@@ -22,7 +22,7 @@ import logging
 import os
 
 from dotenv import load_dotenv
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -35,9 +35,10 @@ from telegram.ext import (
 import db
 import fees
 import onchain
+import quotes
 import sniper
 import trading
-from chains import chain_list, resolve_chain
+from chains import CHAINS, chain_list, explorer_tx, resolve_chain
 from confluence import SignalCard, analyze
 from onchain import OnchainError
 from price_fetcher import PriceFetchError, get_price_usd, get_prices_usd, search_coin
@@ -179,42 +180,51 @@ async def resolve_symbol_or_reply(update: Update, symbol: str):
     return candidates[0]
 
 
+def home_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("Score SOL", callback_data="go:signal:sol"),
+                InlineKeyboardButton("Book", callback_data="go:pos"),
+            ],
+            [
+                InlineKeyboardButton("Launches", callback_data="go:launches"),
+                InlineKeyboardButton("Chains", callback_data="go:chains"),
+            ],
+            [
+                InlineKeyboardButton("Fees", callback_data="go:fees"),
+                InlineKeyboardButton("Help", callback_data="go:help"),
+            ],
+        ]
+    )
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update):
         return
     user = db.ensure_user(update.effective_user.id, update.effective_user.username)
-    await update.message.reply_text(
+    ready, fee_note = fees.live_ready()
+    text = (
         "CONFLUENCE\n"
-        "Signals when independent factors agree. Trades on paper until they do.\n\n"
-        f"Paper cash: ${user['paper_cash']:,.2f}\n"
-        f"Score floor: {user['min_confluence']}  ·  size {user['size_pct']}%  ·  "
-        f"daily cap -{user['max_daily_loss_pct']}%\n\n"
-        "Signals & paper trading\n"
-        "/signal sol — scored card\n"
-        "/buy jup — fill only if the score clears\n"
-        "/positions — open paper book\n"
-        "/sell 3 — close position #3\n"
-        "/watch bonk — add scanner name\n"
-        "/journal — last decisions\n"
-        "/settings — risk vault\n\n"
-        "Price alerts (from the original bot)\n"
-        "/price sol\n"
-        "/alert sol above 200\n"
-        "/list   /remove 4\n\n"
-        "Wallets & drawdown\n"
-        "/watchwallet sol <address>\n"
-        "/watchwallet eth 0x...\n"
-        "/wallets   /unwatchwallet 2\n"
-        "/drawdown  paper peak vs now\n\n"
-        f"Platform cut: {fees.current_bps() / 100:.2f}% per fill (shown on every ticket).\n"
-        "/fees  — what you pay and where live fees would land\n\n"
-        "Snipes (gated, multi-chain)\n"
-        "/snipe sol <CA> 40  — arm $40 when gates pass\n"
-        "/snipes  /cancelsnipe 3  /launches sol\n"
-        f"Chains: {chain_list()}\n\n"
-        "Paste a ticker or contract any time to score it.\n"
-        "This will not hold your seed phrase. It will not beat Maestro on block 0."
+        "Score first. Trade only when factors agree.\n\n"
+        f"Paper  ${user['paper_cash']:,.2f}\n"
+        f"Floor  {user['min_confluence']}   size {user['size_pct']}%   "
+        f"day cap -{user['max_daily_loss_pct']}%\n"
+        f"Cut    {fees.current_bps() / 100:.2f}% per fill\n"
+        f"{'Live fee wallets set' if ready else 'Paper desk — live quote needs fee wallets'}\n\n"
+        "Tap a button or send:\n"
+        "/signal sol     score a market\n"
+        "/buy sol        paper fill if it clears\n"
+        "/quote sol <CA> 50     live Jupiter/0x quote + your cut\n"
+        "/snipe sol <CA> 40     gated paper snipe\n"
+        "/positions   /launches   /fees   /chains\n\n"
+        "Paste a ticker or contract anytime.\n"
+        "No seed phrases. Not financial advice."
     )
+    if update.message:
+        await update.message.reply_text(text, reply_markup=home_keyboard())
+    elif update.callback_query:
+        await update.callback_query.edit_message_text(text, reply_markup=home_keyboard())
 
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -708,6 +718,68 @@ async def cancelsnipe_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await update.message.reply_text("No armed snipe with that id.")
 
 
+async def quote_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard(update):
+        return
+    if not context.args:
+        await update.message.reply_text(
+            "Live quote (unsigned)\n"
+            "/quote sol <token-mint> 50\n"
+            "/quote base 0xabc… 25\n"
+            "50 = dollars of native in. Your 0.50% cut is on the quote.\n"
+            "You sign in Phantom/Rabby. The bot never holds keys."
+        )
+        return
+    chain = resolve_chain(context.args[0])
+    rest = context.args[1:] if chain else context.args
+    if not chain:
+        chain = "sol"
+    if not rest:
+        await update.message.reply_text("Need a token mint or contract.")
+        return
+    usd = 50.0
+    token_parts = []
+    for part in rest:
+        try:
+            usd = float(part)
+        except ValueError:
+            token_parts.append(part)
+    token = " ".join(token_parts).strip()
+    if not token:
+        await update.message.reply_text("Need a token mint or contract.")
+        return
+    try:
+        if chain == "sol":
+            q = quotes.sol_quote(token, max(5.0, usd))
+        else:
+            q = quotes.evm_quote(chain, token, max(5.0, usd))
+    except quotes.QuoteError as exc:
+        await update.message.reply_text(str(exc))
+        return
+    await update.message.reply_text(quotes.format_quote(q))
+
+
+async def chains_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard(update):
+        return
+    lines = ["Trading venues (paper now, live router later)", ""]
+    for cid in ("eth", "bsc", "base", "sol", "hood"):
+        m = CHAINS[cid]
+        extra = f" · chain {m['chain_id']}" if m.get("chain_id") else ""
+        lines.append(f"{m['label']} /{cid}{extra}")
+        lines.append(f"  data {m['dexscreener']} · router {m['router']}")
+        lines.append(f"  gas {m['native']} · {m['rpc']}")
+        if m.get("notes"):
+            lines.append(f"  {m['notes']}")
+        lines.append("")
+    lines.append("Examples:")
+    lines.append("/signal hood CASHCAT")
+    lines.append("/snipe bsc 0xabc… 25")
+    lines.append("/watchwallet hood 0x… whale")
+    lines.append("/launches sol")
+    await update.message.reply_text("\n".join(lines))
+
+
 async def launches_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update):
         return
@@ -753,6 +825,21 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     uid = update.effective_user.id
     data = query.data or ""
+    if data.startswith("go:"):
+        kind = data[3:]
+        if kind.startswith("signal:"):
+            await _send_signal(update, kind.split(":", 1)[1], edit=False)
+        elif kind == "help":
+            await start(update, context)
+        elif kind == "pos":
+            await context.bot.send_message(uid, "Open book: send /positions")
+        elif kind == "launches":
+            await context.bot.send_message(uid, "New pools: send /launches sol")
+        elif kind == "chains":
+            await context.bot.send_message(uid, "Venues: send /chains")
+        elif kind == "fees":
+            await context.bot.send_message(uid, "Fee desk: send /fees")
+        return
     if data.startswith("sig:"):
         await _send_signal(update, data[4:], edit=True)
         return
@@ -875,10 +962,10 @@ async def wallet_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         for ev in reversed(fresh[:4]):
             lines.append(f"• {ev.summary}")
             if ev.txid:
-                if row["chain"] == "sol":
-                    lines.append(f"  https://solscan.io/tx/{ev.txid}")
-                else:
-                    lines.append(f"  https://etherscan.io/tx/{ev.txid}")
+                try:
+                    lines.append("  " + explorer_tx(row["chain"], ev.txid))
+                except Exception:
+                    pass
         try:
             await context.bot.send_message(row["user_id"], "\n".join(lines)[:3500])
         except Exception:
@@ -955,7 +1042,24 @@ def main() -> None:
         raise SystemExit("Set TELEGRAM_BOT_TOKEN in .env before running.")
 
     db.init_db()
-    app = Application.builder().token(token).build()
+
+    async def _post_init(application: Application) -> None:
+        await application.bot.set_my_commands(
+            [
+                BotCommand("start", "Home"),
+                BotCommand("signal", "Score a market"),
+                BotCommand("buy", "Paper buy if it clears"),
+                BotCommand("quote", "Live unsigned quote + cut"),
+                BotCommand("positions", "Paper book"),
+                BotCommand("snipe", "Arm a gated snipe"),
+                BotCommand("launches", "New pools"),
+                BotCommand("chains", "Venues"),
+                BotCommand("fees", "Your cut"),
+                BotCommand("settings", "Risk vault"),
+            ]
+        )
+
+    app = Application.builder().token(token).post_init(_post_init).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
@@ -982,6 +1086,10 @@ def main() -> None:
     app.add_handler(CommandHandler("snipes", snipes_cmd))
     app.add_handler(CommandHandler("cancelsnipe", cancelsnipe_cmd))
     app.add_handler(CommandHandler("launches", launches_cmd))
+    app.add_handler(CommandHandler("chains", chains_cmd))
+    app.add_handler(CommandHandler("quote", quote_cmd))
+    app.add_handler(CommandHandler("menu", start))
+    app.add_handler(CommandHandler("live", quote_cmd))
     app.add_handler(CallbackQueryHandler(on_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
 
