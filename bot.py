@@ -46,6 +46,7 @@ try:
 except Exception:  # noqa: BLE001 — keep the bot alive if quotes.py is missing
     quotes = None
     logging.getLogger(__name__).exception("quotes module failed to load")
+import signer
 import sniper
 import trading
 from chains import ACTIVE, CHAINS, chain_list, resolve_chain
@@ -690,6 +691,12 @@ async def fees_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.effective_message.reply_text("\n".join(lines))
 
 
+async def signer_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard(update):
+        return
+    await update.effective_message.reply_text(signer.status_text())
+
+
 def _parse_snipe_args(args: list[str]) -> tuple[str | None, str, float]:
     if not args:
         raise ValueError("Usage: /snipe [chain] <token-or-CA> [usd]")
@@ -1241,6 +1248,7 @@ def main() -> None:
                     BotCommand("launches", "New pools"),
                     BotCommand("chains", "Venues"),
                     BotCommand("fees", "Your cut"),
+                    BotCommand("signer", "Signer pubkey"),
                     BotCommand("settings", "Risk vault"),
                 ]
             )
@@ -1269,6 +1277,7 @@ def main() -> None:
     app.add_handler(CommandHandler("unwatchwallet", unwatchwallet_cmd))
     app.add_handler(CommandHandler("drawdown", drawdown_cmd))
     app.add_handler(CommandHandler("fees", fees_cmd))
+    app.add_handler(CommandHandler("signer", signer_cmd))
     app.add_handler(CommandHandler("treasury", treasury_cmd))
     app.add_handler(CommandHandler("snipe", snipe_cmd))
     app.add_handler(CommandHandler("snipes", snipes_cmd))
