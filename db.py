@@ -16,7 +16,7 @@ from typing import Any
 
 import sqlite3
 
-DB_PATH = Path(__file__).parent / "confluence.db"
+DB_PATH = Path(os.getenv("DB_PATH", "/tmp/ferzan.db"))
 
 PAPER_STARTING_BALANCE = float(os.getenv("PAPER_STARTING_BALANCE", "10000"))
 DEFAULT_SIZE_PCT = float(os.getenv("DEFAULT_SIZE_PCT", "5"))
@@ -26,7 +26,7 @@ MAX_DAILY_LOSS_PCT = float(os.getenv("MAX_DAILY_LOSS_PCT", "8"))
 
 @contextmanager
 def get_conn():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(str(DB_PATH), timeout=30)
     conn.row_factory = sqlite3.Row
     try:
         yield conn

@@ -67,6 +67,10 @@ Then DM your bot `/start`.
 | `/drawdown` | Paper peak vs now |
 | `/fees` | Your cut paid + live fee-account status |
 | `/treasury` | Operator fee ledger |
+| `/snipe sol <CA> 40` | Arm a gated paper snipe |
+| `/snipes` | List armed / filled snipes |
+| `/cancelsnipe 3` | Cancel an armed snipe |
+| `/launches sol` | Fresh pools on a chain |
 
 Pasting a ticker or contract with no slash also scores it.
 

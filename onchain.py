@@ -18,32 +18,15 @@ from typing import Any
 
 import requests
 
+from chains import CHAINS, explorer_tx, resolve_chain
+
 ETHERSCAN_V2 = "https://api.etherscan.io/v2/api"
 SOLANA_RPC = os.getenv("SOLANA_RPC_URL", "https://api.mainnet-beta.solana.com")
 HELIUS_TX = "https://api-mainnet.helius-rpc.com/v0/addresses/{address}/transactions"
+HOOD_EXPLORER = "https://robinhoodchain.blockscout.com/api"
 
-CHAIN_IDS = {
-    "eth": 1,
-    "ethereum": 1,
-    "base": 8453,
-    "bsc": 56,
-    "bnb": 56,
-    "arb": 42161,
-    "arbitrum": 42161,
-    "op": 10,
-    "optimism": 10,
-    "polygon": 137,
-    "matic": 137,
-}
-
-NATIVE = {
-    1: "ETH",
-    8453: "ETH",
-    56: "BNB",
-    42161: "ETH",
-    10: "ETH",
-    137: "MATIC",
-}
+CHAIN_IDS = {cid: meta["chain_id"] for cid, meta in CHAINS.items() if meta.get("chain_id")}
+NATIVE = {meta["chain_id"]: meta["native"] for meta in CHAINS.values() if meta.get("chain_id")}
 
 
 class OnchainError(Exception):
@@ -59,20 +42,10 @@ def helius_key() -> str:
 
 
 def normalize_chain(raw: str) -> str:
-    c = raw.strip().lower()
-    if c in {"sol", "solana"}:
-        return "sol"
-    if c in CHAIN_IDS:
-        if c in {"ethereum"}:
-            return "eth"
-        if c in {"arbitrum"}:
-            return "arb"
-        if c in {"optimism"}:
-            return "op"
-        if c in {"bnb", "matic"}:
-            return "bsc" if c == "bnb" else "polygon"
-        return c
-    raise OnchainError(f"Unknown chain '{raw}'. Use eth, base, bsc, arb, op, polygon, sol.")
+    cid = resolve_chain(raw)
+    if not cid:
+        raise OnchainError("Unknown chain. Use eth, bsc, base, sol, hood (Robinhood Chain).")
+    return cid
 
 
 def looks_evm(addr: str) -> bool:
@@ -255,6 +228,46 @@ def sol_recent_helius(address: str, limit: int = 8) -> list[WalletEvent]:
     return events
 
 
+def hood_recent(address: str, limit: int = 8) -> list[WalletEvent]:
+    try:
+        r = requests.get(
+            HOOD_EXPLORER,
+            params={
+                "module": "account",
+                "action": "txlist",
+                "address": address,
+                "page": 1,
+                "offset": limit,
+                "sort": "desc",
+            },
+            timeout=15,
+        )
+        r.raise_for_status()
+        rows = (r.json() or {}).get("result") or []
+    except requests.RequestException as exc:
+        raise OnchainError(f"Robinhood explorer error: {exc}") from exc
+    if isinstance(rows, str):
+        raise OnchainError(rows)
+    events: list[WalletEvent] = []
+    addr = address.lower()
+    for row in rows[:limit]:
+        to = (row.get("to") or "").lower()
+        direction = "IN" if to == addr else "OUT"
+        val = int(row.get("value") or 0) / 1e18
+        events.append(
+            WalletEvent(
+                chain="hood",
+                address=address,
+                txid=row.get("hash") or "",
+                when=int(row.get("timeStamp") or 0),
+                summary=f"{direction} {val:.6g} ETH",
+                direction=direction,
+                value_hint=f"{val:.6g} ETH",
+            )
+        )
+    return events
+
+
 def recent_activity(chain: str, address: str, limit: int = 8) -> list[WalletEvent]:
     chain = normalize_chain(chain)
     if chain == "sol":
@@ -263,6 +276,8 @@ def recent_activity(chain: str, address: str, limit: int = 8) -> list[WalletEven
         return sol_recent_helius(address, limit)
     if not looks_evm(address):
         raise OnchainError("That does not look like an EVM address (0x + 40 hex).")
+    if chain == "hood":
+        return hood_recent(address, limit)
     return evm_recent(chain, address, limit)
 
 

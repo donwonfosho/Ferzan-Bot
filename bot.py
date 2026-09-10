@@ -35,10 +35,22 @@ from telegram.ext import (
 import db
 import fees
 import onchain
-import quotes
+try:
+    import quotes
+except Exception:  # noqa: BLE001 — keep the bot alive if quotes.py is missing
+    quotes = None
+    logging.getLogger(__name__).exception("quotes module failed to load")
 import sniper
 import trading
-from chains import CHAINS, chain_list, explorer_tx, resolve_chain
+from chains import CHAINS, chain_list, resolve_chain
+
+try:
+    from chains import explorer_tx
+except ImportError:
+
+    def explorer_tx(chain: str, txid: str) -> str:
+        return txid
+
 from confluence import SignalCard, analyze
 from onchain import OnchainError
 from price_fetcher import PriceFetchError, get_price_usd, get_prices_usd, search_coin
@@ -202,29 +214,40 @@ def home_keyboard() -> InlineKeyboardMarkup:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update):
         return
-    user = db.ensure_user(update.effective_user.id, update.effective_user.username)
-    ready, fee_note = fees.live_ready()
-    text = (
-        "CONFLUENCE\n"
-        "Score first. Trade only when factors agree.\n\n"
-        f"Paper  ${user['paper_cash']:,.2f}\n"
-        f"Floor  {user['min_confluence']}   size {user['size_pct']}%   "
-        f"day cap -{user['max_daily_loss_pct']}%\n"
-        f"Cut    {fees.current_bps() / 100:.2f}% per fill\n"
-        f"{'Live fee wallets set' if ready else 'Paper desk — live quote needs fee wallets'}\n\n"
-        "Tap a button or send:\n"
-        "/signal sol     score a market\n"
-        "/buy sol        paper fill if it clears\n"
-        "/quote sol <CA> 50     live Jupiter/0x quote + your cut\n"
-        "/snipe sol <CA> 40     gated paper snipe\n"
-        "/positions   /launches   /fees   /chains\n\n"
-        "Paste a ticker or contract anytime.\n"
-        "No seed phrases. Not financial advice."
-    )
-    if update.message:
-        await update.message.reply_text(text, reply_markup=home_keyboard())
-    elif update.callback_query:
-        await update.callback_query.edit_message_text(text, reply_markup=home_keyboard())
+    try:
+        user = db.ensure_user(update.effective_user.id, update.effective_user.username)
+        ready, _fee_note = fees.live_ready()
+        cash = float(user.get("paper_cash") or 10000)
+        floor = int(user.get("min_confluence") or 62)
+        size = float(user.get("size_pct") or 5)
+        cap = float(user.get("max_daily_loss_pct") or 8)
+        text = (
+            "FERZAN\n"
+            "Score first. Trade only when factors agree.\n\n"
+            f"Paper  ${cash:,.2f}\n"
+            f"Floor  {floor}   size {size}%   day cap -{cap}%\n"
+            f"Cut    {fees.current_bps() / 100:.2f}% per fill\n"
+            f"{'Live fee wallets set' if ready else 'Paper desk — live quote needs fee wallets'}\n\n"
+            "Tap a button or send:\n"
+            "/signal sol\n"
+            "/buy sol\n"
+            "/quote sol <CA> 50\n"
+            "/snipe sol <CA> 40\n"
+            "/positions   /fees   /chains\n"
+        )
+        target = update.effective_message
+        if target:
+            await target.reply_text(text, reply_markup=home_keyboard())
+    except Exception:
+        logger.exception("start failed")
+        try:
+            if update.effective_message:
+                await update.effective_message.reply_text(
+                    "FERZAN is up. Desk hit a snag loading your paper book. "
+                    "Try /signal sol — do not Redeploy yet."
+                )
+        except Exception:
+            logger.exception("start fallback failed")
 
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -749,11 +772,14 @@ async def quote_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("Need a token mint or contract.")
         return
     try:
+        if quotes is None:
+            await update.message.reply_text("Quote module not loaded. Re-upload quotes.py.")
+            return
         if chain == "sol":
             q = quotes.sol_quote(token, max(5.0, usd))
         else:
             q = quotes.evm_quote(chain, token, max(5.0, usd))
-    except quotes.QuoteError as exc:
+    except Exception as exc:
         await update.message.reply_text(str(exc))
         return
     await update.message.reply_text(quotes.format_quote(q))
@@ -1044,20 +1070,23 @@ def main() -> None:
     db.init_db()
 
     async def _post_init(application: Application) -> None:
-        await application.bot.set_my_commands(
-            [
-                BotCommand("start", "Home"),
-                BotCommand("signal", "Score a market"),
-                BotCommand("buy", "Paper buy if it clears"),
-                BotCommand("quote", "Live unsigned quote + cut"),
-                BotCommand("positions", "Paper book"),
-                BotCommand("snipe", "Arm a gated snipe"),
-                BotCommand("launches", "New pools"),
-                BotCommand("chains", "Venues"),
-                BotCommand("fees", "Your cut"),
-                BotCommand("settings", "Risk vault"),
-            ]
-        )
+        try:
+            await application.bot.set_my_commands(
+                [
+                    BotCommand("start", "Home"),
+                    BotCommand("signal", "Score a market"),
+                    BotCommand("buy", "Paper buy if it clears"),
+                    BotCommand("quote", "Live unsigned quote + cut"),
+                    BotCommand("positions", "Paper book"),
+                    BotCommand("snipe", "Arm a gated snipe"),
+                    BotCommand("launches", "New pools"),
+                    BotCommand("chains", "Venues"),
+                    BotCommand("fees", "Your cut"),
+                    BotCommand("settings", "Risk vault"),
+                ]
+            )
+        except Exception:
+            logger.exception("set_my_commands failed")
 
     app = Application.builder().token(token).post_init(_post_init).build()
 
@@ -1093,15 +1122,19 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(on_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
 
-    app.job_queue.run_repeating(check_alerts_job, interval=ALERT_INTERVAL_SECONDS, first=12)
-    app.job_queue.run_repeating(scan_job, interval=SCAN_INTERVAL_SECONDS, first=25)
-    app.job_queue.run_repeating(wallet_job, interval=WALLET_POLL_SECONDS, first=40)
-    app.job_queue.run_repeating(drawdown_job, interval=DRAWDOWN_POLL_SECONDS, first=55)
-    app.job_queue.run_repeating(snipe_job, interval=SNIPE_POLL_SECONDS, first=18)
-    app.job_queue.run_repeating(launch_feed_job, interval=LAUNCH_FEED_SECONDS, first=35)
+    jq = app.job_queue
+    if jq is not None:
+        jq.run_repeating(check_alerts_job, interval=ALERT_INTERVAL_SECONDS, first=12)
+        jq.run_repeating(scan_job, interval=SCAN_INTERVAL_SECONDS, first=25)
+        jq.run_repeating(wallet_job, interval=WALLET_POLL_SECONDS, first=40)
+        jq.run_repeating(drawdown_job, interval=DRAWDOWN_POLL_SECONDS, first=55)
+        jq.run_repeating(snipe_job, interval=SNIPE_POLL_SECONDS, first=18)
+        jq.run_repeating(launch_feed_job, interval=LAUNCH_FEED_SECONDS, first=35)
+    else:
+        logger.warning("job-queue extra missing; commands still work, scanners off")
 
-    logger.info("CONFLUENCE starting")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    logger.info("FERZAN starting")
+    app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == "__main__":
