@@ -62,7 +62,7 @@ from confluence import SignalCard, analyze
 from onchain import OnchainError
 from price_fetcher import PriceFetchError, get_price_usd, get_prices_usd, search_coin
 
-load_dotenv()
+load_dotenv(Path(__file__).resolve().parent / ".env")
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -1057,6 +1057,21 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             return
         ok, msg = trading.paper_buy(uid, card, force=force)
         await context.bot.send_message(uid, msg)
+        if not ok and not force:
+            return
+        chain = (card.snapshot.chain or "").lower()
+        mint = (card.snapshot.token_address or "").strip()
+        if signer.configured() and ("sol" in chain) and mint:
+            user = db.get_user(uid) or {}
+            cash = float(user.get("paper_cash") or 10000)
+            pct = float(user.get("size_pct") or 5)
+            usd = min(signer.max_usd(), max(5.0, cash * pct / 100.0))
+            live_ok, live_msg = signer.buy_sol(mint, usd)
+            await context.bot.send_message(uid, live_msg)
+        elif signer.configured() and mint:
+            await context.bot.send_message(
+                uid, "Live signer is Solana-only right now. EVM stays paper /quote."
+            )
         return
     if data.startswith("close:"):
         try:
