@@ -20,6 +20,7 @@ from __future__ import annotations
 import html
 import logging
 import os
+from pathlib import Path
 
 from dotenv import load_dotenv
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -62,6 +63,7 @@ logging.basicConfig(
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
+LOGO_PATH = Path(__file__).parent / "logo.jpg"
 
 ALERT_INTERVAL_SECONDS = int(os.getenv("ALERT_INTERVAL_SECONDS", "60"))
 SCAN_INTERVAL_SECONDS = int(os.getenv("SCAN_INTERVAL_SECONDS", "90"))
@@ -196,31 +198,31 @@ def home_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [
-                InlineKeyboardButton("Chains", callback_data="go:chains"),
-                InlineKeyboardButton("Wallets", callback_data="go:wallets"),
+                InlineKeyboardButton("⛓ Chains", callback_data="go:chains"),
+                InlineKeyboardButton("👛 Wallets", callback_data="go:wallets"),
             ],
             [
-                InlineKeyboardButton("Signals", callback_data="go:signal:sol"),
-                InlineKeyboardButton("Copytrade", callback_data="go:copy"),
+                InlineKeyboardButton("📡 Signals", callback_data="go:signal:sol"),
+                InlineKeyboardButton("👯 Copytrade", callback_data="go:copy"),
             ],
             [
-                InlineKeyboardButton("Settings", callback_data="go:settings"),
-                InlineKeyboardButton("Active orders", callback_data="go:snipes"),
+                InlineKeyboardButton("⚙️ Settings", callback_data="go:settings"),
+                InlineKeyboardButton("⏱ Orders", callback_data="go:snipes"),
             ],
             [
-                InlineKeyboardButton("Positions", callback_data="go:pos"),
-                InlineKeyboardButton("Auto snipe", callback_data="go:snipehelp"),
+                InlineKeyboardButton("📊 Positions", callback_data="go:pos"),
+                InlineKeyboardButton("🎯 Auto snipe", callback_data="go:snipehelp"),
             ],
             [
-                InlineKeyboardButton("Launches", callback_data="go:launches"),
-                InlineKeyboardButton("Live quote", callback_data="go:quotehelp"),
+                InlineKeyboardButton("🚀 Launches", callback_data="go:launches"),
+                InlineKeyboardButton("💱 Live quote", callback_data="go:quotehelp"),
             ],
             [
-                InlineKeyboardButton("Fees / cut", callback_data="go:fees"),
-                InlineKeyboardButton("Drawdown", callback_data="go:pnl"),
+                InlineKeyboardButton("💸 Fees", callback_data="go:fees"),
+                InlineKeyboardButton("📉 Drawdown", callback_data="go:pnl"),
             ],
             [
-                InlineKeyboardButton("BUY & SELL — paste a CA", callback_data="go:buyhelp"),
+                InlineKeyboardButton("⚡ BUY / SELL — paste a CA", callback_data="go:buyhelp"),
             ],
         ]
     )
@@ -237,19 +239,28 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         size = float(user.get("size_pct") or 5)
         cap = float(user.get("max_daily_loss_pct") or 8)
         text = (
-            "FERZAN TRADE BOT\n"
-            "One desk. Score first. Then trade.\n\n"
-            f"Paper book   ${cash:,.2f}\n"
-            f"Floor {floor} · size {size}% · day cap -{cap}%\n"
-            f"Platform cut {fees.current_bps() / 100:.2f}%\n"
-            f"{'Fee wallets live' if ready else 'Set FEE_WALLET_* to collect the cut'}\n\n"
-            "Chains · ETH  BNB  Base  Solana  Hood\n"
-            "Paste a token CA to open the trade card.\n"
-            "Paper fills if the score clears. Live = /quote then sign in Trust.\n\n"
-            "We refuse bad tape. They don't."
+            "⚡ FERZAN\n"
+            "Don't ape. Align.\n\n"
+            f"💵 Paper  ${cash:,.2f}\n"
+            f"🎚️ Floor {floor} · size {size}% · cap -{cap}%\n"
+            f"✂️ Cut {fees.current_bps() / 100:.2f}%"
+            f" · {'🟢 fee wallets live' if ready else '🟡 set FEE_WALLET_*'}\n\n"
+            "SOL · BSC · BASE · ETH · MONAD · SONIC · AVAX\n"
+            "ARB · HYPE · HOOD · ARC · STABLE · TRX · TON\n\n"
+            "Paste a CA. We score it. We can say no.\n"
+            "Live sends: /quote then sign in Trust."
         )
         target = update.effective_message
-        if target:
+        if not target:
+            return
+        if LOGO_PATH.exists():
+            with LOGO_PATH.open("rb") as photo:
+                await target.reply_photo(
+                    photo=photo,
+                    caption=text,
+                    reply_markup=home_keyboard(),
+                )
+        else:
             await target.reply_text(text, reply_markup=home_keyboard())
     except Exception:
         logger.exception("start failed")
