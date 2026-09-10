@@ -42,7 +42,7 @@ except Exception:  # noqa: BLE001 — keep the bot alive if quotes.py is missing
     logging.getLogger(__name__).exception("quotes module failed to load")
 import sniper
 import trading
-from chains import CHAINS, chain_list, resolve_chain
+from chains import ACTIVE, CHAINS, chain_list, resolve_chain
 
 try:
     from chains import explorer_tx
@@ -163,7 +163,7 @@ async def guard(update: Update) -> bool:
     user = update.effective_user
     if not user or not _allowed(user.id):
         if update.message:
-            await update.message.reply_text("This bot is locked to an allowlist.")
+            await update.effective_message.reply_text("This bot is locked to an allowlist.")
         elif update.callback_query:
             await update.callback_query.answer("Locked.", show_alert=True)
         return False
@@ -175,17 +175,17 @@ async def resolve_symbol_or_reply(update: Update, symbol: str):
     try:
         candidates = search_coin(symbol)
     except PriceFetchError as exc:
-        await update.message.reply_text(f"Couldn't reach price data: {exc}")
+        await update.effective_message.reply_text(f"Couldn't reach price data: {exc}")
         return None
     if not candidates:
-        await update.message.reply_text(f"No token matching '{symbol}'.")
+        await update.effective_message.reply_text(f"No token matching '{symbol}'.")
         return None
     if len(candidates) > 1 and candidates[0]["symbol"].lower() != symbol.lower():
         options = "\n".join(
             f"  • {c['symbol'].upper()} — {c['name']} (id: {c['id']})"
             for c in candidates[:5]
         )
-        await update.message.reply_text(
+        await update.effective_message.reply_text(
             f"Multiple matches for '{symbol}'. Re-run with the id:\n\n{options}"
         )
         return None
@@ -196,16 +196,31 @@ def home_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [
-                InlineKeyboardButton("Score SOL", callback_data="go:signal:sol"),
-                InlineKeyboardButton("Book", callback_data="go:pos"),
+                InlineKeyboardButton("Chains", callback_data="go:chains"),
+                InlineKeyboardButton("Wallets", callback_data="go:wallets"),
+            ],
+            [
+                InlineKeyboardButton("Signals", callback_data="go:signal:sol"),
+                InlineKeyboardButton("Copytrade", callback_data="go:copy"),
+            ],
+            [
+                InlineKeyboardButton("Settings", callback_data="go:settings"),
+                InlineKeyboardButton("Active orders", callback_data="go:snipes"),
+            ],
+            [
+                InlineKeyboardButton("Positions", callback_data="go:pos"),
+                InlineKeyboardButton("Auto snipe", callback_data="go:snipehelp"),
             ],
             [
                 InlineKeyboardButton("Launches", callback_data="go:launches"),
-                InlineKeyboardButton("Chains", callback_data="go:chains"),
+                InlineKeyboardButton("Live quote", callback_data="go:quotehelp"),
             ],
             [
-                InlineKeyboardButton("Fees", callback_data="go:fees"),
-                InlineKeyboardButton("Help", callback_data="go:help"),
+                InlineKeyboardButton("Fees / cut", callback_data="go:fees"),
+                InlineKeyboardButton("Drawdown", callback_data="go:pnl"),
+            ],
+            [
+                InlineKeyboardButton("BUY & SELL — paste a CA", callback_data="go:buyhelp"),
             ],
         ]
     )
@@ -222,18 +237,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         size = float(user.get("size_pct") or 5)
         cap = float(user.get("max_daily_loss_pct") or 8)
         text = (
-            "FERZAN\n"
-            "Score first. Trade only when factors agree.\n\n"
-            f"Paper  ${cash:,.2f}\n"
-            f"Floor  {floor}   size {size}%   day cap -{cap}%\n"
-            f"Cut    {fees.current_bps() / 100:.2f}% per fill\n"
-            f"{'Live fee wallets set' if ready else 'Paper desk — live quote needs fee wallets'}\n\n"
-            "Tap a button or send:\n"
-            "/signal sol\n"
-            "/buy sol\n"
-            "/quote sol <CA> 50\n"
-            "/snipe sol <CA> 40\n"
-            "/positions   /fees   /chains\n"
+            "FERZAN TRADE BOT\n"
+            "One desk. Score first. Then trade.\n\n"
+            f"Paper book   ${cash:,.2f}\n"
+            f"Floor {floor} · size {size}% · day cap -{cap}%\n"
+            f"Platform cut {fees.current_bps() / 100:.2f}%\n"
+            f"{'Fee wallets live' if ready else 'Set FEE_WALLET_* to collect the cut'}\n\n"
+            "Chains · ETH  BNB  Base  Solana  Hood\n"
+            "Paste a token CA to open the trade card.\n"
+            "Paper fills if the score clears. Live = /quote then sign in Trust.\n\n"
+            "We refuse bad tape. They don't."
         )
         target = update.effective_message
         if target:
@@ -258,7 +271,7 @@ async def price_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update):
         return
     if not context.args:
-        await update.message.reply_text("Usage: /price sol")
+        await update.effective_message.reply_text("Usage: /price sol")
         return
     symbol = context.args[0]
     coin = await resolve_symbol_or_reply(update, symbol)
@@ -267,9 +280,9 @@ async def price_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         usd = get_price_usd(coin["id"])
     except PriceFetchError as exc:
-        await update.message.reply_text(str(exc))
+        await update.effective_message.reply_text(str(exc))
         return
-    await update.message.reply_text(
+    await update.effective_message.reply_text(
         f"{coin['symbol'].upper()} ({coin['name']}): ${usd:,.6g}"
     )
 
@@ -278,21 +291,21 @@ async def alert_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update):
         return
     if len(context.args) != 3:
-        await update.message.reply_text(
+        await update.effective_message.reply_text(
             "Usage: /alert <symbol> <above|below> <price>\nExample: /alert sol above 200"
         )
         return
     symbol, direction, price_str = context.args
     direction = direction.lower()
     if direction not in ("above", "below"):
-        await update.message.reply_text("Direction must be above or below.")
+        await update.effective_message.reply_text("Direction must be above or below.")
         return
     try:
         target_price = float(price_str)
         if target_price <= 0:
             raise ValueError
     except ValueError:
-        await update.message.reply_text("Price must be a positive number.")
+        await update.effective_message.reply_text("Price must be a positive number.")
         return
     coin = await resolve_symbol_or_reply(update, symbol)
     if coin is None:
@@ -304,7 +317,7 @@ async def alert_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         direction=direction,
         target_price=target_price,
     )
-    await update.message.reply_text(
+    await update.effective_message.reply_text(
         f"Alert #{alert_id}: {coin['symbol'].upper()} {direction} ${target_price:,.6g}\n"
         f"Checked every {ALERT_INTERVAL_SECONDS}s."
     )
@@ -315,30 +328,30 @@ async def list_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     alerts = db.list_alerts(update.effective_chat.id)
     if not alerts:
-        await update.message.reply_text("No active price alerts. Create one with /alert.")
+        await update.effective_message.reply_text("No active price alerts. Create one with /alert.")
         return
     lines = [
         f"#{a['id']} — {a['symbol']} {a['direction']} ${a['target_price']:,.6g}"
         for a in alerts
     ]
-    await update.message.reply_text("Active alerts:\n" + "\n".join(lines))
+    await update.effective_message.reply_text("Active alerts:\n" + "\n".join(lines))
 
 
 async def remove_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update):
         return
     if not context.args:
-        await update.message.reply_text("Usage: /remove <alert_id>")
+        await update.effective_message.reply_text("Usage: /remove <alert_id>")
         return
     try:
         alert_id = int(context.args[0])
     except ValueError:
-        await update.message.reply_text("Alert id must be a number.")
+        await update.effective_message.reply_text("Alert id must be a number.")
         return
     if db.delete_alert(alert_id, update.effective_chat.id):
-        await update.message.reply_text(f"Removed alert #{alert_id}.")
+        await update.effective_message.reply_text(f"Removed alert #{alert_id}.")
     else:
-        await update.message.reply_text("No such alert.")
+        await update.effective_message.reply_text("No such alert.")
 
 
 async def _send_signal(update: Update, query: str, edit: bool = False) -> None:
@@ -367,7 +380,7 @@ async def signal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if not await guard(update):
         return
     if not context.args:
-        await update.message.reply_text("Usage: /signal sol   or paste a contract.")
+        await update.effective_message.reply_text("Usage: /signal sol   or paste a contract.")
         return
     await _send_signal(update, " ".join(context.args))
 
@@ -376,18 +389,18 @@ async def buy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update):
         return
     if not context.args:
-        await update.message.reply_text("Usage: /buy sol")
+        await update.effective_message.reply_text("Usage: /buy sol")
         return
     query = " ".join(context.args)
     try:
         card = analyze(query)
     except PriceFetchError as exc:
-        await update.message.reply_text(str(exc))
+        await update.effective_message.reply_text(str(exc))
         return
     ok, msg = trading.paper_buy(update.effective_user.id, card, force=False)
-    await update.message.reply_text(msg)
+    await update.effective_message.reply_text(msg)
     if not ok:
-        await update.message.reply_text(
+        await update.effective_message.reply_text(
             render_card(card),
             parse_mode="HTML",
             disable_web_page_preview=True,
@@ -420,22 +433,22 @@ async def positions_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         for p in closed:
             pnl = p["pnl"] if p["pnl"] is not None else 0
             lines.append(f"#{p['id']} {p['symbol']} {pnl:+,.2f} USD")
-    await update.message.reply_text("\n".join(lines), reply_markup=positions_keyboard(uid))
+    await update.effective_message.reply_text("\n".join(lines), reply_markup=positions_keyboard(uid))
 
 
 async def sell_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update):
         return
     if not context.args:
-        await update.message.reply_text("Usage: /sell <position_id>")
+        await update.effective_message.reply_text("Usage: /sell <position_id>")
         return
     try:
         pos_id = int(context.args[0])
     except ValueError:
-        await update.message.reply_text("Position id must be a number. See /positions.")
+        await update.effective_message.reply_text("Position id must be a number. See /positions.")
         return
     ok, msg = trading.paper_close(update.effective_user.id, pos_id, reason="manual")
-    await update.message.reply_text(msg)
+    await update.effective_message.reply_text(msg)
 
 
 async def watch_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -444,24 +457,24 @@ async def watch_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     uid = update.effective_user.id
     if not context.args:
         names = db.watchlist_of(uid)
-        await update.message.reply_text(
+        await update.effective_message.reply_text(
             "Watchlist: " + (", ".join(names) if names else "(empty)")
             + "\nAdd with /watch jup   remove with /unwatch jup"
         )
         return
     q = context.args[0]
     db.add_watch(uid, q)
-    await update.message.reply_text(f"Watching {q.upper()}. Scanner will score it.")
+    await update.effective_message.reply_text(f"Watching {q.upper()}. Scanner will score it.")
 
 
 async def unwatch_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update):
         return
     if not context.args:
-        await update.message.reply_text("Usage: /unwatch sol")
+        await update.effective_message.reply_text("Usage: /unwatch sol")
         return
     db.remove_watch(update.effective_user.id, context.args[0])
-    await update.message.reply_text(f"Removed {context.args[0].upper()}.")
+    await update.effective_message.reply_text(f"Removed {context.args[0].upper()}.")
 
 
 async def journal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -469,10 +482,10 @@ async def journal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     rows = db.recent_journal(update.effective_user.id)
     if not rows:
-        await update.message.reply_text("Journal is empty.")
+        await update.effective_message.reply_text("Journal is empty.")
         return
     lines = [f"{r['kind']}: {r['body']}" for r in rows]
-    await update.message.reply_text("\n".join(lines)[:3500])
+    await update.effective_message.reply_text("\n".join(lines)[:3500])
 
 
 async def settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -506,14 +519,14 @@ async def settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     raise ValueError
                 db.update_user(uid, drawdown_alert_pct=val)
             else:
-                await update.message.reply_text("Keys: size, floor, cap, alerts, ddalert")
+                await update.effective_message.reply_text("Keys: size, floor, cap, alerts, ddalert")
                 return
         except ValueError:
-            await update.message.reply_text("Out of range.")
+            await update.effective_message.reply_text("Out of range.")
             return
         user = db.get_user(uid)
-        await update.message.reply_text("Updated.")
-    await update.message.reply_text(
+        await update.effective_message.reply_text("Updated.")
+    await update.effective_message.reply_text(
         "Risk vault\n"
         f"size {user['size_pct']}% of cash per ticket (1-20)\n"
         f"floor {user['min_confluence']} confluence to auto-fill (40-90)\n"
@@ -534,14 +547,14 @@ async def resetpaper_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         db.close_position(p["id"], p["entry"], 0)
     db.update_user(uid, paper_cash=start_bal, starting_equity=start_bal, peak_equity=start_bal)
     db.add_journal(uid, "RESET", f"Paper book reset to ${start_bal:,.0f}")
-    await update.message.reply_text(f"Paper account reset to ${start_bal:,.0f}.")
+    await update.effective_message.reply_text(f"Paper account reset to ${start_bal:,.0f}.")
 
 
 async def watchwallet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update):
         return
     if len(context.args) < 2:
-        await update.message.reply_text(
+        await update.effective_message.reply_text(
             "Usage: /watchwallet <eth|base|bsc|arb|op|polygon|sol> <address> [label]\n"
             "Example: /watchwallet sol 7xKX... whale1\n"
             f"Providers: {onchain.status_line()}"
@@ -553,16 +566,16 @@ async def watchwallet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         chain = onchain.normalize_chain(chain_raw)
         events = onchain.recent_activity(chain, address, limit=3)
     except OnchainError as exc:
-        await update.message.reply_text(str(exc))
+        await update.effective_message.reply_text(str(exc))
         return
     except Exception as exc:
-        await update.message.reply_text(f"Provider error: {exc}")
+        await update.effective_message.reply_text(f"Provider error: {exc}")
         return
     wid = db.add_watched_wallet(update.effective_user.id, chain, address, label)
     if events:
         db.set_wallet_cursor(wid, events[0].txid)
     preview = "\n".join(f"• {e.summary}" for e in events[:3]) or "No recent prints."
-    await update.message.reply_text(
+    await update.effective_message.reply_text(
         f"Watching wallet #{wid} on {chain}\n{address}\n{preview}"
     )
 
@@ -572,30 +585,30 @@ async def wallets_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     rows = db.list_watched_wallets(update.effective_user.id)
     if not rows:
-        await update.message.reply_text("No watched wallets. /watchwallet sol <addr>")
+        await update.effective_message.reply_text("No watched wallets. /watchwallet sol <addr>")
         return
     lines = [
         f"#{r['id']} {r['chain']} {r['address'][:10]}… {r['label'] or ''}".strip()
         for r in rows
     ]
-    await update.message.reply_text("Watched wallets:\n" + "\n".join(lines))
+    await update.effective_message.reply_text("Watched wallets:\n" + "\n".join(lines))
 
 
 async def unwatchwallet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update):
         return
     if not context.args:
-        await update.message.reply_text("Usage: /unwatchwallet <id>")
+        await update.effective_message.reply_text("Usage: /unwatchwallet <id>")
         return
     try:
         wid = int(context.args[0])
     except ValueError:
-        await update.message.reply_text("Id must be a number. See /wallets.")
+        await update.effective_message.reply_text("Id must be a number. See /wallets.")
         return
     if db.delete_watched_wallet(wid, update.effective_user.id):
-        await update.message.reply_text(f"Dropped wallet #{wid}.")
+        await update.effective_message.reply_text(f"Dropped wallet #{wid}.")
     else:
-        await update.message.reply_text("No such wallet id.")
+        await update.effective_message.reply_text("No such wallet id.")
 
 
 async def drawdown_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -605,7 +618,7 @@ async def drawdown_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     user = db.get_user(uid)
     equity, peak, dd = trading.update_peak_and_drawdown(uid)
     threshold = float(user.get("drawdown_alert_pct") or 12)
-    await update.message.reply_text(
+    await update.effective_message.reply_text(
         f"Paper equity ${equity:,.2f}\n"
         f"Peak ${peak:,.2f}\n"
         f"Drawdown {dd:.2f}%  (alert at -{threshold:g}%)\n"
@@ -646,7 +659,7 @@ async def fees_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             lines.append(
                 f"  {row['kind']} ${row['fee_usd']:.4f} ({row['fee_bps']}bps) u{row['user_id']}"
             )
-    await update.message.reply_text("\n".join(lines))
+    await update.effective_message.reply_text("\n".join(lines))
 
 
 def _parse_snipe_args(args: list[str]) -> tuple[str | None, str, float]:
@@ -677,7 +690,7 @@ async def snipe_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         chain, query, usd = _parse_snipe_args(context.args)
     except ValueError as exc:
-        await update.message.reply_text(
+        await update.effective_message.reply_text(
             f"{exc}\nChains: {chain_list()}\n"
             "Example: /snipe base 0xabc... 25\n"
             "Optional after that in /settings: floor, size. Snipe uses your score floor "
@@ -695,7 +708,7 @@ async def snipe_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         max_age_h=6.0,
         require_long=True,
     )
-    await update.message.reply_text(
+    await update.effective_message.reply_text(
         f"Armed snipe #{sid}\n"
         f"{chain or 'any-chain'} {query} ${usd:.0f}\n"
         f"Gates: liq ≥ $40k, score ≥ {user['min_confluence']}, age ≤ 6h, bias LONG, no veto.\n"
@@ -705,9 +718,9 @@ async def snipe_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     armed = next((r for r in db.active_snipes(update.effective_user.id) if r["id"] == sid), None)
     status, msg = sniper.try_fill(armed) if armed else ("armed", "")
     if status == "filled":
-        await update.message.reply_text("Immediate fill\n" + msg)
+        await update.effective_message.reply_text("Immediate fill\n" + msg)
     elif status == "miss":
-        await update.message.reply_text("Armed but not filled yet:\n" + msg)
+        await update.effective_message.reply_text("Armed but not filled yet:\n" + msg)
 
 
 async def snipes_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -715,37 +728,37 @@ async def snipes_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
     rows = db.active_snipes(update.effective_user.id)
     if not rows:
-        await update.message.reply_text("No snipes. Arm one with /snipe sol <CA> 40")
+        await update.effective_message.reply_text("No snipes. Arm one with /snipe sol <CA> 40")
         return
     lines = [
         f"#{r['id']} {r['status']} {r['chain'] or '*'} {r['query']} ${r['usd']:.0f}"
         for r in rows[:15]
     ]
-    await update.message.reply_text("\n".join(lines))
+    await update.effective_message.reply_text("\n".join(lines))
 
 
 async def cancelsnipe_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update):
         return
     if not context.args:
-        await update.message.reply_text("Usage: /cancelsnipe <id>")
+        await update.effective_message.reply_text("Usage: /cancelsnipe <id>")
         return
     try:
         sid = int(context.args[0])
     except ValueError:
-        await update.message.reply_text("Id must be a number.")
+        await update.effective_message.reply_text("Id must be a number.")
         return
     if db.cancel_snipe(sid, update.effective_user.id):
-        await update.message.reply_text(f"Cancelled snipe #{sid}.")
+        await update.effective_message.reply_text(f"Cancelled snipe #{sid}.")
     else:
-        await update.message.reply_text("No armed snipe with that id.")
+        await update.effective_message.reply_text("No armed snipe with that id.")
 
 
 async def quote_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update):
         return
     if not context.args:
-        await update.message.reply_text(
+        await update.effective_message.reply_text(
             "Live quote (unsigned)\n"
             "/quote sol <token-mint> 50\n"
             "/quote base 0xabc… 25\n"
@@ -758,7 +771,7 @@ async def quote_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not chain:
         chain = "sol"
     if not rest:
-        await update.message.reply_text("Need a token mint or contract.")
+        await update.effective_message.reply_text("Need a token mint or contract.")
         return
     usd = 50.0
     token_parts = []
@@ -769,27 +782,27 @@ async def quote_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             token_parts.append(part)
     token = " ".join(token_parts).strip()
     if not token:
-        await update.message.reply_text("Need a token mint or contract.")
+        await update.effective_message.reply_text("Need a token mint or contract.")
         return
     try:
         if quotes is None:
-            await update.message.reply_text("Quote module not loaded. Re-upload quotes.py.")
+            await update.effective_message.reply_text("Quote module not loaded. Re-upload quotes.py.")
             return
         if chain == "sol":
             q = quotes.sol_quote(token, max(5.0, usd))
         else:
             q = quotes.evm_quote(chain, token, max(5.0, usd))
     except Exception as exc:
-        await update.message.reply_text(str(exc))
+        await update.effective_message.reply_text(str(exc))
         return
-    await update.message.reply_text(quotes.format_quote(q))
+    await update.effective_message.reply_text(quotes.format_quote(q))
 
 
 async def chains_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update):
         return
     lines = ["Trading venues (paper now, live router later)", ""]
-    for cid in ("eth", "bsc", "base", "sol", "hood"):
+    for cid in ACTIVE:
         m = CHAINS[cid]
         extra = f" · chain {m['chain_id']}" if m.get("chain_id") else ""
         lines.append(f"{m['label']} /{cid}{extra}")
@@ -803,7 +816,7 @@ async def chains_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     lines.append("/snipe bsc 0xabc… 25")
     lines.append("/watchwallet hood 0x… whale")
     lines.append("/launches sol")
-    await update.message.reply_text("\n".join(lines))
+    await update.effective_message.reply_text("\n".join(lines))
 
 
 async def launches_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -812,7 +825,7 @@ async def launches_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     chain = resolve_chain(context.args[0]) if context.args else None
     launches = sniper.fetch_new_pools(chain, limit=8)
     if not launches:
-        await update.message.reply_text(
+        await update.effective_message.reply_text(
             "No fresh pools from GeckoTerminal right now. Try /launches sol"
         )
         return
@@ -821,14 +834,14 @@ async def launches_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         lines.append(
             f"{ln.chain} {ln.symbol} liq ${ln.liquidity_usd:,.0f} {ln.token[:12]}…"
         )
-    await update.message.reply_text("\n".join(lines)[:3500])
+    await update.effective_message.reply_text("\n".join(lines)[:3500])
 
 
 async def treasury_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update):
         return
     if not _is_operator(update.effective_user.id):
-        await update.message.reply_text("Operator only.")
+        await update.effective_message.reply_text("Operator only.")
         return
     await fees_cmd(update, context)
 
@@ -858,13 +871,63 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         elif kind == "help":
             await start(update, context)
         elif kind == "pos":
-            await context.bot.send_message(uid, "Open book: send /positions")
+            fake = update
+            if update.message is None and update.effective_message:
+                pass
+            await positions_cmd(update, context)
         elif kind == "launches":
-            await context.bot.send_message(uid, "New pools: send /launches sol")
+            context.args = ["sol"]
+            await launches_cmd(update, context)
         elif kind == "chains":
-            await context.bot.send_message(uid, "Venues: send /chains")
+            await chains_cmd(update, context)
         elif kind == "fees":
-            await context.bot.send_message(uid, "Fee desk: send /fees")
+            await fees_cmd(update, context)
+        elif kind == "wallets":
+            await wallets_cmd(update, context)
+        elif kind == "settings":
+            context.args = []
+            await settings_cmd(update, context)
+        elif kind == "snipes":
+            await snipes_cmd(update, context)
+        elif kind == "copy":
+            await context.bot.send_message(
+                uid,
+                "Copytrade\n"
+                "/watchwallet sol <address>\n"
+                "/watchwallet eth 0x...\n"
+                "/wallets\n"
+                "Ferzan pings you when they move. It will not spend your Trust wallet.",
+            )
+        elif kind == "snipehelp":
+            await context.bot.send_message(
+                uid,
+                "Auto snipe (gated)\n"
+                "/snipe sol <CA> 40\n"
+                "/snipes   /cancelsnipe 3\n"
+                "Fills paper when liq/score/age gates pass. Not first-block.",
+            )
+        elif kind == "quotehelp":
+            await context.bot.send_message(
+                uid,
+                "Live quote — you sign in Trust\n"
+                "/quote sol <CA> 50\n"
+                "/quote base 0x... 25\n"
+                "0.50% cut is on the quote. No seed in this bot.",
+            )
+        elif kind == "pnl":
+            await context.bot.send_message(
+                uid,
+                f"Paper cash is on /positions and /drawdown.\nSend /positions",
+            )
+        elif kind == "buyhelp":
+            await context.bot.send_message(
+                uid,
+                "BUY & SELL\n"
+                "Paste a CA in this chat.\n"
+                "/buy sol     paper if score clears\n"
+                "/sell 3      close position #3\n"
+                "/quote sol <CA> 50     sign in Trust",
+            )
         return
     if data.startswith("sig:"):
         await _send_signal(update, data[4:], edit=True)

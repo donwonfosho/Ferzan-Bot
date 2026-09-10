@@ -153,6 +153,24 @@ def init_db() -> None:
             conn.execute("ALTER TABLE users ADD COLUMN peak_equity REAL")
         if "drawdown_alert_pct" not in cols:
             conn.execute("ALTER TABLE users ADD COLUMN drawdown_alert_pct REAL DEFAULT 12")
+        if "last_query" not in cols:
+            conn.execute("ALTER TABLE users ADD COLUMN last_query TEXT")
+        if "copy_paper" not in cols:
+            conn.execute("ALTER TABLE users ADD COLUMN copy_paper INTEGER DEFAULT 0")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS limits (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                query TEXT NOT NULL,
+                side TEXT NOT NULL,
+                target REAL NOT NULL,
+                usd REAL NOT NULL,
+                status TEXT NOT NULL DEFAULT 'open',
+                created_at INTEGER NOT NULL
+            )
+            """
+        )
         conn.commit()
 
 
@@ -602,6 +620,45 @@ def cancel_snipe(snipe_id: int, user_id: int) -> bool:
             "UPDATE snipes SET status = 'cancelled', finished_at = ? "
             "WHERE id = ? AND user_id = ? AND status = 'armed'",
             (int(time.time()), snipe_id, user_id),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def add_limit(user_id: int, query: str, side: str, target: float, usd: float) -> int:
+    with get_conn() as conn:
+        cur = conn.execute(
+            "INSERT INTO limits (user_id, query, side, target, usd, status, created_at) "
+            "VALUES (?, ?, ?, ?, ?, 'open', ?)",
+            (user_id, query, side, target, usd, int(time.time())),
+        )
+        conn.commit()
+        return int(cur.lastrowid)
+
+
+def open_limits(user_id: int | None = None) -> list[dict[str, Any]]:
+    with get_conn() as conn:
+        if user_id is None:
+            rows = conn.execute("SELECT * FROM limits WHERE status = 'open'").fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM limits WHERE user_id = ? ORDER BY id DESC",
+                (user_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def finish_limit(limit_id: int, status: str) -> None:
+    with get_conn() as conn:
+        conn.execute("UPDATE limits SET status = ? WHERE id = ?", (status, limit_id))
+        conn.commit()
+
+
+def cancel_limit(limit_id: int, user_id: int) -> bool:
+    with get_conn() as conn:
+        cur = conn.execute(
+            "UPDATE limits SET status = 'cancelled' WHERE id = ? AND user_id = ? AND status = 'open'",
+            (limit_id, user_id),
         )
         conn.commit()
         return cur.rowcount > 0

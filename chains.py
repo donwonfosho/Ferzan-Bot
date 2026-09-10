@@ -1,95 +1,118 @@
-"""The five venues this bot trades.
+"""Venues Ferzan can score and quote.
 
-BNB Chain, Solana, Base, Ethereum, Robinhood Chain.
+Green on Maestro's list. Data via DexScreener. Live swap still means
+the user signs (Jupiter on Sol, 0x/Trust on EVM). TRX/TON/Arc/Stable
+are scored when DexScreener indexes the CA; they are not first-class
+0x routes.
 """
 
 from __future__ import annotations
 
+
+def _c(
+    cid: str,
+    label: str,
+    kind: str,
+    ds: str,
+    gecko: str,
+    native: str,
+    *,
+    chain_id: int | None = None,
+    rpc: str = "",
+    explorer: str = "",
+    router: str = "",
+    notes: str = "",
+) -> dict:
+    tx = f"{explorer}/tx/{{txid}}" if explorer else "{txid}"
+    addr = f"{explorer}/address/{{addr}}" if explorer else "{addr}"
+    if kind == "sol":
+        addr = f"{explorer}/account/{{addr}}" if explorer else "{addr}"
+    return {
+        "id": cid,
+        "label": label,
+        "kind": kind,
+        "chain_id": chain_id,
+        "dexscreener": ds,
+        "gecko": gecko,
+        "native": native,
+        "rpc": rpc,
+        "explorer_tx": tx,
+        "explorer_addr": addr,
+        "router": router,
+        "notes": notes,
+    }
+
+
 CHAINS = {
-    "eth": {
-        "id": "eth",
-        "label": "Ethereum",
-        "kind": "evm",
-        "chain_id": 1,
-        "dexscreener": "ethereum",
-        "gecko": "eth",
-        "native": "ETH",
-        "rpc": "https://ethereum.publicnode.com",
-        "explorer_tx": "https://etherscan.io/tx/{txid}",
-        "explorer_addr": "https://etherscan.io/address/{addr}",
-        "router": "0x / Uniswap",
-    },
-    "bsc": {
-        "id": "bsc",
-        "label": "BNB Chain",
-        "kind": "evm",
-        "chain_id": 56,
-        "dexscreener": "bsc",
-        "gecko": "bsc",
-        "native": "BNB",
-        "rpc": "https://bsc-dataseed.binance.org",
-        "explorer_tx": "https://bscscan.com/tx/{txid}",
-        "explorer_addr": "https://bscscan.com/address/{addr}",
-        "router": "0x / PancakeSwap",
-    },
-    "base": {
-        "id": "base",
-        "label": "Base",
-        "kind": "evm",
-        "chain_id": 8453,
-        "dexscreener": "base",
-        "gecko": "base",
-        "native": "ETH",
-        "rpc": "https://mainnet.base.org",
-        "explorer_tx": "https://basescan.org/tx/{txid}",
-        "explorer_addr": "https://basescan.org/address/{addr}",
-        "router": "0x / Uniswap",
-    },
-    "sol": {
-        "id": "sol",
-        "label": "Solana",
-        "kind": "sol",
-        "chain_id": None,
-        "dexscreener": "solana",
-        "gecko": "solana",
-        "native": "SOL",
-        "rpc": "https://api.mainnet-beta.solana.com",
-        "explorer_tx": "https://solscan.io/tx/{txid}",
-        "explorer_addr": "https://solscan.io/account/{addr}",
-        "router": "Jupiter",
-    },
-    "hood": {
-        "id": "hood",
-        "label": "Robinhood Chain",
-        "kind": "evm",
-        "chain_id": 4663,
-        "dexscreener": "robinhood",
-        "gecko": "robinhood",
-        "native": "ETH",
-        "rpc": "https://rpc.mainnet.chain.robinhood.com",
-        "explorer_tx": "https://robinhoodchain.blockscout.com/tx/{txid}",
-        "explorer_addr": "https://robinhoodchain.blockscout.com/address/{addr}",
-        "router": "Uniswap on Hood / 0x if listed",
-        "notes": "EVM L2. Gas is ETH. Not the Robinhood stock app.",
-    },
+    "sol": _c("sol", "Solana", "sol", "solana", "solana", "SOL",
+              rpc="https://api.mainnet-beta.solana.com",
+              explorer="https://solscan.io", router="Jupiter"),
+    "bsc": _c("bsc", "BNB Chain", "evm", "bsc", "bsc", "BNB",
+              chain_id=56, rpc="https://bsc-dataseed.binance.org",
+              explorer="https://bscscan.com", router="0x / PancakeSwap"),
+    "base": _c("base", "Base", "evm", "base", "base", "ETH",
+               chain_id=8453, rpc="https://mainnet.base.org",
+               explorer="https://basescan.org", router="0x / Uniswap"),
+    "eth": _c("eth", "Ethereum", "evm", "ethereum", "eth", "ETH",
+              chain_id=1, rpc="https://ethereum.publicnode.com",
+              explorer="https://etherscan.io", router="0x / Uniswap"),
+    "monad": _c("monad", "Monad", "evm", "monad", "monad", "MON",
+                rpc="https://rpc.monad.xyz",
+                explorer="https://monadvision.com", router="0x if listed",
+                notes="Score via DexScreener /monad"),
+    "sonic": _c("sonic", "Sonic", "evm", "sonic", "sonic", "S",
+                chain_id=146, rpc="https://rpc.soniclabs.com",
+                explorer="https://sonicscan.org", router="0x if listed"),
+    "avax": _c("avax", "Avalanche", "evm", "avalanche", "avax", "AVAX",
+               chain_id=43114, rpc="https://api.avax.network/ext/bc/C/rpc",
+               explorer="https://snowtrace.io", router="0x / LFJ"),
+    "arb": _c("arb", "Arbitrum", "evm", "arbitrum", "arbitrum", "ETH",
+              chain_id=42161, rpc="https://arb1.arbitrum.io/rpc",
+              explorer="https://arbiscan.io", router="0x / Uniswap"),
+    "hype": _c("hype", "HyperEVM", "evm", "hyperevm", "hyperevm", "HYPE",
+               chain_id=999, rpc="https://rpc.hyperliquid.xyz/evm",
+               explorer="https://purrsec.com", router="HyperEVM DEX / 0x if listed"),
+    "hood": _c("hood", "Robinhood Chain", "evm", "robinhood", "robinhood", "ETH",
+               chain_id=4663, rpc="https://rpc.mainnet.chain.robinhood.com",
+               explorer="https://robinhoodchain.blockscout.com",
+               router="Uniswap on Hood",
+               notes="EVM L2. Not the stock app."),
+    "arc": _c("arc", "Arc", "evm", "arc", "arc", "ETH",
+              explorer="https://explorer.arc.network",
+              router="data only until 0x lists it",
+              notes="Score if DexScreener has /arc pairs"),
+    "stable": _c("stable", "Stable", "evm", "stable", "stable", "ETH",
+                 router="data only",
+                 notes="Maestro label. Score when DexScreener indexes the CA"),
+    "trx": _c("trx", "Tron", "tron", "tron", "tron", "TRX",
+              rpc="https://api.trongrid.io",
+              explorer="https://tronscan.org/#",
+              router="SunSwap / data",
+              notes="Not EVM. Score + alerts. No 0x quote."),
+    "ton": _c("ton", "TON", "ton", "ton", "ton", "TON",
+              explorer="https://tonviewer.com",
+              router="STON.fi / data",
+              notes="Not EVM. Score + alerts. No 0x quote."),
 }
 
 ALIASES = {
-    "ethereum": "eth",
-    "ether": "eth",
-    "bnb": "bsc",
-    "binance": "bsc",
-    "base": "base",
+    "ethereum": "eth", "ether": "eth",
+    "bnb": "bsc", "binance": "bsc",
     "solana": "sol",
-    "sol": "sol",
-    "robinhood": "hood",
-    "hood": "hood",
-    "rh": "hood",
-    "rhc": "hood",
-    "robinhoodchain": "hood",
+    "avalanche": "avax",
+    "arbitrum": "arb",
+    "hyperliquid": "hype", "hyperevm": "hype", "hyper": "hype",
+    "robinhood": "hood", "rh": "hood", "rhc": "hood", "robinhoodchain": "hood",
+    "tron": "trx",
+    "toncoin": "ton",
+    "mon": "monad",
 }
 
-ACTIVE = ("eth", "bsc", "base", "sol", "hood")
+# Same order as Maestro's chain list in the screenshot.
+ACTIVE = (
+    "sol", "bsc", "base", "eth", "monad", "sonic", "avax",
+    "arb", "hype", "hood", "arc", "stable", "trx", "ton",
+)
 
 
 def resolve_chain(raw: str | None) -> str | None:
@@ -109,14 +132,12 @@ def meta(chain: str) -> dict:
 
 
 def chain_list() -> str:
-    return ", ".join(f"{CHAINS[c]['label']} ({c})" for c in ACTIVE)
+    return ", ".join(CHAINS[c]["label"] for c in ACTIVE)
 
 
 def explorer_tx(chain: str, txid: str) -> str:
-    m = meta(chain)
-    return m["explorer_tx"].format(txid=txid)
+    return meta(chain)["explorer_tx"].format(txid=txid)
 
 
 def explorer_addr(chain: str, addr: str) -> str:
-    m = meta(chain)
-    return m["explorer_addr"].format(addr=addr)
+    return meta(chain)["explorer_addr"].format(addr=addr)

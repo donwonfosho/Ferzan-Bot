@@ -158,6 +158,66 @@ def paper_close(user_id: int, pos_id: int, reason: str = "manual") -> tuple[bool
     )
 
 
+def paper_close_pct(user_id: int, pos_id: int, pct: float) -> tuple[bool, str]:
+    if pct >= 99:
+        return paper_close(user_id, pos_id, reason="sell-all")
+    pos = db.get_position(pos_id, user_id)
+    if not pos or pos.get("closed_at"):
+        return False, "No open position with that id."
+    try:
+        px = quote_price(pos["query"] or pos["symbol"])
+    except PriceFetchError as exc:
+        return False, f"Could not mark the book: {exc}"
+    sell_qty = float(pos["qty"]) * (pct / 100.0)
+    if sell_qty <= 0:
+        return False, "Size too small."
+    gross = sell_qty * px
+    cut = fees.quote(gross)
+    proceeds = cut.working_usd
+    cost = sell_qty * float(pos["entry"])
+    pnl = proceeds - cost
+    left = float(pos["qty"]) - sell_qty
+    user = db.get_user(user_id)
+    db.update_user(user_id, paper_cash=float(user["paper_cash"]) + proceeds)
+    fees.record(user_id, "paper_sell", cut, note=str(pos["symbol"]))
+    if left <= 1e-12:
+        db.close_position(pos_id, px, pnl)
+        note = "sold 100%"
+    else:
+        with db.get_conn() as conn:
+            conn.execute(
+                "UPDATE positions SET qty = ? WHERE id = ? AND user_id = ?",
+                (left, pos_id, user_id),
+            )
+            conn.commit()
+        note = f"sold {pct:g}%"
+    db.add_journal(user_id, "SELL", f"#{pos_id} {note} @ {px:.6g} pnl={pnl:+.2f}")
+    return True, f"#{pos_id} {note} @ ${px:,.6g}\nPnL {pnl:+,.2f} USD\n{cut.disclose()}"
+
+
+def paper_pnl(user_id: int) -> str:
+    user = db.get_user(user_id)
+    if not user:
+        return "Tap /start first."
+    equity, peak, dd = update_peak_and_drawdown(user_id)
+    day = db.realized_today(user_id)
+    start = float(user.get("starting_equity") or user.get("paper_cash") or 0)
+    total = equity - start
+    lines = [
+        f"Equity ${equity:,.2f}  peak ${peak:,.2f}  DD {dd:.2f}%",
+        f"Today realized {day:+,.2f}",
+        f"Since reset {total:+,.2f}",
+    ]
+    for p in db.open_positions(user_id):
+        try:
+            px = quote_price(p["query"] or p["symbol"])
+            u = (px - float(p["entry"])) * float(p["qty"])
+            lines.append(f"#{p['id']} {p['symbol']} {u:+,.2f} @ ${px:,.6g}")
+        except PriceFetchError:
+            lines.append(f"#{p['id']} {p['symbol']} (no mark)")
+    return "\n".join(lines)
+
+
 def mark_open_positions() -> list[tuple[int, int, str]]:
     """Check stops/targets. Returns (user_id, pos_id, message) for fills."""
     notices: list[tuple[int, int, str]] = []
