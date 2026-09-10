@@ -240,14 +240,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         cap = float(user.get("max_daily_loss_pct") or 8)
         text = (
             "⚡ FERZAN\n"
-            "Don't ape. Align.\n\n"
+            "See it. Ape it. Send it.\n\n"
             f"💵 Paper  ${cash:,.2f}\n"
             f"🎚️ Floor {floor} · size {size}% · cap -{cap}%\n"
             f"✂️ Cut {fees.current_bps() / 100:.2f}%"
             f" · {'🟢 fee wallets live' if ready else '🟡 set FEE_WALLET_*'}\n\n"
             "SOL · BSC · BASE · ETH · MONAD · SONIC · AVAX\n"
             "ARB · HYPE · HOOD · ARC · STABLE · TRX · TON\n\n"
-            "Paste a CA. We score it. We can say no.\n"
+            "Paste a CA. Score it. Snipe it.\n"
             "Live sends: /quote then sign in Trust."
         )
         target = update.effective_message
@@ -809,25 +809,40 @@ async def quote_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.effective_message.reply_text(quotes.format_quote(q))
 
 
+def chains_keyboard() -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    pair: list[InlineKeyboardButton] = []
+    dots = {
+        "sol": "🟢", "bsc": "🟢", "base": "🟢", "eth": "🟢",
+        "arb": "🟢", "avax": "🟢", "hood": "🟢",
+        "monad": "🟡", "sonic": "🟡", "hype": "🟡",
+        "arc": "⚪", "stable": "⚪", "trx": "🟡", "ton": "🟡",
+    }
+    for cid in ACTIVE:
+        mark = dots.get(cid, "🟡")
+        pair.append(InlineKeyboardButton(f"{mark} {cid.upper()}", callback_data=f"ch:{cid}"))
+        if len(pair) == 2:
+            rows.append(pair)
+            pair = []
+    if pair:
+        rows.append(pair)
+    rows.append([InlineKeyboardButton("⚡ BUY / SELL — paste a CA", callback_data="go:buyhelp")])
+    return InlineKeyboardMarkup(rows)
+
+
 async def chains_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update):
         return
-    lines = ["Trading venues (paper now, live router later)", ""]
-    for cid in ACTIVE:
-        m = CHAINS[cid]
-        extra = f" · chain {m['chain_id']}" if m.get("chain_id") else ""
-        lines.append(f"{m['label']} /{cid}{extra}")
-        lines.append(f"  data {m['dexscreener']} · router {m['router']}")
-        lines.append(f"  gas {m['native']} · {m['rpc']}")
-        if m.get("notes"):
-            lines.append(f"  {m['notes']}")
-        lines.append("")
-    lines.append("Examples:")
-    lines.append("/signal hood CASHCAT")
-    lines.append("/snipe bsc 0xabc… 25")
-    lines.append("/watchwallet hood 0x… whale")
-    lines.append("/launches sol")
-    await update.effective_message.reply_text("\n".join(lines))
+    text = (
+        "⚡ FERZAN · chains\n"
+        "See it. Ape it. Send it.\n\n"
+        "🟢 live score + paper + quote\n"
+        "🟡 score + paper (thin live route)\n"
+        "⚪ listed — DexScreener when the pair exists\n\n"
+        "Tap a chain, then paste a CA.\n"
+        "You sign live swaps in Trust. Ferzan does not hold keys."
+    )
+    await update.effective_message.reply_text(text, reply_markup=chains_keyboard())
 
 
 async def launches_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -875,6 +890,23 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     uid = update.effective_user.id
     data = query.data or ""
+    if data.startswith("ch:"):
+        cid = resolve_chain(data[3:])
+        if not cid:
+            await context.bot.send_message(uid, "Unknown chain.")
+            return
+        m = CHAINS[cid]
+        await context.bot.send_message(
+            uid,
+            f"🟢 {m['label']} selected\n"
+            f"Gas {m['native']} · {m['router']}\n\n"
+            f"Paste a CA or send:\n"
+            f"/signal {cid} <token>\n"
+            f"/snipe {cid} <CA> 40\n"
+            f"/quote {cid} <CA> 50\n"
+            f"/launches {cid}",
+        )
+        return
     if data.startswith("go:"):
         kind = data[3:]
         if kind.startswith("signal:"):
