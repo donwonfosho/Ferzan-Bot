@@ -137,7 +137,7 @@ def render_card(card: SignalCard) -> str:
     if ca:
         lines.append(f"CA <code>{_esc(ca)}</code>")
         lines.append("<i>Tap the address to copy.</i>")
-    lines.append("\n<i>See it. Ape it. Send it. Paper until you sign.</i>")
+    lines.append("\n<i>See it. Ape it. Send it.</i>")
     return "\n".join(lines)
 
 
@@ -145,7 +145,7 @@ def card_keyboard(query: str, score: int, ca: str = "") -> InlineKeyboardMarkup:
     q = query[:40]
     rows = [
         [
-            InlineKeyboardButton("💵 Paper buy", callback_data=f"buy:{q}"),
+            InlineKeyboardButton("💵 Buy", callback_data=f"buy:{q}"),
             InlineKeyboardButton("🧨 Override", callback_data=f"force:{q}"),
         ],
         [
@@ -414,6 +414,32 @@ async def signal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await _send_signal(update, " ".join(context.args))
 
 
+def _live_buy_followup(uid: int, card, query: str, paper_ok: bool, force: bool) -> str:
+    if not signer.configured():
+        return "Live: no signer key on this box."
+    if not signer.live_enabled():
+        return "Live: OFF. Add LIVE_BUYS=1 and restart."
+    if not paper_ok and not force:
+        return "Live: skipped (score/floor blocked). Override to force."
+    snap = card.snapshot
+    mint = (snap.token_address or "").strip()
+    chain = (snap.chain or "").lower()
+    raw = (query or "").strip()
+    if not mint and len(raw) >= 32 and not raw.startswith("0x"):
+        mint = raw
+        chain = chain or "solana"
+    if not mint:
+        return "Live: no mint on this card. Paste the full Solana CA, then Buy."
+    if "sol" not in chain and not (len(mint) >= 32 and not mint.startswith("0x")):
+        return f"Live: {chain or 'unknown'} is not Solana. Signer is SOL-only."
+    user = db.get_user(uid) or {}
+    cash = float(user.get("paper_cash") or 10000)
+    pct = float(user.get("size_pct") or 5)
+    usd = min(signer.max_usd(), max(5.0, cash * pct / 100.0))
+    _ok, msg = signer.buy_sol(mint, usd)
+    return msg
+
+
 async def buy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update):
         return
@@ -428,6 +454,9 @@ async def buy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     ok, msg = trading.paper_buy(update.effective_user.id, card, force=False)
     await update.effective_message.reply_text(msg)
+    live_msg = _live_buy_followup(update.effective_user.id, card, query, ok, False)
+    if live_msg:
+        await update.effective_message.reply_text(live_msg)
     if not ok:
         await update.effective_message.reply_text(
             render_card(card),
@@ -1057,21 +1086,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             return
         ok, msg = trading.paper_buy(uid, card, force=force)
         await context.bot.send_message(uid, msg)
-        if not ok and not force:
-            return
-        chain = (card.snapshot.chain or "").lower()
-        mint = (card.snapshot.token_address or "").strip()
-        if signer.configured() and ("sol" in chain) and mint:
-            user = db.get_user(uid) or {}
-            cash = float(user.get("paper_cash") or 10000)
-            pct = float(user.get("size_pct") or 5)
-            usd = min(signer.max_usd(), max(5.0, cash * pct / 100.0))
-            live_ok, live_msg = signer.buy_sol(mint, usd)
+        live_msg = _live_buy_followup(uid, card, name, ok, force)
+        if live_msg:
             await context.bot.send_message(uid, live_msg)
-        elif signer.configured() and mint:
-            await context.bot.send_message(
-                uid, "Live signer is Solana-only right now. EVM stays paper /quote."
-            )
         return
     if data.startswith("close:"):
         try:
