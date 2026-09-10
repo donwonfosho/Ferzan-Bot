@@ -24,6 +24,11 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
+
+try:
+    from telegram import CopyTextButton
+except ImportError:  # older PTB — tap the <code> CA instead
+    CopyTextButton = None
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -127,24 +132,32 @@ def render_card(card: SignalCard) -> str:
         )
     if s.url:
         lines.append(f'<a href="{html.escape(s.url, quote=True)}">Chart</a>')
-    lines.append("\n<i>Not financial advice. Paper fills only.</i>")
+    ca = (s.token_address or "").strip()
+    if ca:
+        lines.append(f"CA <code>{_esc(ca)}</code>")
+        lines.append("<i>Tap the address to copy.</i>")
+    lines.append("\n<i>See it. Ape it. Send it. Paper until you sign.</i>")
     return "\n".join(lines)
 
 
-def card_keyboard(query: str, score: int) -> InlineKeyboardMarkup:
+def card_keyboard(query: str, score: int, ca: str = "") -> InlineKeyboardMarkup:
     q = query[:40]
-    return InlineKeyboardMarkup(
+    rows = [
         [
-            [
-                InlineKeyboardButton("Paper buy", callback_data=f"buy:{q}"),
-                InlineKeyboardButton("Override", callback_data=f"force:{q}"),
-            ],
-            [
-                InlineKeyboardButton("Watch", callback_data=f"watch:{q}"),
-                InlineKeyboardButton("Refresh", callback_data=f"sig:{q}"),
-            ],
-        ]
-    )
+            InlineKeyboardButton("💵 Paper buy", callback_data=f"buy:{q}"),
+            InlineKeyboardButton("🧨 Override", callback_data=f"force:{q}"),
+        ],
+        [
+            InlineKeyboardButton("👁 Watch", callback_data=f"watch:{q}"),
+            InlineKeyboardButton("🔄 Refresh", callback_data=f"sig:{q}"),
+        ],
+    ]
+    addr = (ca or "").strip()
+    if addr and CopyTextButton is not None:
+        rows.append(
+            [InlineKeyboardButton("📋 Copy CA", copy_text=CopyTextButton(text=addr))]
+        )
+    return InlineKeyboardMarkup(rows)
 
 
 def positions_keyboard(user_id: int) -> InlineKeyboardMarkup | None:
@@ -376,7 +389,11 @@ async def _send_signal(update: Update, query: str, edit: bool = False) -> None:
             await update.effective_message.reply_text(text)
         return
     text = render_card(card)
-    markup = card_keyboard(card.snapshot.query or query, card.score)
+    markup = card_keyboard(
+        card.snapshot.query or query,
+        card.score,
+        ca=card.snapshot.token_address or "",
+    )
     if edit and update.callback_query:
         await update.callback_query.edit_message_text(
             text, parse_mode="HTML", disable_web_page_preview=True, reply_markup=markup
@@ -845,22 +862,49 @@ async def chains_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await update.effective_message.reply_text(text, reply_markup=chains_keyboard())
 
 
+def launch_card(ln) -> tuple[str, InlineKeyboardMarkup]:
+    ca = (ln.token or ln.query or "").strip()
+    name = html.escape((ln.symbol or "?").upper())
+    chain = html.escape((ln.chain or "").upper())
+    text = (
+        f"🚀 <b>${name}</b>\n"
+        f"⛓ {chain}    💧 ${ln.liquidity_usd:,.0f} liq\n\n"
+        f"📋 <code>{html.escape(ca)}</code>\n"
+        f"<i>Tap the CA to copy</i>"
+    )
+    short = ca[:60]
+    rows = [
+        [
+            InlineKeyboardButton("📡 Score", callback_data=f"sig:{short}"),
+            InlineKeyboardButton("💵 Buy", callback_data=f"buy:{short}"),
+        ],
+        [
+            InlineKeyboardButton("🎯 Snipe $40", callback_data=f"snp:{short}"),
+        ],
+    ]
+    if ca and CopyTextButton is not None:
+        rows.append(
+            [InlineKeyboardButton("📋 Copy CA", copy_text=CopyTextButton(text=ca))]
+        )
+    return text, InlineKeyboardMarkup(rows)
+
+
 async def launches_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update):
         return
     chain = resolve_chain(context.args[0]) if context.args else None
-    launches = sniper.fetch_new_pools(chain, limit=8)
+    launches = sniper.fetch_new_pools(chain, limit=6)
     if not launches:
         await update.effective_message.reply_text(
-            "No fresh pools from GeckoTerminal right now. Try /launches sol"
+            "No fresh pools right now. Try /launches sol"
         )
         return
-    lines = ["New pools"]
+    await update.effective_message.reply_text("🚀 Fresh launches")
     for ln in launches:
-        lines.append(
-            f"{ln.chain} {ln.symbol} liq ${ln.liquidity_usd:,.0f} {ln.token[:12]}…"
+        text, markup = launch_card(ln)
+        await update.effective_message.reply_text(
+            text, parse_mode="HTML", reply_markup=markup
         )
-    await update.effective_message.reply_text("\n".join(lines)[:3500])
 
 
 async def treasury_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -971,6 +1015,21 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 "/sell 3      close position #3\n"
                 "/quote sol <CA> 50     sign in Trust",
             )
+        return
+    if data.startswith("snp:"):
+        ca = data[4:]
+        user = db.get_user(uid) or {}
+        sid = sniper.arm(
+            user_id=uid,
+            query=ca,
+            chain=None,
+            usd=40.0,
+            min_liq=25_000,
+            min_score=int(user.get("min_confluence") or 62),
+            max_age_h=6.0,
+            require_long=True,
+        )
+        await context.bot.send_message(uid, f"🎯 Snipe #{sid} armed · $40 · gates on")
         return
     if data.startswith("sig:"):
         await _send_signal(update, data[4:], edit=True)
@@ -1149,23 +1208,17 @@ async def launch_feed_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         if not user.get("alerts_on"):
             continue
         uid = int(user["user_id"])
-        lines = ["Launch feed"]
-        sent_any = False
-        for ln in interesting[:6]:
+        for ln in interesting[:5]:
             key = f"launch:{ln.chain}:{ln.token[:24]}"
             if not db.should_resend_signal(uid, key, 1, cooldown_s=6 * 3600):
                 continue
-            lines.append(
-                f"{ln.chain} {ln.symbol} liq ${ln.liquidity_usd:,.0f}\n{ln.token}"
-            )
-            sent_any = True
-        if not sent_any:
-            continue
-        lines.append("Arm with /snipe <chain> <CA> 40 — gates still apply.")
-        try:
-            await context.bot.send_message(uid, "\n".join(lines)[:3500])
-        except Exception:
-            logger.exception("launch feed failed for %s", uid)
+            text, markup = launch_card(ln)
+            try:
+                await context.bot.send_message(
+                    uid, text, parse_mode="HTML", reply_markup=markup
+                )
+            except Exception:
+                logger.exception("launch feed failed for %s", uid)
 
 
 def main() -> None:
