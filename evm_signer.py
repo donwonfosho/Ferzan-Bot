@@ -186,3 +186,111 @@ def _nonce(rpc: str, addr: str) -> int:
     data = r.json() if r.content else {}
     val = data.get("result") or "0x0"
     return int(val, 16)
+
+
+def _rpc(rpc: str, method: str, params: list):
+    r = requests.post(rpc, json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params}, timeout=20)
+    return r.json() if r.content else {}
+
+
+def _gas_price(rpc: str) -> int:
+    body = _rpc(rpc, "eth_gasPrice", [])
+    val = body.get("result") or "0x77359400"
+    return int(val, 16)
+
+
+def _erc20_balance(rpc: str, token: str, owner: str) -> int:
+    data = "0x70a08231" + owner[2:].lower().zfill(64)
+    body = _rpc(rpc, "eth_call", [{"to": token, "data": data}, "latest"])
+    val = body.get("result") or "0x0"
+    return int(val, 16)
+
+
+def _broadcast(acct, meta: dict, to: str, data: str, value: int = 0) -> tuple[bool, str]:
+    raw_tx = {
+        "to": _addr(to),
+        "data": data if str(data).startswith("0x") else "0x" + str(data),
+        "value": int(value),
+        "chainId": int(meta["chain_id"]),
+        "gas": 180000,
+        "gasPrice": _gas_price(meta["rpc"]),
+        "nonce": _nonce(meta["rpc"], acct.address),
+    }
+    signed = acct.sign_transaction(raw_tx)
+    raw_hex = signed.raw_transaction.hex() if hasattr(signed, "raw_transaction") else signed.rawTransaction.hex()
+    if not raw_hex.startswith("0x"):
+        raw_hex = "0x" + raw_hex
+    body = _rpc(meta["rpc"], "eth_sendRawTransaction", [raw_hex])
+    if body.get("error"):
+        err = body["error"]
+        return False, str(err.get("message") if isinstance(err, dict) else err)
+    txh = body.get("result") or ""
+    if not txh:
+        return False, "RPC accepted nothing."
+    exp = meta.get("explorer") or "https://etherscan.io"
+    return True, f"{exp}/tx/{txh}"
+
+
+def sell_evm(chain: str, sell_token: str) -> tuple[bool, str]:
+    if not live_enabled():
+        return False, "Live sells OFF. LIVE_BUYS=1"
+    if not configured():
+        return False, "Set SIGNER_KEY_EVM and ZEROX_API_KEY."
+    cid = resolve_chain(chain)
+    if cid not in SUPPORTED:
+        cid = "eth"
+    token = _addr(sell_token)
+    try:
+        from eth_account import Account
+    except Exception as exc:
+        return False, f"EVM deps missing: {exc}"
+    meta = CHAINS[cid]
+    acct = Account.from_key("0x" + _key_hex())
+    bal = _erc20_balance(meta["rpc"], token, acct.address)
+    if bal <= 0:
+        return False, f"No token balance on {cid} for {token}"
+    headers = {
+        "0x-api-key": os.getenv("ZEROX_API_KEY", "").strip(),
+        "0x-version": "v2",
+        "Accept": "application/json",
+    }
+    try:
+        qr = requests.get(
+            ZEROX,
+            headers=headers,
+            params={
+                "chainId": str(meta["chain_id"]),
+                "sellToken": token,
+                "buyToken": NATIVE,
+                "sellAmount": str(bal),
+                "taker": acct.address,
+                "txOrigin": acct.address,
+            },
+            timeout=20,
+        )
+        quote = qr.json() if qr.content else {}
+    except requests.RequestException as exc:
+        return False, f"0x quote failed: {exc}"
+    if qr.status_code >= 400:
+        return False, str(quote.get("reason") or quote.get("message") or qr.text[:180])
+    issues = quote.get("issues") or {}
+    allow = issues.get("allowance") if isinstance(issues, dict) else None
+    if allow and allow.get("spender"):
+        spender = _addr(allow["spender"])
+        approve_data = "0x095ea7b3" + spender[2:].lower().zfill(64) + ("f" * 64)
+        ok, msg = _broadcast(acct, meta, token, approve_data, 0)
+        if not ok:
+            return False, f"Approve failed: {msg}"
+        import time
+
+        time.sleep(8)
+        approve_note = f"Approved {spender}\n{msg}\n"
+    else:
+        approve_note = ""
+    tx = quote.get("transaction") or quote.get("tx") or {}
+    if not tx.get("to") or not tx.get("data"):
+        return False, approve_note + str(quote.get("message") or "0x returned no sell tx")
+    ok, msg = _broadcast(acct, meta, tx["to"], tx["data"], _as_int(tx.get("value"), 0))
+    if not ok:
+        return False, approve_note + f"Sell failed: {msg}"
+    return True, approve_note + f"Live {cid.upper()} sell (full bag)\n{msg}"

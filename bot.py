@@ -552,6 +552,20 @@ async def livesell_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.effective_message.reply_text(msg)
 
 
+async def livesellevm_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard(update):
+        return
+    if not context.args:
+        await update.effective_message.reply_text("Usage: /livesellevm [eth|base|bsc] <0xToken>")
+        return
+    if len(context.args) == 1:
+        chain, token = "eth", context.args[0]
+    else:
+        chain, token = context.args[0], context.args[1]
+    _ok, msg = evm_signer.sell_evm(chain, token)
+    await update.effective_message.reply_text(msg)
+
+
 async def sell_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update):
         return
@@ -1382,6 +1396,7 @@ def main() -> None:
     app.add_handler(CommandHandler("signer", signer_cmd))
     app.add_handler(CommandHandler("bag", bag_cmd))
     app.add_handler(CommandHandler("livesell", livesell_cmd))
+    app.add_handler(CommandHandler("livesellevm", livesellevm_cmd))
     app.add_handler(CommandHandler("treasury", treasury_cmd))
     app.add_handler(CommandHandler("snipe", snipe_cmd))
     app.add_handler(CommandHandler("snipes", snipes_cmd))
