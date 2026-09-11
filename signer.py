@@ -207,6 +207,59 @@ def _token_raw_balance(mint: str) -> int:
     return total
 
 
+def holdings() -> list[dict]:
+    kp = _keypair()
+    r = requests.post(
+        _rpc(),
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "getTokenAccountsByOwner",
+            "params": [
+                str(kp.pubkey()),
+                {"programId": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"},
+                {"encoding": "jsonParsed"},
+            ],
+        },
+        timeout=20,
+    )
+    try:
+        data = r.json() if r.content else {}
+    except Exception as exc:
+        raise RuntimeError(f"RPC holdings failed: {exc}") from exc
+    out = []
+    for acc in (data.get("result") or {}).get("value") or []:
+        info = (((acc.get("account") or {}).get("data") or {}).get("parsed") or {}).get("info") or {}
+        tok = info.get("tokenAmount") or {}
+        mint = (info.get("mint") or "").strip()
+        try:
+            ui = float(tok.get("uiAmount") or 0)
+        except (TypeError, ValueError):
+            ui = 0.0
+        if mint and ui > 0:
+            out.append({"mint": mint, "amount": ui})
+    return out
+
+
+def holdings_text() -> str:
+    if not configured():
+        return "Signer empty."
+    try:
+        addr = public_sol()
+        rows = holdings()
+    except Exception as exc:
+        return f"Could not read bag.\n{exc}"
+    lines = [f"Live bag on {addr}", f"{len(rows)} token account(s) with balance"]
+    if not rows:
+        lines.append("No SPL tokens. Only SOL, or the last buy never landed.")
+        return "\n".join(lines)
+    for i, row in enumerate(rows[:12], 1):
+        lines.append(f"{i}. {row['amount']:g}")
+        lines.append(f"   {row['mint']}")
+    lines.append("\n/livesell <mint>  sells that bag to SOL")
+    return "\n".join(lines)
+
+
 def sell_sol(input_mint: str) -> tuple[bool, str]:
     if not live_enabled():
         return False, "Live sells are OFF. Add LIVE_BUYS=1 and restart."

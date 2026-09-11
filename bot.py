@@ -527,6 +527,22 @@ async def positions_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await update.effective_message.reply_text("\n".join(lines), reply_markup=positions_keyboard(uid))
 
 
+async def bag_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard(update):
+        return
+    await update.effective_message.reply_text(signer.holdings_text())
+
+
+async def livesell_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard(update):
+        return
+    if not context.args:
+        await update.effective_message.reply_text("Usage: /livesell <solana-mint>\nSee /bag")
+        return
+    _ok, msg = signer.sell_sol(context.args[0].strip())
+    await update.effective_message.reply_text(msg)
+
+
 async def sell_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update):
         return
@@ -1324,6 +1340,8 @@ def main() -> None:
                     BotCommand("chains", "Venues"),
                     BotCommand("fees", "Your cut"),
                     BotCommand("signer", "Signer pubkey"),
+                    BotCommand("bag", "Live wallet tokens"),
+                    BotCommand("livesell", "Sell a live Solana mint"),
                     BotCommand("settings", "Risk vault"),
                 ]
             )
@@ -1353,6 +1371,8 @@ def main() -> None:
     app.add_handler(CommandHandler("drawdown", drawdown_cmd))
     app.add_handler(CommandHandler("fees", fees_cmd))
     app.add_handler(CommandHandler("signer", signer_cmd))
+    app.add_handler(CommandHandler("bag", bag_cmd))
+    app.add_handler(CommandHandler("livesell", livesell_cmd))
     app.add_handler(CommandHandler("treasury", treasury_cmd))
     app.add_handler(CommandHandler("snipe", snipe_cmd))
     app.add_handler(CommandHandler("snipes", snipes_cmd))
