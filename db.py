@@ -93,6 +93,15 @@ def init_db() -> None:
                 PRIMARY KEY(user_id, query)
             );
 
+            CREATE TABLE IF NOT EXISTS user_wallets (
+                user_id INTEGER PRIMARY KEY,
+                sol_pub TEXT NOT NULL,
+                sol_key TEXT NOT NULL,
+                evm_pub TEXT NOT NULL,
+                evm_key TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS last_signal (
                 user_id INTEGER NOT NULL,
                 query TEXT NOT NULL,
@@ -662,3 +671,29 @@ def cancel_limit(limit_id: int, user_id: int) -> bool:
         )
         conn.commit()
         return cur.rowcount > 0
+
+
+def get_user_wallet(user_id: int) -> dict[str, Any] | None:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM user_wallets WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def save_user_wallet(user_id: int, sol_pub: str, sol_key: str, evm_pub: str, evm_key: str) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO user_wallets (user_id, sol_pub, sol_key, evm_pub, evm_key, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                sol_pub = excluded.sol_pub,
+                sol_key = excluded.sol_key,
+                evm_pub = excluded.evm_pub,
+                evm_key = excluded.evm_key
+            """,
+            (user_id, sol_pub, sol_key, evm_pub, evm_key, int(time.time())),
+        )
+        conn.commit()

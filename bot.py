@@ -22,7 +22,7 @@ import logging
 import os
 from pathlib import Path
 
-from dotenv import load_dotenv
+from dotenv import dotenv_values, load_dotenv
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
 
 try:
@@ -50,6 +50,7 @@ import evm_signer
 import signer
 import sniper
 import trading
+import user_wallets
 from chains import ACTIVE, CHAINS, chain_list, resolve_chain
 
 try:
@@ -63,7 +64,11 @@ from confluence import SignalCard, analyze
 from onchain import OnchainError
 from price_fetcher import PriceFetchError, get_price_usd, get_prices_usd, search_coin
 
-load_dotenv(Path(__file__).resolve().parent / ".env", override=True)
+_ENV_PATH = Path(__file__).resolve().parent / ".env"
+load_dotenv(_ENV_PATH)
+for _k, _v in dotenv_values(_ENV_PATH).items():
+    if _v:
+        os.environ[_k] = _v
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -439,17 +444,19 @@ def _live_buy_followup(uid: int, card, query: str, paper_ok: bool, force: bool) 
     user = db.get_user(uid) or {}
     cash = float(user.get("paper_cash") or 10000)
     pct = float(user.get("size_pct") or 5)
-    usd = min(signer.max_usd(), max(5.0, cash * pct / 100.0))
+    usd = min(signer.max_usd(), max(1.0, cash * pct / 100.0))
+    try:
+        sol_secret, evm_secret = user_wallets.secrets(uid)
+    except Exception as exc:
+        return f"Live: open /wallet first.\n{exc}"
     if mint.startswith("0x"):
-        if not evm_signer.configured():
-            return "Live: EVM needs SIGNER_KEY_EVM + ZEROX_API_KEY on the droplet."
-        _ok, msg = evm_signer.buy_evm(chain or "base", mint, usd)
+        if not (os.getenv("ZEROX_API_KEY") or "").strip():
+            return "Live: EVM needs ZEROX_API_KEY on the droplet."
+        _ok, msg = evm_signer.buy_evm(chain or "base", mint, usd, key_hex=evm_secret)
         return msg
-    if not signer.configured():
-        return "Live: no Solana signer key on this box."
     if "sol" not in chain and not (len(mint) >= 32 and not mint.startswith("0x")):
-        return f"Live: {chain or 'unknown'} is not Solana. Signer is SOL-only."
-    _ok, msg = signer.buy_sol(mint, usd)
+        return f"Live: {chain or 'unknown'} is not Solana."
+    _ok, msg = signer.buy_sol(mint, usd, secret=sol_secret)
     return msg
 
 
@@ -711,6 +718,17 @@ async def watchwallet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await update.effective_message.reply_text(
         f"Watching wallet #{wid} on {chain}\n{address}\n{preview}"
     )
+
+
+async def wallet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard(update):
+        return
+    try:
+        text = user_wallets.card_text(update.effective_user.id)
+    except Exception as exc:
+        await update.effective_message.reply_text(f"Could not create wallet.\n{exc}")
+        return
+    await update.effective_message.reply_text(text, parse_mode="Markdown")
 
 
 async def wallets_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1081,7 +1099,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         elif kind == "fees":
             await fees_cmd(update, context)
         elif kind == "wallets":
-            await wallets_cmd(update, context)
+            await wallet_cmd(update, context)
         elif kind == "settings":
             context.args = []
             await settings_cmd(update, context)
@@ -1363,6 +1381,7 @@ def main() -> None:
                     BotCommand("chains", "Venues"),
                     BotCommand("fees", "Your cut"),
                     BotCommand("signer", "Signer pubkey"),
+                    BotCommand("wallet", "Your deposit wallets"),
                     BotCommand("bag", "Live wallet tokens"),
                     BotCommand("livesell", "Sell a live Solana mint"),
                     BotCommand("settings", "Risk vault"),
@@ -1389,6 +1408,7 @@ def main() -> None:
     app.add_handler(CommandHandler("settings", settings_cmd))
     app.add_handler(CommandHandler("resetpaper", resetpaper_cmd))
     app.add_handler(CommandHandler("watchwallet", watchwallet_cmd))
+    app.add_handler(CommandHandler("wallet", wallet_cmd))
     app.add_handler(CommandHandler("wallets", wallets_cmd))
     app.add_handler(CommandHandler("unwatchwallet", unwatchwallet_cmd))
     app.add_handler(CommandHandler("drawdown", drawdown_cmd))

@@ -88,10 +88,10 @@ def _native_decimals(chain: str) -> int:
     return 18
 
 
-def buy_evm(chain: str, buy_token: str, usd: float) -> tuple[bool, str]:
+def buy_evm(chain: str, buy_token: str, usd: float, key_hex: str | None = None) -> tuple[bool, str]:
     if not live_enabled():
         return False, "Live buys OFF. LIVE_BUYS=1"
-    if not configured():
+    if not key_hex and not configured():
         return False, "Set SIGNER_KEY_EVM and ZEROX_API_KEY."
     cid = resolve_chain(chain)
     if cid not in SUPPORTED:
@@ -117,7 +117,8 @@ def buy_evm(chain: str, buy_token: str, usd: float) -> tuple[bool, str]:
         except Exception:
             px = 600.0
     wei = max(10**12, int((usd / max(px, 1e-9)) * 10 ** _native_decimals(cid)))
-    acct = Account.from_key("0x" + _key_hex())
+    raw = (key_hex or _key_hex()).replace("0x", "").replace("0X", "")
+    acct = Account.from_key("0x" + raw)
     headers = {
         "0x-api-key": os.getenv("ZEROX_API_KEY", "").strip(),
         "0x-version": "v2",

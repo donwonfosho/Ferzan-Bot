@@ -87,24 +87,34 @@ def status_text() -> str:
     )
 
 
-def buy_sol(output_mint: str, usd: float) -> tuple[bool, str]:
+def keypair_from_secret(secret: str):
+    from solders.keypair import Keypair
+
+    secret = (secret or "").strip()
+    try:
+        return Keypair.from_base58_string(secret)
+    except Exception:
+        raw = base64.b64decode(secret)
+        return Keypair.from_bytes(raw)
+
+
+def buy_sol(output_mint: str, usd: float, secret: str | None = None) -> tuple[bool, str]:
     if not live_enabled():
         return False, "Live buys are OFF. Add LIVE_BUYS=1 on the droplet, then restart."
-    if not configured():
+    if not secret and not configured():
         return False, "No signer key on this box."
     mint = (output_mint or "").strip()
     if len(mint) < 32:
         return False, "Need a Solana mint."
     usd = min(max(1.0, float(usd)), max_usd())
     try:
-        from solders.keypair import Keypair
         from solders.transaction import VersionedTransaction
         from price_fetcher import get_price_usd
     except Exception as exc:
         return False, f"Signer deps missing: {exc}"
 
     try:
-        kp = _keypair()
+        kp = keypair_from_secret(secret) if secret else _keypair()
     except Exception as exc:
         return False, str(exc)
 
