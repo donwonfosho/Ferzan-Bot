@@ -46,6 +46,7 @@ try:
 except Exception:  # noqa: BLE001 — keep the bot alive if quotes.py is missing
     quotes = None
     logging.getLogger(__name__).exception("quotes module failed to load")
+import evm_signer
 import signer
 import sniper
 import trading
@@ -419,8 +420,6 @@ async def signal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 def _live_buy_followup(uid: int, card, query: str, paper_ok: bool, force: bool) -> str:
-    if not signer.configured():
-        return "Live: no signer key on this box."
     if not signer.live_enabled():
         return "Live: OFF. Add LIVE_BUYS=1 and restart."
     if not paper_ok and not force:
@@ -429,17 +428,27 @@ def _live_buy_followup(uid: int, card, query: str, paper_ok: bool, force: bool) 
     mint = (snap.token_address or "").strip()
     chain = (snap.chain or "").lower()
     raw = (query or "").strip()
-    if not mint and len(raw) >= 32 and not raw.startswith("0x"):
+    if not mint and len(raw) >= 32:
         mint = raw
-        chain = chain or "solana"
+        if raw.startswith("0x"):
+            chain = chain or "base"
+        else:
+            chain = chain or "solana"
     if not mint:
-        return "Live: no mint on this card. Paste the full Solana CA, then Buy."
-    if "sol" not in chain and not (len(mint) >= 32 and not mint.startswith("0x")):
-        return f"Live: {chain or 'unknown'} is not Solana. Signer is SOL-only."
+        return "Live: no mint on this card. Paste the full CA, then Buy."
     user = db.get_user(uid) or {}
     cash = float(user.get("paper_cash") or 10000)
     pct = float(user.get("size_pct") or 5)
     usd = min(signer.max_usd(), max(5.0, cash * pct / 100.0))
+    if mint.startswith("0x"):
+        if not evm_signer.configured():
+            return "Live: EVM needs SIGNER_KEY_EVM + ZEROX_API_KEY on the droplet."
+        _ok, msg = evm_signer.buy_evm(chain or "base", mint, usd)
+        return msg
+    if not signer.configured():
+        return "Live: no Solana signer key on this box."
+    if "sol" not in chain and not (len(mint) >= 32 and not mint.startswith("0x")):
+        return f"Live: {chain or 'unknown'} is not Solana. Signer is SOL-only."
     _ok, msg = signer.buy_sol(mint, usd)
     return msg
 
@@ -775,7 +784,7 @@ async def fees_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def signer_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update):
         return
-    await update.effective_message.reply_text(signer.status_text())
+    await update.effective_message.reply_text(signer.status_text() + "\n\n" + evm_signer.status_text())
 
 
 def _parse_snipe_args(args: list[str]) -> tuple[str | None, str, float]:
