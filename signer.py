@@ -207,37 +207,46 @@ def _token_raw_balance(mint: str) -> int:
     return total
 
 
+_TOKEN_PROGRAMS = (
+    "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+    "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+)
+
+
 def holdings() -> list[dict]:
     kp = _keypair()
-    r = requests.post(
-        _rpc(),
-        json={
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "getTokenAccountsByOwner",
-            "params": [
-                str(kp.pubkey()),
-                {"programId": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"},
-                {"encoding": "jsonParsed"},
-            ],
-        },
-        timeout=20,
-    )
-    try:
-        data = r.json() if r.content else {}
-    except Exception as exc:
-        raise RuntimeError(f"RPC holdings failed: {exc}") from exc
     out = []
-    for acc in (data.get("result") or {}).get("value") or []:
-        info = (((acc.get("account") or {}).get("data") or {}).get("parsed") or {}).get("info") or {}
-        tok = info.get("tokenAmount") or {}
-        mint = (info.get("mint") or "").strip()
+    seen = set()
+    for program in _TOKEN_PROGRAMS:
+        r = requests.post(
+            _rpc(),
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "getTokenAccountsByOwner",
+                "params": [
+                    str(kp.pubkey()),
+                    {"programId": program},
+                    {"encoding": "jsonParsed"},
+                ],
+            },
+            timeout=20,
+        )
         try:
-            ui = float(tok.get("uiAmount") or 0)
-        except (TypeError, ValueError):
-            ui = 0.0
-        if mint and ui > 0:
-            out.append({"mint": mint, "amount": ui})
+            data = r.json() if r.content else {}
+        except Exception as exc:
+            raise RuntimeError(f"RPC holdings failed: {exc}") from exc
+        for acc in (data.get("result") or {}).get("value") or []:
+            info = (((acc.get("account") or {}).get("data") or {}).get("parsed") or {}).get("info") or {}
+            tok = info.get("tokenAmount") or {}
+            mint = (info.get("mint") or "").strip()
+            try:
+                ui = float(tok.get("uiAmount") or 0)
+            except (TypeError, ValueError):
+                ui = 0.0
+            if mint and ui > 0 and mint not in seen:
+                seen.add(mint)
+                out.append({"mint": mint, "amount": ui})
     return out
 
 
