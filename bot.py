@@ -63,7 +63,7 @@ from confluence import SignalCard, analyze
 from onchain import OnchainError
 from price_fetcher import PriceFetchError, get_price_usd, get_prices_usd, search_coin
 
-load_dotenv(Path(__file__).resolve().parent / ".env")
+load_dotenv(Path(__file__).resolve().parent / ".env", override=True)
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
