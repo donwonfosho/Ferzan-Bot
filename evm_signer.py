@@ -207,14 +207,29 @@ def _erc20_balance(rpc: str, token: str, owner: str) -> int:
     return int(val, 16)
 
 
+def _estimate_gas(rpc: str, frm: str, to: str, data: str, value: int) -> int:
+    body = _rpc(
+        rpc,
+        "eth_estimateGas",
+        [{"from": frm, "to": _addr(to), "data": data, "value": hex(int(value))}],
+    )
+    if body.get("result"):
+        try:
+            return max(21000, int(int(body["result"], 16) * 1.3))
+        except Exception:
+            pass
+    return 550000
+
+
 def _broadcast(acct, meta: dict, to: str, data: str, value: int = 0) -> tuple[bool, str]:
+    data_hex = data if str(data).startswith("0x") else "0x" + str(data)
     raw_tx = {
         "to": _addr(to),
-        "data": data if str(data).startswith("0x") else "0x" + str(data),
+        "data": data_hex,
         "value": int(value),
         "chainId": int(meta["chain_id"]),
-        "gas": 180000,
-        "gasPrice": _gas_price(meta["rpc"]),
+        "gas": _estimate_gas(meta["rpc"], acct.address, to, data_hex, int(value)),
+        "gasPrice": int(_gas_price(meta["rpc"]) * 1.2),
         "nonce": _nonce(meta["rpc"], acct.address),
     }
     signed = acct.sign_transaction(raw_tx)
