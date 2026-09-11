@@ -16,7 +16,7 @@ from typing import Any
 
 import sqlite3
 
-DB_PATH = Path(os.getenv("DB_PATH", "/tmp/ferzan.db"))
+DB_PATH = Path(os.getenv("DB_PATH", "/opt/ferzan/app/ferzan.db"))
 
 PAPER_STARTING_BALANCE = float(os.getenv("PAPER_STARTING_BALANCE", "10000"))
 DEFAULT_SIZE_PCT = float(os.getenv("DEFAULT_SIZE_PCT", "5"))
