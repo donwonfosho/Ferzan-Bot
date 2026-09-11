@@ -25,15 +25,18 @@ def _as_int(val, default: int = 0) -> int:
 
 
 def _addr(val) -> str:
-    s = str(val or "").strip()
+    s = str(val or "").strip().lower()
     if s.startswith("0x"):
         s = s[2:]
-    s = "".join(ch for ch in s.lower() if ch in "0123456789abcdef")
-    if len(s) > 40:
-        s = s[-40:]
-    if len(s) < 40:
-        s = s.zfill(40)
-    return "0x" + s
+    s = "".join(ch for ch in s if ch in "0123456789abcdef")
+    s = (s.lstrip("0") or "0").zfill(40)
+    out = "0x" + s
+    try:
+        from eth_utils import to_checksum_address
+
+        return to_checksum_address(out)
+    except Exception:
+        return out
 
 
 def live_enabled() -> bool:
@@ -163,7 +166,7 @@ def buy_evm(chain: str, buy_token: str, usd: float) -> tuple[bool, str]:
         )
         body = rr.json() if rr.content else {}
     except Exception as exc:
-        return False, f"EVM broadcast failed: {exc}"
+        return False, f"EVM broadcast failed: {exc} | to={raw_tx.get('to')}"
     if body.get("error"):
         err = body["error"]
         return False, str(err.get("message") if isinstance(err, dict) else err)
