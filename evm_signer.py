@@ -134,6 +134,7 @@ def buy_evm(chain: str, buy_token: str, usd: float) -> tuple[bool, str]:
                 "sellAmount": str(wei),
                 "taker": acct.address,
                 "txOrigin": acct.address,
+                "slippageBps": "150",
             },
             timeout=20,
         )
@@ -227,7 +228,13 @@ def _broadcast(acct, meta: dict, to: str, data: str, value: int = 0) -> tuple[bo
     txh = body.get("result") or ""
     if not txh:
         return False, "RPC accepted nothing."
-    exp = meta.get("explorer") or "https://etherscan.io"
+    cid = int(meta.get("chain_id") or 1)
+    if cid == 8453:
+        exp = "https://basescan.org"
+    elif cid == 56:
+        exp = "https://bscscan.com"
+    else:
+        exp = meta.get("explorer") or "https://etherscan.io"
     return True, f"{exp}/tx/{txh}"
 
 
@@ -246,9 +253,25 @@ def sell_evm(chain: str, sell_token: str) -> tuple[bool, str]:
         return False, f"EVM deps missing: {exc}"
     meta = CHAINS[cid]
     acct = Account.from_key("0x" + _key_hex())
-    bal = _erc20_balance(meta["rpc"], token, acct.address)
+    rpcs = [meta["rpc"]]
+    if cid == "base":
+        rpcs += ["https://base.publicnode.com", "https://base.llamarpc.com"]
+    bal = 0
+    for rpc in rpcs:
+        try:
+            bal = _erc20_balance(rpc, token, acct.address)
+        except Exception:
+            bal = 0
+        if bal > 0:
+            meta = dict(meta)
+            meta["rpc"] = rpc
+            break
     if bal <= 0:
-        return False, f"No token balance on {cid} for {token}"
+        return False, (
+            f"No token balance on {cid} for {token}\n"
+            f"Wallet {acct.address}\n"
+            f"https://basescan.org/token/{token}?a={acct.address}"
+        )
     headers = {
         "0x-api-key": os.getenv("ZEROX_API_KEY", "").strip(),
         "0x-version": "v2",
@@ -265,6 +288,7 @@ def sell_evm(chain: str, sell_token: str) -> tuple[bool, str]:
                 "sellAmount": str(bal),
                 "taker": acct.address,
                 "txOrigin": acct.address,
+                "slippageBps": "300",
             },
             timeout=20,
         )
@@ -283,8 +307,26 @@ def sell_evm(chain: str, sell_token: str) -> tuple[bool, str]:
             return False, f"Approve failed: {msg}"
         import time
 
-        time.sleep(8)
+        time.sleep(15)
         approve_note = f"Approved {spender}\n{msg}\n"
+        try:
+            qr = requests.get(
+                ZEROX,
+                headers=headers,
+                params={
+                    "chainId": str(meta["chain_id"]),
+                    "sellToken": token,
+                    "buyToken": NATIVE,
+                    "sellAmount": str(bal),
+                    "taker": acct.address,
+                    "txOrigin": acct.address,
+                    "slippageBps": "300",
+                },
+                timeout=20,
+            )
+            quote = qr.json() if qr.content else {}
+        except requests.RequestException as exc:
+            return False, approve_note + f"0x requote failed: {exc}"
     else:
         approve_note = ""
     tx = quote.get("transaction") or quote.get("tx") or {}
