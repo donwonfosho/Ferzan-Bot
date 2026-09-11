@@ -186,8 +186,8 @@ def buy_sol(output_mint: str, usd: float, secret: str | None = None) -> tuple[bo
     return True, f"Live SOL buy ~${usd:.2f}\nhttps://solscan.io/tx/{sig}"
 
 
-def _token_raw_balance(mint: str) -> int:
-    kp = _keypair()
+def _token_raw_balance(mint: str, kp=None) -> int:
+    kp = kp or _keypair()
     r = requests.post(
         _rpc(),
         json={
@@ -223,8 +223,8 @@ _TOKEN_PROGRAMS = (
 )
 
 
-def holdings() -> list[dict]:
-    kp = _keypair()
+def holdings(secret: str | None = None) -> list[dict]:
+    kp = keypair_from_secret(secret) if secret else _keypair()
     out = []
     seen = set()
     for program in _TOKEN_PROGRAMS:
@@ -260,12 +260,11 @@ def holdings() -> list[dict]:
     return out
 
 
-def holdings_text() -> str:
-    if not configured():
-        return "Signer empty."
+def holdings_text(secret: str | None = None) -> str:
     try:
-        addr = public_sol()
-        rows = holdings()
+        kp = keypair_from_secret(secret) if secret else _keypair()
+        addr = str(kp.pubkey())
+        rows = holdings(secret)
     except Exception as exc:
         return f"Could not read bag.\n{exc}"
     lines = [f"Live bag on {addr}", f"{len(rows)} token account(s) with balance"]
@@ -279,10 +278,10 @@ def holdings_text() -> str:
     return "\n".join(lines)
 
 
-def sell_sol(input_mint: str) -> tuple[bool, str]:
+def sell_sol(input_mint: str, secret: str | None = None) -> tuple[bool, str]:
     if not live_enabled():
         return False, "Live sells are OFF. Add LIVE_BUYS=1 and restart."
-    if not configured():
+    if not secret and not configured():
         return False, "No signer key on this box."
     mint = (input_mint or "").strip()
     if len(mint) < 32:
@@ -292,8 +291,8 @@ def sell_sol(input_mint: str) -> tuple[bool, str]:
     except Exception as exc:
         return False, f"Signer deps missing: {exc}"
     try:
-        kp = _keypair()
-        raw_amt = _token_raw_balance(mint)
+        kp = keypair_from_secret(secret) if secret else _keypair()
+        raw_amt = _token_raw_balance(mint, kp)
     except Exception as exc:
         return False, str(exc)
     if raw_amt <= 0:

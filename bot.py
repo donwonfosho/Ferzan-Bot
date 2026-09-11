@@ -552,7 +552,8 @@ async def positions_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 async def bag_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update):
         return
-    await update.effective_message.reply_text(signer.holdings_text())
+    sol_secret, _evm = user_wallets.secrets(update.effective_user.id)
+    await update.effective_message.reply_text(signer.holdings_text(sol_secret))
 
 
 async def livesell_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -561,7 +562,8 @@ async def livesell_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not context.args:
         await update.effective_message.reply_text("Usage: /livesell <solana-mint>\nSee /bag")
         return
-    _ok, msg = signer.sell_sol(context.args[0].strip())
+    sol_secret, _evm = user_wallets.secrets(update.effective_user.id)
+    _ok, msg = signer.sell_sol(context.args[0].strip(), secret=sol_secret)
     await update.effective_message.reply_text(msg)
 
 
