@@ -174,3 +174,113 @@ def buy_sol(output_mint: str, usd: float) -> tuple[bool, str]:
     if not sig:
         return False, "RPC accepted nothing."
     return True, f"Live SOL buy ~${usd:.2f}\nhttps://solscan.io/tx/{sig}"
+
+
+def _token_raw_balance(mint: str) -> int:
+    kp = _keypair()
+    r = requests.post(
+        _rpc(),
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "getTokenAccountsByOwner",
+            "params": [
+                str(kp.pubkey()),
+                {"mint": mint},
+                {"encoding": "jsonParsed"},
+            ],
+        },
+        timeout=20,
+    )
+    try:
+        data = r.json() if r.content else {}
+    except Exception:
+        return 0
+    total = 0
+    for acc in (data.get("result") or {}).get("value") or []:
+        info = (((acc.get("account") or {}).get("data") or {}).get("parsed") or {}).get("info") or {}
+        amt = (info.get("tokenAmount") or {}).get("amount") or "0"
+        try:
+            total += int(amt)
+        except ValueError:
+            pass
+    return total
+
+
+def sell_sol(input_mint: str) -> tuple[bool, str]:
+    if not live_enabled():
+        return False, "Live sells are OFF. Add LIVE_BUYS=1 and restart."
+    if not configured():
+        return False, "No signer key on this box."
+    mint = (input_mint or "").strip()
+    if len(mint) < 32:
+        return False, "Need a Solana mint to sell."
+    try:
+        from solders.transaction import VersionedTransaction
+    except Exception as exc:
+        return False, f"Signer deps missing: {exc}"
+    try:
+        kp = _keypair()
+        raw_amt = _token_raw_balance(mint)
+    except Exception as exc:
+        return False, str(exc)
+    if raw_amt <= 0:
+        return False, "Wallet holds 0 of that token. Nothing to sell."
+    try:
+        qr = requests.get(
+            JUP_QUOTE,
+            params={
+                "inputMint": mint,
+                "outputMint": SOL_MINT,
+                "amount": str(raw_amt),
+                "slippageBps": "200",
+            },
+            timeout=15,
+        )
+        quote = qr.json() if qr.content else {}
+    except requests.RequestException as exc:
+        return False, f"Jupiter quote failed: {exc}"
+    if qr.status_code >= 400 or quote.get("error"):
+        return False, str(quote.get("error") or quote.get("message") or qr.text[:180])
+    try:
+        sr = requests.post(
+            JUP_SWAP,
+            json={
+                "quoteResponse": quote,
+                "userPublicKey": str(kp.pubkey()),
+                "wrapAndUnwrapSol": True,
+                "dynamicComputeUnitLimit": True,
+                "prioritizationFeeLamports": "auto",
+            },
+            timeout=20,
+        )
+        swap = sr.json() if sr.content else {}
+    except requests.RequestException as exc:
+        return False, f"Jupiter swap failed: {exc}"
+    raw_tx = swap.get("swapTransaction")
+    if not raw_tx:
+        return False, str(swap.get("error") or swap.get("message") or "Jupiter returned no transaction")
+    try:
+        tx = VersionedTransaction.from_bytes(base64.b64decode(raw_tx))
+        signed = VersionedTransaction(tx.message, [kp])
+        wire = base64.b64encode(bytes(signed)).decode()
+        send = requests.post(
+            _rpc(),
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "sendTransaction",
+                "params": [wire, {"encoding": "base64", "skipPreflight": False}],
+            },
+            timeout=20,
+        )
+        body = send.json() if send.content else {}
+    except Exception as exc:
+        return False, f"Broadcast failed: {exc}"
+    if body.get("error"):
+        err = body["error"]
+        return False, str(err.get("message") if isinstance(err, dict) else err)
+    sig = body.get("result") or ""
+    if not sig:
+        return False, "RPC accepted nothing."
+    return True, f"Live SOL sell (full bag)\nhttps://solscan.io/tx/{sig}"

@@ -167,9 +167,13 @@ def positions_keyboard(user_id: int) -> InlineKeyboardMarkup | None:
         rows.append(
             [
                 InlineKeyboardButton(
-                    f"Close #{p['id']} {p['symbol']}",
+                    f"📄 Close #{p['id']} {p['symbol']}",
                     callback_data=f"close:{p['id']}",
-                )
+                ),
+                InlineKeyboardButton(
+                    f"💸 Live sell #{p['id']}",
+                    callback_data=f"xsell:{p['id']}",
+                ),
             ]
         )
     return InlineKeyboardMarkup(rows) if rows else None
@@ -440,6 +444,35 @@ def _live_buy_followup(uid: int, card, query: str, paper_ok: bool, force: bool) 
     return msg
 
 
+def _mint_from_position(pos: dict) -> str:
+    raw = (pos.get("query") or "").strip()
+    if len(raw) >= 32 and not raw.startswith("0x"):
+        return raw
+    blob = pos.get("signal_json") or ""
+    if blob:
+        try:
+            import json
+
+            data = json.loads(blob)
+            mint = (data.get("token_address") or data.get("ca") or "").strip()
+            if len(mint) >= 32 and not mint.startswith("0x"):
+                return mint
+        except Exception:
+            pass
+    return ""
+
+
+def _live_sell_position(uid: int, pos_id: int) -> str:
+    pos = db.get_position(pos_id, uid)
+    if not pos:
+        return "Live sell: no position."
+    mint = _mint_from_position(pos)
+    if not mint:
+        return "Live sell: no Solana mint on this ticket. Paste the CA and sell from the card."
+    _ok, msg = signer.sell_sol(mint)
+    return msg
+
+
 async def buy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update):
         return
@@ -507,6 +540,9 @@ async def sell_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     ok, msg = trading.paper_close(update.effective_user.id, pos_id, reason="manual")
     await update.effective_message.reply_text(msg)
+    live = _live_sell_position(update.effective_user.id, pos_id)
+    if live:
+        await update.effective_message.reply_text(live)
 
 
 async def watch_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1097,6 +1133,13 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             return
         ok, msg = trading.paper_close(uid, pos_id, reason="manual")
         await context.bot.send_message(uid, msg)
+        return
+    if data.startswith("xsell:"):
+        try:
+            pos_id = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        await context.bot.send_message(uid, _live_sell_position(uid, pos_id))
 
 
 async def check_alerts_job(context: ContextTypes.DEFAULT_TYPE) -> None:
