@@ -105,6 +105,8 @@ def _allowlist() -> set[int]:
 
 
 def _allowed(user_id: int) -> bool:
+    if os.getenv("FERZAN_PUBLIC", "").strip().lower() in {"1", "true", "yes", "on"}:
+        return True
     allow = _allowlist()
     return (not allow) or user_id in allow
 
@@ -265,14 +267,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         text = (
             "⚡ FERZAN\n"
             "See it. Ape it. Send it.\n\n"
-            f"💵 Paper  ${cash:,.2f}\n"
-            f"🎚️ Floor {floor} · size {size}% · cap -{cap}%\n"
-            f"✂️ Cut {fees.current_bps() / 100:.2f}%"
-            f" · {'🟢 fee wallets live' if ready else '🟡 set FEE_WALLET_*'}\n\n"
-            "SOL · BSC · BASE · ETH · MONAD · SONIC · AVAX\n"
-            "ARB · HYPE · HOOD · ARC · STABLE · TRX · TON\n\n"
-            "Paste a CA. Score it. Snipe it.\n"
-            "Live sends: /quote then sign in Trust."
+            "1. Fund the wallet below\n"
+            "2. Paste a CA\n"
+            "3. Tap Buy — it spends YOUR bag\n\n"
+            f"🎚️ Floor {floor} · size {size}% · cut {fees.current_bps() / 100:.2f}%\n"
+            "/settings to change size and floor"
         )
         target = update.effective_message
         if not target:
@@ -286,6 +285,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 )
         else:
             await target.reply_text(text, reply_markup=home_keyboard())
+        try:
+            await target.reply_text(
+                user_wallets.card_text(update.effective_user.id),
+                parse_mode="Markdown",
+            )
+        except Exception:
+            logger.exception("wallet card on start failed")
     except Exception:
         logger.exception("start failed")
         try:
