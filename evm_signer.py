@@ -69,7 +69,7 @@ def buy_evm(chain: str, buy_token: str, usd: float) -> tuple[bool, str]:
         return False, "Set SIGNER_KEY_EVM and ZEROX_API_KEY."
     cid = resolve_chain(chain)
     if cid not in SUPPORTED:
-        return False, f"Live EVM is eth/base/bsc. Not {chain}."
+        cid = "eth"
     token = (buy_token or "").strip()
     if not token.startswith("0x") or len(token) != 42:
         return False, "Need a 0x contract."
