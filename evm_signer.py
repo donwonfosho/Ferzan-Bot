@@ -13,6 +13,29 @@ ZEROX = "https://api.0x.org/swap/allowance-holder/quote"
 SUPPORTED = {"eth", "base", "bsc"}
 
 
+def _as_int(val, default: int = 0) -> int:
+    if val is None or val == "":
+        return default
+    if isinstance(val, int):
+        return val
+    s = str(val).strip()
+    if s.startswith("0x"):
+        return int(s, 16)
+    return int(s)
+
+
+def _addr(val) -> str:
+    s = str(val or "").strip()
+    if s.startswith("0x"):
+        s = s[2:]
+    s = "".join(ch for ch in s.lower() if ch in "0123456789abcdef")
+    if len(s) > 40:
+        s = s[-40:]
+    if len(s) < 40:
+        s = s.zfill(40)
+    return "0x" + s
+
+
 def live_enabled() -> bool:
     return os.getenv("LIVE_BUYS", "").strip().lower() in {"1", "true", "yes", "on"}
 
@@ -120,18 +143,14 @@ def buy_evm(chain: str, buy_token: str, usd: float) -> tuple[bool, str]:
     if not tx.get("to") or not tx.get("data"):
         return False, str(quote.get("message") or "0x returned no transaction")
     raw_tx = {
-        "to": tx["to"],
-        "data": tx["data"],
-        "value": int(tx.get("value") or wei),
+        "to": _addr(tx["to"]),
+        "data": tx["data"] if str(tx["data"]).startswith("0x") else "0x" + str(tx["data"]),
+        "value": _as_int(tx.get("value"), wei),
         "chainId": int(meta["chain_id"]),
-        "gas": int(tx.get("gas") or tx.get("gasLimit") or 400000),
+        "gas": _as_int(tx.get("gas") or tx.get("gasLimit"), 400000),
+        "gasPrice": _as_int(tx.get("gasPrice"), 2_000_000_000),
         "nonce": _nonce(meta["rpc"], acct.address),
     }
-    if tx.get("gasPrice"):
-        raw_tx["gasPrice"] = int(tx["gasPrice"])
-    else:
-        raw_tx["maxFeePerGas"] = int(tx.get("maxFeePerGas") or 2_000_000_000)
-        raw_tx["maxPriorityFeePerGas"] = int(tx.get("maxPriorityFeePerGas") or 100_000_000)
     try:
         signed = acct.sign_transaction(raw_tx)
         raw_hex = "0x" + signed.raw_transaction.hex() if hasattr(signed, "raw_transaction") else signed.rawTransaction.hex()
