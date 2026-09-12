@@ -10,7 +10,7 @@ from chains import CHAINS, resolve_chain
 
 NATIVE = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
 ZEROX = "https://api.0x.org/swap/allowance-holder/quote"
-SUPPORTED = {"eth", "base", "bsc", "arb", "avax"}
+SUPPORTED = {cid for cid, meta in CHAINS.items() if meta.get("chain_id")}
 
 
 def _as_int(val, default: int = 0) -> int:
@@ -96,7 +96,7 @@ def status_text() -> str:
     return (
         f"EVM signer {addr}\n"
         f"Live: {flag} · max ${max_usd():.0f}\n"
-        "Chains: ETH, Base, BSC, Arb, Avax."
+        "EVM live: any listed chain 0x will quote."
     )
 
 
@@ -261,12 +261,7 @@ def _broadcast(acct, meta: dict, to: str, data: str, value: int = 0) -> tuple[bo
     if not txh:
         return False, "RPC accepted nothing."
     cid = int(meta.get("chain_id") or 1)
-    if cid == 8453:
-        exp = "https://basescan.org"
-    elif cid == 56:
-        exp = "https://bscscan.com"
-    else:
-        exp = meta.get("explorer") or "https://etherscan.io"
+    exp = meta.get("explorer") or "https://etherscan.io"
     return True, f"{exp}/tx/{txh}"
 
 
