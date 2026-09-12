@@ -138,6 +138,16 @@ def init_db() -> None:
                 added_at INTEGER NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS sponsored (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chain TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                title TEXT NOT NULL,
+                url TEXT NOT NULL,
+                ca TEXT,
+                expires_at INTEGER NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS feed_binds (
                 chat_id INTEGER NOT NULL,
                 chain TEXT NOT NULL,
@@ -866,6 +876,33 @@ def list_feed_binds() -> list[tuple[int, str]]:
         rows = conn.execute("SELECT chat_id, chain FROM feed_binds").fetchall()
         out.extend((int(r["chat_id"]), str(r["chain"] or "*")) for r in rows)
     return out
+
+
+def add_sponsored(chain: str, kind: str, title: str, url: str, hours: float, ca: str = "") -> int:
+    with get_conn() as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO sponsored (chain, kind, title, url, ca, expires_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (chain.lower(), kind, title, url, ca, int(time.time() + hours * 3600)),
+        )
+        conn.commit()
+        return int(cur.lastrowid)
+
+
+def list_sponsored(chain: str, kind: str) -> list[dict]:
+    now = int(time.time())
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM sponsored
+            WHERE (chain = ? OR chain = '*') AND kind = ? AND expires_at > ?
+            ORDER BY id DESC
+            """,
+            (chain.lower(), kind, now),
+        ).fetchall()
+        return [dict(r) for r in rows]
 
 
 def list_feed_chats() -> list[int]:

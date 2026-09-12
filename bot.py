@@ -197,7 +197,7 @@ def render_card(card: SignalCard) -> str:
     ds = s.url or (f"https://dexscreener.com/{s.chain}/{ca}" if ca else "")
     lines = [
         f"🪙 <b>{_esc(s.name)}</b>  ({_esc(s.symbol if str(s.symbol).startswith('$') else '$' + str(s.symbol))})",
-        f"Mint\n<code>{_esc(ca)}</code>" if ca else "",
+        f"CA\n<code>{_esc(ca)}</code>" if ca else "",
         f"💧 {_esc(dex)}  ·  ⛓ {_esc(chain)}",
         "",
         f"🧢 MC {_esc(f'${mc:,.0f}' if mc else '—')}   💵 {_esc(_fmt_px(s.price_usd))}",
@@ -360,6 +360,10 @@ def home_keyboard() -> InlineKeyboardMarkup:
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update):
+        return
+    extra = (context.args or [None])[0]
+    if extra and extra.startswith("sig_"):
+        await _send_signal(update, extra[4:], edit=False)
         return
     try:
         user = db.ensure_user(update.effective_user.id, update.effective_user.username)
@@ -1163,6 +1167,26 @@ async def setfeed_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     )
 
 
+async def sponsor_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard(update):
+        return
+    if not context.args or len(context.args) < 4:
+        await update.effective_message.reply_text(
+            "Paid slot (you collect off-Telegram).\n"
+            "/sponsor ad bsc Title https://t.me/x 24\n"
+            "/sponsor trend eth $TICKER https://t.me/x 12"
+        )
+        return
+    kind, chain, title = context.args[0], context.args[1], context.args[2]
+    url = context.args[3]
+    hours = float(context.args[4]) if len(context.args) > 4 else 24
+    if kind not in {"ad", "trend"}:
+        await update.effective_message.reply_text("kind: ad or trend")
+        return
+    sid = db.add_sponsored(chain, kind, title, url, hours)
+    await update.effective_message.reply_text(f"Slot #{sid} {kind} {chain} {hours:g}h")
+
+
 async def unsetfeed_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update):
         return
@@ -1666,17 +1690,27 @@ def launch_card(ln) -> tuple[str, InlineKeyboardMarkup]:
         links.append(f'<a href="{html.escape(href)}">Scan</a>')
     text = (
         f"{title}\n"
-        f"Mint\n<code>{html.escape(ca)}</code>\n"
+        f"CA\n<code>{html.escape(ca)}</code>\n"
         f"💧 {_esc(cid.upper() if cid else chain)}  ·  ⛓ {chain}\n"
         f"💧 Liq ${liq:,.0f}\n"
         + (" · ".join(links) + "\n" if links else "")
-        + "<i>Tap mint to copy</i>"
+        + "<i>Tap CA to copy · Buy opens the Ferzan bot</i>"
     )
+    ads = db.list_sponsored(cid or "*", "ad")
+    trends = db.list_sponsored(cid or "*", "trend")
+    if trends:
+        text += f"\n🔥 Trending <b>{html.escape(trends[0]['title'])}</b>"
+    if ads:
+        text += f"\n📣 {html.escape(ads[0]['title'])}"
+    elif os.getenv("FERZAN_AD_TITLE", "").strip():
+        text += f"\n📣 {html.escape(os.getenv('FERZAN_AD_TITLE', ''))}"
     short = ca if len(ca) <= 48 else ca[:48]
+    bot_user = (os.getenv("FERZAN_BOT_USERNAME") or "").lstrip("@")
+    desk = f"https://t.me/{bot_user}?start=sig_{short}" if bot_user and short else ""
     rows = [
         [
-            InlineKeyboardButton("📡 Score", callback_data=f"sig:{short}"),
-            InlineKeyboardButton("💵 Buy", callback_data=f"buy:{short}"),
+            InlineKeyboardButton("📡 Score", url=desk) if desk else InlineKeyboardButton("📡 Score", callback_data=f"sig:{short}"),
+            InlineKeyboardButton("💵 Buy", url=desk) if desk else InlineKeyboardButton("💵 Buy", callback_data=f"buy:{short}"),
         ],
         [
             InlineKeyboardButton(f"🎯 Snipe ${cap}", callback_data=f"snp:{short}"),
@@ -1694,6 +1728,21 @@ def launch_card(ln) -> tuple[str, InlineKeyboardMarkup]:
             InlineKeyboardButton("⏳ Buy limit −20%", callback_data=f"blm:{short}"),
         ],
     ]
+    chat_url = (os.getenv("FERZAN_CHAT_URL") or "").strip()
+    extra_row = []
+    if desk:
+        extra_row.append(InlineKeyboardButton("🤖 Ferzan bot", url=desk))
+    if chat_url:
+        extra_row.append(InlineKeyboardButton("💬 Main chat", url=chat_url))
+    if extra_row:
+        rows.append(extra_row)
+    ad_url = (os.getenv("FERZAN_AD_URL") or "").strip()
+    if ads:
+        rows.append([InlineKeyboardButton(f"📣 {ads[0]['title'][:28]}", url=ads[0]["url"])])
+    elif ad_url:
+        rows.append([InlineKeyboardButton("📣 Partner", url=ad_url)])
+    if trends:
+        rows.append([InlineKeyboardButton(f"🔥 {trends[0]['title'][:28]}", url=trends[0]["url"])])
     if ca and CopyTextButton is not None:
         rows.append(
             [InlineKeyboardButton("📋 Copy CA", copy_text=CopyTextButton(text=ca))]
@@ -2522,6 +2571,12 @@ def main() -> None:
 
     async def _post_init(application: Application) -> None:
         try:
+            me = await application.bot.get_me()
+            if me.username:
+                os.environ["FERZAN_BOT_USERNAME"] = me.username
+        except Exception:
+            logger.exception("could not cache bot username")
+        try:
             await application.bot.set_my_commands(
                 [
                     BotCommand("start", "Home"),
@@ -2563,6 +2618,7 @@ def main() -> None:
     app.add_handler(CommandHandler("setfeed", setfeed_cmd))
     app.add_handler(CommandHandler("setfeed", setfeed_cmd, filters=filters.UpdateType.CHANNEL_POSTS))
     app.add_handler(CommandHandler("unsetfeed", unsetfeed_cmd))
+    app.add_handler(CommandHandler("sponsor", sponsor_cmd))
     app.add_handler(CommandHandler("unsetfeed", unsetfeed_cmd, filters=filters.UpdateType.CHANNEL_POSTS))
     app.add_handler(CommandHandler("resetpaper", resetpaper_cmd))
     app.add_handler(CommandHandler("watchwallet", watchwallet_cmd))
