@@ -79,6 +79,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 LOGO_PATH = Path(__file__).parent / "logo.jpg"
+PROMO_PATH = Path(os.getenv("FERZAN_PROMO_GIF", str(Path(__file__).parent / "promo.gif")))
 
 ALERT_INTERVAL_SECONDS = int(os.getenv("ALERT_INTERVAL_SECONDS", "60"))
 SCAN_INTERVAL_SECONDS = int(os.getenv("SCAN_INTERVAL_SECONDS", "90"))
@@ -1673,6 +1674,27 @@ async def chains_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await update.effective_message.reply_text(text, reply_markup=chains_keyboard())
 
 
+async def send_launch(bot, chat_id: int, text: str, markup, promo: bool = True) -> None:
+    clip = PROMO_PATH if promo and PROMO_PATH.exists() else None
+    if clip and os.getenv("FERZAN_PROMO_ON_SIGNALS", "1") != "0":
+        with clip.open("rb") as gif:
+            await bot.send_animation(
+                chat_id,
+                animation=gif,
+                caption=text,
+                parse_mode="HTML",
+                reply_markup=markup,
+            )
+        return
+    await bot.send_message(
+        chat_id,
+        text,
+        parse_mode="HTML",
+        reply_markup=markup,
+        disable_web_page_preview=True,
+    )
+
+
 def launch_card(ln) -> tuple[str, InlineKeyboardMarkup]:
     ca = (ln.token or ln.query or "").strip()
     name = html.escape((ln.symbol or "?").upper())
@@ -1773,12 +1795,7 @@ async def launches_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.effective_message.reply_text("🚀 Fresh launches")
     for ln in launches:
         text, markup = launch_card(ln)
-        await update.effective_message.reply_text(
-            text,
-            parse_mode="HTML",
-            reply_markup=markup,
-            disable_web_page_preview=True,
-        )
+        await send_launch(context.bot, update.effective_chat.id, text, markup)
 
 
 async def treasury_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2542,13 +2559,7 @@ async def launch_feed_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 continue
             text, markup = launch_card(ln)
             try:
-                await context.bot.send_message(
-                    uid,
-                    text,
-                    parse_mode="HTML",
-                    reply_markup=markup,
-                    disable_web_page_preview=True,
-                )
+                await send_launch(context.bot, uid, text, markup, promo=False)
             except Exception:
                 logger.exception("launch feed failed for %s", uid)
     for chat_id, bind in db.list_feed_binds():
@@ -2561,13 +2572,7 @@ async def launch_feed_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 continue
             text, markup = launch_card(ln)
             try:
-                await context.bot.send_message(
-                    chat_id,
-                    text,
-                    parse_mode="HTML",
-                    reply_markup=markup,
-                    disable_web_page_preview=True,
-                )
+                await send_launch(context.bot, chat_id, text, markup, promo=True)
             except Exception:
                 logger.exception("channel feed failed for %s", chat_id)
 
