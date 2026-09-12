@@ -1093,9 +1093,14 @@ async def settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         f"{'🟢' if rug else '🔴'} Block buys if liq is thin / gone\n"
         f"{'🟢' if honey else '🔴'} Block buys if honeypot / unsellable\n"
         f"{'🟢' if lpw else '🔴'} Auto-sell if LP is yanked after you're in\n\n"
-        f"Paper floor {user['min_confluence']} · size {user['size_pct']}%",
+        f"Paper floor {user['min_confluence']} · size {user['size_pct']}%\n"
+        f"DM alerts {'on' if user.get('alerts_on') else 'off'}",
         reply_markup=InlineKeyboardMarkup(
             [
+                [InlineKeyboardButton(
+                    f"{'🟢' if user.get('alerts_on') else '🔴'} DM launch alerts",
+                    callback_data="flg:alerts",
+                )],
                 [InlineKeyboardButton(
                     f"{'🟢' if rug else '🔴'} Rug buy-block",
                     callback_data="flg:rug_buy",
@@ -1108,6 +1113,7 @@ async def settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     f"{'🟢' if lpw else '🔴'} LP yank auto-sell",
                     callback_data="flg:lp_watch",
                 )],
+                [InlineKeyboardButton("📡 Per-chain feeds", callback_data="go:feeds")],
             ]
         ),
     )
@@ -1895,6 +1901,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         elif kind == "settings":
             context.args = []
             await settings_cmd(update, context)
+        elif kind == "feeds":
+            await feeds_cmd(update, context)
         elif kind == "snipes":
             await snipes_cmd(update, context)
         elif kind == "copy":
@@ -2044,6 +2052,13 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     if data.startswith("flg:"):
         flag = data[4:]
+        if flag == "alerts":
+            user = db.get_user(uid) or {}
+            on = not bool(user.get("alerts_on"))
+            db.update_user(uid, alerts_on=1 if on else 0)
+            await query.answer("Saved")
+            await context.bot.send_message(uid, f"{'🟢' if on else '🔴'} DM launch alerts")
+            return
         if flag not in {"rug_buy", "honeypot", "lp_watch"}:
             return
         now = not db.flag_on(uid, flag, 1)
