@@ -196,8 +196,8 @@ def render_card(card: SignalCard) -> str:
         scan = f"https://solscan.io/token/{ca}"
     ds = s.url or (f"https://dexscreener.com/{s.chain}/{ca}" if ca else "")
     lines = [
-        f"🪙 <b>{_esc(s.name)}</b>  (${_esc(s.symbol)})",
-        f"<code>{_esc(ca)}</code>" if ca else "",
+        f"🪙 <b>{_esc(s.name)}</b>  ({_esc(s.symbol if str(s.symbol).startswith('$') else '$' + str(s.symbol))})",
+        f"Mint\n<code>{_esc(ca)}</code>" if ca else "",
         f"💧 {_esc(dex)}  ·  ⛓ {_esc(chain)}",
         "",
         f"🧢 MC {_esc(f'${mc:,.0f}' if mc else '—')}   💵 {_esc(_fmt_px(s.price_usd))}",
@@ -206,8 +206,9 @@ def render_card(card: SignalCard) -> str:
         f"🏅 Score <b>{card.score}</b>/100 {_bar(card.score)}  {_esc(card.bias)}",
         f"🎯 TP {card.take_pct:g}%   🛑 SL {card.stop_pct:g}%",
     ]
-    if (s.extras or {}).get("resolved") and (s.extras or {}).get("pasted"):
-        lines.append(f"<i>Resolved mint from paste {_esc(str(s.extras['pasted'])[:12])}…</i>")
+    pasted = str((s.extras or {}).get("pasted") or s.query or "")
+    if ca and pasted and pasted.lower() != ca.lower():
+        lines.append(f"You pasted (not the mint)\n<code>{_esc(pasted)}</code>")
     sec = _security_line(s.chain, ca)
     if sec:
         lines.extend(_esc(part) for part in sec.splitlines() if part)
