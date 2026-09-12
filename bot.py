@@ -326,7 +326,9 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/start — home + slogan\n"
         "/wallet — generate / import / chain addresses\n"
         "/importsol /importevm — import a key in private chat\n"
-        "/bag — SOL + tokens in your bag\n"
+        "/bag — live bag + PnL + sell %\n"
+        "/tp 50 — live take profit %\n"
+        "/sl 30 — live stop loss %\n"
         "/settings — size, floor, daily cap\n"
         "/positions — paper desk\n"
         "/launches — new pools\n"
@@ -688,6 +690,50 @@ def _bag_panel(mint: str, amount: float, addr: str, uid: int) -> tuple[str, Inli
         ]
     )
     return text, kb
+
+
+async def tp_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard(update):
+        return
+    if not context.args:
+        await update.effective_message.reply_text("Usage: /tp 50   or /tp 50 <mint>")
+        return
+    try:
+        pct = float(context.args[0])
+    except ValueError:
+        await update.effective_message.reply_text("Use a number. /tp 50")
+        return
+    mint = context.args[1] if len(context.args) > 1 else ""
+    if not mint:
+        found = db.live_mints(update.effective_user.id)
+        mint = found[0] if found else ""
+    if not mint:
+        await update.effective_message.reply_text("Buy live first, or pass a mint.")
+        return
+    db.set_live_exit(update.effective_user.id, mint, tp_pct=pct)
+    await update.effective_message.reply_text(f"🎯 TP +{pct:.0f}% armed.")
+
+
+async def sl_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard(update):
+        return
+    if not context.args:
+        await update.effective_message.reply_text("Usage: /sl 30   or /sl 30 <mint>")
+        return
+    try:
+        pct = float(context.args[0])
+    except ValueError:
+        await update.effective_message.reply_text("Use a number. /sl 30")
+        return
+    mint = context.args[1] if len(context.args) > 1 else ""
+    if not mint:
+        found = db.live_mints(update.effective_user.id)
+        mint = found[0] if found else ""
+    if not mint:
+        await update.effective_message.reply_text("Buy live first, or pass a mint.")
+        return
+    db.set_live_exit(update.effective_user.id, mint, sl_pct=pct)
+    await update.effective_message.reply_text(f"🛑 SL -{pct:.0f}% armed.")
 
 
 async def bag_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2003,6 +2049,8 @@ def main() -> None:
     app.add_handler(CommandHandler("fees", fees_cmd))
     app.add_handler(CommandHandler("signer", signer_cmd))
     app.add_handler(CommandHandler("bag", bag_cmd))
+    app.add_handler(CommandHandler("tp", tp_cmd))
+    app.add_handler(CommandHandler("sl", sl_cmd))
     app.add_handler(CommandHandler("livesell", livesell_cmd))
     app.add_handler(CommandHandler("livesellevm", livesellevm_cmd))
     app.add_handler(CommandHandler("treasury", treasury_cmd))
