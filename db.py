@@ -132,6 +132,16 @@ def init_db() -> None:
                 note TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS buy_limits (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                mint TEXT NOT NULL,
+                chain TEXT,
+                usd REAL NOT NULL,
+                target_px REAL NOT NULL,
+                status TEXT NOT NULL DEFAULT 'armed'
+            );
+
             CREATE TABLE IF NOT EXISTS user_flags (
                 user_id INTEGER NOT NULL,
                 flag TEXT NOT NULL,
@@ -802,6 +812,43 @@ def list_live_exits() -> list[dict]:
 def clear_live_exit(user_id: int, mint: str) -> None:
     with get_conn() as conn:
         conn.execute("DELETE FROM live_exits WHERE user_id = ? AND mint = ?", (user_id, mint))
+        conn.commit()
+
+
+def add_buy_limit(user_id: int, mint: str, chain: str, usd: float, target_px: float) -> int:
+    with get_conn() as conn:
+        cur = conn.execute(
+            "INSERT INTO buy_limits (user_id, mint, chain, usd, target_px, status) VALUES (?,?,?,?,?,'armed')",
+            (user_id, mint, chain, float(usd), float(target_px)),
+        )
+        conn.commit()
+        return int(cur.lastrowid)
+
+
+def list_buy_limits(user_id: int | None = None) -> list[dict]:
+    with get_conn() as conn:
+        if user_id is None:
+            rows = conn.execute("SELECT * FROM buy_limits WHERE status = 'armed'").fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM buy_limits WHERE user_id = ? ORDER BY id DESC",
+                (user_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def fill_buy_limit(lid: int) -> None:
+    with get_conn() as conn:
+        conn.execute("UPDATE buy_limits SET status = 'filled' WHERE id = ?", (lid,))
+        conn.commit()
+
+
+def cancel_buy_limit(user_id: int, lid: int) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE buy_limits SET status = 'cancelled' WHERE id = ? AND user_id = ?",
+            (lid, user_id),
+        )
         conn.commit()
 
 

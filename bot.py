@@ -404,6 +404,8 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/bag — live bag + PnL + sell %\n"
         "/tp 50 — live take profit %\n"
         "/sl 30 — live stop loss %\n"
+        "/buylimit <CA> <price> 3 — buy when mark hits\n"
+        "/limits — list buy limits\n"
         "/settings — size, floor, daily cap\n"
         "/positions — paper desk\n"
         "/launches — new pools\n"
@@ -850,6 +852,54 @@ async def sl_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     db.set_live_exit(update.effective_user.id, mint, sl_pct=pct)
     await update.effective_message.reply_text(f"🛑 SL -{pct:.0f}% armed.")
+
+
+async def buylimit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard(update):
+        return
+    if not context.args or len(context.args) < 2:
+        await update.effective_message.reply_text(
+            "Buy when price hits target.\n"
+            "/buylimit <CA> <price>\n"
+            "/buylimit <CA> <price> 3   (spend $3)\n"
+            "Example: /buylimit 0xabc... 0.00001 3"
+        )
+        return
+    mint = context.args[0].strip()
+    try:
+        target = float(context.args[1])
+        usd = float(context.args[2]) if len(context.args) > 2 else float(signer.max_usd())
+    except ValueError:
+        await update.effective_message.reply_text("Price and size must be numbers.")
+        return
+    usd = min(signer.max_usd(), max(1.0, usd))
+    chain = "sol" if not mint.startswith("0x") else "bsc"
+    lid = db.add_buy_limit(update.effective_user.id, mint, chain, usd, target)
+    await update.effective_message.reply_text(
+        f"⏳ Buy limit #{lid}\n{_fmt_px(target)} · ${usd:.0f}\n`{mint}`",
+        parse_mode="Markdown",
+    )
+
+
+async def limits_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard(update):
+        return
+    rows = db.list_buy_limits(update.effective_user.id)
+    if not rows:
+        await update.effective_message.reply_text("No limits. /buylimit <CA> <price> 3")
+        return
+    lines = [f"#{r['id']} {r['status']} {_fmt_px(r['target_px'])} ${r['usd']:.0f} {r['mint'][:10]}…" for r in rows[:12]]
+    await update.effective_message.reply_text("Buy limits\n" + "\n".join(lines))
+
+
+async def cancellimit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard(update):
+        return
+    if not context.args:
+        await update.effective_message.reply_text("Usage: /cancellimit <id>")
+        return
+    db.cancel_buy_limit(update.effective_user.id, int(context.args[0]))
+    await update.effective_message.reply_text("Cancelled.")
 
 
 async def bag_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2076,6 +2126,29 @@ async def drawdown_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             logger.exception("drawdown notify failed for %s", uid)
 
 
+async def buy_limit_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    for row in db.list_buy_limits():
+        px = _token_mark_usd(row["mint"])
+        if px <= 0 or px > float(row["target_px"]):
+            continue
+        uid = int(row["user_id"])
+        try:
+            card = analyze(row["mint"])
+            msg = _live_buy_followup(
+                uid, card, row["mint"], True, True, usd_override=float(row["usd"])
+            )
+        except Exception as exc:
+            msg = str(exc)
+        db.fill_buy_limit(int(row["id"]))
+        try:
+            await context.bot.send_message(
+                uid,
+                f"⏳ Buy limit #{row['id']} hit @ {_fmt_px(px)}\n{msg}",
+            )
+        except Exception:
+            logger.exception("buy limit notify")
+
+
 async def lp_watch_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         with db.get_conn() as conn:
@@ -2293,6 +2366,9 @@ def main() -> None:
     app.add_handler(CommandHandler("bag", bag_cmd))
     app.add_handler(CommandHandler("tp", tp_cmd))
     app.add_handler(CommandHandler("sl", sl_cmd))
+    app.add_handler(CommandHandler("buylimit", buylimit_cmd))
+    app.add_handler(CommandHandler("limits", limits_cmd))
+    app.add_handler(CommandHandler("cancellimit", cancellimit_cmd))
     app.add_handler(CommandHandler("livesell", livesell_cmd))
     app.add_handler(CommandHandler("livesellevm", livesellevm_cmd))
     app.add_handler(CommandHandler("treasury", treasury_cmd))
@@ -2316,6 +2392,7 @@ def main() -> None:
         jq.run_repeating(snipe_job, interval=SNIPE_POLL_SECONDS, first=18)
         jq.run_repeating(live_exit_job, interval=45, first=50)
         jq.run_repeating(lp_watch_job, interval=40, first=70)
+        jq.run_repeating(buy_limit_job, interval=35, first=80)
         jq.run_repeating(launch_feed_job, interval=LAUNCH_FEED_SECONDS, first=35)
     else:
         logger.warning("job-queue extra missing; commands still work, scanners off")
