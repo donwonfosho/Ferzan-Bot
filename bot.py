@@ -152,9 +152,34 @@ def _security_line(chain: str, ca: str) -> str:
         return ""
     buy_t = blob.get("buy_tax") or "0"
     sell_t = blob.get("sell_tax") or "0"
-    honey = blob.get("is_honeypot") == "1"
-    mark = "🚨 Honeypot" if honey else "✅ Tax check"
-    return f"{mark}  ·  buy {buy_t}%  ·  sell {sell_t}%"
+    flags = []
+    if blob.get("is_honeypot") == "1":
+        flags.append("🚨 HONEYPOT")
+    if blob.get("honeypot_with_same_creator") == "1":
+        flags.append("🚨 same creator rugged")
+    if blob.get("cannot_sell_all") == "1":
+        flags.append("⚠️ cannot sell all")
+    if blob.get("is_blacklisted") == "1":
+        flags.append("⚠️ blacklist")
+    if blob.get("hidden_owner") == "1":
+        flags.append("⚠️ hidden owner")
+    if blob.get("can_take_back_ownership") == "1":
+        flags.append("⚠️ owner reclaim")
+    if blob.get("is_mintable") == "1":
+        flags.append("⚠️ mintable")
+    if blob.get("owner_change_balance") == "1":
+        flags.append("⚠️ owner can change balances")
+    if blob.get("personal_slippage_modifiable") == "1" or blob.get("slippage_modifiable") == "1":
+        flags.append("⚠️ tax can change")
+    if blob.get("is_proxy") == "1":
+        flags.append("ℹ️ proxy")
+    head = "🚨 HONEYPOT RISK" if blob.get("is_honeypot") == "1" else (
+        "⚠️ Contract flags" if flags else "✅ No honeypot flag"
+    )
+    out = f"{head}  ·  buy {buy_t}%  ·  sell {sell_t}%"
+    if flags:
+        out += "\n" + " · ".join(flags[:6])
+    return out
 
 
 def render_card(card: SignalCard) -> str:
@@ -179,7 +204,7 @@ def render_card(card: SignalCard) -> str:
     ]
     sec = _security_line(s.chain, ca)
     if sec:
-        lines.append(_esc(sec))
+        lines.extend(_esc(part) for part in sec.splitlines() if part)
     if card.vetoes:
         lines.append("⚠️ " + _esc(" · ".join(card.vetoes[:2])))
     if s.url:
