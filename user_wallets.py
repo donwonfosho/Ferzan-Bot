@@ -67,11 +67,17 @@ def secrets(user_id: int) -> tuple[str, str]:
 
 def card_text(user_id: int) -> str:
     row = ensure(user_id)
+    bal = ""
+    try:
+        import signer
+
+        lamports = signer.sol_balance_lamports(row["sol_pub"])
+        bal = f"Balance {lamports / 1_000_000_000:.6f} SOL\n"
+    except Exception:
+        bal = ""
     return (
-        "Your Ferzan wallets (you deposit, you trade)\n\n"
-        f"Solana\n`{row['sol_pub']}`\n\n"
+        "Your Ferzan wallets\n\n"
+        f"Solana\n`{row['sol_pub']}`\n{bal}\n"
         f"EVM (ETH / Base / BSC)\n`{row['evm_pub']}`\n\n"
-        "Send SOL to the Solana line. Send ETH or BNB to the EVM line on that network.\n"
-        "Live Buy/Sell spend THESE addresses, not Ferzan treasury.\n"
-        "Export is not shown in chat. Ask support if you must leave."
+        "Fund those addresses. /bag lists tokens. Buy spends this wallet."
     )

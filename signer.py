@@ -260,14 +260,29 @@ def holdings(secret: str | None = None) -> list[dict]:
     return out
 
 
+def sol_balance_lamports(addr: str) -> int:
+    r = requests.post(
+        _rpc(),
+        json={"jsonrpc": "2.0", "id": 1, "method": "getBalance", "params": [addr]},
+        timeout=15,
+    )
+    data = r.json() if r.content else {}
+    return int(((data.get("result") or {}).get("value")) or 0)
+
+
 def holdings_text(secret: str | None = None) -> str:
     try:
         kp = keypair_from_secret(secret) if secret else _keypair()
         addr = str(kp.pubkey())
         rows = holdings(secret)
+        lamports = sol_balance_lamports(addr)
     except Exception as exc:
         return f"Could not read bag.\n{exc}"
-    lines = [f"Live bag on {addr}", f"{len(rows)} token account(s) with balance"]
+    lines = [
+        f"Live bag on {addr}",
+        f"SOL {lamports / 1_000_000_000:.6f}",
+        f"{len(rows)} token account(s)",
+    ]
     if not rows:
         lines.append("No SPL tokens. Only SOL, or the last buy never landed.")
         return "\n".join(lines)
