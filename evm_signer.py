@@ -107,9 +107,13 @@ def _native_decimals(chain: str) -> int:
 def buy_evm(chain: str, buy_token: str, usd: float, key_hex: str | None = None) -> tuple[bool, str]:
     if not live_enabled():
         return False, "Live buys OFF. LIVE_BUYS=1"
+    cid = resolve_chain(chain)
+    if cid == "hood":
+        import hood
+
+        return hood.buy_hood(buy_token, usd, key_hex)
     if not key_hex and not configured():
         return False, "Set SIGNER_KEY_EVM and ZEROX_API_KEY."
-    cid = resolve_chain(chain)
     if cid not in SUPPORTED:
         return False, f"Live EVM is {', '.join(sorted(SUPPORTED))}. Not {chain}."
     token = (buy_token or "").strip()
