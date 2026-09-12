@@ -1798,9 +1798,28 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             pct = int(pct_s)
         except ValueError:
             pct = 100
-        sol_secret, _evm = user_wallets.secrets(uid)
-        _ok, msg = signer.sell_sol(mint, secret=sol_secret, pct=pct)
-        await context.bot.send_message(uid, f"{'🟢' if _ok else '🔴'} Sell {pct}%\n{msg}")
+        sol_secret, evm_secret = user_wallets.secrets(uid)
+        if mint.startswith("0x"):
+            if pct < 100:
+                await context.bot.send_message(
+                    uid,
+                    "EVM live sell is a full exit on this version. Use 100% / Sell All.",
+                )
+                return
+            chain = "base"
+            evm_addr = (db.get_user_wallet(uid) or {}).get("evm_pub") or ""
+            for cid in ("eth", "base", "bsc", "hood", "arb", "avax"):
+                try:
+                    raw = evm_signer._erc20_balance(CHAINS[cid]["rpc"], mint, evm_addr)
+                except Exception:
+                    raw = 0
+                if raw > 0:
+                    chain = cid
+                    break
+            _ok, msg = evm_signer.sell_evm(chain, mint, key_hex=evm_secret)
+        else:
+            _ok, msg = signer.sell_sol(mint, secret=sol_secret, pct=pct)
+        await context.bot.send_message(uid, f"{'🟢' if _ok else '🔴'} Sell {pct}% · {chain if mint.startswith('0x') else 'SOL'}\n{msg}")
         return
     if data.startswith("snp:"):
         ca = data[4:]
