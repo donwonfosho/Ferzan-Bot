@@ -134,6 +134,29 @@ def _fmt_px(n: float) -> str:
     return "—"
 
 
+def _security_line(chain: str, ca: str) -> str:
+    ids = {"eth": "1", "bsc": "56", "base": "8453", "arb": "42161", "avax": "43114"}
+    cid = ids.get((chain or "").lower())
+    if not cid or not ca.startswith("0x"):
+        return ""
+    try:
+        r = requests.get(
+            f"https://api.gopluslabs.io/api/v1/token_security/{cid}",
+            params={"contract_addresses": ca},
+            timeout=8,
+        )
+        blob = ((r.json() or {}).get("result") or {}).get(ca.lower()) or {}
+    except Exception:
+        return ""
+    if not blob:
+        return ""
+    buy_t = blob.get("buy_tax") or "0"
+    sell_t = blob.get("sell_tax") or "0"
+    honey = blob.get("is_honeypot") == "1"
+    mark = "🚨 Honeypot" if honey else "✅ Tax check"
+    return f"{mark}  ·  buy {buy_t}%  ·  sell {sell_t}%"
+
+
 def render_card(card: SignalCard) -> str:
     s = card.snapshot
     ca = (s.token_address or "").strip()
@@ -154,6 +177,9 @@ def render_card(card: SignalCard) -> str:
         f"📊 24h vol {_esc(f'${vol:,.0f}' if vol else '—')}  ·  🟢{s.buys_h1} / 🔴{s.sells_h1} 1h",
         f"🎯 TP {card.take_pct:g}%   🛑 SL {card.stop_pct:g}%",
     ]
+    sec = _security_line(s.chain, ca)
+    if sec:
+        lines.append(_esc(sec))
     if card.vetoes:
         lines.append("⚠️ " + _esc(" · ".join(card.vetoes[:2])))
     if s.url:
@@ -175,9 +201,9 @@ def card_keyboard(query: str, score: int, ca: str = "") -> InlineKeyboardMarkup:
             InlineKeyboardButton("🧨 Override", callback_data=f"force:{q}"),
         ],
         [
-            InlineKeyboardButton("$1", callback_data=f"buy:{q}"),
-            InlineKeyboardButton("$3", callback_data=f"force:{q}"),
-            InlineKeyboardButton(f"${cap}", callback_data=f"force:{q}"),
+            InlineKeyboardButton("$1", callback_data=f"buyz:1:{q}"),
+            InlineKeyboardButton("$3", callback_data=f"buyz:3:{q}"),
+            InlineKeyboardButton(f"${cap}", callback_data=f"buyz:{cap}:{q}"),
         ],
         [
             InlineKeyboardButton("🎯 Snipe", callback_data=f"snp:{q}"),
@@ -487,7 +513,9 @@ async def signal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await _send_signal(update, " ".join(context.args))
 
 
-def _live_buy_followup(uid: int, card, query: str, paper_ok: bool, force: bool) -> str:
+def _live_buy_followup(
+    uid: int, card, query: str, paper_ok: bool, force: bool, usd_override: float | None = None
+) -> str:
     if not signer.live_enabled():
         return "Live: OFF. Add LIVE_BUYS=1 and restart."
     if not paper_ok and not force:
@@ -508,6 +536,8 @@ def _live_buy_followup(uid: int, card, query: str, paper_ok: bool, force: bool) 
     cash = float(user.get("paper_cash") or 10000)
     pct = float(user.get("size_pct") or 5)
     usd = min(signer.max_usd(), max(1.0, cash * pct / 100.0))
+    if usd_override is not None:
+        usd = min(signer.max_usd(), max(1.0, float(usd_override)))
     try:
         sol_secret, evm_secret = user_wallets.secrets(uid)
     except Exception as exc:
@@ -1732,6 +1762,23 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         db.add_watch(uid, name)
         await query.edit_message_reply_markup(reply_markup=card_keyboard(name, 0))
         await context.bot.send_message(uid, f"Watching {name.upper()}.")
+        return
+    if data.startswith("buyz:"):
+        _tag, usd_s, name = data.split(":", 2)
+        try:
+            usd_o = float(usd_s)
+        except ValueError:
+            usd_o = signer.max_usd()
+        try:
+            card = analyze(name)
+        except PriceFetchError as exc:
+            await context.bot.send_message(uid, str(exc))
+            return
+        ok, msg = trading.paper_buy(uid, card, force=True)
+        await context.bot.send_message(uid, msg)
+        live_msg = _live_buy_followup(uid, card, name, True, True, usd_override=usd_o)
+        if live_msg:
+            await context.bot.send_message(uid, live_msg)
         return
     if data.startswith("buy:") or data.startswith("force:"):
         force = data.startswith("force:")
