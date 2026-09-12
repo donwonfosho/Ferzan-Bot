@@ -1243,7 +1243,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await context.bot.send_message(uid, str(exc))
             return
         meta = CHAINS.get(cid) or {}
-        label = meta.get("label", cid.upper())
+        label = "Hood" if cid == "hood" else meta.get("label", cid.upper())
         native = meta.get("native", "ETH")
         marks = {
             "sol": "🟣", "bsc": "🟡", "base": "🔵", "eth": "♦️",
@@ -1267,10 +1267,10 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 bal_line = f"— {native}"
         href = (meta.get("explorer_addr") or "{addr}").format(addr=addr)
         text = (
-            f"{mark} <b>{_esc(label)}</b>\n"
-            f"💰 <b>{_esc(bal_line)}</b>\n\n"
-            f"📬 <a href=\"{_esc(href)}\">{_esc(addr)}</a>\n"
-            f"<i>Tap the blue address to open the explorer.</i>\n\n"
+            f"{mark} <a href=\"{_esc(href)}\"><b>{_esc(label)}</b></a>\n"
+            f"<code>{_esc(addr)}</code>\n"
+            f"🟢 Balance {_esc(bal_line)}\n\n"
+            f"<i>Blue name opens the explorer. Tap the address to copy.</i>\n"
             f"Gas in {_esc(native)}. Paste a {_esc(label)} CA to buy."
         )
         await context.bot.send_message(
