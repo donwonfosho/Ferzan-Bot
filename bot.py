@@ -173,18 +173,32 @@ def card_keyboard(query: str, score: int, ca: str = "") -> InlineKeyboardMarkup:
 def positions_keyboard(user_id: int) -> InlineKeyboardMarkup | None:
     rows = []
     for p in db.open_positions(user_id)[:8]:
+        sym = (p["symbol"] or "?").upper()[:10]
         rows.append(
             [
                 InlineKeyboardButton(
-                    f"📄 Close #{p['id']} {p['symbol']}",
+                    f"📄 Paper close #{p['id']}",
                     callback_data=f"close:{p['id']}",
                 ),
                 InlineKeyboardButton(
-                    f"💸 Live sell #{p['id']}",
+                    f"🟢 Live sell {sym}",
                     callback_data=f"xsell:{p['id']}",
                 ),
             ]
         )
+        rows.append(
+            [
+                InlineKeyboardButton("25%", callback_data=f"xsell:{p['id']}"),
+                InlineKeyboardButton("50%", callback_data=f"xsell:{p['id']}"),
+                InlineKeyboardButton("Bag", callback_data="go:bag"),
+            ]
+        )
+    rows.append(
+        [
+            InlineKeyboardButton("👛 Wallet", callback_data="go:wallets"),
+            InlineKeyboardButton("↩️ Home", callback_data="go:home"),
+        ]
+    )
     return InlineKeyboardMarkup(rows) if rows else None
 
 
@@ -548,24 +562,53 @@ async def positions_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     opens = db.open_positions(uid)
     closed = db.recent_closed(uid, 5)
     day = db.realized_today(uid)
+    def _qty(n: float) -> str:
+        n = float(n or 0)
+        if n >= 1_000_000:
+            return f"{n / 1_000_000:.2f}M"
+        if n >= 1_000:
+            return f"{n / 1_000:.2f}K"
+        return f"{n:.4f}"
+
+    def _px(n: float) -> str:
+        n = float(n or 0)
+        if n >= 1:
+            return f"${n:,.4f}"
+        if n >= 0.0001:
+            return f"${n:.6f}"
+        return f"${n:.8f}"
+
+    cash = float(user["paper_cash"] if user else 0)
+    day_s = f"+${day:,.2f}" if day >= 0 else f"-${abs(day):,.2f}"
     lines = [
-        f"Cash ${user['paper_cash']:,.2f}",
-        f"Realized today {day:+,.2f} USD",
+        "📊 <b>Ferzan desk</b>",
+        f"💵 Paper cash  <b>${cash:,.2f}</b>",
+        f"📈 Realized today  <b>{html.escape(day_s)}</b>",
         "",
     ]
     if not opens:
-        lines.append("No open paper positions.")
+        lines.append("📭 No open paper tickets.")
+        lines.append("<i>Live bag is /bag — this list is the paper book.</i>")
     for p in opens:
-        lines.append(
-            f"#{p['id']} LONG {p['symbol']} qty {p['qty']:.6g} @ ${p['entry']:,.6g}"
-            f"  sl ${p['stop']:,.6g}  tp ${p['take']:,.6g}"
-        )
+        sym = html.escape((p["symbol"] or "?").upper())
+        lines.append(f"🟢 <b>#{p['id']} ${sym}</b> · LONG")
+        lines.append(f"   📦 {_qty(p['qty'])} @ {_px(p['entry'])}")
+        lines.append(f"   🛑 SL {_px(p['stop'])}   🎯 TP {_px(p['take'])}")
+        lines.append("")
     if closed:
-        lines.append("\nRecent closes:")
+        lines.append("———")
+        lines.append("📁 <b>Recent paper closes</b>")
         for p in closed:
             pnl = p["pnl"] if p["pnl"] is not None else 0
-            lines.append(f"#{p['id']} {p['symbol']} {pnl:+,.2f} USD")
-    await update.effective_message.reply_text("\n".join(lines), reply_markup=positions_keyboard(uid))
+            mark = "🟢" if pnl >= 0 else "🔴"
+            lines.append(
+                f"{mark} #{p['id']} {html.escape((p['symbol'] or '?').upper())}  {pnl:+,.2f} USD"
+            )
+    await update.effective_message.reply_text(
+        "\n".join(lines),
+        parse_mode="HTML",
+        reply_markup=positions_keyboard(uid),
+    )
 
 
 def _bag_panel(mint: str, amount: float, addr: str) -> tuple[str, InlineKeyboardMarkup]:
