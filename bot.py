@@ -1151,7 +1151,7 @@ async def settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 FEED_CHAINS = (
     "sol", "bsc", "base", "eth", "arb", "avax", "hood", "hype",
-    "sonic", "monad", "pol", "pulse", "ink", "ton", "op", "linea",
+    "sonic", "monad", "pol", "pulse", "ink", "ton", "op", "linea", "trx",
 )
 
 

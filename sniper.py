@@ -62,7 +62,7 @@ def fetch_new_pools(chain: str | None = None, limit: int = 20) -> list[Launch]:
     else:
         for cid in (
             "eth", "bsc", "base", "sol", "arb", "avax", "hood", "hype",
-            "sonic", "monad", "pol", "pulse", "ink", "ton", "op", "linea",
+            "sonic", "monad", "pol", "pulse", "ink", "ton", "op", "linea", "trx",
         ):
             gid = CHAINS[cid]["gecko"]
             urls.append((gid, GECKO_NEW.format(network=gid)))
