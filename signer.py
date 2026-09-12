@@ -293,7 +293,7 @@ def holdings_text(secret: str | None = None) -> str:
     return "\n".join(lines)
 
 
-def send_sol(dest: str, secret: str | None = None) -> tuple[bool, str]:
+def send_sol(dest: str, secret: str | None = None, lamports: int | None = None) -> tuple[bool, str]:
     dest = (dest or "").strip()
     if len(dest) < 32:
         return False, "Need a Solana address."
@@ -308,10 +308,13 @@ def send_sol(dest: str, secret: str | None = None) -> tuple[bool, str]:
         return False, str(exc)
     kp = keypair_from_secret(secret) if secret else _keypair()
     to = Pubkey.from_string(dest)
-    lamports = sol_balance_lamports(str(kp.pubkey()))
-    send_amt = lamports - 5000
-    if send_amt <= 0:
-        return False, "Not enough SOL to collect (need rent + fee)."
+    bag = sol_balance_lamports(str(kp.pubkey()))
+    if lamports is None:
+        send_amt = bag - 5000
+    else:
+        send_amt = int(lamports)
+    if send_amt <= 0 or send_amt + 5000 > bag:
+        return False, "Not enough SOL to send (need rent + fee)."
     bh = requests.post(
         _rpc(),
         json={"jsonrpc": "2.0", "id": 1, "method": "getLatestBlockhash", "params": [{"commitment": "finalized"}]},

@@ -293,7 +293,7 @@ def send_native(chain: str, dest: str, key_hex: str | None = None) -> tuple[bool
     return True, f"Collected {value / 10**18:.6f} {meta.get('native')}\n{msg}"
 
 
-def sell_evm(chain: str, sell_token: str, key_hex: str | None = None) -> tuple[bool, str]:
+def sell_evm(chain: str, sell_token: str, key_hex: str | None = None, pct: int = 100) -> tuple[bool, str]:
     if not live_enabled():
         return False, "Live sells OFF. LIVE_BUYS=1"
     cid = resolve_chain(chain)
@@ -326,6 +326,8 @@ def sell_evm(chain: str, sell_token: str, key_hex: str | None = None) -> tuple[b
             meta = dict(meta)
             meta["rpc"] = rpc
             break
+    pct = max(1, min(100, int(pct)))
+    bal = bal * pct // 100
     if bal <= 0:
         return False, (
             f"No token balance on {cid} for {token}\n"

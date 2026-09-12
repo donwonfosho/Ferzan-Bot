@@ -1219,15 +1219,27 @@ async def disperse_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         )
         return
     dests = [a.strip() for a in context.args if len(a.strip()) >= 32]
+    if len(dests) < 2:
+        await update.effective_message.reply_text("Need at least two Solana addresses.")
+        return
     sol_secret, _evm = user_wallets.secrets(update.effective_user.id)
+    try:
+        kp = signer.keypair_from_secret(sol_secret)
+        bag = signer.sol_balance_lamports(str(kp.pubkey()))
+    except Exception as exc:
+        await update.effective_message.reply_text(str(exc))
+        return
+    fee_each = 5000
+    spendable = bag - fee_each * len(dests)
+    if spendable <= 0:
+        await update.effective_message.reply_text("Not enough SOL to disperse.")
+        return
+    chunk = spendable // len(dests)
     lines = []
     for dest in dests:
-        # equal split: collect-style full send only to first until we have partial send
-        _ok, msg = signer.send_sol(dest, secret=sol_secret)
+        _ok, msg = signer.send_sol(dest, secret=sol_secret, lamports=chunk)
         lines.append(msg)
-        break
-    lines.append("v1 sends the bag to the first address. Partial split is next.")
-    await update.effective_message.reply_text("\n".join(lines))
+    await update.effective_message.reply_text("📤 Disperse\n" + "\n".join(lines))
 
 
 async def collectevm_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1800,12 +1812,6 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             pct = 100
         sol_secret, evm_secret = user_wallets.secrets(uid)
         if mint.startswith("0x"):
-            if pct < 100:
-                await context.bot.send_message(
-                    uid,
-                    "EVM live sell is a full exit on this version. Use 100% / Sell All.",
-                )
-                return
             chain = "base"
             evm_addr = (db.get_user_wallet(uid) or {}).get("evm_pub") or ""
             for cid in ("eth", "base", "bsc", "hood", "arb", "avax"):
@@ -1816,7 +1822,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 if raw > 0:
                     chain = cid
                     break
-            _ok, msg = evm_signer.sell_evm(chain, mint, key_hex=evm_secret)
+            _ok, msg = evm_signer.sell_evm(chain, mint, key_hex=evm_secret, pct=pct)
         else:
             _ok, msg = signer.sell_sol(mint, secret=sol_secret, pct=pct)
         await context.bot.send_message(uid, f"{'🟢' if _ok else '🔴'} Sell {pct}% · {chain if mint.startswith('0x') else 'SOL'}\n{msg}")
