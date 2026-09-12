@@ -21,6 +21,8 @@ import html
 import logging
 import os
 import re
+
+import requests
 from pathlib import Path
 
 from dotenv import dotenv_values, load_dotenv
@@ -492,10 +494,14 @@ def _live_buy_followup(uid: int, card, query: str, paper_ok: bool, force: bool) 
         if not (os.getenv("ZEROX_API_KEY") or "").strip():
             return "Live: EVM needs ZEROX_API_KEY on the droplet."
         _ok, msg = evm_signer.buy_evm(chain or "base", mint, usd, key_hex=evm_secret)
+        if _ok:
+            db.add_live_cost(uid, mint, usd)
         return msg
     if "sol" not in chain and not (len(mint) >= 32 and not mint.startswith("0x")):
         return f"Live: {chain or 'unknown'} is not Solana."
     _ok, msg = signer.buy_sol(mint, usd, secret=sol_secret)
+    if _ok:
+        db.add_live_cost(uid, mint, usd)
     return msg
 
 
@@ -611,15 +617,45 @@ async def positions_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     )
 
 
-def _bag_panel(mint: str, amount: float, addr: str) -> tuple[str, InlineKeyboardMarkup]:
+def _token_mark_usd(mint: str) -> float:
+    try:
+        r = requests.get(
+            f"https://api.dexscreener.com/latest/dex/tokens/{mint}",
+            timeout=8,
+        )
+        pairs = (r.json() or {}).get("pairs") or []
+        if pairs:
+            return float(pairs[0].get("priceUsd") or 0)
+    except Exception:
+        return 0.0
+    return 0.0
+
+
+def _bag_panel(mint: str, amount: float, addr: str, uid: int) -> tuple[str, InlineKeyboardMarkup]:
     short = mint[:44]
     href = f"https://solscan.io/token/{mint}"
+    px = _token_mark_usd(mint)
+    worth = float(amount or 0) * px
+    cost = db.live_cost(uid, mint)
+    if cost > 0 and worth > 0:
+        pnl = worth - cost
+        pct = (pnl / cost) * 100
+        mark = "🟢" if pnl >= 0 else "🔴"
+        pnl_line = (
+            f"{mark} PnL <b>{pnl:+,.2f} USD</b> ({pct:+.1f}%)\n"
+            f"📥 Initial ${cost:,.2f}   💰 Worth ${worth:,.2f}"
+        )
+    elif worth > 0:
+        pnl_line = f"💰 Worth ${worth:,.2f}\n<i>Buy live once to lock Initial for PnL.</i>"
+    else:
+        pnl_line = "💰 Mark unavailable"
     text = (
         f"🎒 <b>Position</b> · SOL\n"
         f"<a href=\"https://solscan.io/account/{html.escape(addr)}\">Wallet</a>\n"
         f"🪙 <a href=\"{href}\">token</a>\n"
         f"<code>{html.escape(mint)}</code>\n"
         f"Tokens: <b>{amount:g}</b>\n"
+        f"{pnl_line}\n"
         f"<i>Tap CA to copy</i>"
     )
     kb = InlineKeyboardMarkup(
@@ -664,7 +700,7 @@ async def bag_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.effective_message.reply_text("No tokens yet. Paste a CA and Buy.")
         return
     for row in rows[:6]:
-        text, kb = _bag_panel(row["mint"], row["amount"], addr)
+        text, kb = _bag_panel(row["mint"], row["amount"], addr, update.effective_user.id)
         await update.effective_message.reply_text(
             text, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True
         )

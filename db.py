@@ -132,6 +132,14 @@ def init_db() -> None:
                 note TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS live_basis (
+                user_id INTEGER NOT NULL,
+                mint TEXT NOT NULL,
+                cost_usd REAL NOT NULL DEFAULT 0,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY(user_id, mint)
+            );
+
             CREATE TABLE IF NOT EXISTS equity_marks (
                 user_id INTEGER NOT NULL,
                 marked_at INTEGER NOT NULL,
@@ -695,5 +703,41 @@ def save_user_wallet(user_id: int, sol_pub: str, sol_key: str, evm_pub: str, evm
                 evm_key = excluded.evm_key
             """,
             (user_id, sol_pub, sol_key, evm_pub, evm_key, int(time.time())),
+        )
+        conn.commit()
+
+
+def add_live_cost(user_id: int, mint: str, usd: float) -> None:
+    mint = (mint or "").strip()
+    if not mint:
+        return
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO live_basis (user_id, mint, cost_usd, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(user_id, mint) DO UPDATE SET
+                cost_usd = live_basis.cost_usd + excluded.cost_usd,
+                updated_at = excluded.updated_at
+            """,
+            (user_id, mint, float(usd), int(time.time())),
+        )
+        conn.commit()
+
+
+def live_cost(user_id: int, mint: str) -> float:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT cost_usd FROM live_basis WHERE user_id = ? AND mint = ?",
+            (user_id, mint),
+        ).fetchone()
+        return float(row["cost_usd"]) if row else 0.0
+
+
+def clear_live_cost(user_id: int, mint: str) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            "DELETE FROM live_basis WHERE user_id = ? AND mint = ?",
+            (user_id, mint),
         )
         conn.commit()
