@@ -1709,6 +1709,23 @@ def launch_card(ln) -> tuple[str, InlineKeyboardMarkup]:
     }
     mark = marks.get(cid, "⛓")
     liq = float(ln.liquidity_usd or 0)
+    mc = 0.0
+    px = 0.0
+    if ca:
+        try:
+            rr = requests.get(
+                f"https://api.dexscreener.com/latest/dex/tokens/{ca}",
+                timeout=4,
+            )
+            pairs = (rr.json() or {}).get("pairs") or []
+            if pairs:
+                p = max(pairs, key=lambda x: float((x.get("liquidity") or {}).get("usd") or 0))
+                mc = float(p.get("fdv") or p.get("marketCap") or 0)
+                px = float(p.get("priceUsd") or 0)
+                if liq <= 0:
+                    liq = float((p.get("liquidity") or {}).get("usd") or 0)
+        except Exception:
+            pass
     cap = int(signer.max_usd())
     href = (CHAINS.get(cid, {}).get("explorer_addr") or "").format(addr=ca) if ca.startswith("0x") or cid == "sol" else ""
     if cid == "sol" and ca:
@@ -1721,7 +1738,8 @@ def launch_card(ln) -> tuple[str, InlineKeyboardMarkup]:
         f"{title}\n"
         f"CA\n<code>{html.escape(ca)}</code>\n"
         f"💧 {_esc(cid.upper() if cid else chain)}  ·  ⛓ {chain}\n"
-        f"💧 Liq ${liq:,.0f}\n"
+        f"🧢 MC {_esc(f'${mc:,.0f}' if mc else '—')}   💧 Liq ${_esc(f'{liq:,.0f}')}\n"
+        + (f"💵 {_esc(_fmt_px(px))}\n" if px else "")
         + (" · ".join(links) + "\n" if links else "")
         + "<i>Tap CA to copy · Buy opens the Ferzan bot</i>"
     )
