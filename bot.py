@@ -1770,6 +1770,15 @@ def launch_card(ln) -> tuple[str, InlineKeyboardMarkup]:
             if abs(float(getattr(ln, "chg_1h", 0) or 0)) >= 1
             else ""
         )
+        + (
+            (
+                f"{'▲' if float(ln.pulse_chg) >= 0 else '▼'} "
+                f"{float(ln.pulse_chg):+.2f}% since last pulse"
+                f" ({int(getattr(ln, 'pulse_mins', 0) or 0)}m)\n"
+            )
+            if getattr(ln, "pulse_chg", None) is not None
+            else ""
+        )
         + (" · ".join(links) + "\n" if links else "")
         + "<i>Tap CA to copy · Buy opens the Ferzan bot</i>"
     )
@@ -2696,15 +2705,25 @@ def _native_prices() -> dict[str, float]:
     return out
 
 
+NATIVE_CA = {
+    "sol": "So11111111111111111111111111111111111111112",
+    "eth": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+    "base": "0x4200000000000000000000000000000000000006",
+    "arb": "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
+    "op": "0x4200000000000000000000000000000000000006",
+    "linea": "0xe5D7C2a44FfDDf6b295A15c148167daaAf5Cf34f",
+    "bsc": "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c",
+    "avax": "0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7",
+    "pol": "0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270",
+    "hood": "0x4200000000000000000000000000000000000006",
+    "ink": "0x4200000000000000000000000000000000000006",
+}
+
+
 async def native_pulse_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     prices = _native_prices()
     if not prices:
         return
-    marks = {
-        "sol": "🟣", "bsc": "🟡", "base": "🔵", "eth": "♦️",
-        "arb": "🔷", "avax": "🔺", "hood": "🪶", "hype": "💚",
-        "trx": "🔴", "ton": "💠", "pol": "🟣", "pulse": "💗",
-    }
     for chat_id, bind in db.list_feed_binds():
         if bind in {"*", ""}:
             continue
@@ -2713,28 +2732,32 @@ async def native_pulse_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         if not px:
             continue
         prev = db.get_native_mark(cid)
-        chg = ""
+        pulse_chg = None
+        pulse_mins = 0
         if prev and prev[0] > 0:
-            pct = (px - prev[0]) / prev[0] * 100
-            arrow = "▲" if pct >= 0 else "▼"
-            mins = max(1, int((time.time() - prev[1]) / 60))
-            chg = f"\n{arrow} {pct:+.2f}% since last pulse ({mins}m)"
+            pulse_chg = (px - prev[0]) / prev[0] * 100
+            pulse_mins = max(1, int((time.time() - prev[1]) / 60))
         db.set_native_mark(cid, px)
         ticker = CHAINS.get(cid, {}).get("native") or cid.upper()
-        label = CHAINS.get(cid, {}).get("label") or cid.upper()
-        text = (
-            f"{marks.get(cid, '⛓')} <b>${html.escape(str(ticker))}</b> · {_esc(label)}\n"
-            f"💵 {_esc(_fmt_px(px))}"
-            f"{html.escape(chg)}\n"
-            f"<i>Chain pulse · every 10m</i>"
+        ca = NATIVE_CA.get(cid) or ticker
+        ln = sniper.Launch(
+            chain=cid,
+            symbol=str(ticker),
+            name=CHAINS.get(cid, {}).get("label") or cid,
+            token=ca,
+            pool=ca,
+            liquidity_usd=0,
+            created_at="",
+            source="chain-pulse",
+            query=ca,
+            price_usd=px,
+            pulse_chg=pulse_chg,
+            pulse_mins=pulse_mins,
         )
+        text, markup = launch_card(ln)
+        text += "\n<i>Chain pulse · every 10m · Buy opens the desk</i>"
         try:
-            await context.bot.send_message(
-                chat_id,
-                text,
-                parse_mode="HTML",
-                disable_web_page_preview=True,
-            )
+            await send_launch(context.bot, chat_id, text, markup, promo=False)
         except Exception:
             logger.exception("native pulse failed for %s", chat_id)
 

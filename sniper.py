@@ -48,6 +48,8 @@ class Launch:
     price_usd: float = 0.0
     chg_1h: float = 0.0
     chg_24h: float = 0.0
+    pulse_chg: float | None = None
+    pulse_mins: int = 0
 
 
 def _headers() -> dict[str, str]:
