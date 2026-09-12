@@ -193,7 +193,7 @@ def render_card(card: SignalCard) -> str:
     vol = float(s.volume_24h or 0)
     lines = [
         f"🪙 <b>${_esc(s.symbol)}</b>  ·  {_esc(s.name)}",
-        f"⛓ {_esc(chain)}  ·  {_esc(s.dex)}",
+        f"⛓ {_esc(chain)}  ·  {_esc(s.dex)}  ·  {_esc(s.source)}",
         f"<code>{_esc(ca)}</code>" if ca else "",
         "",
         f"🏅 Score <b>{card.score}</b>/100 {_bar(card.score)}  ·  {_esc(card.bias)}",
@@ -421,6 +421,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/chains — pick a network\n"
         "/help — this list\n\n"
         "Paste a CA anytime to score + buy.\n"
+        "Pump.fun: paste the mint from DexScreener (usually ends in pump).\n"
         "Live spend is YOUR /wallet bag, not treasury."
     )
 

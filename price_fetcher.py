@@ -257,7 +257,7 @@ def _gecko_snap(query: str) -> MarketSnapshot | None:
             buys_h1=0,
             sells_h1=0,
             pair_created_ms=None,
-            url=attr.get("image_url") or "",
+            url=f"https://www.geckoterminal.com/{net}/tokens/{q}",
             source="geckoterminal",
         )
     return None
