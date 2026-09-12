@@ -245,6 +245,15 @@ def init_db() -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS native_marks (
+                chain TEXT PRIMARY KEY,
+                price REAL NOT NULL,
+                ts INTEGER NOT NULL
+            )
+            """
+        )
         conn.commit()
 
 
@@ -861,6 +870,30 @@ def drop_feed_chat(chat_id: int, chain: str | None = None) -> None:
             )
         else:
             conn.execute("DELETE FROM feed_binds WHERE chat_id = ?", (int(chat_id),))
+        conn.commit()
+
+
+def get_native_mark(chain: str) -> tuple[float, int] | None:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT price, ts FROM native_marks WHERE chain = ?",
+            (chain.lower(),),
+        ).fetchone()
+    if not row:
+        return None
+    return float(row["price"]), int(row["ts"])
+
+
+def set_native_mark(chain: str, price: float) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO native_marks (chain, price, ts)
+            VALUES (?, ?, ?)
+            ON CONFLICT(chain) DO UPDATE SET price = excluded.price, ts = excluded.ts
+            """,
+            (chain.lower(), float(price), int(time.time())),
+        )
         conn.commit()
 
 

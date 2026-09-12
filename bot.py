@@ -2583,7 +2583,7 @@ async def launch_feed_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     interesting = [
         ln
         for ln in launches
-        if ln.liquidity_usd >= 1_500
+        if ln.liquidity_usd >= 500
         or getattr(ln, "source", "") in {"dexscreener-boost", "geckoterminal-trend"}
     ]
     if not interesting:
@@ -2593,7 +2593,7 @@ async def launch_feed_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         by_chain.setdefault((ln.chain or "?").lower(), []).append(ln)
     diverse: list = []
     for rows in by_chain.values():
-        diverse.extend(rows[:4])
+        diverse.extend(rows[:6])
     for user in db.list_users():
         if not user.get("alerts_on"):
             continue
@@ -2617,15 +2617,101 @@ async def launch_feed_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             if bind not in {"*", ""} and cid != bind and (ln.chain or "").lower() != bind:
                 continue
             pool.append(ln)
-        for ln in pool[:4]:
+        for ln in pool[:6]:
             key = f"ch:{chat_id}:{ln.chain}:{(ln.token or '')[:20]}"
-            if not db.should_resend_signal(int(chat_id), key, 1, cooldown_s=30 * 60):
+            if not db.should_resend_signal(int(chat_id), key, 1, cooldown_s=12 * 60):
                 continue
             text, markup = launch_card(ln)
             try:
                 await send_launch(context.bot, chat_id, text, markup, promo=True)
             except Exception:
                 logger.exception("channel feed failed for %s", chat_id)
+
+
+CG_NATIVE = {
+    "sol": "solana",
+    "bsc": "binancecoin",
+    "eth": "ethereum",
+    "base": "ethereum",
+    "arb": "ethereum",
+    "avax": "avalanche-2",
+    "hood": "ethereum",
+    "hype": "hyperliquid",
+    "sonic": "sonic-3",
+    "monad": "monad",
+    "pol": "polygon-ecosystem-token",
+    "pulse": "pulsechain",
+    "ink": "ethereum",
+    "ton": "the-open-network",
+    "trx": "tron",
+    "op": "ethereum",
+    "linea": "ethereum",
+}
+
+
+def _native_prices() -> dict[str, float]:
+    ids = ",".join(dict.fromkeys(CG_NATIVE.values()))
+    try:
+        r = requests.get(
+            "https://api.coingecko.com/api/v3/simple/price",
+            params={"ids": ids, "vs_currencies": "usd"},
+            timeout=12,
+        )
+        data = r.json() if r.ok else {}
+    except Exception:
+        data = {}
+    out: dict[str, float] = {}
+    for cid, gid in CG_NATIVE.items():
+        try:
+            px = float((data.get(gid) or {}).get("usd") or 0)
+        except (TypeError, ValueError):
+            px = 0.0
+        if px > 0:
+            out[cid] = px
+    return out
+
+
+async def native_pulse_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    prices = _native_prices()
+    if not prices:
+        return
+    marks = {
+        "sol": "🟣", "bsc": "🟡", "base": "🔵", "eth": "♦️",
+        "arb": "🔷", "avax": "🔺", "hood": "🪶", "hype": "💚",
+        "trx": "🔴", "ton": "💠", "pol": "🟣", "pulse": "💗",
+    }
+    for chat_id, bind in db.list_feed_binds():
+        if bind in {"*", ""}:
+            continue
+        cid = resolve_chain(bind) or bind
+        px = prices.get(cid)
+        if not px:
+            continue
+        prev = db.get_native_mark(cid)
+        chg = ""
+        if prev and prev[0] > 0:
+            pct = (px - prev[0]) / prev[0] * 100
+            arrow = "▲" if pct >= 0 else "▼"
+            mins = max(1, int((time.time() - prev[1]) / 60))
+            chg = f"\n{arrow} {pct:+.2f}% since last pulse ({mins}m)"
+        db.set_native_mark(cid, px)
+        ticker = CHAINS.get(cid, {}).get("native") or cid.upper()
+        label = CHAINS.get(cid, {}).get("label") or cid.upper()
+        text = (
+            f"{marks.get(cid, '⛓')} <b>${html.escape(str(ticker))}</b> · {_esc(label)}\n"
+            f"💵 {_esc(_fmt_px(px))}"
+            f"{html.escape(chg)}\n"
+            f"<i>Chain pulse · every 10m</i>"
+        )
+        try:
+            await context.bot.send_message(
+                chat_id,
+                text,
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+        except Exception:
+            logger.exception("native pulse failed for %s", chat_id)
 
 
 def main() -> None:
@@ -2730,6 +2816,7 @@ def main() -> None:
         jq.run_repeating(lp_watch_job, interval=40, first=70)
         jq.run_repeating(buy_limit_job, interval=35, first=80)
         jq.run_repeating(launch_feed_job, interval=LAUNCH_FEED_SECONDS, first=35)
+        jq.run_repeating(native_pulse_job, interval=600, first=50)
     else:
         logger.warning("job-queue extra missing; commands still work, scanners off")
 
