@@ -302,7 +302,27 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await start(update, context)
+    if not await guard(update):
+        return
+    await update.effective_message.reply_text(
+        "FERZAN commands\n\n"
+        "/start — home + slogan\n"
+        "/wallet — deposit addresses by chain\n"
+        "/bag — SOL + tokens in your bag\n"
+        "/settings — size, floor, daily cap\n"
+        "/positions — paper desk\n"
+        "/launches — new pools\n"
+        "/signal <CA> — score a token\n"
+        "/snipe <CA> — arm live snipe (capped)\n"
+        "/livesell <mint> — sell SOL token\n"
+        "/livesellevm <chain> <0x> — sell EVM token\n"
+        "/watchwallet — copy-trade alerts\n"
+        "/quote <chain> <CA> — swap quote\n"
+        "/chains — pick a network\n"
+        "/help — this list\n\n"
+        "Paste a CA anytime to score + buy.\n"
+        "Live spend is YOUR /wallet bag, not treasury."
+    )
 
 
 async def price_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
