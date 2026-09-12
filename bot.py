@@ -888,7 +888,13 @@ async def limits_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if not rows:
         await update.effective_message.reply_text("No limits. /buylimit <CA> <price> 3")
         return
-    lines = [f"#{r['id']} {r['status']} {_fmt_px(r['target_px'])} ${r['usd']:.0f} {r['mint'][:10]}…" for r in rows[:12]]
+    lines = []
+    for r in rows[:12]:
+        now = _token_mark_usd(r["mint"])
+        lines.append(
+            f"#{r['id']} {r['status']}  tgt {_fmt_px(r['target_px'])}  "
+            f"now {_fmt_px(now)}  ${r['usd']:.0f}"
+        )
     await update.effective_message.reply_text("Buy limits\n" + "\n".join(lines))
 
 
@@ -2139,7 +2145,9 @@ async def buy_limit_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             )
         except Exception as exc:
             msg = str(exc)
-        db.fill_buy_limit(int(row["id"]))
+        blocked = str(msg).startswith(("🛡", "Live: skipped", "Live: OFF", "Could not"))
+        if not blocked:
+            db.fill_buy_limit(int(row["id"]))
         try:
             await context.bot.send_message(
                 uid,
