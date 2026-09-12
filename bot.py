@@ -1119,7 +1119,7 @@ async def settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     )
 
 
-FEED_CHAINS = ("sol", "bsc", "base", "eth", "arb", "avax")
+FEED_CHAINS = ("sol", "bsc", "base", "eth", "arb", "avax", "hood", "hype", "sonic", "monad")
 
 
 def _feeds_keyboard(uid: int) -> InlineKeyboardMarkup:
