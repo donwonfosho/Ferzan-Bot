@@ -53,3 +53,48 @@ def buy_hood(token: str, usd: float, key_hex: str | None = None) -> tuple[bool, 
     if not ok:
         return False, "Hood Uniswap buy failed: " + msg
     return True, f"Live HOOD buy ~${usd:.2f}\n{msg}"
+
+
+SWAP_TOKEN = "0x791ac947"  # swapExactTokensForETHSupportingFeeOnTransferTokens
+
+
+def sell_hood(token: str, key_hex: str | None = None) -> tuple[bool, str]:
+    if not live_enabled():
+        return False, "Live sells OFF."
+    token = _addr(token)
+    try:
+        from eth_account import Account
+
+        from evm_signer import _erc20_balance
+    except Exception as exc:
+        return False, str(exc)
+    raw = (key_hex or _key_hex()).replace("0x", "").replace("0X", "")
+    if not raw:
+        return False, "No EVM key for Hood sell."
+    acct = Account.from_key("0x" + raw)
+    meta = dict(CHAINS["hood"])
+    bal = _erc20_balance(meta["rpc"], token, acct.address)
+    if bal <= 0:
+        return False, f"No token on Hood for {token}"
+    approve = "0x095ea7b3" + _enc_addr(ROUTER) + ("f" * 64)
+    ok, msg = _broadcast(acct, meta, token, approve, 0)
+    if not ok:
+        return False, "Hood approve failed: " + msg
+    time.sleep(8)
+    deadline = int(time.time()) + 600
+    data = (
+        SWAP_TOKEN
+        + hex(bal)[2:].zfill(64)
+        + "0".zfill(64)
+        + "a0".zfill(64)
+        + _enc_addr(acct.address)
+        + hex(deadline)[2:].zfill(64)
+        + "2".zfill(64)
+        + _enc_addr(token)
+        + _enc_addr(WETH)
+    )
+    ok, msg2 = _broadcast(acct, meta, ROUTER, data, 0)
+    note = f"Approved\n{msg}\n"
+    if not ok:
+        return False, note + "Hood sell failed: " + msg2
+    return True, note + f"Live HOOD sell\n{msg2}"

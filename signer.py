@@ -293,6 +293,49 @@ def holdings_text(secret: str | None = None) -> str:
     return "\n".join(lines)
 
 
+def send_sol(dest: str, secret: str | None = None) -> tuple[bool, str]:
+    dest = (dest or "").strip()
+    if len(dest) < 32:
+        return False, "Need a Solana address."
+    try:
+        from solders.hash import Hash
+        from solders.instruction import Instruction
+        from solders.message import Message
+        from solders.pubkey import Pubkey
+        from solders.system_program import TransferParams, transfer
+        from solders.transaction import Transaction
+    except Exception as exc:
+        return False, str(exc)
+    kp = keypair_from_secret(secret) if secret else _keypair()
+    to = Pubkey.from_string(dest)
+    lamports = sol_balance_lamports(str(kp.pubkey()))
+    send_amt = lamports - 5000
+    if send_amt <= 0:
+        return False, "Not enough SOL to collect (need rent + fee)."
+    bh = requests.post(
+        _rpc(),
+        json={"jsonrpc": "2.0", "id": 1, "method": "getLatestBlockhash", "params": [{"commitment": "finalized"}]},
+        timeout=15,
+    ).json()
+    blockhash = ((bh.get("result") or {}).get("value") or {}).get("blockhash")
+    if not blockhash:
+        return False, "No blockhash."
+    ix = transfer(TransferParams(from_pubkey=kp.pubkey(), to_pubkey=to, lamports=send_amt))
+    msg = Message.new_with_blockhash([ix], kp.pubkey(), Hash.from_string(blockhash))
+    tx = Transaction.new_unsigned(msg)
+    tx.sign([kp], Hash.from_string(blockhash))
+    raw = bytes(tx).hex()
+    body = requests.post(
+        _rpc(),
+        json={"jsonrpc": "2.0", "id": 1, "method": "sendTransaction", "params": [raw, {"encoding": "hex"}]},
+        timeout=20,
+    ).json()
+    if body.get("error"):
+        return False, str(body["error"])
+    sig = body.get("result") or ""
+    return True, f"Collected {send_amt / 1e9:.6f} SOL\nhttps://solscan.io/tx/{sig}"
+
+
 def sell_sol(input_mint: str, secret: str | None = None) -> tuple[bool, str]:
     if not live_enabled():
         return False, "Live sells are OFF. Add LIVE_BUYS=1 and restart."

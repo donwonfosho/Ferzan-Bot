@@ -596,7 +596,8 @@ async def livesellevm_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         chain, token = "eth", context.args[0]
     else:
         chain, token = context.args[0], context.args[1]
-    _ok, msg = evm_signer.sell_evm(chain, token)
+    _sol, evm_secret = user_wallets.secrets(update.effective_user.id)
+    _ok, msg = evm_signer.sell_evm(chain, token, key_hex=evm_secret)
     await update.effective_message.reply_text(msg)
 
 
@@ -837,6 +838,32 @@ async def importevm_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         parse_mode="Markdown",
         reply_markup=wallet_keyboard(),
     )
+
+
+async def collectsol_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard(update):
+        return
+    if not context.args:
+        await update.effective_message.reply_text("Usage: /collectsol <your-sol-address>")
+        return
+    sol_secret, _evm = user_wallets.secrets(update.effective_user.id)
+    _ok, msg = signer.send_sol(context.args[0], secret=sol_secret)
+    await update.effective_message.reply_text(msg)
+
+
+async def collectevm_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard(update):
+        return
+    if not context.args:
+        await update.effective_message.reply_text("Usage: /collectevm [eth|base|bsc|hood] <0x>")
+        return
+    if len(context.args) == 1:
+        chain, dest = "eth", context.args[0]
+    else:
+        chain, dest = context.args[0], context.args[1]
+    _sol, evm_secret = user_wallets.secrets(update.effective_user.id)
+    _ok, msg = evm_signer.send_native(chain, dest, key_hex=evm_secret)
+    await update.effective_message.reply_text(msg)
 
 
 async def wallets_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1649,6 +1676,8 @@ def main() -> None:
     app.add_handler(CommandHandler("wallet", wallet_cmd))
     app.add_handler(CommandHandler("importsol", importsol_cmd))
     app.add_handler(CommandHandler("importevm", importevm_cmd))
+    app.add_handler(CommandHandler("collectsol", collectsol_cmd))
+    app.add_handler(CommandHandler("collectevm", collectevm_cmd))
     app.add_handler(CommandHandler("wallets", wallets_cmd))
     app.add_handler(CommandHandler("unwatchwallet", unwatchwallet_cmd))
     app.add_handler(CommandHandler("drawdown", drawdown_cmd))

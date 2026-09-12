@@ -269,12 +269,40 @@ def _broadcast(acct, meta: dict, to: str, data: str, value: int = 0) -> tuple[bo
     return True, f"{exp}/tx/{txh}"
 
 
-def sell_evm(chain: str, sell_token: str) -> tuple[bool, str]:
+def send_native(chain: str, dest: str, key_hex: str | None = None) -> tuple[bool, str]:
+    cid = resolve_chain(chain) or "eth"
+    meta = CHAINS.get(cid) or CHAINS["eth"]
+    dest = _addr(dest)
+    try:
+        from eth_account import Account
+    except Exception as exc:
+        return False, str(exc)
+    raw = (key_hex or _key_hex()).replace("0x", "").replace("0X", "")
+    acct = Account.from_key("0x" + raw)
+    body = _rpc(meta["rpc"], "eth_getBalance", [acct.address, "latest"])
+    wei = int(body.get("result") or "0x0", 16)
+    gas_price = int(_gas_price(meta["rpc"]) * 1.2)
+    gas = 21000
+    need = gas * gas_price
+    if wei <= need + 10**12:
+        return False, f"Not enough {meta.get('native')} to collect."
+    value = wei - need
+    ok, msg = _broadcast(acct, meta, dest, "0x", value)
+    if not ok:
+        return False, "Collect failed: " + msg
+    return True, f"Collected {value / 10**18:.6f} {meta.get('native')}\n{msg}"
+
+
+def sell_evm(chain: str, sell_token: str, key_hex: str | None = None) -> tuple[bool, str]:
     if not live_enabled():
         return False, "Live sells OFF. LIVE_BUYS=1"
-    if not configured():
-        return False, "Set SIGNER_KEY_EVM and ZEROX_API_KEY."
     cid = resolve_chain(chain)
+    if cid == "hood":
+        import hood
+
+        return hood.sell_hood(sell_token, key_hex)
+    if not key_hex and not configured():
+        return False, "Set SIGNER_KEY_EVM and ZEROX_API_KEY."
     if cid not in SUPPORTED:
         return False, f"Live EVM is {', '.join(sorted(SUPPORTED))}. Not {chain}."
     token = _addr(sell_token)
@@ -283,7 +311,8 @@ def sell_evm(chain: str, sell_token: str) -> tuple[bool, str]:
     except Exception as exc:
         return False, f"EVM deps missing: {exc}"
     meta = CHAINS[cid]
-    acct = Account.from_key("0x" + _key_hex())
+    raw = (key_hex or _key_hex()).replace("0x", "").replace("0X", "")
+    acct = Account.from_key("0x" + raw)
     rpcs = [meta["rpc"]]
     if cid == "base":
         rpcs += ["https://base.publicnode.com", "https://base.llamarpc.com"]
