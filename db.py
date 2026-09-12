@@ -132,6 +132,20 @@ def init_db() -> None:
                 note TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS feed_chats (
+                chat_id INTEGER PRIMARY KEY,
+                title TEXT,
+                added_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS feed_binds (
+                chat_id INTEGER NOT NULL,
+                chain TEXT NOT NULL,
+                title TEXT,
+                added_at INTEGER NOT NULL,
+                PRIMARY KEY (chat_id, chain)
+            );
+
             CREATE TABLE IF NOT EXISTS buy_limits (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL,
@@ -813,6 +827,49 @@ def clear_live_exit(user_id: int, mint: str) -> None:
     with get_conn() as conn:
         conn.execute("DELETE FROM live_exits WHERE user_id = ? AND mint = ?", (user_id, mint))
         conn.commit()
+
+
+def add_feed_chat(chat_id: int, title: str = "", chain: str = "*") -> None:
+    chain = (chain or "*").lower()
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO feed_binds (chat_id, chain, title, added_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (int(chat_id), chain, title or "", int(time.time())),
+        )
+        conn.commit()
+
+
+def drop_feed_chat(chat_id: int, chain: str | None = None) -> None:
+    with get_conn() as conn:
+        if chain:
+            conn.execute(
+                "DELETE FROM feed_binds WHERE chat_id = ? AND chain = ?",
+                (int(chat_id), chain.lower()),
+            )
+        else:
+            conn.execute("DELETE FROM feed_binds WHERE chat_id = ?", (int(chat_id),))
+        conn.commit()
+
+
+def list_feed_binds() -> list[tuple[int, str]]:
+    out: list[tuple[int, str]] = []
+    extra = os.getenv("FERZAN_FEED_CHAT", "").strip()
+    if extra:
+        try:
+            out.append((int(extra), "*"))
+        except ValueError:
+            pass
+    with get_conn() as conn:
+        rows = conn.execute("SELECT chat_id, chain FROM feed_binds").fetchall()
+        out.extend((int(r["chat_id"]), str(r["chain"] or "*")) for r in rows)
+    return out
+
+
+def list_feed_chats() -> list[int]:
+    return list(dict.fromkeys(cid for cid, _ch in list_feed_binds()))
 
 
 def add_buy_limit(user_id: int, mint: str, chain: str, usd: float, target_px: float) -> int:

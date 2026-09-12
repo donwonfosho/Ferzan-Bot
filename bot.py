@@ -1136,6 +1136,36 @@ def _feeds_keyboard(uid: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
+async def setfeed_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat = update.effective_chat
+    is_chan = bool(update.channel_post) or (chat and chat.type == "channel")
+    if not is_chan and not await guard(update):
+        return
+    if not chat or chat.type not in {"channel", "group", "supergroup"}:
+        await update.effective_message.reply_text(
+            "Add Ferzan as admin in a channel, then send /setfeed in that channel.\n"
+            "Or FERZAN_FEED_CHAT=-100xxxxxxxxxx on the droplet."
+        )
+        return
+    raw = (context.args[0] if context.args else "*").lower()
+    chain = "*" if raw in {"*", "all", "any"} else (resolve_chain(raw) or raw)
+    db.add_feed_chat(chat.id, chat.title or "", chain=chain)
+    label = "ALL CHAINS" if chain == "*" else chain.upper()
+    await update.effective_message.reply_text(
+        f"📡 This chat is the {label} feed.\n{chat.id}\n"
+        "/setfeed bsc · /setfeed eth · /setfeed sol · /setfeed base"
+    )
+
+
+async def unsetfeed_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard(update):
+        return
+    chat = update.effective_chat
+    if chat:
+        db.drop_feed_chat(chat.id)
+    await update.effective_message.reply_text("Feed off in this chat.")
+
+
 async def feeds_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update):
         return
@@ -2447,6 +2477,25 @@ async def launch_feed_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 )
             except Exception:
                 logger.exception("launch feed failed for %s", uid)
+    for chat_id, bind in db.list_feed_binds():
+        for ln in diverse[:12]:
+            cid = resolve_chain(ln.chain) or (ln.chain or "").lower()
+            if bind not in {"*", ""} and cid != bind and (ln.chain or "").lower() != bind:
+                continue
+            key = f"ch:{chat_id}:{ln.chain}:{ln.token[:20]}"
+            if not db.should_resend_signal(int(chat_id), key, 1, cooldown_s=6 * 3600):
+                continue
+            text, markup = launch_card(ln)
+            try:
+                await context.bot.send_message(
+                    chat_id,
+                    text,
+                    parse_mode="HTML",
+                    reply_markup=markup,
+                    disable_web_page_preview=True,
+                )
+            except Exception:
+                logger.exception("channel feed failed for %s", chat_id)
 
 
 def main() -> None:
@@ -2496,6 +2545,10 @@ def main() -> None:
     app.add_handler(CommandHandler("journal", journal_cmd))
     app.add_handler(CommandHandler("settings", settings_cmd))
     app.add_handler(CommandHandler("feeds", feeds_cmd))
+    app.add_handler(CommandHandler("setfeed", setfeed_cmd))
+    app.add_handler(CommandHandler("setfeed", setfeed_cmd, filters=filters.UpdateType.CHANNEL_POSTS))
+    app.add_handler(CommandHandler("unsetfeed", unsetfeed_cmd))
+    app.add_handler(CommandHandler("unsetfeed", unsetfeed_cmd, filters=filters.UpdateType.CHANNEL_POSTS))
     app.add_handler(CommandHandler("resetpaper", resetpaper_cmd))
     app.add_handler(CommandHandler("watchwallet", watchwallet_cmd))
     app.add_handler(CommandHandler("wallet", wallet_cmd))
