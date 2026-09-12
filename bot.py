@@ -1108,10 +1108,16 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             return
         label = CHAINS.get(cid, {}).get("label", cid.upper())
         native = CHAINS.get(cid, {}).get("native", "ETH")
+        bal_line = ""
+        try:
+            amt, sym = evm_signer.native_balance(cid, row["evm_pub"])
+            bal_line = f"\nBalance {amt:.6f} {sym}"
+        except Exception:
+            bal_line = f"\nBalance unavailable ({native})"
         await context.bot.send_message(
             uid,
-            f"{label.upper()}\n`{row['evm_pub']}`\n\n"
-            f"Same EVM key. Network must be {label}. Gas in {native}.\n"
+            f"{label.upper()}\n`{row['evm_pub']}`{bal_line}\n\n"
+            f"Same EVM address. Set network to {label}.\n"
             f"Paste a {label} CA to buy.",
             parse_mode="Markdown",
             reply_markup=wallet_keyboard(),

@@ -39,6 +39,22 @@ def _addr(val) -> str:
         return out
 
 
+def native_balance(chain: str, address: str) -> tuple[float, str]:
+    cid = resolve_chain(chain) or chain
+    meta = CHAINS.get(cid) or {}
+    symbol = meta.get("native") or "?"
+    rpc = meta.get("rpc")
+    if not rpc:
+        return 0.0, symbol
+    try:
+        body = _rpc(rpc, "eth_getBalance", [address, "latest"])
+        raw = body.get("result") or "0x0"
+        wei = int(raw, 16) if str(raw).startswith("0x") else int(raw)
+    except Exception:
+        return 0.0, symbol
+    return wei / 10**18, symbol
+
+
 def live_enabled() -> bool:
     return os.getenv("LIVE_BUYS", "").strip().lower() in {"1", "true", "yes", "on"}
 
