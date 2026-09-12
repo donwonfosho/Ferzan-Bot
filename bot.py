@@ -17,6 +17,7 @@ Live custody/sniping is intentionally not included.
 
 from __future__ import annotations
 
+import asyncio
 import html
 import logging
 import os
@@ -86,7 +87,7 @@ SCAN_INTERVAL_SECONDS = int(os.getenv("SCAN_INTERVAL_SECONDS", "90"))
 WALLET_POLL_SECONDS = int(os.getenv("WALLET_POLL_SECONDS", "75"))
 DRAWDOWN_POLL_SECONDS = int(os.getenv("DRAWDOWN_POLL_SECONDS", "120"))
 SNIPE_POLL_SECONDS = int(os.getenv("SNIPE_POLL_SECONDS", "25"))
-LAUNCH_FEED_SECONDS = int(os.getenv("LAUNCH_FEED_SECONDS", "60"))
+LAUNCH_FEED_SECONDS = int(os.getenv("LAUNCH_FEED_SECONDS", "45"))
 
 
 def _operators() -> set[int]:
@@ -1695,25 +1696,54 @@ async def chains_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await update.effective_message.reply_text(text, reply_markup=chains_keyboard())
 
 
+_PROMO_TS: dict[int, float] = {}
+
+
 async def send_launch(bot, chat_id: int, text: str, markup, promo: bool = True) -> None:
     clip = PROMO_PATH if promo and PROMO_PATH.exists() else None
-    if clip and os.getenv("FERZAN_PROMO_ON_SIGNALS", "1") != "0":
-        with clip.open("rb") as gif:
-            await bot.send_animation(
-                chat_id,
-                animation=gif,
-                caption=text,
-                parse_mode="HTML",
-                reply_markup=markup,
-            )
-        return
-    await bot.send_message(
-        chat_id,
-        text,
-        parse_mode="HTML",
-        reply_markup=markup,
-        disable_web_page_preview=True,
+    want_gif = (
+        bool(clip)
+        and os.getenv("FERZAN_PROMO_ON_SIGNALS", "0") == "1"
+        and (time.time() - _PROMO_TS.get(int(chat_id), 0) > 3600)
     )
+    try:
+        if want_gif:
+            with clip.open("rb") as gif:
+                await bot.send_animation(
+                    chat_id,
+                    animation=gif,
+                    caption=text,
+                    parse_mode="HTML",
+                    reply_markup=markup,
+                )
+            _PROMO_TS[int(chat_id)] = time.time()
+            return
+        await bot.send_message(
+            chat_id,
+            text,
+            parse_mode="HTML",
+            reply_markup=markup,
+            disable_web_page_preview=True,
+        )
+    except Exception as exc:
+        name = type(exc).__name__
+        wait = float(getattr(exc, "retry_after", 0) or 0)
+        if wait > 0:
+            await asyncio.sleep(min(wait, 20))
+        if name in {"RetryAfter", "TimedOut", "NetworkError", "TelegramError"} or wait:
+            try:
+                await bot.send_message(
+                    chat_id,
+                    text,
+                    parse_mode="HTML",
+                    reply_markup=markup,
+                    disable_web_page_preview=True,
+                )
+                return
+            except Exception:
+                logger.exception("signal send retry failed for %s", chat_id)
+                return
+        logger.exception("signal send failed for %s", chat_id)
 
 
 def launch_card(ln) -> tuple[str, InlineKeyboardMarkup]:
@@ -2591,6 +2621,13 @@ async def snipe_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def launch_feed_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    try:
+        await _launch_feed_job(context)
+    except Exception:
+        logger.exception("launch feed job crashed; will retry next cycle")
+
+
+async def _launch_feed_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     binds = db.list_feed_binds()
     cache: dict[str, list] = {}
 
@@ -2618,9 +2655,9 @@ async def launch_feed_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 "geckoterminal-mover",
             }
             chg = abs(float(getattr(ln, "chg_1h", 0) or 0))
-            if ln.liquidity_usd >= (100 if loose else 500) or hot or chg >= 5:
+            if ln.liquidity_usd >= (1 if loose else 250) or hot or chg >= 3:
                 keep.append(ln)
-        return keep or list(rows[:4])
+        return keep or list(rows[:8])
 
     for user in db.list_users():
         if not user.get("alerts_on"):
@@ -2651,9 +2688,9 @@ async def launch_feed_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 if (resolve_chain(ln.chain) or (ln.chain or "").lower()) == want
                 or (ln.chain or "").lower() == bind
             ] or rows[:4]
-        for ln in pool[:6]:
+        for ln in pool[:12]:
             key = f"ch:{chat_id}:{ln.chain}:{(ln.token or '')[:20]}"
-            if not db.should_resend_signal(int(chat_id), key, 1, cooldown_s=12 * 60):
+            if not db.should_resend_signal(int(chat_id), key, 1, cooldown_s=4 * 60):
                 continue
             text, markup = launch_card(ln)
             try:

@@ -65,6 +65,7 @@ def fetch_new_pools(chain: str | None = None, limit: int = 20) -> list[Launch]:
             return []
         gecko_id = CHAINS[resolved]["gecko"]
         urls.append((gecko_id, GECKO_NEW.format(network=gecko_id)))
+        urls.append((gecko_id, GECKO_NEW.format(network=gecko_id) + "?page=2"))
         urls.append((gecko_id, GECKO_TREND.format(network=gecko_id)))
         urls.append((gecko_id, GECKO_POOLS.format(network=gecko_id)))
     else:
