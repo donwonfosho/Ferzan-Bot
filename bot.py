@@ -1625,12 +1625,17 @@ def launch_card(ln) -> tuple[str, InlineKeyboardMarkup]:
     href = (CHAINS.get(cid, {}).get("explorer_addr") or "").format(addr=ca) if ca.startswith("0x") or cid == "sol" else ""
     if cid == "sol" and ca:
         href = f"https://solscan.io/token/{ca}"
-    title = f"{mark} <a href=\"{html.escape(href)}\"><b>${name}</b></a>" if href else f"{mark} <b>${name}</b>"
+    title = f"{mark} <b>${name}</b>"
+    links = []
+    if href:
+        links.append(f'<a href="{html.escape(href)}">Scan</a>')
     text = (
         f"{title}\n"
-        f"<b>{chain}</b>   💧 ${liq:,.0f} liq\n"
-        f"<code>{html.escape(ca)}</code>\n"
-        f"<i>Blue ticker → explorer · tap CA to copy</i>"
+        f"Mint\n<code>{html.escape(ca)}</code>\n"
+        f"💧 {_esc(cid.upper() if cid else chain)}  ·  ⛓ {chain}\n"
+        f"💧 Liq ${liq:,.0f}\n"
+        + (" · ".join(links) + "\n" if links else "")
+        + "<i>Tap mint to copy</i>"
     )
     short = ca if len(ca) <= 48 else ca[:48]
     rows = [
@@ -1672,7 +1677,10 @@ async def launches_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     for ln in launches:
         text, markup = launch_card(ln)
         await update.effective_message.reply_text(
-            text, parse_mode="HTML", reply_markup=markup
+            text,
+            parse_mode="HTML",
+            reply_markup=markup,
+            disable_web_page_preview=True,
         )
 
 
@@ -2374,14 +2382,20 @@ async def launch_feed_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     launches = sniper.fetch_new_pools(None, limit=12)
     if not launches:
         return
-    interesting = [ln for ln in launches if ln.liquidity_usd >= 25_000]
+    interesting = [ln for ln in launches if ln.liquidity_usd >= 8_000]
     if not interesting:
         return
+    by_chain: dict[str, list] = {}
+    for ln in interesting:
+        by_chain.setdefault((ln.chain or "?").lower(), []).append(ln)
+    diverse: list = []
+    for rows in by_chain.values():
+        diverse.extend(rows[:2])
     for user in db.list_users():
         if not user.get("alerts_on"):
             continue
         uid = int(user["user_id"])
-        for ln in interesting[:8]:
+        for ln in diverse[:12]:
             cid = resolve_chain(ln.chain) or (ln.chain or "").lower()
             if cid and not db.flag_on(uid, f"feed_{cid}", 1):
                 continue
@@ -2391,7 +2405,11 @@ async def launch_feed_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             text, markup = launch_card(ln)
             try:
                 await context.bot.send_message(
-                    uid, text, parse_mode="HTML", reply_markup=markup
+                    uid,
+                    text,
+                    parse_mode="HTML",
+                    reply_markup=markup,
+                    disable_web_page_preview=True,
                 )
             except Exception:
                 logger.exception("launch feed failed for %s", uid)
