@@ -345,37 +345,36 @@ async def resolve_symbol_or_reply(update: Update, symbol: str):
 
 
 def home_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
+    chat = (os.getenv("FERZAN_CHAT_URL") or "https://t.me/Ferzan_Chat").strip()
+    rows = [
         [
-            [
-                InlineKeyboardButton("⛓ Chains", callback_data="go:chains"),
-                InlineKeyboardButton("👛 Wallets", callback_data="go:wallets"),
-            ],
-            [
-                InlineKeyboardButton("📡 Signals", callback_data="go:signal:sol"),
-                InlineKeyboardButton("👯 Copytrade", callback_data="go:copy"),
-            ],
-            [
-                InlineKeyboardButton("⚙️ Settings", callback_data="go:settings"),
-                InlineKeyboardButton("⏱ Orders", callback_data="go:snipes"),
-            ],
-            [
-                InlineKeyboardButton("📊 Positions", callback_data="go:pos"),
-                InlineKeyboardButton("🎯 Auto snipe", callback_data="go:snipehelp"),
-            ],
-            [
-                InlineKeyboardButton("🚀 Launches", callback_data="go:launches"),
-                InlineKeyboardButton("💱 Live quote", callback_data="go:quotehelp"),
-            ],
-            [
-                InlineKeyboardButton("💸 Fees", callback_data="go:fees"),
-                InlineKeyboardButton("📉 Drawdown", callback_data="go:pnl"),
-            ],
-            [
-                InlineKeyboardButton("⚡ BUY / SELL — paste a CA", callback_data="go:buyhelp"),
-            ],
-        ]
-    )
+            InlineKeyboardButton("⛓ Chains", callback_data="go:chains"),
+            InlineKeyboardButton("👛 Wallets", callback_data="go:wallets"),
+        ],
+        [
+            InlineKeyboardButton("⚙️ Trade desk", callback_data="go:settings"),
+            InlineKeyboardButton("📊 Bag", callback_data="go:bag"),
+        ],
+        [
+            InlineKeyboardButton("📡 Signals", callback_data="go:feeds"),
+            InlineKeyboardButton("🎯 Snipe", callback_data="go:snipehelp"),
+        ],
+        [
+            InlineKeyboardButton("⏱ Limits", callback_data="go:snipes"),
+            InlineKeyboardButton("👯 Copy", callback_data="go:copy"),
+        ],
+        [
+            InlineKeyboardButton("🚀 Launches", callback_data="go:launches"),
+            InlineKeyboardButton("💸 Cut", callback_data="go:fees"),
+        ],
+        [
+            InlineKeyboardButton("⚡ PASTE A CA — BUY / SELL", callback_data="go:buyhelp"),
+        ],
+        [
+            InlineKeyboardButton("💬 Ferzan Chat", url=chat),
+        ],
+    ]
+    return InlineKeyboardMarkup(rows)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -395,18 +394,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         user = db.ensure_user(update.effective_user.id, update.effective_user.username)
         ready, _fee_note = fees.live_ready()
-        cash = float(user.get("paper_cash") or 10000)
-        floor = int(user.get("min_confluence") or 62)
-        size = float(user.get("size_pct") or 5)
-        cap = float(user.get("max_daily_loss_pct") or 8)
+        buy_usd = float(user.get("buy_usd") or 25)
+        bslip = float(user.get("buy_slip_pct") or 10)
         text = (
-            "⚡ FERZAN\n"
+            "⚡ FERZAN TRADE BOT\n"
             "See it. Ape it. Send it.\n\n"
-            "1. Tap Wallets → pick a chain → fund it\n"
-            "2. Paste a CA\n"
-            "3. Tap Buy — it spends YOUR bag\n\n"
-            f"🎚️ Floor {floor} · size {size}% · cut {fees.current_bps() / 100:.2f}%\n"
-            "/settings to change size and floor"
+            "Paste a CA. Score it. Buy from YOUR wallet.\n"
+            "Signals in the chain rooms. Talk in Ferzan Chat.\n\n"
+            f"💵 Default buy ${buy_usd:.0f} · slip {bslip:.0f}% · cut {fees.current_bps() / 100:.2f}%\n"
+            "/settings  ·  /wallet  ·  /bag"
         )
         target = update.effective_message
         if not target:
@@ -429,8 +425,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         try:
             if update.effective_message:
                 await update.effective_message.reply_text(
-                    "FERZAN is up. Desk hit a snag loading your paper book. "
-                    "Try /signal sol — do not Redeploy yet."
+                    "FERZAN is up. Desk hit a snag. Try /wallet — do not Redeploy yet."
                 )
         except Exception:
             logger.exception("start fallback failed")
@@ -449,9 +444,9 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/sl 30 — live stop loss %\n"
         "/buylimit <CA> <price> 3 — buy when mark hits\n"
         "/limits — list buy limits\n"
-        "/settings — size, floor, daily cap\n"
+        "/settings — buy size, floor, protection\n"
         "/feeds — on/off launch alerts per chain\n"
-        "/positions — paper desk\n"
+        "/positions — live bag\n"
         "/launches — new pools\n"
         "/signal <CA> — score a token\n"
         "/snipe <CA> — arm live snipe (capped)\n"
@@ -621,13 +616,34 @@ def _token_liq_usd(mint: str) -> float:
         return -1.0
 
 
+def _slip_bps(uid: int, side: str = "buy") -> int:
+    user = db.get_user(uid) or {}
+    raw = user.get("buy_slip_pct" if side == "buy" else "sell_slip_pct") or 10
+    try:
+        pct = float(raw)
+    except (TypeError, ValueError):
+        pct = 10.0
+    return int(max(10, min(9900, pct * 100)))
+
+
+def _default_buy_usd(uid: int) -> float:
+    user = db.get_user(uid) or {}
+    try:
+        usd = float(user.get("buy_usd") or 25)
+    except (TypeError, ValueError):
+        usd = 25.0
+    return min(signer.max_usd(), max(1.0, usd))
+
+
 def _live_buy_followup(
     uid: int, card, query: str, paper_ok: bool, force: bool, usd_override: float | None = None
 ) -> str:
     if not signer.live_enabled():
-        return "Live: OFF. Add LIVE_BUYS=1 and restart."
-    if not paper_ok and not force:
-        return "Live: skipped (score/floor blocked). Override to force."
+        return "Live buys are off. LIVE_BUYS=0 on the server."
+    if db.flag_on(uid, "score_gate", 0) and not force:
+        floor = int((db.get_user(uid) or {}).get("min_confluence") or 0)
+        if getattr(card, "score", 100) < floor:
+            return f"Blocked by your score floor ({card.score} < {floor}). /settings floor or tap Override."
     snap = card.snapshot
     mint = (snap.token_address or "").strip()
     chain = (snap.chain or "").lower()
@@ -643,10 +659,7 @@ def _live_buy_followup(
     blocked = _rug_block(uid, card, mint)
     if blocked:
         return blocked
-    user = db.get_user(uid) or {}
-    cash = float(user.get("paper_cash") or 10000)
-    pct = float(user.get("size_pct") or 5)
-    usd = min(signer.max_usd(), max(1.0, cash * pct / 100.0))
+    usd = _default_buy_usd(uid)
     if usd_override is not None:
         usd = min(signer.max_usd(), max(1.0, float(usd_override)))
     try:
@@ -656,14 +669,16 @@ def _live_buy_followup(
     if mint.startswith("0x"):
         if not (os.getenv("ZEROX_API_KEY") or "").strip():
             return "Live: EVM needs ZEROX_API_KEY on the droplet."
-        _ok, msg = evm_signer.buy_evm(chain or "base", mint, usd, key_hex=evm_secret)
+        _ok, msg = evm_signer.buy_evm(
+            chain or "base", mint, usd, key_hex=evm_secret, slip_bps=_slip_bps(uid, "buy")
+        )
         if _ok:
             db.add_live_cost(uid, mint, usd)
             db.set_lp_mark(uid, mint, float(card.snapshot.liquidity_usd or 0))
         return msg
     if "sol" not in chain and not (len(mint) >= 32 and not mint.startswith("0x")):
         return f"Live: {chain or 'unknown'} is not Solana."
-    _ok, msg = signer.buy_sol(mint, usd, secret=sol_secret)
+    _ok, msg = signer.buy_sol(mint, usd, secret=sol_secret, slip_bps=_slip_bps(uid, "buy"))
     if _ok:
         db.add_live_cost(uid, mint, usd)
         db.set_lp_mark(uid, mint, float(card.snapshot.liquidity_usd or 0))
@@ -695,7 +710,7 @@ def _live_sell_position(uid: int, pos_id: int) -> str:
     mint = _mint_from_position(pos)
     if not mint:
         return "Live sell: no Solana mint on this ticket. Paste the CA and sell from the card."
-    _ok, msg = signer.sell_sol(mint)
+    _ok, msg = signer.sell_sol(mint, slip_bps=_slip_bps(uid, "sell"))
     return msg
 
 
@@ -711,23 +726,13 @@ async def buy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     except PriceFetchError as exc:
         await update.effective_message.reply_text(str(exc))
         return
-    ok, msg = trading.paper_buy(update.effective_user.id, card, force=False)
-    await update.effective_message.reply_text(msg)
-    live_msg = _live_buy_followup(update.effective_user.id, card, query, ok, False)
-    if live_msg:
-        await update.effective_message.reply_text(live_msg)
-    if not ok:
-        await update.effective_message.reply_text(
-            render_card(card),
-            parse_mode="HTML",
-            disable_web_page_preview=True,
-            reply_markup=card_keyboard(query, card.score),
-        )
+    live_msg = _live_buy_followup(update.effective_user.id, card, query, True, False)
+    await update.effective_message.reply_text(live_msg or "Buy sent.")
 
 
 async def positions_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await guard(update):
-        return
+    await bag_cmd(update, context)
+    return
     uid = update.effective_user.id
     user = db.get_user(uid)
     opens = db.open_positions(uid)
@@ -1004,7 +1009,11 @@ async def livesell_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.effective_message.reply_text("Usage: /livesell <solana-mint>\nSee /bag")
         return
     sol_secret, _evm = user_wallets.secrets(update.effective_user.id)
-    _ok, msg = signer.sell_sol(context.args[0].strip(), secret=sol_secret)
+    _ok, msg = signer.sell_sol(
+        context.args[0].strip(),
+        secret=sol_secret,
+        slip_bps=_slip_bps(update.effective_user.id, "sell"),
+    )
     await update.effective_message.reply_text(msg)
 
 
@@ -1086,14 +1095,35 @@ async def settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if context.args and len(context.args) == 2:
         key, raw = context.args[0].lower(), context.args[1]
         try:
-            if key in {"size", "size_pct"}:
+            if key in {"size", "size_pct", "buy"}:
                 val = float(raw)
-                if not 1 <= val <= 20:
+                if key == "buy" or val > 20:
+                    if not 1 <= val <= 5000:
+                        raise ValueError
+                    db.update_user(uid, buy_usd=val)
+                else:
+                    if not 1 <= val <= 50:
+                        raise ValueError
+                    db.update_user(uid, size_pct=val)
+            elif key in {"buyslip", "slip"}:
+                val = float(raw)
+                if not 0.1 <= val <= 99:
                     raise ValueError
-                db.update_user(uid, size_pct=val)
+                db.update_user(uid, buy_slip_pct=val)
+            elif key == "sellslip":
+                val = float(raw)
+                if not 0.1 <= val <= 99:
+                    raise ValueError
+                db.update_user(uid, sell_slip_pct=val)
+            elif key == "autobuy":
+                val = float(raw)
+                if not 0 <= val <= 5000:
+                    raise ValueError
+                db.update_user(uid, auto_buy_usd=val)
+                db.set_flag(uid, "auto_buy", val > 0)
             elif key in {"floor", "min", "score"}:
                 val = int(raw)
-                if not 40 <= val <= 90:
+                if not 0 <= val <= 90:
                     raise ValueError
                 db.update_user(uid, min_confluence=val)
             elif key in {"cap", "dd", "daily"}:
@@ -1109,7 +1139,9 @@ async def settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     raise ValueError
                 db.update_user(uid, drawdown_alert_pct=val)
             else:
-                await update.effective_message.reply_text("Keys: size, floor, cap, alerts, ddalert")
+                await update.effective_message.reply_text(
+                    "Keys: buy, buyslip, sellslip, autobuy, floor, cap, alerts"
+                )
                 return
         except ValueError:
             await update.effective_message.reply_text("Out of range.")
@@ -1119,18 +1151,45 @@ async def settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     rug = db.flag_on(uid, "rug_buy", 1)
     honey = db.flag_on(uid, "honeypot", 1)
     lpw = db.flag_on(uid, "lp_watch", 1)
+    gate = db.flag_on(uid, "score_gate", 0)
+    auto = db.flag_on(uid, "auto_buy", 0)
+    mev = db.flag_on(uid, "anti_mev", 1)
+    buy_usd = float(user.get("buy_usd") or 25)
+    bslip = float(user.get("buy_slip_pct") or 10)
+    sslip = float(user.get("sell_slip_pct") or 10)
+    abuy = float(user.get("auto_buy_usd") or 0)
     await update.effective_message.reply_text(
-        "🛡 Ferzan protection\n"
+        "⚙️ Ferzan desk\n"
+        f"💵 Default buy  ${buy_usd:.0f}   ( /settings buy 25 )\n"
+        f"📉 Buy slip {bslip:.0f}%   Sell slip {sslip:.0f}%\n"
+        f"   /settings buyslip 10   /settings sellslip 10\n"
+        f"⚡️ Auto-buy paste  {'ON $'+str(int(abuy)) if auto and abuy else 'OFF'}\n"
+        f"   /settings autobuy 25   (0 = off)\n"
+        f"{'🟢' if mev else '🔴'} Anti-MEV\n"
+        f"🎯 Score floor  {user['min_confluence']}   ( /settings floor 0 )\n\n"
+        "🛡 Protection — you turn these on or off\n"
+        f"{'🟢' if gate else '🔴'} Block buy if score under floor\n"
         f"{'🟢' if rug else '🔴'} Block buys if liq is thin / gone\n"
         f"{'🟢' if honey else '🔴'} Block buys if honeypot / unsellable\n"
-        f"{'🟢' if lpw else '🔴'} Auto-sell if LP is yanked after you're in\n\n"
-        f"Paper floor {user['min_confluence']} · size {user['size_pct']}%\n"
+        f"{'🟢' if lpw else '🔴'} Auto-sell if LP is yanked after you're in\n"
         f"DM alerts {'on' if user.get('alerts_on') else 'off'}",
         reply_markup=InlineKeyboardMarkup(
             [
                 [InlineKeyboardButton(
                     f"{'🟢' if user.get('alerts_on') else '🔴'} DM launch alerts",
                     callback_data="flg:alerts",
+                )],
+                [InlineKeyboardButton(
+                    f"{'🟢' if auto else '🔴'} Auto-buy pasted CA",
+                    callback_data="flg:auto_buy",
+                )],
+                [InlineKeyboardButton(
+                    f"{'🟢' if mev else '🔴'} Anti-MEV",
+                    callback_data="flg:anti_mev",
+                )],
+                [InlineKeyboardButton(
+                    f"{'🟢' if gate else '🔴'} Score floor gate",
+                    callback_data="flg:score_gate",
                 )],
                 [InlineKeyboardButton(
                     f"{'🟢' if rug else '🔴'} Rug buy-block",
@@ -1903,6 +1962,24 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if len(text) > 80:
         return
     await _send_signal(update, text)
+    uid = update.effective_user.id
+    if update.effective_chat and update.effective_chat.type != "private":
+        return
+    if not db.flag_on(uid, "auto_buy", 0):
+        return
+    user = db.get_user(uid) or {}
+    usd = float(user.get("auto_buy_usd") or 0)
+    if usd <= 0:
+        return
+    looks = (text.startswith("0x") and len(text) == 42) or (len(text) >= 32 and " " not in text)
+    if not looks:
+        return
+    try:
+        card = analyze(text)
+    except Exception:
+        return
+    live_msg = _live_buy_followup(uid, card, text, True, True, usd_override=usd)
+    await update.effective_message.reply_text(f"⚡️ Auto-buy ${usd:.0f}\n{live_msg}")
 
 
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2071,19 +2148,21 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         elif kind == "copy":
             await context.bot.send_message(
                 uid,
-                "Copytrade\n"
+                "👯 COPY\n"
                 "/watchwallet sol <address>\n"
-                "/watchwallet eth 0x...\n"
-                "/wallets\n"
-                "Ferzan pings you when they move. It will not spend your Trust wallet.",
+                "/watchwallet eth 0x...\n\n"
+                "Ping when they move. Mirror is opt-in.\n"
+                "Never posts your key.",
             )
         elif kind == "snipehelp":
             await context.bot.send_message(
                 uid,
-                "Auto snipe (gated)\n"
-                "/snipe sol <CA> 40\n"
-                "/snipes   /cancelsnipe 3\n"
-                "Fills paper when liq/score/age gates pass. Not first-block.",
+                "🎯 SNIPE\n"
+                "/snipe <CA> 25\n"
+                "/snipes\n"
+                "/cancelsnipe 3\n\n"
+                "Arms a live buy when the pair is tradable.\n"
+                "Uses your slip + default size from /settings.",
             )
         elif kind == "quotehelp":
             await context.bot.send_message(
@@ -2096,16 +2175,19 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         elif kind == "pnl":
             await context.bot.send_message(
                 uid,
-                f"Paper cash is on /positions and /drawdown.\nSend /positions",
+                "📊 BAG\n/bag — live tokens, PnL, sell %",
             )
         elif kind == "buyhelp":
             await context.bot.send_message(
                 uid,
-                "BUY & SELL\n"
+                "⚡ BUY & SELL\n"
                 "Paste a CA in this chat.\n"
-                "/buy sol     paper if score clears\n"
-                "/sell 3      close position #3\n"
-                "/quote sol <CA> 50     sign in Trust",
+                "Tap $5 / $25 / 0.05 on the card.\n"
+                "/settings buy 25\n"
+                "/settings buyslip 10\n"
+                "/settings sellslip 10\n"
+                "/settings autobuy 25\n"
+                "/bag to sell.",
             )
         return
     if data.startswith("tpx:") or data.startswith("slx:"):
@@ -2141,7 +2223,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     break
             _ok, msg = evm_signer.sell_evm(chain, mint, key_hex=evm_secret, pct=pct)
         else:
-            _ok, msg = signer.sell_sol(mint, secret=sol_secret, pct=pct)
+            _ok, msg = signer.sell_sol(
+                mint, secret=sol_secret, pct=pct, slip_bps=_slip_bps(uid, "sell")
+            )
         await context.bot.send_message(uid, f"{'🟢' if _ok else '🔴'} Sell {pct}% · {chain if mint.startswith('0x') else 'SOL'}\n{msg}")
         return
     if data.startswith("blm:"):
@@ -2222,7 +2306,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await query.answer("Saved")
             await context.bot.send_message(uid, f"{'🟢' if on else '🔴'} DM launch alerts")
             return
-        if flag not in {"rug_buy", "honeypot", "lp_watch"}:
+        if flag not in {"rug_buy", "honeypot", "lp_watch", "score_gate", "auto_buy", "anti_mev"}:
             return
         now = not db.flag_on(uid, flag, 1)
         db.set_flag(uid, flag, now)
@@ -2262,10 +2346,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             px = get_price_usd(gecko)
         except Exception:
             px = 0
-        usd_o = amt * px if px > 0 else float(signer.max_usd())
+        usd_o = amt * px if px > 0 else _default_buy_usd(uid)
         usd_o = min(signer.max_usd(), max(1.0, usd_o))
-        ok, msg = trading.paper_buy(uid, card, force=True)
-        await context.bot.send_message(uid, msg)
         live_msg = _live_buy_followup(uid, card, name, True, True, usd_override=usd_o)
         if live_msg:
             await context.bot.send_message(uid, f"{amt:g} native ≈ ${usd_o:.2f}\n{live_msg}")
@@ -2275,14 +2357,12 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         try:
             usd_o = float(usd_s)
         except ValueError:
-            usd_o = signer.max_usd()
+            usd_o = _default_buy_usd(uid)
         try:
             card = analyze(name)
         except PriceFetchError as exc:
             await context.bot.send_message(uid, str(exc))
             return
-        ok, msg = trading.paper_buy(uid, card, force=True)
-        await context.bot.send_message(uid, msg)
         live_msg = _live_buy_followup(uid, card, name, True, True, usd_override=usd_o)
         if live_msg:
             await context.bot.send_message(uid, live_msg)
@@ -2295,9 +2375,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         except PriceFetchError as exc:
             await context.bot.send_message(uid, str(exc))
             return
-        ok, msg = trading.paper_buy(uid, card, force=force)
-        await context.bot.send_message(uid, msg)
-        live_msg = _live_buy_followup(uid, card, name, ok, force)
+        live_msg = _live_buy_followup(uid, card, name, True, force)
         if live_msg:
             await context.bot.send_message(uid, live_msg)
         return
@@ -2432,9 +2510,13 @@ async def wallet_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 sol_secret, evm_secret = user_wallets.secrets(int(row["user_id"]))
                 usd = signer.max_usd()
                 if mint.startswith("0x"):
-                    _ok, live = evm_signer.buy_evm(chain or "base", mint, usd, key_hex=evm_secret)
+                    _ok, live = evm_signer.buy_evm(
+                        chain or "base", mint, usd, key_hex=evm_secret, slip_bps=_slip_bps(uid, "buy")
+                    )
                 else:
-                    _ok, live = signer.buy_sol(mint, usd, secret=sol_secret)
+                    _ok, live = signer.buy_sol(
+                        mint, usd, secret=sol_secret, slip_bps=_slip_bps(uid, "buy")
+                    )
                 await context.bot.send_message(row["user_id"], "Copy live\n" + live)
             except Exception as exc:
                 logger.info("copy live skip: %s", exc)
@@ -2529,7 +2611,7 @@ async def lp_watch_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                             break
                     _ok, msg = evm_signer.sell_evm(chain, mint, key_hex=evm_secret)
                 else:
-                    _ok, msg = signer.sell_sol(mint, secret=sol_secret, pct=100)
+                    _ok, msg = signer.sell_sol(mint, secret=sol_secret, pct=100, slip_bps=_slip_bps(uid, "sell"))
             except Exception as exc:
                 _ok, msg = False, str(exc)
             db.set_lp_mark(uid, mint, liq)
@@ -2594,7 +2676,7 @@ async def live_exit_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             if mint.startswith("0x"):
                 _ok, msg = evm_signer.sell_evm(evm_chain, mint, key_hex=evm_secret)
             else:
-                _ok, msg = signer.sell_sol(mint, secret=sol_secret, pct=100)
+                _ok, msg = signer.sell_sol(mint, secret=sol_secret, pct=100, slip_bps=_slip_bps(uid, "sell"))
         except Exception as exc:
             msg = str(exc)
             _ok = False
@@ -2818,9 +2900,9 @@ def main() -> None:
                 [
                     BotCommand("start", "Home"),
                     BotCommand("signal", "Score a market"),
-                    BotCommand("buy", "Paper buy if it clears"),
-                    BotCommand("quote", "Live unsigned quote + cut"),
-                    BotCommand("positions", "Paper book"),
+                    BotCommand("buy", "Live buy a CA"),
+                    BotCommand("quote", "Quote + cut"),
+                    BotCommand("positions", "Live bag"),
                     BotCommand("snipe", "Arm a gated snipe"),
                     BotCommand("launches", "New pools"),
                     BotCommand("chains", "Venues"),

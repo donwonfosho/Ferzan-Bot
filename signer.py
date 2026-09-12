@@ -30,14 +30,15 @@ def configured() -> bool:
 
 
 def live_enabled() -> bool:
-    return os.getenv("LIVE_BUYS", "").strip().lower() in {"1", "true", "yes", "on"}
+    raw = os.getenv("LIVE_BUYS", "1").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
 
 
 def max_usd() -> float:
     try:
-        return max(1.0, min(50.0, float(os.getenv("SIGNER_MAX_USD", "10"))))
+        return max(1.0, min(5000.0, float(os.getenv("SIGNER_MAX_USD", "500"))))
     except ValueError:
-        return 10.0
+        return 500.0
 
 
 def _rpc() -> str:
@@ -98,7 +99,12 @@ def keypair_from_secret(secret: str):
         return Keypair.from_bytes(raw)
 
 
-def buy_sol(output_mint: str, usd: float, secret: str | None = None) -> tuple[bool, str]:
+def buy_sol(
+    output_mint: str,
+    usd: float,
+    secret: str | None = None,
+    slip_bps: int | None = None,
+) -> tuple[bool, str]:
     if not live_enabled():
         return False, "Live buys are OFF. Add LIVE_BUYS=1 on the droplet, then restart."
     if not secret and not configured():
@@ -131,7 +137,7 @@ def buy_sol(output_mint: str, usd: float, secret: str | None = None) -> tuple[bo
                 "inputMint": SOL_MINT,
                 "outputMint": mint,
                 "amount": str(lamports),
-                "slippageBps": "150",
+                "slippageBps": str(int(slip_bps if slip_bps is not None else 1000)),
             },
             timeout=15,
         )
@@ -339,7 +345,12 @@ def send_sol(dest: str, secret: str | None = None, lamports: int | None = None) 
     return True, f"Collected {send_amt / 1e9:.6f} SOL\nhttps://solscan.io/tx/{sig}"
 
 
-def sell_sol(input_mint: str, secret: str | None = None, pct: int = 100) -> tuple[bool, str]:
+def sell_sol(
+    input_mint: str,
+    secret: str | None = None,
+    pct: int = 100,
+    slip_bps: int | None = None,
+) -> tuple[bool, str]:
     if not live_enabled():
         return False, "Live sells are OFF. Add LIVE_BUYS=1 and restart."
     if not secret and not configured():
@@ -367,7 +378,7 @@ def sell_sol(input_mint: str, secret: str | None = None, pct: int = 100) -> tupl
                 "inputMint": mint,
                 "outputMint": SOL_MINT,
                 "amount": str(raw_amt),
-                "slippageBps": "200",
+                "slippageBps": str(int(slip_bps if slip_bps is not None else 1000)),
             },
             timeout=15,
         )

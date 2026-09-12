@@ -231,6 +231,14 @@ def init_db() -> None:
             conn.execute("ALTER TABLE users ADD COLUMN last_query TEXT")
         if "copy_paper" not in cols:
             conn.execute("ALTER TABLE users ADD COLUMN copy_paper INTEGER DEFAULT 0")
+        if "buy_usd" not in cols:
+            conn.execute("ALTER TABLE users ADD COLUMN buy_usd REAL DEFAULT 25")
+        if "buy_slip_pct" not in cols:
+            conn.execute("ALTER TABLE users ADD COLUMN buy_slip_pct REAL DEFAULT 10")
+        if "sell_slip_pct" not in cols:
+            conn.execute("ALTER TABLE users ADD COLUMN sell_slip_pct REAL DEFAULT 10")
+        if "auto_buy_usd" not in cols:
+            conn.execute("ALTER TABLE users ADD COLUMN auto_buy_usd REAL DEFAULT 0")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS limits (

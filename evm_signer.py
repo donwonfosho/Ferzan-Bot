@@ -56,7 +56,8 @@ def native_balance(chain: str, address: str) -> tuple[float, str]:
 
 
 def live_enabled() -> bool:
-    return os.getenv("LIVE_BUYS", "").strip().lower() in {"1", "true", "yes", "on"}
+    raw = os.getenv("LIVE_BUYS", "1").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
 
 
 def configured() -> bool:
@@ -104,7 +105,13 @@ def _native_decimals(chain: str) -> int:
     return 18
 
 
-def buy_evm(chain: str, buy_token: str, usd: float, key_hex: str | None = None) -> tuple[bool, str]:
+def buy_evm(
+    chain: str,
+    buy_token: str,
+    usd: float,
+    key_hex: str | None = None,
+    slip_bps: int | None = None,
+) -> tuple[bool, str]:
     if not live_enabled():
         return False, "Live buys OFF. LIVE_BUYS=1"
     cid = resolve_chain(chain)
@@ -155,7 +162,7 @@ def buy_evm(chain: str, buy_token: str, usd: float, key_hex: str | None = None) 
                 "sellAmount": str(wei),
                 "taker": acct.address,
                 "txOrigin": acct.address,
-                "slippageBps": "150",
+                "slippageBps": str(int(slip_bps if slip_bps is not None else 1000)),
             },
             timeout=20,
         )
