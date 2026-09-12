@@ -346,6 +346,7 @@ async def resolve_symbol_or_reply(update: Update, symbol: str):
 
 def home_keyboard() -> InlineKeyboardMarkup:
     chat = (os.getenv("FERZAN_CHAT_URL") or "https://t.me/Ferzan_Chat").strip()
+    xurl = (os.getenv("FERZAN_X_URL") or "https://x.com/ferzaneco").strip()
     rows = [
         [
             InlineKeyboardButton("⛓ Chains", callback_data="go:chains"),
@@ -371,7 +372,8 @@ def home_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton("⚡ PASTE A CA — BUY / SELL", callback_data="go:buyhelp"),
         ],
         [
-            InlineKeyboardButton("💬 Ferzan Chat", url=chat),
+            InlineKeyboardButton("💬 Chat", url=chat),
+            InlineKeyboardButton("𝕏 @FerzanEco", url=xurl),
         ],
     ]
     return InlineKeyboardMarkup(rows)
@@ -400,7 +402,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "⚡ FERZAN TRADE BOT\n"
             "See it. Ape it. Send it.\n\n"
             "Paste a CA. Score it. Buy from YOUR wallet.\n"
-            "Signals in the chain rooms. Talk in Ferzan Chat.\n\n"
+            "Signals in the chain rooms. Talk in Ferzan Chat.\n"
+            "X — @FerzanEco\n\n"
             f"💵 Default buy ${buy_usd:.0f} · slip {bslip:.0f}% · cut {fees.current_bps() / 100:.2f}%\n"
             "/settings  ·  /wallet  ·  /bag"
         )
