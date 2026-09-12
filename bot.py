@@ -267,7 +267,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         text = (
             "⚡ FERZAN\n"
             "See it. Ape it. Send it.\n\n"
-            "1. Fund the wallet below\n"
+            "1. Tap Wallets → pick a chain → fund it\n"
             "2. Paste a CA\n"
             "3. Tap Buy — it spends YOUR bag\n\n"
             f"🎚️ Floor {floor} · size {size}% · cut {fees.current_bps() / 100:.2f}%\n"
@@ -286,12 +286,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         else:
             await target.reply_text(text, reply_markup=home_keyboard())
         try:
-            await target.reply_text(
-                user_wallets.card_text(update.effective_user.id),
-                parse_mode="Markdown",
-            )
+            user_wallets.ensure(update.effective_user.id)
         except Exception:
-            logger.exception("wallet card on start failed")
+            logger.exception("wallet ensure on start failed")
     except Exception:
         logger.exception("start failed")
         try:
@@ -728,15 +725,32 @@ async def watchwallet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     )
 
 
+def wallet_keyboard() -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    pair: list[InlineKeyboardButton] = []
+    for cid in ACTIVE:
+        pair.append(InlineKeyboardButton(cid.upper(), callback_data=f"wa:{cid}"))
+        if len(pair) == 3:
+            rows.append(pair)
+            pair = []
+    if pair:
+        rows.append(pair)
+    rows.append([InlineKeyboardButton("Return", callback_data="go:home")])
+    return InlineKeyboardMarkup(rows)
+
+
 async def wallet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update):
         return
     try:
-        text = user_wallets.card_text(update.effective_user.id)
+        user_wallets.ensure(update.effective_user.id)
     except Exception as exc:
         await update.effective_message.reply_text(f"Could not create wallet.\n{exc}")
         return
-    await update.effective_message.reply_text(text, parse_mode="Markdown")
+    await update.effective_message.reply_text(
+        "Select the chain. Deposit and trade on that network.",
+        reply_markup=wallet_keyboard(),
+    )
 
 
 async def wallets_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1071,6 +1085,38 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     uid = update.effective_user.id
     data = query.data or ""
+    if data.startswith("wa:"):
+        cid = resolve_chain(data[3:]) or data[3:]
+        try:
+            row = user_wallets.ensure(uid)
+        except Exception as exc:
+            await context.bot.send_message(uid, str(exc))
+            return
+        if cid == "sol":
+            bal = ""
+            try:
+                lamports = signer.sol_balance_lamports(row["sol_pub"])
+                bal = f"\nBalance {lamports / 1_000_000_000:.6f} SOL"
+            except Exception:
+                bal = ""
+            await context.bot.send_message(
+                uid,
+                f"SOLANA\n`{row['sol_pub']}`{bal}\n\nSend SOL here. Paste a Solana CA to buy.",
+                parse_mode="Markdown",
+                reply_markup=wallet_keyboard(),
+            )
+            return
+        label = CHAINS.get(cid, {}).get("label", cid.upper())
+        native = CHAINS.get(cid, {}).get("native", "ETH")
+        await context.bot.send_message(
+            uid,
+            f"{label.upper()}\n`{row['evm_pub']}`\n\n"
+            f"Same EVM key. Network must be {label}. Gas in {native}.\n"
+            f"Paste a {label} CA to buy.",
+            parse_mode="Markdown",
+            reply_markup=wallet_keyboard(),
+        )
+        return
     if data.startswith("ch:"):
         cid = resolve_chain(data[3:])
         if not cid:
@@ -1092,7 +1138,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         kind = data[3:]
         if kind.startswith("signal:"):
             await _send_signal(update, kind.split(":", 1)[1], edit=False)
-        elif kind == "help":
+        elif kind in {"help", "home"}:
             await start(update, context)
         elif kind == "pos":
             fake = update
