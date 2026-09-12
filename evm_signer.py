@@ -10,7 +10,7 @@ from chains import CHAINS, resolve_chain
 
 NATIVE = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
 ZEROX = "https://api.0x.org/swap/allowance-holder/quote"
-SUPPORTED = {"eth", "base", "bsc"}
+SUPPORTED = {"eth", "base", "bsc", "arb", "avax"}
 
 
 def _as_int(val, default: int = 0) -> int:
@@ -96,7 +96,7 @@ def status_text() -> str:
     return (
         f"EVM signer {addr}\n"
         f"Live: {flag} · max ${max_usd():.0f}\n"
-        "Chains: ETH, Base, BSC. Hood/Arb later."
+        "Chains: ETH, Base, BSC, Arb, Avax."
     )
 
 
@@ -111,7 +111,7 @@ def buy_evm(chain: str, buy_token: str, usd: float, key_hex: str | None = None) 
         return False, "Set SIGNER_KEY_EVM and ZEROX_API_KEY."
     cid = resolve_chain(chain)
     if cid not in SUPPORTED:
-        cid = "eth"
+        return False, f"Live EVM is {', '.join(sorted(SUPPORTED))}. Not {chain}."
     token = (buy_token or "").strip()
     if not token.startswith("0x") or len(token) != 42:
         return False, "Need a 0x contract."
@@ -277,7 +277,7 @@ def sell_evm(chain: str, sell_token: str) -> tuple[bool, str]:
         return False, "Set SIGNER_KEY_EVM and ZEROX_API_KEY."
     cid = resolve_chain(chain)
     if cid not in SUPPORTED:
-        cid = "eth"
+        return False, f"Live EVM is {', '.join(sorted(SUPPORTED))}. Not {chain}."
     token = _addr(sell_token)
     try:
         from eth_account import Account
