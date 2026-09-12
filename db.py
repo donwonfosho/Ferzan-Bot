@@ -132,6 +132,14 @@ def init_db() -> None:
                 note TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS live_exits (
+                user_id INTEGER NOT NULL,
+                mint TEXT NOT NULL,
+                tp_pct REAL,
+                sl_pct REAL,
+                PRIMARY KEY(user_id, mint)
+            );
+
             CREATE TABLE IF NOT EXISTS live_basis (
                 user_id INTEGER NOT NULL,
                 mint TEXT NOT NULL,
@@ -741,6 +749,45 @@ def live_cost(user_id: int, mint: str) -> float:
             (user_id, mint),
         ).fetchone()
         return float(row["cost_usd"]) if row else 0.0
+
+
+def set_live_exit(user_id: int, mint: str, tp_pct: float | None = None, sl_pct: float | None = None) -> None:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT tp_pct, sl_pct FROM live_exits WHERE user_id = ? AND mint = ?",
+            (user_id, mint),
+        ).fetchone()
+        tp = tp_pct if tp_pct is not None else (float(row["tp_pct"]) if row and row["tp_pct"] is not None else None)
+        sl = sl_pct if sl_pct is not None else (float(row["sl_pct"]) if row and row["sl_pct"] is not None else None)
+        conn.execute(
+            """
+            INSERT INTO live_exits (user_id, mint, tp_pct, sl_pct)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(user_id, mint) DO UPDATE SET tp_pct = excluded.tp_pct, sl_pct = excluded.sl_pct
+            """,
+            (user_id, mint, tp, sl),
+        )
+        conn.commit()
+
+
+def get_live_exit(user_id: int, mint: str) -> dict | None:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM live_exits WHERE user_id = ? AND mint = ?",
+            (user_id, mint),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def list_live_exits() -> list[dict]:
+    with get_conn() as conn:
+        return [dict(r) for r in conn.execute("SELECT * FROM live_exits").fetchall()]
+
+
+def clear_live_exit(user_id: int, mint: str) -> None:
+    with get_conn() as conn:
+        conn.execute("DELETE FROM live_exits WHERE user_id = ? AND mint = ?", (user_id, mint))
+        conn.commit()
 
 
 def clear_live_cost(user_id: int, mint: str) -> None:

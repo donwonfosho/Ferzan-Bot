@@ -656,12 +656,24 @@ def _bag_panel(mint: str, amount: float, addr: str, uid: int) -> tuple[str, Inli
         f"<code>{html.escape(mint)}</code>\n"
         f"Tokens: <b>{amount:g}</b>\n"
         f"{pnl_line}\n"
-        f"<i>Tap CA to copy</i>"
     )
+    ex = db.get_live_exit(uid, mint)
+    if ex and (ex.get("tp_pct") or ex.get("sl_pct")):
+        bits = []
+        if ex.get("tp_pct"):
+            bits.append(f"🎯 TP +{float(ex['tp_pct']):.0f}%")
+        if ex.get("sl_pct"):
+            bits.append(f"🛑 SL -{float(ex['sl_pct']):.0f}%")
+        text += " · ".join(bits) + "\n"
+    text += "<i>Tap CA to copy</i>"
     kb = InlineKeyboardMarkup(
         [
             [
                 InlineKeyboardButton("☢️ Sell All", callback_data=f"slp:100:{short}"),
+            ],
+            [
+                InlineKeyboardButton("🎯 TP +50%", callback_data=f"tpx:50:{short}"),
+                InlineKeyboardButton("🛑 SL -30%", callback_data=f"slx:30:{short}"),
             ],
             [
                 InlineKeyboardButton("25%", callback_data=f"slp:25:{short}"),
@@ -1589,6 +1601,19 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 "/quote sol <CA> 50     sign in Trust",
             )
         return
+    if data.startswith("tpx:") or data.startswith("slx:"):
+        kind, pct_s, mint = data.split(":", 2)
+        try:
+            pct = float(pct_s)
+        except ValueError:
+            pct = 50.0
+        if kind == "tpx":
+            db.set_live_exit(uid, mint, tp_pct=pct)
+            await context.bot.send_message(uid, f"🎯 Live TP +{pct:.0f}% armed on that mint.")
+        else:
+            db.set_live_exit(uid, mint, sl_pct=pct)
+            await context.bot.send_message(uid, f"🛑 Live SL -{pct:.0f}% armed on that mint.")
+        return
     if data.startswith("slp:"):
         _tag, pct_s, mint = data.split(":", 2)
         try:
@@ -1819,6 +1844,52 @@ async def drawdown_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             logger.exception("drawdown notify failed for %s", uid)
 
 
+async def live_exit_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    for row in db.list_live_exits():
+        uid = int(row["user_id"])
+        mint = row["mint"]
+        cost = db.live_cost(uid, mint)
+        if cost <= 0:
+            continue
+        px = _token_mark_usd(mint)
+        if px <= 0:
+            continue
+        # worth unknown without qty; compare mark vs implied entry from last cost only if we have holdings
+        try:
+            sol_secret, evm_secret = user_wallets.secrets(uid)
+            if mint.startswith("0x"):
+                continue
+            held = next((h for h in signer.holdings(sol_secret) if h["mint"] == mint), None)
+            if not held:
+                continue
+            worth = float(held["amount"]) * px
+        except Exception:
+            continue
+        pnl_pct = ((worth - cost) / cost) * 100
+        hit = None
+        if row.get("tp_pct") and pnl_pct >= float(row["tp_pct"]):
+            hit = "tp"
+        if row.get("sl_pct") and pnl_pct <= -float(row["sl_pct"]):
+            hit = "sl"
+        if not hit:
+            continue
+        try:
+            _ok, msg = signer.sell_sol(mint, secret=sol_secret, pct=100)
+        except Exception as exc:
+            msg = str(exc)
+            _ok = False
+        db.clear_live_exit(uid, mint)
+        if _ok:
+            db.clear_live_cost(uid, mint)
+        try:
+            await context.bot.send_message(
+                uid,
+                f"{'🎯 TP' if hit == 'tp' else '🛑 SL'} hit ({pnl_pct:+.1f}%)\n{msg}",
+            )
+        except Exception:
+            logger.exception("live exit notify failed")
+
+
 async def snipe_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     for user_id, sid, status, msg in sniper.scan_armed():
         if status != "filled":
@@ -1934,6 +2005,7 @@ def main() -> None:
         jq.run_repeating(wallet_job, interval=WALLET_POLL_SECONDS, first=40)
         jq.run_repeating(drawdown_job, interval=DRAWDOWN_POLL_SECONDS, first=55)
         jq.run_repeating(snipe_job, interval=SNIPE_POLL_SECONDS, first=18)
+        jq.run_repeating(live_exit_job, interval=45, first=50)
         jq.run_repeating(launch_feed_job, interval=LAUNCH_FEED_SECONDS, first=35)
     else:
         logger.warning("job-queue extra missing; commands still work, scanners off")
