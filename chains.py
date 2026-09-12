@@ -93,6 +93,21 @@ CHAINS = {
               explorer="https://tonviewer.com",
               router="STON.fi / data",
               notes="Not EVM. Score + alerts. No 0x quote."),
+    "pol": _c("pol", "Polygon", "evm", "polygon", "polygon_pos", "POL",
+              chain_id=137, rpc="https://polygon-rpc.com",
+              explorer="https://polygonscan.com", router="0x / QuickSwap"),
+    "pulse": _c("pulse", "PulseChain", "evm", "pulsechain", "pulsechain", "PLS",
+                explorer="https://scan.pulsechain.com",
+                router="data / PulseX",
+                notes="Score + signals when Gecko lists pools"),
+    "ink": _c("ink", "Ink", "evm", "ink", "ink", "ETH",
+              explorer="https://explorer.inkonchain.com",
+              router="data until 0x lists it"),
+    "op": _c("op", "Optimism", "evm", "optimism", "optimism", "ETH",
+             chain_id=10, rpc="https://mainnet.optimism.io",
+             explorer="https://optimistic.etherscan.io", router="0x / Uniswap"),
+    "linea": _c("linea", "Linea", "evm", "linea", "linea", "ETH",
+                explorer="https://lineascan.build", router="0x if listed"),
 }
 
 ALIASES = {
@@ -106,12 +121,16 @@ ALIASES = {
     "tron": "trx",
     "toncoin": "ton",
     "mon": "monad",
+    "polygon": "pol", "matic": "pol", "poly": "pol",
+    "pulsechain": "pulse", "pls": "pulse",
+    "optimism": "op", "opmainnet": "op",
 }
 
 # Same order as Maestro's chain list in the screenshot.
 ACTIVE = (
     "sol", "bsc", "base", "eth", "monad", "sonic", "avax",
-    "arb", "hype", "hood", "arc", "stable", "trx", "ton",
+    "arb", "hype", "hood", "pol", "pulse", "ink", "op", "linea",
+    "arc", "stable", "trx", "ton",
 )
 
 

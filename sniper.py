@@ -60,7 +60,10 @@ def fetch_new_pools(chain: str | None = None, limit: int = 20) -> list[Launch]:
         gecko_id = CHAINS[resolved]["gecko"]
         urls.append((gecko_id, GECKO_NEW.format(network=gecko_id)))
     else:
-        for cid in ("eth", "bsc", "base", "sol", "arb", "avax", "hood", "hype", "sonic", "monad"):
+        for cid in (
+            "eth", "bsc", "base", "sol", "arb", "avax", "hood", "hype",
+            "sonic", "monad", "pol", "pulse", "ink", "ton", "op", "linea",
+        ):
             gid = CHAINS[cid]["gecko"]
             urls.append((gid, GECKO_NEW.format(network=gid)))
     gecko_id = urls[0][0] if urls else ""
