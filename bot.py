@@ -762,6 +762,7 @@ def wallet_menu_keyboard() -> InlineKeyboardMarkup:
             [InlineKeyboardButton("🧲 Collect", callback_data="wi:col")],
             [InlineKeyboardButton("📤 Disperse", callback_data="wi:dis")],
             [InlineKeyboardButton("🔗 Addresses by chain", callback_data="wi:chains")],
+            [InlineKeyboardButton("🗝️ Export keys", callback_data="wi:exp")],
         ]
     )
 
@@ -1212,6 +1213,19 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             return
         if kind == "rearr":
             await context.bot.send_message(uid, "📂 One trading pair per user for now.")
+            return
+        if kind == "exp":
+            if update.effective_chat and update.effective_chat.type != "private":
+                await context.bot.send_message(uid, "Export only works in a private chat with the bot.")
+                return
+            try:
+                await context.bot.send_message(
+                    uid,
+                    user_wallets.export_text(uid),
+                    parse_mode="Markdown",
+                )
+            except Exception as exc:
+                await context.bot.send_message(uid, str(exc))
             return
         if kind == "chains":
             await context.bot.send_message(

@@ -97,6 +97,22 @@ def secrets(user_id: int) -> tuple[str, str]:
     return _unlock(row["sol_key"]), _unlock(row["evm_key"])
 
 
+def export_text(user_id: int) -> str:
+    sol, evm = secrets(user_id)
+    row = ensure(user_id)
+    return (
+        "⚠️ SAVE OFFLINE. Delete this Telegram message after you copy it.\n"
+        "Anyone with these keys owns the bag.\n\n"
+        f"Solana address\n`{row['sol_pub']}`\n"
+        f"Solana private key\n`{sol}`\n\n"
+        f"EVM address\n`{row['evm_pub']}`\n"
+        f"EVM private key\n`{evm}`\n\n"
+        "Phantom → import Solana private key.\n"
+        "MetaMask / Trust → import EVM private key.\n"
+        "Bot-generated wallets have no 12-word phrase — only these keys."
+    )
+
+
 def card_text(user_id: int) -> str:
     row = ensure(user_id)
     bal = ""
