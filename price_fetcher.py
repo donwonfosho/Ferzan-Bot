@@ -16,6 +16,7 @@ import requests
 
 COINGECKO = "https://api.coingecko.com/api/v3"
 DEX_SEARCH = "https://api.dexscreener.com/latest/dex/search"
+DEX_TOKEN = "https://api.dexscreener.com/latest/dex/tokens/{addr}"
 TIMEOUT = 10
 
 
@@ -149,36 +150,75 @@ def snapshot_from_pair(pair: dict[str, Any], query: str) -> MarketSnapshot:
     )
 
 
-def search_dex(query: str) -> MarketSnapshot | None:
-    try:
-        resp = requests.get(DEX_SEARCH, params={"q": query}, timeout=TIMEOUT)
-        resp.raise_for_status()
-    except requests.RequestException as exc:
-        raise PriceFetchError(f"DexScreener request failed: {exc}") from exc
+def _looks_ca(query: str) -> bool:
+    q = (query or "").strip()
+    if q.startswith("0x") and len(q) == 42:
+        return True
+    if 32 <= len(q) <= 44 and not q.startswith("0x") and " " not in q:
+        return True
+    return False
 
-    pairs = (resp.json() or {}).get("pairs") or []
+
+def _pairs_for_token(addr: str) -> list[dict[str, Any]]:
+    try:
+        resp = requests.get(DEX_TOKEN.format(addr=addr), timeout=TIMEOUT)
+        resp.raise_for_status()
+        return (resp.json() or {}).get("pairs") or []
+    except requests.RequestException:
+        return []
+
+
+def search_dex(query: str) -> MarketSnapshot | None:
+    q = query.strip()
+    ql = q.lower()
+    pairs: list[dict[str, Any]] = []
+    if _looks_ca(q):
+        pairs = _pairs_for_token(q)
+        pairs = [
+            p
+            for p in pairs
+            if (p.get("baseToken") or {}).get("address", "").lower() == ql
+            or (p.get("quoteToken") or {}).get("address", "").lower() == ql
+        ]
+        if not pairs:
+            return None
+    else:
+        try:
+            resp = requests.get(DEX_SEARCH, params={"q": query}, timeout=TIMEOUT)
+            resp.raise_for_status()
+        except requests.RequestException as exc:
+            raise PriceFetchError(f"DexScreener request failed: {exc}") from exc
+        pairs = (resp.json() or {}).get("pairs") or []
     if not pairs:
         return None
 
-    q = query.strip().lower()
-
     def rank(p: dict[str, Any]) -> tuple:
         base = p.get("baseToken") or {}
-        sym = (base.get("symbol") or "").lower()
+        quote = p.get("quoteToken") or {}
         addr = (base.get("address") or "").lower()
+        qaddr = (quote.get("address") or "").lower()
         pair_addr = (p.get("pairAddress") or "").lower()
-        exact = 1 if q in {sym, addr, pair_addr} else 0
+        exact = 1 if ql in {addr, qaddr, pair_addr} else 0
         liq = _num((p.get("liquidity") or {}).get("usd"))
         vol = _num((p.get("volume") or {}).get("h24"))
         return (exact, liq + vol * 0.25)
 
-    return snapshot_from_pair(max(pairs, key=rank), query)
+    snap = snapshot_from_pair(max(pairs, key=rank), query)
+    if _looks_ca(q) and snap.token_address.lower() != ql:
+        # Keep the pasted CA even if DexScreener listed it as quote.
+        snap.token_address = q
+    return snap
 
 
 def load_market(query: str) -> MarketSnapshot:
     snap = search_dex(query)
-    if snap and snap.price_usd > 0:
-        return snap
+    if snap and (snap.price_usd > 0 or _looks_ca(query)):
+        if snap:
+            return snap
+    if _looks_ca(query):
+        raise PriceFetchError(
+            f"No DexScreener pool for that CA. Check the chain / address.\n{query.strip()}"
+        )
 
     coins = search_coin(query)
     if not coins:
