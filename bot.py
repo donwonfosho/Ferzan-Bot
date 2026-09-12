@@ -20,6 +20,7 @@ from __future__ import annotations
 import html
 import logging
 import os
+import re
 from pathlib import Path
 
 from dotenv import dotenv_values, load_dotenv
@@ -1380,6 +1381,26 @@ async def wallet_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             await context.bot.send_message(row["user_id"], "\n".join(lines)[:3500])
         except Exception:
             logger.exception("wallet notify failed for %s", row["user_id"])
+        blob = "\n".join(ev.summary for ev in fresh)
+        mint = ""
+        chain = (row.get("chain") or "").lower()
+        if "sol" in chain:
+            found = re.findall(r"[1-9A-HJ-NP-Za-km-z]{32,44}", blob)
+            mint = next((x for x in found if len(x) >= 32 and not x.startswith("0x")), "")
+        else:
+            found = re.findall(r"0x[a-fA-F0-9]{40}", blob)
+            mint = found[0] if found else ""
+        if mint:
+            try:
+                sol_secret, evm_secret = user_wallets.secrets(int(row["user_id"]))
+                usd = signer.max_usd()
+                if mint.startswith("0x"):
+                    _ok, live = evm_signer.buy_evm(chain or "base", mint, usd, key_hex=evm_secret)
+                else:
+                    _ok, live = signer.buy_sol(mint, usd, secret=sol_secret)
+                await context.bot.send_message(row["user_id"], "Copy live\n" + live)
+            except Exception as exc:
+                logger.info("copy live skip: %s", exc)
 
 
 async def drawdown_job(context: ContextTypes.DEFAULT_TYPE) -> None:
