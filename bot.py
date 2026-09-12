@@ -768,18 +768,36 @@ def wallet_menu_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def wallet_keyboard() -> InlineKeyboardMarkup:
+def chain_board_keyboard(user_id: int | None = None) -> InlineKeyboardMarkup:
+    has = bool(user_id and db.get_user_wallet(user_id))
     rows: list[list[InlineKeyboardButton]] = []
-    pair: list[InlineKeyboardButton] = []
     for cid in ACTIVE:
-        pair.append(InlineKeyboardButton(cid.upper(), callback_data=f"wa:{cid}"))
-        if len(pair) == 3:
-            rows.append(pair)
-            pair = []
-    if pair:
-        rows.append(pair)
-    rows.append([InlineKeyboardButton("↩️ Wallet menu", callback_data="go:wallets")])
+        label = "HOOD" if cid == "hood" else cid.upper()
+        left = InlineKeyboardButton(f"🟢 {label}", callback_data=f"ch:{cid}")
+        if cid in {"trx", "ton"}:
+            right = InlineKeyboardButton("⚠️ Soon", callback_data=f"wa:{cid}")
+        elif has:
+            right = InlineKeyboardButton("👛 Wallet", callback_data=f"wa:{cid}")
+        else:
+            right = InlineKeyboardButton("✨ Generate", callback_data="wi:gen")
+        rows.append([left, right])
+    rows.append(
+        [
+            InlineKeyboardButton("📥 Import", callback_data="wi:imp"),
+            InlineKeyboardButton("✨ Generate", callback_data="wi:gen"),
+        ]
+    )
+    rows.append(
+        [
+            InlineKeyboardButton("ℹ️ Help", callback_data="go:help"),
+            InlineKeyboardButton("↩️ Return", callback_data="go:home"),
+        ]
+    )
     return InlineKeyboardMarkup(rows)
+
+
+def wallet_keyboard(user_id: int | None = None) -> InlineKeyboardMarkup:
+    return chain_board_keyboard(user_id)
 
 
 async def wallet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -788,12 +806,16 @@ async def wallet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     row = db.get_user_wallet(update.effective_user.id)
     if row:
         text = (
-            "👛 Ferzan wallets ready.\n"
-            "Chain buttons for addresses. Import / Collect / Disperse below."
+            "🟢 Enable a chain · 👛 open its address\n"
+            "Same EVM key covers ETH / Base / BSC / Hood / Arb / Avax.\n"
+            "SOL is its own key. TON / TRX adapters next."
         )
     else:
-        text = "ℹ️ Wallet not found. Import or generate."
-    await update.effective_message.reply_text(text, reply_markup=wallet_menu_keyboard())
+        text = "ℹ️ Wallet not found. Generate or import, then every chain lights up."
+    await update.effective_message.reply_text(
+        text,
+        reply_markup=chain_board_keyboard(update.effective_user.id),
+    )
 
 
 async def importsol_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -814,7 +836,7 @@ async def importsol_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await update.effective_message.reply_text(
         f"Solana imported.\n`{row['sol_pub']}`",
         parse_mode="Markdown",
-        reply_markup=wallet_keyboard(),
+        reply_markup=wallet_keyboard(update.effective_user.id),
     )
 
 
@@ -836,7 +858,7 @@ async def importevm_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await update.effective_message.reply_text(
         f"EVM imported.\n`{row['evm_pub']}`",
         parse_mode="Markdown",
-        reply_markup=wallet_keyboard(),
+        reply_markup=wallet_keyboard(update.effective_user.id),
     )
 
 
@@ -1091,24 +1113,7 @@ async def quote_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 def chains_keyboard() -> InlineKeyboardMarkup:
-    rows: list[list[InlineKeyboardButton]] = []
-    pair: list[InlineKeyboardButton] = []
-    dots = {
-        "sol": "🟢", "bsc": "🟢", "base": "🟢", "eth": "🟢",
-        "arb": "🟢", "avax": "🟢", "hood": "🟢",
-        "monad": "🟡", "sonic": "🟡", "hype": "🟡",
-        "arc": "⚪", "stable": "⚪", "trx": "🟡", "ton": "🟡",
-    }
-    for cid in ACTIVE:
-        mark = dots.get(cid, "🟡")
-        pair.append(InlineKeyboardButton(f"{mark} {cid.upper()}", callback_data=f"ch:{cid}"))
-        if len(pair) == 2:
-            rows.append(pair)
-            pair = []
-    if pair:
-        rows.append(pair)
-    rows.append([InlineKeyboardButton("⚡ BUY / SELL — paste a CA", callback_data="go:buyhelp")])
-    return InlineKeyboardMarkup(rows)
+    return chain_board_keyboard()
 
 
 async def chains_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1116,6 +1121,7 @@ async def chains_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
     text = (
         "⚡ FERZAN · chains\n"
+        "🟢 chain · 👛 wallet address\n"
         "See it. Ape it. Send it.\n\n"
         "🟢 live score + paper + quote\n"
         "🟡 score + paper (thin live route)\n"
@@ -1234,7 +1240,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 uid,
                 "✨ Wallet generated. Keys stay on the server — not posted in chat.\n"
                 "Tap a chain for the deposit address.",
-                reply_markup=wallet_keyboard(),
+                reply_markup=wallet_keyboard(update.effective_user.id),
             )
             return
         if kind == "imp":
@@ -1282,7 +1288,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await context.bot.send_message(
                 uid,
                 "Select the chain for its deposit address.",
-                reply_markup=wallet_keyboard(),
+                reply_markup=wallet_keyboard(update.effective_user.id),
             )
             return
         return
@@ -1329,7 +1335,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             text,
             parse_mode="HTML",
             disable_web_page_preview=True,
-            reply_markup=wallet_keyboard(),
+            reply_markup=wallet_keyboard(update.effective_user.id),
         )
         return
     if data.startswith("ch:"):
