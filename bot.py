@@ -420,6 +420,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/buylimit <CA> <price> 3 — buy when mark hits\n"
         "/limits — list buy limits\n"
         "/settings — size, floor, daily cap\n"
+        "/feeds — on/off launch alerts per chain\n"
         "/positions — paper desk\n"
         "/launches — new pools\n"
         "/signal <CA> — score a token\n"
@@ -1110,6 +1111,41 @@ async def settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 )],
             ]
         ),
+    )
+
+
+FEED_CHAINS = ("sol", "bsc", "base", "eth", "arb", "avax")
+
+
+def _feeds_keyboard(uid: int) -> InlineKeyboardMarkup:
+    rows = []
+    pair = []
+    for cid in FEED_CHAINS:
+        on = db.flag_on(uid, f"feed_{cid}", 1)
+        label = "HOOD" if cid == "hood" else cid.upper()
+        pair.append(
+            InlineKeyboardButton(
+                f"{'🟢' if on else '🔴'} {label}",
+                callback_data=f"fd:{cid}",
+            )
+        )
+        if len(pair) == 2:
+            rows.append(pair)
+            pair = []
+    if pair:
+        rows.append(pair)
+    return InlineKeyboardMarkup(rows)
+
+
+async def feeds_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard(update):
+        return
+    uid = update.effective_user.id
+    await update.effective_message.reply_text(
+        "📡 Launch feed by chain\n"
+        "🟢 on · 🔴 off\n"
+        "Master switch is still /settings alerts.",
+        reply_markup=_feeds_keyboard(uid),
     )
 
 
@@ -1954,6 +1990,18 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if data.startswith("sig:"):
         await _send_signal(update, data[4:], edit=True)
         return
+    if data.startswith("fd:"):
+        cid = data[3:]
+        if cid not in FEED_CHAINS:
+            return
+        now = not db.flag_on(uid, f"feed_{cid}", 1)
+        db.set_flag(uid, f"feed_{cid}", now)
+        await query.answer("Saved")
+        try:
+            await query.edit_message_reply_markup(reply_markup=_feeds_keyboard(uid))
+        except Exception:
+            pass
+        return
     if data.startswith("flg:"):
         flag = data[4:]
         if flag not in {"rug_buy", "honeypot", "lp_watch"}:
@@ -2333,7 +2381,10 @@ async def launch_feed_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         if not user.get("alerts_on"):
             continue
         uid = int(user["user_id"])
-        for ln in interesting[:5]:
+        for ln in interesting[:8]:
+            cid = resolve_chain(ln.chain) or (ln.chain or "").lower()
+            if cid and not db.flag_on(uid, f"feed_{cid}", 1):
+                continue
             key = f"launch:{ln.chain}:{ln.token[:24]}"
             if not db.should_resend_signal(uid, key, 1, cooldown_s=6 * 3600):
                 continue
@@ -2392,6 +2443,7 @@ def main() -> None:
     app.add_handler(CommandHandler("unwatch", unwatch_cmd))
     app.add_handler(CommandHandler("journal", journal_cmd))
     app.add_handler(CommandHandler("settings", settings_cmd))
+    app.add_handler(CommandHandler("feeds", feeds_cmd))
     app.add_handler(CommandHandler("resetpaper", resetpaper_cmd))
     app.add_handler(CommandHandler("watchwallet", watchwallet_cmd))
     app.add_handler(CommandHandler("wallet", wallet_cmd))

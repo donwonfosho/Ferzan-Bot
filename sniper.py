@@ -50,25 +50,40 @@ def _headers() -> dict[str, str]:
 
 def fetch_new_pools(chain: str | None = None, limit: int = 20) -> list[Launch]:
     gecko_id = None
+    urls: list[tuple[str, str]] = []
     if chain:
         resolved = resolve_chain(chain)
         if not resolved:
             return []
         gecko_id = CHAINS[resolved]["gecko"]
-        url = GECKO_NEW.format(network=gecko_id)
+        urls.append((gecko_id, GECKO_NEW.format(network=gecko_id)))
     else:
-        url = GECKO_NEW_ALL
-    try:
-        r = requests.get(url, headers=_headers(), timeout=TIMEOUT)
-        r.raise_for_status()
-    except requests.RequestException:
-        return []
-    data = (r.json() or {}).get("data") or []
+        for cid in ("eth", "bsc", "base", "sol", "arb", "avax"):
+            gid = CHAINS[cid]["gecko"]
+            urls.append((gid, GECKO_NEW.format(network=gid)))
+    data: list[dict] = []
+    gecko_id = urls[0][0] if urls else ""
+    for gid, url in urls:
+        try:
+            r = requests.get(url, headers=_headers(), timeout=TIMEOUT)
+            r.raise_for_status()
+            chunk = (r.json() or {}).get("data") or []
+            for row in chunk:
+                row["_ferzan_net"] = gid
+            data.extend(chunk)
+        except requests.RequestException:
+            continue
+    data = data[: max(limit * 3, 24)]
     out: list[Launch] = []
     for row in data[:limit]:
         attrs = row.get("attributes") or {}
         rel = row.get("relationships") or {}
-        net = ((rel.get("network") or {}).get("data") or {}).get("id") or gecko_id or ""
+        net = (
+            ((rel.get("network") or {}).get("data") or {}).get("id")
+            or row.get("_ferzan_net")
+            or gecko_id
+            or ""
+        )
         chain_id = _from_gecko(net)
         name = attrs.get("name") or "UNKNOWN"
         symbol = name.split("/")[0].strip() if name else "UNK"
