@@ -132,6 +132,21 @@ def init_db() -> None:
                 note TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS user_flags (
+                user_id INTEGER NOT NULL,
+                flag TEXT NOT NULL,
+                onoff INTEGER NOT NULL DEFAULT 1,
+                PRIMARY KEY(user_id, flag)
+            );
+
+            CREATE TABLE IF NOT EXISTS lp_marks (
+                user_id INTEGER NOT NULL,
+                mint TEXT NOT NULL,
+                liq_usd REAL NOT NULL DEFAULT 0,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY(user_id, mint)
+            );
+
             CREATE TABLE IF NOT EXISTS live_exits (
                 user_id INTEGER NOT NULL,
                 mint TEXT NOT NULL,
@@ -787,6 +802,50 @@ def list_live_exits() -> list[dict]:
 def clear_live_exit(user_id: int, mint: str) -> None:
     with get_conn() as conn:
         conn.execute("DELETE FROM live_exits WHERE user_id = ? AND mint = ?", (user_id, mint))
+        conn.commit()
+
+
+def flag_on(user_id: int, flag: str, default: int = 1) -> bool:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT onoff FROM user_flags WHERE user_id = ? AND flag = ?",
+            (user_id, flag),
+        ).fetchone()
+        if row is None:
+            return bool(default)
+        return int(row["onoff"]) == 1
+
+
+def set_flag(user_id: int, flag: str, on: bool) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO user_flags (user_id, flag, onoff) VALUES (?, ?, ?)
+            ON CONFLICT(user_id, flag) DO UPDATE SET onoff = excluded.onoff
+            """,
+            (user_id, flag, 1 if on else 0),
+        )
+        conn.commit()
+
+
+def lp_mark(user_id: int, mint: str) -> float:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT liq_usd FROM lp_marks WHERE user_id = ? AND mint = ?",
+            (user_id, mint),
+        ).fetchone()
+        return float(row["liq_usd"]) if row else 0.0
+
+
+def set_lp_mark(user_id: int, mint: str, liq: float) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO lp_marks (user_id, mint, liq_usd, updated_at) VALUES (?, ?, ?, ?)
+            ON CONFLICT(user_id, mint) DO UPDATE SET liq_usd = excluded.liq_usd, updated_at = excluded.updated_at
+            """,
+            (user_id, mint, float(liq), int(time.time())),
+        )
         conn.commit()
 
 

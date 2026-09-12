@@ -538,6 +538,37 @@ async def signal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await _send_signal(update, " ".join(context.args))
 
 
+def _rug_block(uid: int, card, mint: str) -> str:
+    s = card.snapshot
+    if db.flag_on(uid, "rug_buy", 1):
+        liq = float(s.liquidity_usd or 0)
+        if liq <= 0:
+            return "🛡 Rug guard ON: no DEX liquidity. Live buy blocked."
+        if liq < 15_000:
+            return "🛡 Rug guard ON: liquidity under $15k. Live buy blocked."
+    if db.flag_on(uid, "honeypot", 1) and mint.startswith("0x"):
+        sec = _security_line(s.chain, mint).lower()
+        if "honeypot" in sec:
+            return "🛡 Honeypot guard ON: live buy blocked."
+        if "cannot sell all" in sec or "owner can change" in sec:
+            return "🛡 Honeypot guard ON: sell looks trapped. Live buy blocked."
+    return ""
+
+
+def _token_liq_usd(mint: str) -> float:
+    try:
+        r = requests.get(
+            f"https://api.dexscreener.com/latest/dex/tokens/{mint}",
+            timeout=8,
+        )
+        pairs = (r.json() or {}).get("pairs") or []
+        if not pairs:
+            return 0.0
+        return max(float((p.get("liquidity") or {}).get("usd") or 0) for p in pairs)
+    except Exception:
+        return -1.0
+
+
 def _live_buy_followup(
     uid: int, card, query: str, paper_ok: bool, force: bool, usd_override: float | None = None
 ) -> str:
@@ -557,6 +588,9 @@ def _live_buy_followup(
             chain = chain or "solana"
     if not mint:
         return "Live: no mint on this card. Paste the full CA, then Buy."
+    blocked = _rug_block(uid, card, mint)
+    if blocked:
+        return blocked
     user = db.get_user(uid) or {}
     cash = float(user.get("paper_cash") or 10000)
     pct = float(user.get("size_pct") or 5)
@@ -573,12 +607,14 @@ def _live_buy_followup(
         _ok, msg = evm_signer.buy_evm(chain or "base", mint, usd, key_hex=evm_secret)
         if _ok:
             db.add_live_cost(uid, mint, usd)
+            db.set_lp_mark(uid, mint, float(card.snapshot.liquidity_usd or 0))
         return msg
     if "sol" not in chain and not (len(mint) >= 32 and not mint.startswith("0x")):
         return f"Live: {chain or 'unknown'} is not Solana."
     _ok, msg = signer.buy_sol(mint, usd, secret=sol_secret)
     if _ok:
         db.add_live_cost(uid, mint, usd)
+        db.set_lp_mark(uid, mint, float(card.snapshot.liquidity_usd or 0))
     return msg
 
 
@@ -974,15 +1010,31 @@ async def settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             return
         user = db.get_user(uid)
         await update.effective_message.reply_text("Updated.")
+    rug = db.flag_on(uid, "rug_buy", 1)
+    honey = db.flag_on(uid, "honeypot", 1)
+    lpw = db.flag_on(uid, "lp_watch", 1)
     await update.effective_message.reply_text(
-        "Risk vault\n"
-        f"size {user['size_pct']}% of cash per ticket (1-20)\n"
-        f"floor {user['min_confluence']} confluence to auto-fill (40-90)\n"
-        f"cap -{user['max_daily_loss_pct']}% daily realized (1-25)\n"
-        f"scanner alerts {'on' if user['alerts_on'] else 'off'}\n"
-        f"drawdown ping at -{user.get('drawdown_alert_pct') or 12}% from peak\n\n"
-        "Examples:\n/settings size 3\n/settings floor 70\n/settings cap 5\n"
-        "/settings alerts off\n/settings ddalert 10"
+        "🛡 Ferzan protection\n"
+        f"{'🟢' if rug else '🔴'} Block buys if liq is thin / gone\n"
+        f"{'🟢' if honey else '🔴'} Block buys if honeypot / unsellable\n"
+        f"{'🟢' if lpw else '🔴'} Auto-sell if LP is yanked after you're in\n\n"
+        f"Paper floor {user['min_confluence']} · size {user['size_pct']}%",
+        reply_markup=InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton(
+                    f"{'🟢' if rug else '🔴'} Rug buy-block",
+                    callback_data="flg:rug_buy",
+                )],
+                [InlineKeyboardButton(
+                    f"{'🟢' if honey else '🔴'} Honeypot block",
+                    callback_data="flg:honeypot",
+                )],
+                [InlineKeyboardButton(
+                    f"{'🟢' if lpw else '🔴'} LP yank auto-sell",
+                    callback_data="flg:lp_watch",
+                )],
+            ]
+        ),
     )
 
 
@@ -1782,6 +1834,18 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if data.startswith("sig:"):
         await _send_signal(update, data[4:], edit=True)
         return
+    if data.startswith("flg:"):
+        flag = data[4:]
+        if flag not in {"rug_buy", "honeypot", "lp_watch"}:
+            return
+        now = not db.flag_on(uid, flag, 1)
+        db.set_flag(uid, flag, now)
+        await query.answer("Saved")
+        await context.bot.send_message(
+            uid,
+            f"{'🟢 ON' if now else '🔴 OFF'} {flag.replace('_', ' ')}",
+        )
+        return
     if data.startswith("watch:"):
         name = data[6:]
         db.add_watch(uid, name)
@@ -1982,6 +2046,62 @@ async def drawdown_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             logger.exception("drawdown notify failed for %s", uid)
 
 
+async def lp_watch_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    try:
+        with db.get_conn() as conn:
+            users = [int(r[0]) for r in conn.execute("SELECT DISTINCT user_id FROM live_basis").fetchall()]
+    except Exception:
+        return
+    for uid in users:
+        if not db.flag_on(uid, "lp_watch", 1):
+            continue
+        try:
+            sol_secret, evm_secret = user_wallets.secrets(uid)
+        except Exception:
+            continue
+        for mint in db.live_mints(uid):
+            liq = _token_liq_usd(mint)
+            if liq < 0:
+                continue
+            prev = db.lp_mark(uid, mint)
+            if prev <= 0:
+                if liq > 0:
+                    db.set_lp_mark(uid, mint, liq)
+                continue
+            yanked = liq <= max(500.0, prev * 0.25)
+            if not yanked:
+                db.set_lp_mark(uid, mint, liq)
+                continue
+            try:
+                if mint.startswith("0x"):
+                    chain = "base"
+                    evm_addr = (db.get_user_wallet(uid) or {}).get("evm_pub") or ""
+                    for cid in ("eth", "base", "bsc", "hood", "arb", "avax"):
+                        try:
+                            raw = evm_signer._erc20_balance(CHAINS[cid]["rpc"], mint, evm_addr)
+                        except Exception:
+                            raw = 0
+                        if raw > 0:
+                            chain = cid
+                            break
+                    _ok, msg = evm_signer.sell_evm(chain, mint, key_hex=evm_secret)
+                else:
+                    _ok, msg = signer.sell_sol(mint, secret=sol_secret, pct=100)
+            except Exception as exc:
+                _ok, msg = False, str(exc)
+            db.set_lp_mark(uid, mint, liq)
+            if _ok:
+                db.clear_live_cost(uid, mint)
+                db.clear_live_exit(uid, mint)
+            try:
+                await context.bot.send_message(
+                    uid,
+                    f"🛡 LP yank  ${prev:,.0f} → ${liq:,.0f}\nAuto-sell\n{msg}",
+                )
+            except Exception:
+                logger.exception("lp watch notify")
+
+
 async def live_exit_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     for row in db.list_live_exits():
         uid = int(row["user_id"])
@@ -2165,6 +2285,7 @@ def main() -> None:
         jq.run_repeating(drawdown_job, interval=DRAWDOWN_POLL_SECONDS, first=55)
         jq.run_repeating(snipe_job, interval=SNIPE_POLL_SECONDS, first=18)
         jq.run_repeating(live_exit_job, interval=45, first=50)
+        jq.run_repeating(lp_watch_job, interval=40, first=70)
         jq.run_repeating(launch_feed_job, interval=LAUNCH_FEED_SECONDS, first=35)
     else:
         logger.warning("job-queue extra missing; commands still work, scanners off")
