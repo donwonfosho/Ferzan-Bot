@@ -213,26 +213,30 @@ def render_card(card: SignalCard) -> str:
     return "\n".join(x for x in lines if x)
 
 
-def card_keyboard(query: str, score: int, ca: str = "") -> InlineKeyboardMarkup:
+def card_keyboard(query: str, score: int, ca: str = "", chain: str = "") -> InlineKeyboardMarkup:
     q = (ca or query)[:44]
     cap = int(signer.max_usd())
+    cid = resolve_chain(chain) or ("sol" if q and not str(q).startswith("0x") else "bsc")
+    size_row = []
+    seen: set[int] = set()
+    for n in (1, 3, cap):
+        if n in seen:
+            continue
+        seen.add(n)
+        size_row.append(InlineKeyboardButton(f"${n}", callback_data=f"buyz:{n}:{q}"))
     rows = [
         [
             InlineKeyboardButton("👁 Track", callback_data=f"watch:{q}"),
             InlineKeyboardButton("🔄 Refresh", callback_data=f"sig:{q}"),
         ],
         [
-            InlineKeyboardButton(f"💵 ${cap}", callback_data=f"buy:{q}"),
+            InlineKeyboardButton(f"💵 Buy ${cap}", callback_data=f"buy:{q}"),
             InlineKeyboardButton("🧨 Override", callback_data=f"force:{q}"),
         ],
-        [
-            InlineKeyboardButton("$1", callback_data=f"buyz:1:{q}"),
-            InlineKeyboardButton("$3", callback_data=f"buyz:3:{q}"),
-            InlineKeyboardButton(f"${cap}", callback_data=f"buyz:{cap}:{q}"),
-        ],
+        size_row,
         [
             InlineKeyboardButton("🎯 Snipe", callback_data=f"snp:{q}"),
-            InlineKeyboardButton("📉 Quote", callback_data=f"qte:sol:{q}"),
+            InlineKeyboardButton("📉 Quote", callback_data=f"qte:{cid}:{q}"),
         ],
     ]
     addr = (ca or query or "").strip()
@@ -518,6 +522,7 @@ async def _send_signal(update: Update, query: str, edit: bool = False) -> None:
         card.snapshot.query or query,
         card.score,
         ca=card.snapshot.token_address or "",
+        chain=card.snapshot.chain or "",
     )
     if edit and update.callback_query:
         await update.callback_query.edit_message_text(
