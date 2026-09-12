@@ -568,11 +568,63 @@ async def positions_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await update.effective_message.reply_text("\n".join(lines), reply_markup=positions_keyboard(uid))
 
 
+def _bag_panel(mint: str, amount: float, addr: str) -> tuple[str, InlineKeyboardMarkup]:
+    short = mint[:44]
+    href = f"https://solscan.io/token/{mint}"
+    text = (
+        f"🎒 <b>Position</b> · SOL\n"
+        f"<a href=\"https://solscan.io/account/{html.escape(addr)}\">Wallet</a>\n"
+        f"🪙 <a href=\"{href}\">token</a>\n"
+        f"<code>{html.escape(mint)}</code>\n"
+        f"Tokens: <b>{amount:g}</b>\n"
+        f"<i>Tap CA to copy</i>"
+    )
+    kb = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("☢️ Sell All", callback_data=f"slp:100:{short}"),
+            ],
+            [
+                InlineKeyboardButton("25%", callback_data=f"slp:25:{short}"),
+                InlineKeyboardButton("50%", callback_data=f"slp:50:{short}"),
+                InlineKeyboardButton("75%", callback_data=f"slp:75:{short}"),
+                InlineKeyboardButton("100%", callback_data=f"slp:100:{short}"),
+            ],
+            [
+                InlineKeyboardButton("📡 Score", callback_data=f"sig:{short}"),
+                InlineKeyboardButton("💵 Buy more", callback_data=f"buy:{short}"),
+            ],
+        ]
+    )
+    return text, kb
+
+
 async def bag_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update):
         return
     sol_secret, _evm = user_wallets.secrets(update.effective_user.id)
-    await update.effective_message.reply_text(signer.holdings_text(sol_secret))
+    try:
+        kp = signer.keypair_from_secret(sol_secret)
+        addr = str(kp.pubkey())
+        rows = signer.holdings(sol_secret)
+        lamports = signer.sol_balance_lamports(addr)
+    except Exception as exc:
+        await update.effective_message.reply_text(str(exc))
+        return
+    await update.effective_message.reply_text(
+        f"🎒 <b>Wallet positions</b> · SOL\n"
+        f"💰 {lamports / 1e9:.6f} SOL\n"
+        f"<code>{html.escape(addr)}</code>",
+        parse_mode="HTML",
+    )
+    if not rows:
+        await update.effective_message.reply_text("No tokens yet. Paste a CA and Buy.")
+        return
+    for row in rows[:6]:
+        text, kb = _bag_panel(row["mint"], row["amount"], addr)
+        await update.effective_message.reply_text(
+            text, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True
+        )
 
 
 async def livesell_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1421,6 +1473,16 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 "/sell 3      close position #3\n"
                 "/quote sol <CA> 50     sign in Trust",
             )
+        return
+    if data.startswith("slp:"):
+        _tag, pct_s, mint = data.split(":", 2)
+        try:
+            pct = int(pct_s)
+        except ValueError:
+            pct = 100
+        sol_secret, _evm = user_wallets.secrets(uid)
+        _ok, msg = signer.sell_sol(mint, secret=sol_secret, pct=pct)
+        await context.bot.send_message(uid, f"{'🟢' if _ok else '🔴'} Sell {pct}%\n{msg}")
         return
     if data.startswith("snp:"):
         ca = data[4:]

@@ -336,7 +336,7 @@ def send_sol(dest: str, secret: str | None = None) -> tuple[bool, str]:
     return True, f"Collected {send_amt / 1e9:.6f} SOL\nhttps://solscan.io/tx/{sig}"
 
 
-def sell_sol(input_mint: str, secret: str | None = None) -> tuple[bool, str]:
+def sell_sol(input_mint: str, secret: str | None = None, pct: int = 100) -> tuple[bool, str]:
     if not live_enabled():
         return False, "Live sells are OFF. Add LIVE_BUYS=1 and restart."
     if not secret and not configured():
@@ -353,6 +353,8 @@ def sell_sol(input_mint: str, secret: str | None = None) -> tuple[bool, str]:
         raw_amt = _token_raw_balance(mint, kp)
     except Exception as exc:
         return False, str(exc)
+    pct = max(1, min(100, int(pct)))
+    raw_amt = raw_amt * pct // 100
     if raw_amt <= 0:
         return False, "Wallet holds 0 of that token. Nothing to sell."
     try:
