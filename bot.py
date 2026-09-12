@@ -1655,6 +1655,9 @@ def launch_card(ln) -> tuple[str, InlineKeyboardMarkup]:
             InlineKeyboardButton("👛 Wallet", callback_data="go:wallets"),
             InlineKeyboardButton("🎒 Bag", callback_data="go:bag"),
         ],
+        [
+            InlineKeyboardButton("⏳ Buy limit −20%", callback_data=f"blm:{short}"),
+        ],
     ]
     if ca and CopyTextButton is not None:
         rows.append(
