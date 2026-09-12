@@ -1720,22 +1720,24 @@ def launch_card(ln) -> tuple[str, InlineKeyboardMarkup]:
             InlineKeyboardButton("📡 Score", url=desk) if desk else InlineKeyboardButton("📡 Score", callback_data=f"sig:{short}"),
             InlineKeyboardButton("💵 Buy", url=buy_link) if buy_link else InlineKeyboardButton("💵 Buy", callback_data=f"buy:{short}"),
         ],
-        [
-            InlineKeyboardButton(f"🎯 Snipe ${cap}", callback_data=f"snp:{short}"),
-            InlineKeyboardButton("👁 Watch", callback_data=f"watch:{short}"),
-        ],
-        [
-            InlineKeyboardButton("📉 Quote", callback_data=f"qte:{cid}:{short}"),
-            InlineKeyboardButton("🧨 Override", callback_data=f"force:{short}"),
-        ],
-        [
-            InlineKeyboardButton("👛 Wallet", callback_data="go:wallets"),
-            InlineKeyboardButton("🎒 Bag", callback_data="go:bag"),
-        ],
-        [
-            InlineKeyboardButton("⏳ Buy limit −20%", callback_data=f"blm:{short}"),
-        ],
     ]
+    if href:
+        rows.append([InlineKeyboardButton("🔎 Scan", url=href)])
+    ds_net = {
+        "sol": "solana", "eth": "ethereum", "bsc": "bsc", "base": "base",
+        "arb": "arbitrum", "avax": "avalanche", "hood": "robinhood",
+    }.get(cid or "", "solana")
+    dt_net = {
+        "sol": "solana", "eth": "ether", "bsc": "bnb", "base": "base",
+        "arb": "arbitrum", "avax": "avalanche",
+    }.get(cid or "")
+    charts = []
+    if ca:
+        charts.append(InlineKeyboardButton("📈 DexScreener", url=f"https://dexscreener.com/{ds_net}/{ca}"))
+    if ca and dt_net:
+        charts.append(InlineKeyboardButton("🛠 DexTools", url=f"https://www.dextools.io/app/en/{dt_net}/pair-explorer/{ca}"))
+    if charts:
+        rows.append(charts)
     chat_url = (os.getenv("FERZAN_CHAT_URL") or "").strip()
     extra_row = []
     if desk:
