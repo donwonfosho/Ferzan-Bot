@@ -227,13 +227,12 @@ def card_keyboard(query: str, score: int, ca: str = "", chain: str = "") -> Inli
     q = (ca or query)[:44]
     cap = int(signer.max_usd())
     cid = resolve_chain(chain) or ("sol" if q and not str(q).startswith("0x") else "bsc")
-    size_row = []
-    seen: set[int] = set()
-    for n in (1, 3, cap):
-        if n in seen:
-            continue
-        seen.add(n)
-        size_row.append(InlineKeyboardButton(f"${n}", callback_data=f"buyz:{n}:{q}"))
+    unit = {"sol": "SOL", "bsc": "BNB", "eth": "ETH", "base": "ETH", "arb": "ETH", "avax": "AVAX"}.get(cid, "ETH")
+    size_row = [
+        InlineKeyboardButton(f"0.01 {unit}", callback_data=f"bnv:0.01:{q}"),
+        InlineKeyboardButton(f"0.05 {unit}", callback_data=f"bnv:0.05:{q}"),
+        InlineKeyboardButton(f"0.1 {unit}", callback_data=f"bnv:0.1:{q}"),
+    ]
     rows = [
         [
             InlineKeyboardButton("👁 Track", callback_data=f"watch:{q}"),
@@ -2030,6 +2029,38 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         db.add_watch(uid, name)
         await query.edit_message_reply_markup(reply_markup=card_keyboard(name, 0))
         await context.bot.send_message(uid, f"Watching {name.upper()}.")
+        return
+    if data.startswith("bnv:"):
+        _tag, amt_s, name = data.split(":", 2)
+        try:
+            amt = float(amt_s)
+        except ValueError:
+            amt = 0.05
+        try:
+            card = analyze(name)
+        except PriceFetchError as exc:
+            await context.bot.send_message(uid, str(exc))
+            return
+        cid = resolve_chain(card.snapshot.chain) or "sol"
+        gecko = {
+            "sol": "solana",
+            "bsc": "binancecoin",
+            "eth": "ethereum",
+            "base": "ethereum",
+            "arb": "ethereum",
+            "avax": "avalanche-2",
+        }.get(cid, "ethereum")
+        try:
+            px = get_price_usd(gecko)
+        except Exception:
+            px = 0
+        usd_o = amt * px if px > 0 else float(signer.max_usd())
+        usd_o = min(signer.max_usd(), max(1.0, usd_o))
+        ok, msg = trading.paper_buy(uid, card, force=True)
+        await context.bot.send_message(uid, msg)
+        live_msg = _live_buy_followup(uid, card, name, True, True, usd_override=usd_o)
+        if live_msg:
+            await context.bot.send_message(uid, f"{amt:g} native ≈ ${usd_o:.2f}\n{live_msg}")
         return
     if data.startswith("buyz:"):
         _tag, usd_s, name = data.split(":", 2)
