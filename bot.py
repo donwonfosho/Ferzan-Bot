@@ -1242,34 +1242,42 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         except Exception as exc:
             await context.bot.send_message(uid, str(exc))
             return
+        meta = CHAINS.get(cid) or {}
+        label = meta.get("label", cid.upper())
+        native = meta.get("native", "ETH")
+        marks = {
+            "sol": "🟣", "bsc": "🟡", "base": "🔵", "eth": "♦️",
+            "arb": "🔷", "avax": "🔺", "hood": "🪶", "hype": "💚",
+            "monad": "🟣", "sonic": "🟠", "trx": "🔴", "ton": "💠",
+        }
+        mark = marks.get(cid, "🔗")
         if cid == "sol":
-            bal = ""
+            addr = row["sol_pub"]
             try:
-                lamports = signer.sol_balance_lamports(row["sol_pub"])
-                bal = f"\nBalance {lamports / 1_000_000_000:.6f} SOL"
+                lamports = signer.sol_balance_lamports(addr)
+                bal_line = f"{lamports / 1_000_000_000:.6f} SOL"
             except Exception:
-                bal = ""
-            await context.bot.send_message(
-                uid,
-                f"SOLANA\n`{row['sol_pub']}`{bal}\n\nSend SOL here. Paste a Solana CA to buy.",
-                parse_mode="Markdown",
-                reply_markup=wallet_keyboard(),
-            )
-            return
-        label = CHAINS.get(cid, {}).get("label", cid.upper())
-        native = CHAINS.get(cid, {}).get("native", "ETH")
-        bal_line = ""
-        try:
-            amt, sym = evm_signer.native_balance(cid, row["evm_pub"])
-            bal_line = f"\nBalance {amt:.6f} {sym}"
-        except Exception:
-            bal_line = f"\nBalance unavailable ({native})"
+                bal_line = "—"
+        else:
+            addr = row["evm_pub"]
+            try:
+                amt, sym = evm_signer.native_balance(cid, addr)
+                bal_line = f"{amt:.6f} {sym}"
+            except Exception:
+                bal_line = f"— {native}"
+        href = (meta.get("explorer_addr") or "{addr}").format(addr=addr)
+        text = (
+            f"{mark} <b>{_esc(label)}</b>\n"
+            f"💰 <b>{_esc(bal_line)}</b>\n\n"
+            f"📬 <a href=\"{_esc(href)}\">{_esc(addr)}</a>\n"
+            f"<i>Tap the blue address to open the explorer.</i>\n\n"
+            f"Gas in {_esc(native)}. Paste a {_esc(label)} CA to buy."
+        )
         await context.bot.send_message(
             uid,
-            f"{label.upper()}\n`{row['evm_pub']}`{bal_line}\n\n"
-            f"Same EVM address. Set network to {label}.\n"
-            f"Paste a {label} CA to buy.",
-            parse_mode="Markdown",
+            text,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
             reply_markup=wallet_keyboard(),
         )
         return
