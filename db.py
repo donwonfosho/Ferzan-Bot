@@ -725,6 +725,15 @@ def add_live_cost(user_id: int, mint: str, usd: float) -> None:
         conn.commit()
 
 
+def live_mints(user_id: int) -> list[str]:
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT mint FROM live_basis WHERE user_id = ? ORDER BY updated_at DESC",
+            (user_id,),
+        ).fetchall()
+        return [str(r["mint"]) for r in rows]
+
+
 def live_cost(user_id: int, mint: str) -> float:
     with get_conn() as conn:
         row = conn.execute(

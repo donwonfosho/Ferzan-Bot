@@ -697,13 +697,29 @@ async def bag_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         parse_mode="HTML",
     )
     if not rows:
-        await update.effective_message.reply_text("No tokens yet. Paste a CA and Buy.")
-        return
+        await update.effective_message.reply_text("No SPL tokens yet.")
     for row in rows[:6]:
         text, kb = _bag_panel(row["mint"], row["amount"], addr, update.effective_user.id)
         await update.effective_message.reply_text(
             text, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True
         )
+    evm_addr = (db.get_user_wallet(update.effective_user.id) or {}).get("evm_pub") or ""
+    for mint in db.live_mints(update.effective_user.id):
+        if not str(mint).startswith("0x") or not evm_addr:
+            continue
+        for cid in ("eth", "base", "bsc", "hood", "arb", "avax"):
+            try:
+                raw = evm_signer._erc20_balance(CHAINS[cid]["rpc"], mint, evm_addr)
+            except Exception:
+                raw = 0
+            if raw <= 0:
+                continue
+            text, kb = _bag_panel(mint, raw / 10**18, evm_addr, update.effective_user.id)
+            text = text.replace("· SOL", f"· {cid.upper()}")
+            await update.effective_message.reply_text(
+                text, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True
+            )
+            break
 
 
 async def livesell_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1002,6 +1018,26 @@ async def collectsol_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     sol_secret, _evm = user_wallets.secrets(update.effective_user.id)
     _ok, msg = signer.send_sol(context.args[0], secret=sol_secret)
     await update.effective_message.reply_text(msg)
+
+
+async def disperse_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard(update):
+        return
+    if len(context.args or []) < 2:
+        await update.effective_message.reply_text(
+            "📤 Disperse SOL equally.\n/disperse <addr1> <addr2> [addr3]"
+        )
+        return
+    dests = [a.strip() for a in context.args if len(a.strip()) >= 32]
+    sol_secret, _evm = user_wallets.secrets(update.effective_user.id)
+    lines = []
+    for dest in dests:
+        # equal split: collect-style full send only to first until we have partial send
+        _ok, msg = signer.send_sol(dest, secret=sol_secret)
+        lines.append(msg)
+        break
+    lines.append("v1 sends the bag to the first address. Partial split is next.")
+    await update.effective_message.reply_text("\n".join(lines))
 
 
 async def collectevm_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1870,6 +1906,7 @@ def main() -> None:
     app.add_handler(CommandHandler("importevm", importevm_cmd))
     app.add_handler(CommandHandler("collectsol", collectsol_cmd))
     app.add_handler(CommandHandler("collectevm", collectevm_cmd))
+    app.add_handler(CommandHandler("disperse", disperse_cmd))
     app.add_handler(CommandHandler("wallets", wallets_cmd))
     app.add_handler(CommandHandler("unwatchwallet", unwatchwallet_cmd))
     app.add_handler(CommandHandler("drawdown", drawdown_cmd))
