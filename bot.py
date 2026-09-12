@@ -365,6 +365,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if extra and extra.startswith("sig_"):
         await _send_signal(update, extra[4:], edit=False)
         return
+    if extra and extra.startswith("buy_"):
+        await _send_signal(update, extra[4:], edit=False)
+        if update.effective_message:
+            await update.effective_message.reply_text(
+                "Buy desk. Tap 0.01 / 0.05 / $ on the card. Spends YOUR Ferzan wallet."
+            )
+        return
     try:
         user = db.ensure_user(update.effective_user.id, update.effective_user.username)
         ready, _fee_note = fees.live_ready()
@@ -1707,10 +1714,11 @@ def launch_card(ln) -> tuple[str, InlineKeyboardMarkup]:
     short = ca if len(ca) <= 48 else ca[:48]
     bot_user = (os.getenv("FERZAN_BOT_USERNAME") or "").lstrip("@")
     desk = f"https://t.me/{bot_user}?start=sig_{short}" if bot_user and short else ""
+    buy_link = f"https://t.me/{bot_user}?start=buy_{short}" if bot_user and short else ""
     rows = [
         [
             InlineKeyboardButton("📡 Score", url=desk) if desk else InlineKeyboardButton("📡 Score", callback_data=f"sig:{short}"),
-            InlineKeyboardButton("💵 Buy", url=desk) if desk else InlineKeyboardButton("💵 Buy", callback_data=f"buy:{short}"),
+            InlineKeyboardButton("💵 Buy", url=buy_link) if buy_link else InlineKeyboardButton("💵 Buy", callback_data=f"buy:{short}"),
         ],
         [
             InlineKeyboardButton(f"🎯 Snipe ${cap}", callback_data=f"snp:{short}"),
