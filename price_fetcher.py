@@ -210,12 +210,122 @@ def search_dex(query: str) -> MarketSnapshot | None:
     return snap
 
 
+def _gecko_snap(query: str) -> MarketSnapshot | None:
+    q = query.strip()
+    nets = (
+        (("solana", "solana"),)
+        if not q.startswith("0x")
+        else (
+            ("bsc", "bsc"),
+            ("base", "base"),
+            ("eth", "ethereum"),
+            ("arbitrum", "arbitrum"),
+            ("avalanche", "avax"),
+        )
+    )
+    for net, chain in nets:
+        try:
+            r = requests.get(
+                f"https://api.geckoterminal.com/api/v2/networks/{net}/tokens/{q}",
+                headers={"Accept": "application/json"},
+                timeout=TIMEOUT,
+            )
+        except requests.RequestException:
+            continue
+        if r.status_code >= 400:
+            continue
+        attr = ((r.json() or {}).get("data") or {}).get("attributes") or {}
+        px = _num(attr.get("price_usd"))
+        if px <= 0:
+            continue
+        return MarketSnapshot(
+            query=q,
+            symbol=(attr.get("symbol") or "TOKEN").upper(),
+            name=attr.get("name") or attr.get("symbol") or q[:8],
+            chain=chain,
+            dex="geckoterminal",
+            pair_address="",
+            token_address=q,
+            price_usd=px,
+            liquidity_usd=_num(attr.get("total_reserve_in_usd")),
+            volume_24h=_num(attr.get("volume_usd", {}).get("h24") if isinstance(attr.get("volume_usd"), dict) else attr.get("volume_usd")),
+            change_5m=0,
+            change_1h=0,
+            change_6h=0,
+            change_24h=_num(attr.get("price_change_percentage", {}).get("h24") if isinstance(attr.get("price_change_percentage"), dict) else 0),
+            fdv=_num(attr.get("fdv_usd") or attr.get("market_cap_usd")),
+            buys_h1=0,
+            sells_h1=0,
+            pair_created_ms=None,
+            url=attr.get("image_url") or "",
+            source="geckoterminal",
+        )
+    return None
+
+
+def _jup_snap(query: str) -> MarketSnapshot | None:
+    mint = query.strip()
+    if mint.startswith("0x") or len(mint) < 32:
+        return None
+    sol = "So11111111111111111111111111111111111111112"
+    try:
+        r = requests.get(
+            "https://quote-api.jup.ag/v6/quote",
+            params={
+                "inputMint": sol,
+                "outputMint": mint,
+                "amount": "100000000",
+                "slippageBps": "300",
+            },
+            timeout=TIMEOUT,
+        )
+        q = r.json() if r.content else {}
+    except requests.RequestException:
+        return None
+    out = _num(q.get("outAmount"))
+    if out <= 0:
+        return None
+    # 0.1 SOL -> out tokens (raw). Price USD needs SOL usd — skip precise, mark tradable.
+    return MarketSnapshot(
+        query=mint,
+        symbol="TOKEN",
+        name="Jupiter-routable",
+        chain="solana",
+        dex="jupiter",
+        pair_address="",
+        token_address=mint,
+        price_usd=0.0,
+        liquidity_usd=0.0,
+        volume_24h=0.0,
+        change_5m=0,
+        change_1h=0,
+        change_6h=0,
+        change_24h=0,
+        fdv=0,
+        buys_h1=0,
+        sells_h1=0,
+        pair_created_ms=None,
+        url="",
+        source="jupiter",
+        extras={"tradable": True, "out_per_0p1_sol": out},
+    )
+
+
 def load_market(query: str) -> MarketSnapshot:
     snap = search_dex(query)
-    if snap and (snap.price_usd > 0 or _looks_ca(query)):
-        if snap:
+    if snap and snap.token_address and _looks_ca(query):
+        if snap.token_address.lower() == query.strip().lower():
             return snap
+        snap = None
+    elif snap and not _looks_ca(query):
+        return snap
     if _looks_ca(query):
+        g = _gecko_snap(query)
+        if g:
+            return g
+        j = _jup_snap(query)
+        if j:
+            return j
         hint = ""
         try:
             resp = requests.get(DEX_SEARCH, params={"q": query.strip()}, timeout=TIMEOUT)
@@ -227,13 +337,13 @@ def load_market(query: str) -> MarketSnapshot:
             addr = base.get("address") or ""
             if addr and addr.lower() != query.strip().lower():
                 hint = (
-                    f"\nDexScreener search did not index that mint.\n"
-                    f"Closest chart: {base.get('symbol') or '?'} on {alt.get('dexId')}\n"
-                    f"Indexed CA:\n{addr}\n"
-                    f"Paste THAT address (Pump.fun mints often end in 'pump')."
+                    f"\nClosest DexScreener chart is a DIFFERENT mint:\n"
+                    f"{base.get('symbol')} on {alt.get('dexId')}\n"
+                    f"{addr}\n"
+                    f"Pump.fun coins usually end in 'pump'. Paste the mint from the chart."
                 )
         raise PriceFetchError(
-            "No DexScreener pool for the exact CA you pasted.\n"
+            "No pool / price on DexScreener, GeckoTerminal, or Jupiter for that exact CA.\n"
             + query.strip()
             + hint
         )
