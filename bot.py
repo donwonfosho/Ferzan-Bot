@@ -1857,13 +1857,29 @@ async def live_exit_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         # worth unknown without qty; compare mark vs implied entry from last cost only if we have holdings
         try:
             sol_secret, evm_secret = user_wallets.secrets(uid)
-            if mint.startswith("0x"):
-                continue
-            held = next((h for h in signer.holdings(sol_secret) if h["mint"] == mint), None)
-            if not held:
-                continue
-            worth = float(held["amount"]) * px
         except Exception:
+            continue
+        worth = 0.0
+        evm_chain = "base"
+        try:
+            if mint.startswith("0x"):
+                evm_addr = (db.get_user_wallet(uid) or {}).get("evm_pub") or ""
+                for cid in ("eth", "base", "bsc", "hood", "arb", "avax"):
+                    try:
+                        raw = evm_signer._erc20_balance(CHAINS[cid]["rpc"], mint, evm_addr)
+                    except Exception:
+                        raw = 0
+                    if raw > 0:
+                        worth = (raw / 10**18) * px
+                        evm_chain = cid
+                        break
+            else:
+                held = next((h for h in signer.holdings(sol_secret) if h["mint"] == mint), None)
+                if held:
+                    worth = float(held["amount"]) * px
+        except Exception:
+            continue
+        if worth <= 0:
             continue
         pnl_pct = ((worth - cost) / cost) * 100
         hit = None
@@ -1874,7 +1890,10 @@ async def live_exit_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         if not hit:
             continue
         try:
-            _ok, msg = signer.sell_sol(mint, secret=sol_secret, pct=100)
+            if mint.startswith("0x"):
+                _ok, msg = evm_signer.sell_evm(evm_chain, mint, key_hex=evm_secret)
+            else:
+                _ok, msg = signer.sell_sol(mint, secret=sol_secret, pct=100)
         except Exception as exc:
             msg = str(exc)
             _ok = False
