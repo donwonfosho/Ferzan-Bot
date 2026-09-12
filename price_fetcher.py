@@ -313,40 +313,25 @@ def _jup_snap(query: str) -> MarketSnapshot | None:
 
 def load_market(query: str) -> MarketSnapshot:
     snap = search_dex(query)
-    if snap and snap.token_address and _looks_ca(query):
-        if snap.token_address.lower() == query.strip().lower():
-            return snap
-        snap = None
-    elif snap and not _looks_ca(query):
+    if snap and snap.price_usd > 0:
         return snap
     if _looks_ca(query):
         g = _gecko_snap(query)
         if g:
             return g
         j = _jup_snap(query)
-        if j:
+        if j and j.price_usd > 0:
             return j
-        hint = ""
         try:
             resp = requests.get(DEX_SEARCH, params={"q": query.strip()}, timeout=TIMEOUT)
-            alt = ((resp.json() or {}).get("pairs") or [None])[0]
+            pairs = (resp.json() or {}).get("pairs") or []
         except requests.RequestException:
-            alt = None
-        if alt:
-            base = alt.get("baseToken") or {}
-            addr = base.get("address") or ""
-            if addr and addr.lower() != query.strip().lower():
-                hint = (
-                    f"\nClosest DexScreener chart is a DIFFERENT mint:\n"
-                    f"{base.get('symbol')} on {alt.get('dexId')}\n"
-                    f"{addr}\n"
-                    f"Pump.fun coins usually end in 'pump'. Paste the mint from the chart."
-                )
-        raise PriceFetchError(
-            "No pool / price on DexScreener, GeckoTerminal, or Jupiter for that exact CA.\n"
-            + query.strip()
-            + hint
-        )
+            pairs = []
+        if pairs:
+            chosen = snapshot_from_pair(pairs[0], query)
+            chosen.extras["resolved"] = True
+            chosen.extras["pasted"] = query.strip()
+            return chosen
 
     coins = search_coin(query)
     if not coins:

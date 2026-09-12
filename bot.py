@@ -186,30 +186,39 @@ def render_card(card: SignalCard) -> str:
     s = card.snapshot
     ca = (s.token_address or "").strip()
     chain = (s.chain or "").upper()
-    chg = float(s.change_1h or 0)
-    chg_s = f"{chg:+.1f}% 1h"
+    dex = (s.dex or "").replace("pumpswap", "Pump.fun AMM").replace("pumpfun", "Pump.fun")
     mc = float(s.fdv or 0)
     liq = float(s.liquidity_usd or 0)
     vol = float(s.volume_24h or 0)
+    liq_pct = f" ({liq / mc * 100:.1f}%)" if mc > 0 and liq > 0 else ""
+    scan = (CHAINS.get(resolve_chain(s.chain) or "", {}).get("explorer_addr") or "").format(addr=ca) if ca else ""
+    if (s.chain or "").lower() in {"solana", "sol"} and ca:
+        scan = f"https://solscan.io/token/{ca}"
+    ds = s.url or (f"https://dexscreener.com/{s.chain}/{ca}" if ca else "")
     lines = [
-        f"🪙 <b>${_esc(s.symbol)}</b>  ·  {_esc(s.name)}",
-        f"⛓ {_esc(chain)}  ·  {_esc(s.dex)}  ·  {_esc(s.source)}",
+        f"🪙 <b>{_esc(s.name)}</b>  (${_esc(s.symbol)})",
         f"<code>{_esc(ca)}</code>" if ca else "",
+        f"💧 {_esc(dex)}  ·  ⛓ {_esc(chain)}",
         "",
-        f"🏅 Score <b>{card.score}</b>/100 {_bar(card.score)}  ·  {_esc(card.bias)}",
-        f"💵 Price {_esc(_fmt_px(s.price_usd))}  ·  {html.escape(chg_s)}",
-        f"🧢 MC {_esc(f'${mc:,.0f}' if mc else '—')}  ·  💧 Liq {_esc(f'${liq:,.0f}' if liq else '—')}",
-        f"📊 24h vol {_esc(f'${vol:,.0f}' if vol else '—')}  ·  🟢{s.buys_h1} / 🔴{s.sells_h1} 1h",
+        f"🧢 MC {_esc(f'${mc:,.0f}' if mc else '—')}   💵 {_esc(_fmt_px(s.price_usd))}",
+        f"💧 Liq {_esc(f'${liq:,.0f}' if liq else '—')}{_esc(liq_pct)}",
+        f"📊 24h {_esc(f'${vol:,.0f}' if vol else '—')}   🟢{s.buys_h1} / 🔴{s.sells_h1}",
+        f"🏅 Score <b>{card.score}</b>/100 {_bar(card.score)}  {_esc(card.bias)}",
         f"🎯 TP {card.take_pct:g}%   🛑 SL {card.stop_pct:g}%",
     ]
+    if (s.extras or {}).get("resolved") and (s.extras or {}).get("pasted"):
+        lines.append(f"<i>Resolved mint from paste {_esc(str(s.extras['pasted'])[:12])}…</i>")
     sec = _security_line(s.chain, ca)
     if sec:
         lines.extend(_esc(part) for part in sec.splitlines() if part)
-    if card.vetoes:
-        lines.append("⚠️ " + _esc(" · ".join(card.vetoes[:2])))
-    if s.url:
-        lines.append(f'<a href="{html.escape(s.url, quote=True)}">DexScreener</a>')
-    lines.append("<i>Tap CA to copy · See it. Ape it. Send it.</i>")
+    link_bits = []
+    if ds:
+        link_bits.append(f'<a href="{html.escape(ds, quote=True)}">DS</a>')
+    if scan:
+        link_bits.append(f'<a href="{html.escape(scan, quote=True)}">Scan</a>')
+    if link_bits:
+        lines.append(" · ".join(link_bits))
+    lines.append("<i>Tap mint to copy</i>")
     return "\n".join(x for x in lines if x)
 
 
