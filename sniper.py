@@ -25,6 +25,7 @@ from confluence import build_signal
 from price_fetcher import PriceFetchError, load_market, search_dex, snapshot_from_pair
 
 GECKO_NEW = "https://api.geckoterminal.com/api/v2/networks/{network}/new_pools"
+GECKO_TREND = "https://api.geckoterminal.com/api/v2/networks/{network}/trending_pools"
 GECKO_NEW_ALL = "https://api.geckoterminal.com/api/v2/networks/new_pools"
 DEX_PROFILES = "https://api.dexscreener.com/token-profiles/latest/v1"
 DEX_BOOSTS = "https://api.dexscreener.com/token-boosts/latest/v1"
@@ -59,6 +60,7 @@ def fetch_new_pools(chain: str | None = None, limit: int = 20) -> list[Launch]:
             return []
         gecko_id = CHAINS[resolved]["gecko"]
         urls.append((gecko_id, GECKO_NEW.format(network=gecko_id)))
+        urls.append((gecko_id, GECKO_TREND.format(network=gecko_id)))
     else:
         for cid in (
             "eth", "bsc", "base", "sol", "arb", "avax", "hood", "hype",
@@ -66,6 +68,7 @@ def fetch_new_pools(chain: str | None = None, limit: int = 20) -> list[Launch]:
         ):
             gid = CHAINS[cid]["gecko"]
             urls.append((gid, GECKO_NEW.format(network=gid)))
+            urls.append((gid, GECKO_TREND.format(network=gid)))
     gecko_id = urls[0][0] if urls else ""
     out: list[Launch] = []
     for gid, url in urls:
@@ -114,7 +117,7 @@ def fetch_new_pools(chain: str | None = None, limit: int = 20) -> list[Launch]:
                     pool=attrs.get("address") or "",
                     liquidity_usd=liq,
                     created_at=str(attrs.get("pool_created_at") or ""),
-                    source="geckoterminal",
+                    source="geckoterminal-trend" if "trending_pools" in url else "geckoterminal",
                     query=token or name,
                     fdv_usd=fdv,
                     price_usd=price,

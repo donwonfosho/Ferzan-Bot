@@ -2583,7 +2583,8 @@ async def launch_feed_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     interesting = [
         ln
         for ln in launches
-        if ln.liquidity_usd >= 8_000 or getattr(ln, "source", "") == "dexscreener-boost"
+        if ln.liquidity_usd >= 1_500
+        or getattr(ln, "source", "") in {"dexscreener-boost", "geckoterminal-trend"}
     ]
     if not interesting:
         return
@@ -2592,7 +2593,7 @@ async def launch_feed_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         by_chain.setdefault((ln.chain or "?").lower(), []).append(ln)
     diverse: list = []
     for rows in by_chain.values():
-        diverse.extend(rows[:2])
+        diverse.extend(rows[:4])
     for user in db.list_users():
         if not user.get("alerts_on"):
             continue
@@ -2610,12 +2611,15 @@ async def launch_feed_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             except Exception:
                 logger.exception("launch feed failed for %s", uid)
     for chat_id, bind in db.list_feed_binds():
-        for ln in diverse[:12]:
+        pool = []
+        for ln in interesting:
             cid = resolve_chain(ln.chain) or (ln.chain or "").lower()
             if bind not in {"*", ""} and cid != bind and (ln.chain or "").lower() != bind:
                 continue
-            key = f"ch:{chat_id}:{ln.chain}:{ln.token[:20]}"
-            if not db.should_resend_signal(int(chat_id), key, 1, cooldown_s=45 * 60):
+            pool.append(ln)
+        for ln in pool[:4]:
+            key = f"ch:{chat_id}:{ln.chain}:{(ln.token or '')[:20]}"
+            if not db.should_resend_signal(int(chat_id), key, 1, cooldown_s=30 * 60):
                 continue
             text, markup = launch_card(ln)
             try:
