@@ -123,48 +123,68 @@ def _bar(score: int) -> str:
     return "█" * filled + "░" * (10 - filled)
 
 
+def _fmt_px(n: float) -> str:
+    n = float(n or 0)
+    if n >= 1:
+        return f"${n:,.4f}"
+    if n >= 0.0001:
+        return f"${n:.6f}"
+    if n > 0:
+        return f"${n:.10f}".rstrip("0")
+    return "—"
+
+
 def render_card(card: SignalCard) -> str:
     s = card.snapshot
-    lines = [
-        f"<b>{_esc(s.symbol)}</b> · {_esc(s.name)}",
-        f"{_esc(s.chain)}/{_esc(s.dex)} · ${_esc(f'{s.price_usd:,.6g}')}",
-        f"Score <b>{card.score}</b>/100 {_bar(card.score)}  ·  {_esc(card.bias)}",
-        "",
-    ]
-    for f in card.factors:
-        lines.append(f"• <b>{_esc(f.name)}</b> {f.score} — {_esc(f.note)}")
-    lines += [
-        "",
-        _esc(card.thesis),
-        f"Suggested stop {card.stop_pct:g}% · target {card.take_pct:g}%",
-    ]
-    if s.liquidity_usd:
-        lines.append(
-            f"Liq ${_esc(f'{s.liquidity_usd:,.0f}')} · 24h vol ${_esc(f'{s.volume_24h:,.0f}')}"
-        )
-    if s.url:
-        lines.append(f'<a href="{html.escape(s.url, quote=True)}">Chart</a>')
     ca = (s.token_address or "").strip()
-    if ca:
-        lines.append(f"CA <code>{_esc(ca)}</code>")
-        lines.append("<i>Tap the address to copy.</i>")
-    lines.append("\n<i>See it. Ape it. Send it.</i>")
-    return "\n".join(lines)
+    chain = (s.chain or "").upper()
+    chg = float(s.change_1h or 0)
+    chg_s = f"{chg:+.1f}% 1h"
+    mc = float(s.fdv or 0)
+    liq = float(s.liquidity_usd or 0)
+    vol = float(s.volume_24h or 0)
+    lines = [
+        f"🪙 <b>${_esc(s.symbol)}</b>  ·  {_esc(s.name)}",
+        f"⛓ {_esc(chain)}  ·  {_esc(s.dex)}",
+        f"<code>{_esc(ca)}</code>" if ca else "",
+        "",
+        f"🏅 Score <b>{card.score}</b>/100 {_bar(card.score)}  ·  {_esc(card.bias)}",
+        f"💵 Price {_esc(_fmt_px(s.price_usd))}  ·  {html.escape(chg_s)}",
+        f"🧢 MC {_esc(f'${mc:,.0f}' if mc else '—')}  ·  💧 Liq {_esc(f'${liq:,.0f}' if liq else '—')}",
+        f"📊 24h vol {_esc(f'${vol:,.0f}' if vol else '—')}  ·  🟢{s.buys_h1} / 🔴{s.sells_h1} 1h",
+        f"🎯 TP {card.take_pct:g}%   🛑 SL {card.stop_pct:g}%",
+    ]
+    if card.vetoes:
+        lines.append("⚠️ " + _esc(" · ".join(card.vetoes[:2])))
+    if s.url:
+        lines.append(f'<a href="{html.escape(s.url, quote=True)}">DexScreener</a>')
+    lines.append("<i>Tap CA to copy · See it. Ape it. Send it.</i>")
+    return "\n".join(x for x in lines if x)
 
 
 def card_keyboard(query: str, score: int, ca: str = "") -> InlineKeyboardMarkup:
-    q = query[:40]
+    q = (ca or query)[:44]
+    cap = int(signer.max_usd())
     rows = [
         [
-            InlineKeyboardButton("💵 Buy", callback_data=f"buy:{q}"),
+            InlineKeyboardButton("👁 Track", callback_data=f"watch:{q}"),
+            InlineKeyboardButton("🔄 Refresh", callback_data=f"sig:{q}"),
+        ],
+        [
+            InlineKeyboardButton(f"💵 ${cap}", callback_data=f"buy:{q}"),
             InlineKeyboardButton("🧨 Override", callback_data=f"force:{q}"),
         ],
         [
-            InlineKeyboardButton("👁 Watch", callback_data=f"watch:{q}"),
-            InlineKeyboardButton("🔄 Refresh", callback_data=f"sig:{q}"),
+            InlineKeyboardButton("$1", callback_data=f"buy:{q}"),
+            InlineKeyboardButton("$3", callback_data=f"force:{q}"),
+            InlineKeyboardButton(f"${cap}", callback_data=f"force:{q}"),
+        ],
+        [
+            InlineKeyboardButton("🎯 Snipe", callback_data=f"snp:{q}"),
+            InlineKeyboardButton("📉 Quote", callback_data=f"qte:sol:{q}"),
         ],
     ]
-    addr = (ca or "").strip()
+    addr = (ca or query or "").strip()
     if addr and CopyTextButton is not None:
         rows.append(
             [InlineKeyboardButton("📋 Copy CA", copy_text=CopyTextButton(text=addr))]
