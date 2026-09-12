@@ -1765,6 +1765,11 @@ def launch_card(ln) -> tuple[str, InlineKeyboardMarkup]:
         + (f"💵 {_esc(_fmt_px(px))}\n" if px else "")
         + (f"⏱ {_esc(_pair_age(getattr(ln, 'created_at', '') or ''))}\n" if getattr(ln, "created_at", None) else "")
         + ("🔥 DexScreener hot\n" if getattr(ln, "source", "") == "dexscreener-boost" else "")
+        + (
+            f"🚀 {float(getattr(ln, 'chg_1h', 0) or 0):+.1f}% 1h\n"
+            if abs(float(getattr(ln, "chg_1h", 0) or 0)) >= 1
+            else ""
+        )
         + (" · ".join(links) + "\n" if links else "")
         + "<i>Tap CA to copy · Buy opens the Ferzan bot</i>"
     )
@@ -2584,7 +2589,12 @@ async def launch_feed_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         ln
         for ln in launches
         if ln.liquidity_usd >= 500
-        or getattr(ln, "source", "") in {"dexscreener-boost", "geckoterminal-trend"}
+        or getattr(ln, "source", "") in {
+            "dexscreener-boost",
+            "geckoterminal-trend",
+            "geckoterminal-mover",
+        }
+        or abs(float(getattr(ln, "chg_1h", 0) or 0)) >= 8
     ]
     if not interesting:
         return

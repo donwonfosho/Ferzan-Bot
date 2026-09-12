@@ -26,6 +26,7 @@ from price_fetcher import PriceFetchError, load_market, search_dex, snapshot_fro
 
 GECKO_NEW = "https://api.geckoterminal.com/api/v2/networks/{network}/new_pools"
 GECKO_TREND = "https://api.geckoterminal.com/api/v2/networks/{network}/trending_pools"
+GECKO_POOLS = "https://api.geckoterminal.com/api/v2/networks/{network}/pools"
 GECKO_NEW_ALL = "https://api.geckoterminal.com/api/v2/networks/new_pools"
 DEX_PROFILES = "https://api.dexscreener.com/token-profiles/latest/v1"
 DEX_BOOSTS = "https://api.dexscreener.com/token-boosts/latest/v1"
@@ -45,6 +46,8 @@ class Launch:
     query: str
     fdv_usd: float = 0.0
     price_usd: float = 0.0
+    chg_1h: float = 0.0
+    chg_24h: float = 0.0
 
 
 def _headers() -> dict[str, str]:
@@ -61,6 +64,7 @@ def fetch_new_pools(chain: str | None = None, limit: int = 20) -> list[Launch]:
         gecko_id = CHAINS[resolved]["gecko"]
         urls.append((gecko_id, GECKO_NEW.format(network=gecko_id)))
         urls.append((gecko_id, GECKO_TREND.format(network=gecko_id)))
+        urls.append((gecko_id, GECKO_POOLS.format(network=gecko_id)))
     else:
         for cid in (
             "eth", "bsc", "base", "sol", "arb", "avax", "hood", "hype",
@@ -69,6 +73,7 @@ def fetch_new_pools(chain: str | None = None, limit: int = 20) -> list[Launch]:
             gid = CHAINS[cid]["gecko"]
             urls.append((gid, GECKO_NEW.format(network=gid)))
             urls.append((gid, GECKO_TREND.format(network=gid)))
+            urls.append((gid, GECKO_POOLS.format(network=gid)))
     gecko_id = urls[0][0] if urls else ""
     out: list[Launch] = []
     for gid, url in urls:
@@ -108,6 +113,23 @@ def fetch_new_pools(chain: str | None = None, limit: int = 20) -> list[Launch]:
                 price = float(attrs.get("base_token_price_usd") or 0)
             except (TypeError, ValueError):
                 price = 0.0
+            chg = attrs.get("price_change_percentage") or {}
+            try:
+                chg_1h = float(chg.get("h1") or 0)
+            except (TypeError, ValueError):
+                chg_1h = 0.0
+            try:
+                chg_24h = float(chg.get("h24") or 0)
+            except (TypeError, ValueError):
+                chg_24h = 0.0
+            src = "geckoterminal"
+            if "trending_pools" in url:
+                src = "geckoterminal-trend"
+            elif "/pools" in url and "new_pools" not in url:
+                if chg_1h >= 8 or chg_24h >= 20:
+                    src = "geckoterminal-mover"
+                else:
+                    continue
             out.append(
                 Launch(
                     chain=chain_id or net,
@@ -117,10 +139,12 @@ def fetch_new_pools(chain: str | None = None, limit: int = 20) -> list[Launch]:
                     pool=attrs.get("address") or "",
                     liquidity_usd=liq,
                     created_at=str(attrs.get("pool_created_at") or ""),
-                    source="geckoterminal-trend" if "trending_pools" in url else "geckoterminal",
+                    source=src,
                     query=token or name,
                     fdv_usd=fdv,
                     price_usd=price,
+                    chg_1h=chg_1h,
+                    chg_24h=chg_24h,
                 )
             )
     # DexScreener paid/hot profiles
