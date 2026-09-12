@@ -2528,7 +2528,7 @@ async def launch_feed_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             if cid and not db.flag_on(uid, f"feed_{cid}", 1):
                 continue
             key = f"launch:{ln.chain}:{ln.token[:24]}"
-            if not db.should_resend_signal(uid, key, 1, cooldown_s=6 * 3600):
+            if not db.should_resend_signal(uid, key, 1, cooldown_s=45 * 60):
                 continue
             text, markup = launch_card(ln)
             try:
@@ -2547,7 +2547,7 @@ async def launch_feed_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             if bind not in {"*", ""} and cid != bind and (ln.chain or "").lower() != bind:
                 continue
             key = f"ch:{chat_id}:{ln.chain}:{ln.token[:20]}"
-            if not db.should_resend_signal(int(chat_id), key, 1, cooldown_s=6 * 3600):
+            if not db.should_resend_signal(int(chat_id), key, 1, cooldown_s=45 * 60):
                 continue
             text, markup = launch_card(ln)
             try:

@@ -61,51 +61,47 @@ def fetch_new_pools(chain: str | None = None, limit: int = 20) -> list[Launch]:
         for cid in ("eth", "bsc", "base", "sol", "arb", "avax", "hood", "hype", "sonic", "monad"):
             gid = CHAINS[cid]["gecko"]
             urls.append((gid, GECKO_NEW.format(network=gid)))
-    data: list[dict] = []
     gecko_id = urls[0][0] if urls else ""
+    out: list[Launch] = []
     for gid, url in urls:
         try:
             r = requests.get(url, headers=_headers(), timeout=TIMEOUT)
             r.raise_for_status()
             chunk = (r.json() or {}).get("data") or []
-            for row in chunk:
-                row["_ferzan_net"] = gid
-            data.extend(chunk)
         except requests.RequestException:
             continue
-    data = data[: max(limit * 3, 24)]
-    out: list[Launch] = []
-    for row in data[:limit]:
-        attrs = row.get("attributes") or {}
-        rel = row.get("relationships") or {}
-        net = (
-            ((rel.get("network") or {}).get("data") or {}).get("id")
-            or row.get("_ferzan_net")
-            or gecko_id
-            or ""
-        )
-        chain_id = _from_gecko(net)
-        name = attrs.get("name") or "UNKNOWN"
-        symbol = name.split("/")[0].strip() if name else "UNK"
-        token = attrs.get("address") or ""
-        liq = 0.0
-        try:
-            liq = float(attrs.get("reserve_in_usd") or 0)
-        except (TypeError, ValueError):
-            pass
-        out.append(
-            Launch(
-                chain=chain_id or net,
-                symbol=symbol,
-                name=name,
-                token=token,
-                pool=attrs.get("address") or "",
-                liquidity_usd=liq,
-                created_at=str(attrs.get("pool_created_at") or ""),
-                source="geckoterminal",
-                query=token or name,
+        for row in chunk[:8]:
+            row["_ferzan_net"] = gid
+            data_row = row  # parsed below using same loop body
+            attrs = (row.get("attributes") or {})
+            rel = row.get("relationships") or {}
+            net = (
+                ((rel.get("network") or {}).get("data") or {}).get("id")
+                or row.get("_ferzan_net")
+                or gecko_id
+                or ""
             )
-        )
+            chain_id = _from_gecko(net)
+            name = attrs.get("name") or "UNKNOWN"
+            symbol = name.split("/")[0].strip() if name else "UNK"
+            token = attrs.get("address") or ""
+            try:
+                liq = float(attrs.get("reserve_in_usd") or 0)
+            except (TypeError, ValueError):
+                liq = 0.0
+            out.append(
+                Launch(
+                    chain=chain_id or net,
+                    symbol=symbol,
+                    name=name,
+                    token=token,
+                    pool=attrs.get("address") or "",
+                    liquidity_usd=liq,
+                    created_at=str(attrs.get("pool_created_at") or ""),
+                    source="geckoterminal",
+                    query=token or name,
+                )
+            )
     return out
 
 
