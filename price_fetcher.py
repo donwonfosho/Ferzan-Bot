@@ -216,8 +216,26 @@ def load_market(query: str) -> MarketSnapshot:
         if snap:
             return snap
     if _looks_ca(query):
+        hint = ""
+        try:
+            resp = requests.get(DEX_SEARCH, params={"q": query.strip()}, timeout=TIMEOUT)
+            alt = ((resp.json() or {}).get("pairs") or [None])[0]
+        except requests.RequestException:
+            alt = None
+        if alt:
+            base = alt.get("baseToken") or {}
+            addr = base.get("address") or ""
+            if addr and addr.lower() != query.strip().lower():
+                hint = (
+                    f"\nDexScreener search did not index that mint.\n"
+                    f"Closest chart: {base.get('symbol') or '?'} on {alt.get('dexId')}\n"
+                    f"Indexed CA:\n{addr}\n"
+                    f"Paste THAT address (Pump.fun mints often end in 'pump')."
+                )
         raise PriceFetchError(
-            f"No DexScreener pool for that CA. Check the chain / address.\n{query.strip()}"
+            "No DexScreener pool for the exact CA you pasted.\n"
+            + query.strip()
+            + hint
         )
 
     coins = search_coin(query)
