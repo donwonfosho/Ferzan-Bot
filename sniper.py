@@ -42,6 +42,8 @@ class Launch:
     created_at: str
     source: str
     query: str
+    fdv_usd: float = 0.0
+    price_usd: float = 0.0
 
 
 def _headers() -> dict[str, str]:
@@ -85,10 +87,21 @@ def fetch_new_pools(chain: str | None = None, limit: int = 20) -> list[Launch]:
             name = attrs.get("name") or "UNKNOWN"
             symbol = name.split("/")[0].strip() if name else "UNK"
             token = attrs.get("address") or ""
+            base = ((rel.get("base_token") or {}).get("data") or {}).get("id") or ""
+            if "_" in str(base):
+                token = str(base).split("_", 1)[1] or token
             try:
                 liq = float(attrs.get("reserve_in_usd") or 0)
             except (TypeError, ValueError):
                 liq = 0.0
+            try:
+                fdv = float(attrs.get("fdv_usd") or attrs.get("market_cap_usd") or 0)
+            except (TypeError, ValueError):
+                fdv = 0.0
+            try:
+                price = float(attrs.get("base_token_price_usd") or 0)
+            except (TypeError, ValueError):
+                price = 0.0
             out.append(
                 Launch(
                     chain=chain_id or net,
@@ -100,8 +113,39 @@ def fetch_new_pools(chain: str | None = None, limit: int = 20) -> list[Launch]:
                     created_at=str(attrs.get("pool_created_at") or ""),
                     source="geckoterminal",
                     query=token or name,
+                    fdv_usd=fdv,
+                    price_usd=price,
                 )
             )
+    # DexScreener paid/hot profiles
+    try:
+        hot = requests.get("https://api.dexscreener.com/token-boosts/latest/v1", timeout=TIMEOUT)
+        rows = hot.json() if hot.ok else []
+    except requests.RequestException:
+        rows = []
+    if not isinstance(rows, list):
+        rows = []
+    for row in rows[:15]:
+        ca = row.get("tokenAddress") or ""
+        ds = (row.get("chainId") or "").lower()
+        cid = _from_gecko(ds) or ds
+        if chain and resolve_chain(chain) and cid != resolve_chain(chain):
+            continue
+        if not ca:
+            continue
+        out.append(
+            Launch(
+                chain=cid,
+                symbol=(row.get("description") or "HOT")[:12],
+                name="DexScreener hot",
+                token=ca,
+                pool=ca,
+                liquidity_usd=0,
+                created_at="",
+                source="dexscreener-boost",
+                query=ca,
+            )
+        )
     return out
 
 

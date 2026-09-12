@@ -135,6 +135,24 @@ def _fmt_px(n: float) -> str:
     return "—"
 
 
+def _pair_age(iso: str) -> str:
+    raw = (iso or "").strip()
+    if not raw:
+        return ""
+    try:
+        from datetime import datetime, timezone
+
+        ts = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        mins = max(0, int((datetime.now(timezone.utc) - ts).total_seconds() // 60))
+        if mins < 60:
+            return f"{mins}m old"
+        if mins < 1440:
+            return f"{mins // 60}h old"
+        return f"{mins // 1440}d old"
+    except Exception:
+        return raw[:16]
+
+
 def _security_line(chain: str, ca: str) -> str:
     ids = {"eth": "1", "bsc": "56", "base": "8453", "arb": "42161", "avax": "43114"}
     cid = ids.get((chain or "").lower())
@@ -1709,9 +1727,9 @@ def launch_card(ln) -> tuple[str, InlineKeyboardMarkup]:
     }
     mark = marks.get(cid, "⛓")
     liq = float(ln.liquidity_usd or 0)
-    mc = 0.0
-    px = 0.0
-    if ca:
+    mc = float(getattr(ln, "fdv_usd", 0) or 0)
+    px = float(getattr(ln, "price_usd", 0) or 0)
+    if ca and (mc <= 0 or px <= 0):
         try:
             rr = requests.get(
                 f"https://api.dexscreener.com/latest/dex/tokens/{ca}",
@@ -1720,8 +1738,10 @@ def launch_card(ln) -> tuple[str, InlineKeyboardMarkup]:
             pairs = (rr.json() or {}).get("pairs") or []
             if pairs:
                 p = max(pairs, key=lambda x: float((x.get("liquidity") or {}).get("usd") or 0))
-                mc = float(p.get("fdv") or p.get("marketCap") or 0)
-                px = float(p.get("priceUsd") or 0)
+                if mc <= 0:
+                    mc = float(p.get("fdv") or p.get("marketCap") or 0)
+                if px <= 0:
+                    px = float(p.get("priceUsd") or 0)
                 if liq <= 0:
                     liq = float((p.get("liquidity") or {}).get("usd") or 0)
         except Exception:
@@ -1740,6 +1760,8 @@ def launch_card(ln) -> tuple[str, InlineKeyboardMarkup]:
         f"💧 {_esc(cid.upper() if cid else chain)}  ·  ⛓ {chain}\n"
         f"🧢 MC {_esc(f'${mc:,.0f}' if mc else '—')}   💧 Liq ${_esc(f'{liq:,.0f}')}\n"
         + (f"💵 {_esc(_fmt_px(px))}\n" if px else "")
+        + (f"⏱ {_esc(_pair_age(getattr(ln, 'created_at', '') or ''))}\n" if getattr(ln, "created_at", None) else "")
+        + ("🔥 DexScreener hot\n" if getattr(ln, "source", "") == "dexscreener-boost" else "")
         + (" · ".join(links) + "\n" if links else "")
         + "<i>Tap CA to copy · Buy opens the Ferzan bot</i>"
     )
@@ -2555,7 +2577,11 @@ async def launch_feed_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     launches = sniper.fetch_new_pools(None, limit=12)
     if not launches:
         return
-    interesting = [ln for ln in launches if ln.liquidity_usd >= 8_000]
+    interesting = [
+        ln
+        for ln in launches
+        if ln.liquidity_usd >= 8_000 or getattr(ln, "source", "") == "dexscreener-boost"
+    ]
     if not interesting:
         return
     by_chain: dict[str, list] = {}
