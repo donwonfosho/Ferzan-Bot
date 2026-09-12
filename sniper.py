@@ -195,6 +195,23 @@ def try_fill(order: dict[str, Any]) -> tuple[str, str]:
     )
     if not filled:
         return "miss", msg
+    live_line = ""
+    try:
+        import evm_signer
+        import signer
+        import user_wallets
+
+        uid = int(order["user_id"])
+        mint = (card.snapshot.token_address or order.get("query") or "").strip()
+        usd = min(signer.max_usd(), float(order.get("usd") or signer.max_usd()))
+        sol_secret, evm_secret = user_wallets.secrets(uid)
+        if mint.startswith("0x"):
+            _ok, live_line = evm_signer.buy_evm(order.get("chain") or "base", mint, usd, key_hex=evm_secret)
+        elif mint:
+            _ok, live_line = signer.buy_sol(mint, usd, secret=sol_secret)
+    except Exception as exc:
+        live_line = f"Live snipe skipped: {exc}"
+    msg = msg + ("\n" + live_line if live_line else "")
     db.finish_snipe(int(order["id"]), "filled", msg)
     return "filled", msg
 
