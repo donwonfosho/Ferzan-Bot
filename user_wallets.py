@@ -60,6 +60,38 @@ def ensure(user_id: int) -> dict:
     return db.get_user_wallet(user_id) or {}
 
 
+def import_keys(user_id: int, sol_secret: str = "", evm_secret: str = "") -> dict:
+    sol_secret = (sol_secret or "").strip()
+    evm_secret = (evm_secret or "").strip()
+    if not sol_secret and not evm_secret:
+        raise ValueError("Need a Solana key or an EVM hex key.")
+    row = db.get_user_wallet(user_id) or ensure(user_id)
+    sol_pub, evm_pub = row["sol_pub"], row["evm_pub"]
+    sol_store, evm_store = row["sol_key"], row["evm_key"]
+    if sol_secret:
+        from solders.keypair import Keypair
+
+        try:
+            kp = Keypair.from_base58_string(sol_secret)
+        except Exception:
+            kp = Keypair.from_bytes(base64.b64decode(sol_secret))
+        sol_pub = str(kp.pubkey())
+        try:
+            packed = kp.to_base58_string()
+        except Exception:
+            packed = base64.b64encode(bytes(kp)).decode()
+        sol_store = _lock(packed)
+    if evm_secret:
+        from eth_account import Account
+
+        raw = evm_secret[2:] if evm_secret.startswith("0x") else evm_secret
+        acct = Account.from_key("0x" + raw)
+        evm_pub = acct.address
+        evm_store = _lock(acct.key.hex())
+    db.save_user_wallet(user_id, sol_pub, sol_store, evm_pub, evm_store)
+    return db.get_user_wallet(user_id) or {}
+
+
 def secrets(user_id: int) -> tuple[str, str]:
     row = ensure(user_id)
     return _unlock(row["sol_key"]), _unlock(row["evm_key"])

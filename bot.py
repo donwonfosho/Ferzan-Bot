@@ -308,7 +308,8 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.effective_message.reply_text(
         "FERZAN commands\n\n"
         "/start — home + slogan\n"
-        "/wallet — deposit addresses by chain\n"
+        "/wallet — generate / import / chain addresses\n"
+        "/importsol /importevm — import a key in private chat\n"
         "/bag — SOL + tokens in your bag\n"
         "/settings — size, floor, daily cap\n"
         "/positions — paper desk\n"
@@ -746,6 +747,25 @@ async def watchwallet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     )
 
 
+def wallet_menu_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("ℹ️ Help", callback_data="go:help"),
+                InlineKeyboardButton("↩️ Return", callback_data="go:home"),
+            ],
+            [InlineKeyboardButton("📂 Rearrange wallets", callback_data="wi:rearr")],
+            [
+                InlineKeyboardButton("📥 Import wallet", callback_data="wi:imp"),
+                InlineKeyboardButton("✨ Generate wallet", callback_data="wi:gen"),
+            ],
+            [InlineKeyboardButton("🧲 Collect", callback_data="wi:col")],
+            [InlineKeyboardButton("📤 Disperse", callback_data="wi:dis")],
+            [InlineKeyboardButton("🔗 Addresses by chain", callback_data="wi:chains")],
+        ]
+    )
+
+
 def wallet_keyboard() -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     pair: list[InlineKeyboardButton] = []
@@ -756,20 +776,64 @@ def wallet_keyboard() -> InlineKeyboardMarkup:
             pair = []
     if pair:
         rows.append(pair)
-    rows.append([InlineKeyboardButton("Return", callback_data="go:home")])
+    rows.append([InlineKeyboardButton("↩️ Wallet menu", callback_data="go:wallets")])
     return InlineKeyboardMarkup(rows)
 
 
 async def wallet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update):
         return
-    try:
-        user_wallets.ensure(update.effective_user.id)
-    except Exception as exc:
-        await update.effective_message.reply_text(f"Could not create wallet.\n{exc}")
+    row = db.get_user_wallet(update.effective_user.id)
+    if row:
+        text = (
+            "👛 Ferzan wallets ready.\n"
+            "Chain buttons for addresses. Import / Collect / Disperse below."
+        )
+    else:
+        text = "ℹ️ Wallet not found. Import or generate."
+    await update.effective_message.reply_text(text, reply_markup=wallet_menu_keyboard())
+
+
+async def importsol_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard(update):
         return
+    if not context.args:
+        await update.effective_message.reply_text("Usage: /importsol <base58-key>")
+        return
+    try:
+        row = user_wallets.import_keys(update.effective_user.id, sol_secret=context.args[0])
+    except Exception as exc:
+        await update.effective_message.reply_text(str(exc))
+        return
+    try:
+        await update.effective_message.delete()
+    except Exception:
+        pass
     await update.effective_message.reply_text(
-        "Select the chain. Deposit and trade on that network.",
+        f"Solana imported.\n`{row['sol_pub']}`",
+        parse_mode="Markdown",
+        reply_markup=wallet_keyboard(),
+    )
+
+
+async def importevm_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard(update):
+        return
+    if not context.args:
+        await update.effective_message.reply_text("Usage: /importevm <0x-key>")
+        return
+    try:
+        row = user_wallets.import_keys(update.effective_user.id, evm_secret=context.args[0])
+    except Exception as exc:
+        await update.effective_message.reply_text(str(exc))
+        return
+    try:
+        await update.effective_message.delete()
+    except Exception:
+        pass
+    await update.effective_message.reply_text(
+        f"EVM imported.\n`{row['evm_pub']}`",
+        parse_mode="Markdown",
         reply_markup=wallet_keyboard(),
     )
 
@@ -1106,6 +1170,57 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     uid = update.effective_user.id
     data = query.data or ""
+    if data.startswith("wi:"):
+        kind = data[3:]
+        if kind == "gen":
+            try:
+                user_wallets.ensure(uid)
+            except Exception as exc:
+                await context.bot.send_message(uid, str(exc))
+                return
+            await context.bot.send_message(
+                uid,
+                "✨ Wallet generated. Keys stay on the server — not posted in chat.\n"
+                "Tap a chain for the deposit address.",
+                reply_markup=wallet_keyboard(),
+            )
+            return
+        if kind == "imp":
+            await context.bot.send_message(
+                uid,
+                "📥 Import\n"
+                "/importsol <solana-private-key>\n"
+                "/importevm <0x-private-key>\n"
+                "Only in this private chat. Then delete your message.",
+            )
+            return
+        if kind == "col":
+            await context.bot.send_message(
+                uid,
+                "🧲 Collect — pull funds to one address you own.\n"
+                "/collectsol <your-sol-address>\n"
+                "/collectevm <your-0x-address>\n"
+                "Sends the bag off Ferzan to that address (coming as live send).",
+            )
+            return
+        if kind == "dis":
+            await context.bot.send_message(
+                uid,
+                "📤 Disperse — split from your Ferzan bag to several addresses.\n"
+                "Use /collect first until multi-send ships.",
+            )
+            return
+        if kind == "rearr":
+            await context.bot.send_message(uid, "📂 One trading pair per user for now.")
+            return
+        if kind == "chains":
+            await context.bot.send_message(
+                uid,
+                "Select the chain for its deposit address.",
+                reply_markup=wallet_keyboard(),
+            )
+            return
+        return
     if data.startswith("wa:"):
         cid = resolve_chain(data[3:]) or data[3:]
         try:
@@ -1510,6 +1625,8 @@ def main() -> None:
     app.add_handler(CommandHandler("resetpaper", resetpaper_cmd))
     app.add_handler(CommandHandler("watchwallet", watchwallet_cmd))
     app.add_handler(CommandHandler("wallet", wallet_cmd))
+    app.add_handler(CommandHandler("importsol", importsol_cmd))
+    app.add_handler(CommandHandler("importevm", importevm_cmd))
     app.add_handler(CommandHandler("wallets", wallets_cmd))
     app.add_handler(CommandHandler("unwatchwallet", unwatchwallet_cmd))
     app.add_handler(CommandHandler("drawdown", drawdown_cmd))
