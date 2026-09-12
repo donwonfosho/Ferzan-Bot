@@ -1129,21 +1129,45 @@ async def chains_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 def launch_card(ln) -> tuple[str, InlineKeyboardMarkup]:
     ca = (ln.token or ln.query or "").strip()
     name = html.escape((ln.symbol or "?").upper())
-    chain = html.escape((ln.chain or "").upper())
+    raw_chain = (ln.chain or "").lower()
+    cid = resolve_chain(raw_chain) or raw_chain
+    chain = html.escape((CHAINS.get(cid, {}).get("label") or raw_chain or "?").upper())
+    if cid == "hood":
+        chain = "HOOD"
+    marks = {
+        "sol": "🟣", "bsc": "🟡", "base": "🔵", "eth": "♦️",
+        "arb": "🔷", "avax": "🔺", "hood": "🪶", "hype": "💚",
+    }
+    mark = marks.get(cid, "⛓")
+    liq = float(ln.liquidity_usd or 0)
+    cap = int(signer.max_usd())
+    href = (CHAINS.get(cid, {}).get("explorer_addr") or "").format(addr=ca) if ca.startswith("0x") or cid == "sol" else ""
+    if cid == "sol" and ca:
+        href = f"https://solscan.io/token/{ca}"
+    title = f"{mark} <a href=\"{html.escape(href)}\"><b>${name}</b></a>" if href else f"{mark} <b>${name}</b>"
     text = (
-        f"🚀 <b>${name}</b>\n"
-        f"⛓ {chain}    💧 ${ln.liquidity_usd:,.0f} liq\n\n"
-        f"📋 <code>{html.escape(ca)}</code>\n"
-        f"<i>Tap the CA to copy</i>"
+        f"{title}\n"
+        f"<b>{chain}</b>   💧 ${liq:,.0f} liq\n"
+        f"<code>{html.escape(ca)}</code>\n"
+        f"<i>Blue ticker → explorer · tap CA to copy</i>"
     )
-    short = ca[:60]
+    short = ca if len(ca) <= 48 else ca[:48]
     rows = [
         [
             InlineKeyboardButton("📡 Score", callback_data=f"sig:{short}"),
             InlineKeyboardButton("💵 Buy", callback_data=f"buy:{short}"),
         ],
         [
-            InlineKeyboardButton("🎯 Snipe $40", callback_data=f"snp:{short}"),
+            InlineKeyboardButton(f"🎯 Snipe ${cap}", callback_data=f"snp:{short}"),
+            InlineKeyboardButton("👁 Watch", callback_data=f"watch:{short}"),
+        ],
+        [
+            InlineKeyboardButton("📉 Quote", callback_data=f"qte:{cid}:{short}"),
+            InlineKeyboardButton("🧨 Override", callback_data=f"force:{short}"),
+        ],
+        [
+            InlineKeyboardButton("👛 Wallet", callback_data="go:wallets"),
+            InlineKeyboardButton("🎒 Bag", callback_data="go:bag"),
         ],
     ]
     if ca and CopyTextButton is not None:
@@ -1345,6 +1369,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await fees_cmd(update, context)
         elif kind == "wallets":
             await wallet_cmd(update, context)
+        elif kind == "bag":
+            await bag_cmd(update, context)
         elif kind == "settings":
             context.args = []
             await settings_cmd(update, context)
@@ -1397,13 +1423,32 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             user_id=uid,
             query=ca,
             chain=None,
-            usd=40.0,
+            usd=float(signer.max_usd()),
             min_liq=25_000,
             min_score=int(user.get("min_confluence") or 62),
             max_age_h=6.0,
             require_long=True,
         )
-        await context.bot.send_message(uid, f"🎯 Snipe #{sid} armed · $40 · gates on")
+        await context.bot.send_message(
+            uid, f"🎯 Snipe #{sid} armed · ${signer.max_usd():.0f} · gates on"
+        )
+        return
+    if data.startswith("qte:"):
+        parts = data.split(":", 2)
+        chain = parts[1] if len(parts) > 2 else "sol"
+        token = parts[2] if len(parts) > 2 else parts[-1]
+        if quotes is None:
+            await context.bot.send_message(uid, "Quote module not loaded.")
+            return
+        try:
+            usd = float(signer.max_usd())
+            if chain in {"sol", "solana"} or (token and not token.startswith("0x")):
+                q = quotes.sol_quote(token, usd)
+            else:
+                q = quotes.evm_quote(chain, token, usd)
+            await context.bot.send_message(uid, quotes.format_quote(q))
+        except Exception as exc:
+            await context.bot.send_message(uid, str(exc))
         return
     if data.startswith("sig:"):
         await _send_signal(update, data[4:], edit=True)
