@@ -2582,37 +2582,47 @@ async def snipe_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def launch_feed_job(context: ContextTypes.DEFAULT_TYPE) -> None:
-    launches = sniper.fetch_new_pools(None, limit=12)
-    if not launches:
-        return
-    interesting = [
-        ln
-        for ln in launches
-        if ln.liquidity_usd >= 500
-        or getattr(ln, "source", "") in {
-            "dexscreener-boost",
-            "geckoterminal-trend",
-            "geckoterminal-mover",
-        }
-        or abs(float(getattr(ln, "chg_1h", 0) or 0)) >= 8
-    ]
-    if not interesting:
-        return
-    by_chain: dict[str, list] = {}
-    for ln in interesting:
-        by_chain.setdefault((ln.chain or "?").lower(), []).append(ln)
-    diverse: list = []
-    for rows in by_chain.values():
-        diverse.extend(rows[:6])
+    binds = db.list_feed_binds()
+    cache: dict[str, list] = {}
+
+    def _pool_for(bind: str) -> list:
+        key = (resolve_chain(bind) or bind or "*").lower()
+        if key in cache:
+            return cache[key]
+        if key in {"*", ""}:
+            rows = []
+            for major in ("sol", "bsc", "eth", "base"):
+                rows.extend(sniper.fetch_new_pools(major, limit=8))
+            cache[key] = rows
+            return rows
+        rows = sniper.fetch_new_pools(key, limit=16)
+        cache[key] = rows
+        return rows
+
+    def _interesting(rows: list, loose: bool) -> list:
+        keep = []
+        for ln in rows:
+            hot = getattr(ln, "source", "") in {
+                "dexscreener-boost",
+                "dexscreener-mover",
+                "geckoterminal-trend",
+                "geckoterminal-mover",
+            }
+            chg = abs(float(getattr(ln, "chg_1h", 0) or 0))
+            if ln.liquidity_usd >= (100 if loose else 500) or hot or chg >= 5:
+                keep.append(ln)
+        return keep or list(rows[:4])
+
     for user in db.list_users():
         if not user.get("alerts_on"):
             continue
         uid = int(user["user_id"])
-        for ln in diverse[:12]:
+        diverse = _interesting(_pool_for("*"), False)
+        for ln in diverse[:8]:
             cid = resolve_chain(ln.chain) or (ln.chain or "").lower()
             if cid and not db.flag_on(uid, f"feed_{cid}", 1):
                 continue
-            key = f"launch:{ln.chain}:{ln.token[:24]}"
+            key = f"launch:{ln.chain}:{(ln.token or '')[:24]}"
             if not db.should_resend_signal(uid, key, 1, cooldown_s=45 * 60):
                 continue
             text, markup = launch_card(ln)
@@ -2620,13 +2630,18 @@ async def launch_feed_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 await send_launch(context.bot, uid, text, markup, promo=False)
             except Exception:
                 logger.exception("launch feed failed for %s", uid)
-    for chat_id, bind in db.list_feed_binds():
-        pool = []
-        for ln in interesting:
-            cid = resolve_chain(ln.chain) or (ln.chain or "").lower()
-            if bind not in {"*", ""} and cid != bind and (ln.chain or "").lower() != bind:
-                continue
-            pool.append(ln)
+
+    for chat_id, bind in binds:
+        rows = _pool_for(bind)
+        pool = _interesting(rows, loose=True)
+        if bind not in {"*", ""}:
+            want = resolve_chain(bind) or bind
+            pool = [
+                ln
+                for ln in pool
+                if (resolve_chain(ln.chain) or (ln.chain or "").lower()) == want
+                or (ln.chain or "").lower() == bind
+            ] or rows[:4]
         for ln in pool[:6]:
             key = f"ch:{chat_id}:{ln.chain}:{(ln.token or '')[:20]}"
             if not db.should_resend_signal(int(chat_id), key, 1, cooldown_s=12 * 60):

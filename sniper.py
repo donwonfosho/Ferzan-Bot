@@ -83,7 +83,7 @@ def fetch_new_pools(chain: str | None = None, limit: int = 20) -> list[Launch]:
             chunk = (r.json() or {}).get("data") or []
         except requests.RequestException:
             continue
-        for row in chunk[:8]:
+        for row in chunk[:12]:
             row["_ferzan_net"] = gid
             data_row = row  # parsed below using same loop body
             attrs = (row.get("attributes") or {})
@@ -176,6 +176,78 @@ def fetch_new_pools(chain: str | None = None, limit: int = 20) -> list[Launch]:
                 query=ca,
             )
         )
+    if chain:
+        resolved = resolve_chain(chain)
+        have = sum(1 for x in out if (resolve_chain(x.chain) or x.chain) == resolved)
+        if resolved and have < 6:
+            out.extend(_ds_chain_pairs(resolved)[:10])
+    return out
+
+
+def _ds_chain_pairs(cid: str) -> list[Launch]:
+    meta = CHAINS.get(cid) or {}
+    ds = (meta.get("dexscreener") or cid).lower()
+    queries = [meta.get("native") or cid, meta.get("label") or cid, cid]
+    seen: set[str] = set()
+    out: list[Launch] = []
+    for q in queries:
+        try:
+            r = requests.get(
+                "https://api.dexscreener.com/latest/dex/search",
+                params={"q": q},
+                timeout=TIMEOUT,
+            )
+            pairs = (r.json() or {}).get("pairs") or []
+        except requests.RequestException:
+            continue
+        for p in pairs[:25]:
+            raw = (p.get("chainId") or "").lower()
+            pcid = resolve_chain(raw) or raw
+            if pcid != cid and raw not in {ds, cid}:
+                continue
+            base = p.get("baseToken") or {}
+            ca = base.get("address") or ""
+            if not ca or ca in seen:
+                continue
+            seen.add(ca)
+            try:
+                liq = float((p.get("liquidity") or {}).get("usd") or 0)
+            except (TypeError, ValueError):
+                liq = 0.0
+            chg = (p.get("priceChange") or {}).get("h1")
+            try:
+                chg_1h = float(chg or 0)
+            except (TypeError, ValueError):
+                chg_1h = 0.0
+            try:
+                chg_24h = float((p.get("priceChange") or {}).get("h24") or 0)
+            except (TypeError, ValueError):
+                chg_24h = 0.0
+            try:
+                px = float(p.get("priceUsd") or 0)
+            except (TypeError, ValueError):
+                px = 0.0
+            try:
+                fdv = float(p.get("fdv") or p.get("marketCap") or 0)
+            except (TypeError, ValueError):
+                fdv = 0.0
+            out.append(
+                Launch(
+                    chain=cid,
+                    symbol=base.get("symbol") or "TOK",
+                    name=base.get("name") or base.get("symbol") or "token",
+                    token=ca,
+                    pool=p.get("pairAddress") or ca,
+                    liquidity_usd=liq,
+                    created_at="",
+                    source="dexscreener-mover",
+                    query=ca,
+                    fdv_usd=fdv,
+                    price_usd=px,
+                    chg_1h=chg_1h,
+                    chg_24h=chg_24h,
+                )
+            )
     return out
 
 
