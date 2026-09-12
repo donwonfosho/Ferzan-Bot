@@ -238,6 +238,9 @@ def card_keyboard(query: str, score: int, ca: str = "", chain: str = "") -> Inli
             InlineKeyboardButton("🎯 Snipe", callback_data=f"snp:{q}"),
             InlineKeyboardButton("📉 Quote", callback_data=f"qte:{cid}:{q}"),
         ],
+        [
+            InlineKeyboardButton("⏳ Buy limit −20%", callback_data=f"blm:{q}"),
+        ],
     ]
     addr = (ca or query or "").strip()
     if addr and CopyTextButton is not None:
@@ -1882,6 +1885,26 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         else:
             _ok, msg = signer.sell_sol(mint, secret=sol_secret, pct=pct)
         await context.bot.send_message(uid, f"{'🟢' if _ok else '🔴'} Sell {pct}% · {chain if mint.startswith('0x') else 'SOL'}\n{msg}")
+        return
+    if data.startswith("blm:"):
+        mint = data[4:]
+        try:
+            card = analyze(mint)
+            px = float(card.snapshot.price_usd or 0)
+        except Exception as exc:
+            await context.bot.send_message(uid, str(exc))
+            return
+        if px <= 0:
+            await context.bot.send_message(uid, "No mark to hang a limit on.")
+            return
+        target = px * 0.8
+        usd = float(signer.max_usd())
+        chain = card.snapshot.chain or ""
+        lid = db.add_buy_limit(uid, card.snapshot.token_address or mint, chain, usd, target)
+        await context.bot.send_message(
+            uid,
+            f"⏳ Buy limit #{lid} · {_fmt_px(target)} (−20%) · ${usd:.0f}",
+        )
         return
     if data.startswith("snp:"):
         ca = data[4:]
