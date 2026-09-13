@@ -776,6 +776,26 @@ def _live_buy_followup(
         sol_secret, evm_secret = user_wallets.secrets(uid)
     except Exception as exc:
         return f"Live: open /wallet first.\n{exc}"
+    if chain in {"trx", "tron"} or (mint.startswith("T") and 30 <= len(mint) <= 36):
+        import tron_signer
+
+        _ok, msg = tron_signer.buy_tron(mint, usd, key_hex=evm_secret)
+        if _ok:
+            db.add_live_cost(uid, mint, usd)
+            extra = db.credit_desk_share(uid, usd)
+            if extra:
+                msg = f"{msg}\n{extra}"
+        return msg
+    if chain in {"ton"} or mint.startswith(("EQ", "UQ", "kQ")):
+        import ton_signer
+
+        _ok, msg = ton_signer.buy_ton(mint, usd, secret=sol_secret)
+        if _ok:
+            db.add_live_cost(uid, mint, usd)
+            extra = db.credit_desk_share(uid, usd)
+            if extra:
+                msg = f"{msg}\n{extra}"
+        return msg
     if mint.startswith("0x"):
         if not (os.getenv("ZEROX_API_KEY") or "").strip():
             return "Live: EVM needs ZEROX_API_KEY on the droplet."
@@ -2077,8 +2097,9 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await update.effective_message.reply_text(
         "🩺 Ferzan Trade Bot\n"
         f"Live buys {live}\n"
-        "Live swap: SOL + ETH BASE BNB ARB AVAX POL OP LINEA SONIC HYPE HOOD INK MONAD\n"
-        "Signals only: Pulse TON TRON\n"
+        "Live swap: SOL + EVM list + TRON SunSwap\n"
+        "TON: STON.fi quote live; send after pip install pytoniq\n"
+        "Signals only: Pulse\n"
         f"SOL send {rpc_on}\n"
         f"Tip {prio} lamports · Jito {jito}\n"
         f"Feed binds {binds}\n"
@@ -2431,7 +2452,15 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         except ValueError:
             pct = 100
         sol_secret, evm_secret = user_wallets.secrets(uid)
-        if mint.startswith("0x"):
+        if mint.startswith("T") and 30 <= len(mint) <= 36:
+            import tron_signer
+
+            _ok, msg = tron_signer.sell_tron(mint, key_hex=evm_secret)
+        elif mint.startswith(("EQ", "UQ", "kQ")):
+            import ton_signer
+
+            _ok, msg = ton_signer.sell_ton(mint, secret=sol_secret)
+        elif mint.startswith("0x"):
             chain = "base"
             evm_addr = (db.get_user_wallet(uid) or {}).get("evm_pub") or ""
             for cid in ("eth", "base", "bsc", "hood", "arb", "avax"):

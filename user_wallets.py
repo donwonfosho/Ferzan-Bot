@@ -123,9 +123,18 @@ def card_text(user_id: int) -> str:
         bal = f"Balance {lamports / 1_000_000_000:.6f} SOL\n"
     except Exception:
         bal = ""
-    return (
+    body = (
         "Your Ferzan wallets\n\n"
         f"Solana\n`{row['sol_pub']}`\n{bal}\n"
-        f"EVM (ETH / Base / BSC)\n`{row['evm_pub']}`\n\n"
-        "Fund those addresses. /bag lists tokens. Buy spends this wallet."
+        f"EVM (ETH / Base / BNB / ARB…)\n`{row['evm_pub']}`\n"
     )
+    try:
+        import tron_signer
+
+        _, evm_secret = secrets(user_id)
+        tron_addr, _ = tron_signer.evm_key_to_tron(evm_secret)
+        body += f"\nTRON (same key)\n`{tron_addr}`\nFund TRX + energy here.\n"
+    except Exception:
+        body += "\nTRON uses the EVM key.\n"
+    body += "\nFund those addresses. Buy spends this wallet."
+    return body
