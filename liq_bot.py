@@ -357,6 +357,41 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 
+
+async def cmd_rank(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    uid = update.effective_user.id
+    await update.effective_message.reply_text(_rank_text(), parse_mode="HTML", reply_markup=_nav_kb(
+        [InlineKeyboardButton("📄 Set token", callback_data="liq:settoken")]
+    ))
+
+async def cmd_chart(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    uid = update.effective_user.id
+    await update.effective_message.reply_text(_chart_text(uid), parse_mode="HTML", reply_markup=_chart_kb())
+
+async def cmd_quotes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.effective_message.reply_text(_vol_text(), parse_mode="HTML", reply_markup=_nav_kb(
+        [InlineKeyboardButton("📄 Set token", callback_data="liq:settoken")]
+    ))
+
+async def cmd_holders(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.effective_message.reply_text(_hold_text(), parse_mode="HTML", reply_markup=_nav_kb(
+        [InlineKeyboardButton("📄 Set token", callback_data="liq:settoken")]
+    ))
+
+async def cmd_react(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.effective_message.reply_text(_react_text(), parse_mode="HTML", reply_markup=_nav_kb())
+
+async def cmd_ref(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    uid = update.effective_user.id
+    await update.effective_message.reply_text(_earn_text(uid), parse_mode="HTML", reply_markup=_nav_kb(
+        [InlineKeyboardButton("⚡ Open Trade", url=f"https://t.me/{TRADE}?start=r-{uid}")]
+    ))
+
+async def cmd_wd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.effective_message.reply_text(_wd_text(), parse_mode="HTML", reply_markup=_nav_kb(
+        [InlineKeyboardButton("⚡ Open Trade wallets", url=f"https://t.me/{TRADE}")]
+    ))
+
 async def setkeys(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_chat.type != "private":
         await update.effective_message.reply_text("Send /setkeys in a private chat with this bot.")
@@ -386,6 +421,16 @@ def main() -> None:
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("token", token_cmd))
+
+    app.add_handler(CommandHandler("rank", cmd_rank))
+    app.add_handler(CommandHandler("chart_maker", cmd_chart))
+    app.add_handler(CommandHandler("quotes", cmd_quotes))
+    app.add_handler(CommandHandler("fast_volume", cmd_quotes))
+    app.add_handler(CommandHandler("holders", cmd_holders))
+    app.add_handler(CommandHandler("reactions", cmd_react))
+    app.add_handler(CommandHandler("referral", cmd_ref))
+    app.add_handler(CommandHandler("withdraw", cmd_wd))
+
     if HAS_MM:
         credentials_db.init_db()
         app.add_handler(CommandHandler("setkeys", setkeys))
@@ -396,12 +441,16 @@ def main() -> None:
     async def _post(app):
         await app.bot.set_my_commands(
             [
-                BotCommand("start", "Start the bot"),
-                BotCommand("help", "Help and desk"),
+                BotCommand("start", "Main menu"),
+                BotCommand("rank", "Rank"),
+                BotCommand("chart_maker", "Chart Maker"),
+                BotCommand("quotes", "Testnet quotes"),
+                BotCommand("holders", "Holders"),
+                BotCommand("reactions", "Reactions"),
+                BotCommand("referral", "Earn with Ferzan"),
+                BotCommand("withdraw", "Withdraw"),
                 BotCommand("token", "Lookup a CA"),
-                BotCommand("setkeys", "Testnet API keys (DM)"),
-                BotCommand("start_liquidity", "Start testnet quotes"),
-                BotCommand("stop_liquidity", "Stop testnet quotes"),
+                BotCommand("help", "Help"),
             ]
         )
     app.post_init = _post
