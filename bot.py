@@ -353,19 +353,24 @@ def render_card(card: SignalCard, uid: int | None = None) -> str:
         f"⚡ <b>{_esc(s.name)}</b>  ${_esc(str(s.symbol).lstrip('$'))}",
         f"<code>{_esc(ca)}</code>" if ca else "",
         f"{venue}  🔗 {_esc(chain)}",
+        "",
         " · ".join(social),
         f"🔎 Age: {html.escape(age)}" if age else "",
         curve,
+        "",
         f"🧢 MC ${_esc(f'{mc:,.0f}' if mc else '—')}  |  💵 {_esc(_fmt_px(s.price_usd))}",
         f"💧 Liq ${_esc(f'{liq:,.0f}' if liq else '—')}{_esc(liq_pct)}",
         "📌 No limit orders",
+        "",
         _card_wallet(uid, ca, s.chain or ""),
+        "",
         f"📊 1h 🟢{s.buys_h1} / 🔴{s.sells_h1}  ·  24h {_esc(f'${vol:,.0f}' if vol else '—')}",
         f"🏅 {card.score}/100  {_esc(card.bias)}   🎯 TP {card.take_pct:g}%  🛑 SL {card.stop_pct:g}%",
+        "",
         " · ".join(links),
         "<i>Tap CA to copy</i>",
     ]
-    return "\n".join(x for x in lines if x)
+    return "\n".join(lines)
 
 
 def card_keyboard(
@@ -453,6 +458,61 @@ def card_keyboard(
         extra.append(InlineKeyboardButton("📋 CA", callback_data=f"sig:{addr[:44]}"))
     if extra:
         rows.append(extra)
+    return InlineKeyboardMarkup(rows)
+
+
+def sell_keyboard(
+    query: str, ca: str = "", chain: str = "", uid: int | None = None, token_amt: float = 0.0
+) -> InlineKeyboardMarkup:
+    q = (ca or query)[:44]
+    cid = resolve_chain(chain) or ("sol" if q and not str(q).startswith("0x") else "eth")
+    unit = {
+        "sol": "SOL", "bsc": "BNB", "eth": "ETH", "base": "ETH",
+        "arb": "ETH", "avax": "AVAX", "pol": "POL", "hood": "ETH",
+    }.get(cid, "ETH")
+    rows = [
+        [
+            InlineKeyboardButton("📍 Track", callback_data=f"watch:{q}"),
+            InlineKeyboardButton(f"🔄 {unit}", callback_data=f"sig:{q}"),
+        ],
+        [InlineKeyboardButton("↔️ Go to buy", callback_data=f"sig:{q}")],
+        [
+            InlineKeyboardButton("💳 Multi sell | 1", callback_data="go:wallets"),
+            InlineKeyboardButton("🟢 Multi", callback_data="go:wallets"),
+        ],
+    ]
+    if token_amt <= 0:
+        rows.append([InlineKeyboardButton("⚠️ No balance detected ⚠️", callback_data=f"slc:{q}")])
+    else:
+        rows.append(
+            [
+                InlineKeyboardButton("Sell 25%", callback_data=f"slp:25:{q}"),
+                InlineKeyboardButton("Sell 50%", callback_data=f"slp:50:{q}"),
+                InlineKeyboardButton("Sell 100%", callback_data=f"slp:100:{q}"),
+            ]
+        )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                f"🎚 Slip {int((db.get_chain_trade(uid, cid)['sell_slip'] if uid else 10))}%"
+                if uid
+                else "🎚 Slippage",
+                callback_data=f"xslip:{cid}",
+            ),
+            InlineKeyboardButton(
+                f"⛽ Gas {float((db.get_chain_trade(uid, cid).get('gas') if uid else 0) or 0):.3f} {unit}"
+                if uid
+                else "⛽ Gas",
+                callback_data=f"xgas:{cid}",
+            ),
+        ]
+    )
+    rows.append(
+        [
+            InlineKeyboardButton("🎯 Snipe", callback_data=f"snp:{q}"),
+            InlineKeyboardButton("⏳ Sell limit", callback_data=f"blm:{q}"),
+        ]
+    )
     return InlineKeyboardMarkup(rows)
 
 
@@ -2795,7 +2855,14 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     break
         except Exception:
             pass
-        text, kb = _bag_panel(mint, amount, addr, uid)
+        try:
+            card = analyze(mint)
+            text = render_card(card, uid)
+            chain = card.snapshot.chain or ""
+        except Exception:
+            text = _bag_panel(mint, amount, addr, uid)[0]
+            chain = "sol"
+        kb = sell_keyboard(mint, mint, chain, uid, amount)
         await context.bot.send_message(uid, text, reply_markup=kb, parse_mode="HTML")
         return
     if data.startswith("xsell:"):
