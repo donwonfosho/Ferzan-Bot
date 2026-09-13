@@ -247,9 +247,12 @@ def _card_wallet(uid: int | None, ca: str, chain: str) -> str:
                 if row.get("mint") == ca:
                     tok = float(row.get("amount") or 0)
                     break
-        return f"💼 {sol:.4f} SOL · {tok:.4g} token"
+        return (
+            "💰 <b>Balance</b>\n"
+            f"{sol:.4f} SOL · {tok:.4g} token (0%)"
+        )
     except Exception:
-        return "💼 Fund /wallet · see /bag"
+        return "💰 Fund /wallet · see /bag"
 
 
 def render_card(card: SignalCard, uid: int | None = None) -> str:
@@ -286,8 +289,9 @@ def render_card(card: SignalCard, uid: int | None = None) -> str:
     if age:
         lines.append(f"⏱ Age {html.escape(age)}")
     lines += [
-        f"🧢 MC {_esc(f'${mc:,.0f}' if mc else '—')}   💵 {_esc(_fmt_px(s.price_usd))}",
+        f"🧢 MC {_esc(f'${mc:,.0f}' if mc else '—')} | 💵 {_esc(_fmt_px(s.price_usd))}",
         f"💧 Liq {_esc(f'${liq:,.0f}' if liq else '—')}{_esc(liq_pct)}",
+        "📌 No limit orders",
         f"📊 1h 🟢{s.buys_h1} / 🔴{s.sells_h1}   24h {_esc(f'${vol:,.0f}' if vol else '—')}",
         f"🏅 Score <b>{card.score}</b>/100 {_bar(card.score)}  {_esc(card.bias)}",
         f"🎯 TP {card.take_pct:g}%   🛑 SL {card.stop_pct:g}%",
@@ -330,6 +334,11 @@ def card_keyboard(
         ],
         [InlineKeyboardButton("↔️ Go to sell", callback_data=f"slc:{q}")],
         [
+            InlineKeyboardButton("💳 Multi buy | 1", callback_data="go:wallets"),
+            InlineKeyboardButton("🟢 Multi", callback_data="go:wallets"),
+        ],
+        [InlineKeyboardButton(f"🟢 {unit}", callback_data=f"sig:{q}")],
+        [
             InlineKeyboardButton(f"0.01 {unit}", callback_data=f"bnv:0.01:{q}"),
             InlineKeyboardButton(f"0.05 {unit}", callback_data=f"bnv:0.05:{q}"),
             InlineKeyboardButton(f"0.1 {unit}", callback_data=f"bnv:0.1:{q}"),
@@ -350,7 +359,12 @@ def card_keyboard(
                 else "🎚 Slippage",
                 callback_data=f"xslip:{cid}",
             ),
-            InlineKeyboardButton("⚙️ Desk", callback_data="go:settings"),
+            InlineKeyboardButton(
+                f"⛽ Gas {float((db.get_chain_trade(uid, cid).get('gas') if uid else 0) or 0):.3f} {unit}"
+                if uid
+                else "⛽ Gas",
+                callback_data=f"xgas:{cid}",
+            ),
         ],
         [
             InlineKeyboardButton("🎯 Snipe", callback_data=f"snp:{q}"),
@@ -2672,6 +2686,15 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         db.set_chain_trade(uid, cid, buy_slip=nxt, sell_slip=nxt)
         await query.answer(f"{cid.upper()} slip {nxt}%")
         await context.bot.send_message(uid, f"🎚 {cid.upper()} buy/sell slip → {nxt}%")
+        return
+    if data.startswith("xgas:"):
+        cid = resolve_chain(data[5:]) or data[5:] or "sol"
+        cur = db.get_chain_trade(uid, cid)
+        now = float(cur.get("gas") or 0)
+        nxt = {0.0: 0.001, 0.001: 0.005, 0.005: 0.01, 0.01: 0.0}.get(round(now, 3), 0.005)
+        db.set_chain_trade(uid, cid, gas=nxt)
+        await query.answer(f"{cid.upper()} gas tip {nxt}")
+        await context.bot.send_message(uid, f"⛽ {cid.upper()} priority tip → {nxt}")
         return
     if data.startswith("slc:"):
         mint = data[4:].strip()
