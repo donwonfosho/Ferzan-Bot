@@ -155,7 +155,7 @@ def buy_sol(
                 "userPublicKey": str(kp.pubkey()),
                 "wrapAndUnwrapSol": True,
                 "dynamicComputeUnitLimit": True,
-                "prioritizationFeeLamports": "auto",
+                "prioritizationFeeLamports": int(os.getenv("PRIORITY_FEE_LAMPORTS", "1000000")),
             },
             timeout=20,
         )
@@ -395,7 +395,7 @@ def sell_sol(
                 "userPublicKey": str(kp.pubkey()),
                 "wrapAndUnwrapSol": True,
                 "dynamicComputeUnitLimit": True,
-                "prioritizationFeeLamports": "auto",
+                "prioritizationFeeLamports": int(os.getenv("PRIORITY_FEE_LAMPORTS", "1000000")),
             },
             timeout=20,
         )

@@ -355,15 +355,8 @@ def try_fill(order: dict[str, Any]) -> tuple[str, str]:
     ok, reason = gates_for(order, card)
     if not ok:
         return "armed", reason
-    filled, msg = trading.paper_buy(
-        int(order["user_id"]),
-        card,
-        force=True,
-        override_usd=float(order["usd"]) if order.get("usd") else None,
-    )
-    if not filled:
-        return "miss", msg
     live_line = ""
+    _ok = False
     try:
         import evm_signer
         import signer
@@ -373,15 +366,21 @@ def try_fill(order: dict[str, Any]) -> tuple[str, str]:
         mint = (card.snapshot.token_address or order.get("query") or "").strip()
         usd = min(signer.max_usd(), float(order.get("usd") or signer.max_usd()))
         sol_secret, evm_secret = user_wallets.secrets(uid)
+        slip = int(max(10, min(9900, float(order.get("slip") or 15) * 100)))
         if mint.startswith("0x"):
-            _ok, live_line = evm_signer.buy_evm(order.get("chain") or "base", mint, usd, key_hex=evm_secret)
+            _ok, live_line = evm_signer.buy_evm(
+                order.get("chain") or "base", mint, usd, key_hex=evm_secret, slip_bps=slip
+            )
         elif mint:
-            _ok, live_line = signer.buy_sol(mint, usd, secret=sol_secret)
+            _ok, live_line = signer.buy_sol(mint, usd, secret=sol_secret, slip_bps=slip)
+        else:
+            live_line = "Snipe: no mint"
     except Exception as exc:
-        live_line = f"Live snipe skipped: {exc}"
-    msg = msg + ("\n" + live_line if live_line else "")
-    db.finish_snipe(int(order["id"]), "filled", msg)
-    return "filled", msg
+        live_line = f"Live snipe failed: {exc}"
+    if not _ok:
+        return "armed", live_line or "snipe waiting"
+    db.finish_snipe(int(order["id"]), "filled", live_line)
+    return "filled", live_line
 
 
 def scan_armed() -> list[tuple[int, int, str, str]]:

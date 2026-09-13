@@ -241,6 +241,18 @@ def init_db() -> None:
             conn.execute("ALTER TABLE users ADD COLUMN auto_buy_usd REAL DEFAULT 0")
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS chain_trade (
+                user_id INTEGER NOT NULL,
+                chain TEXT NOT NULL,
+                buy_slip REAL NOT NULL DEFAULT 10,
+                sell_slip REAL NOT NULL DEFAULT 10,
+                gas REAL NOT NULL DEFAULT 0,
+                PRIMARY KEY (user_id, chain)
+            )
+            """
+        )
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS limits (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL,
@@ -879,6 +891,42 @@ def drop_feed_chat(chat_id: int, chain: str | None = None) -> None:
         else:
             conn.execute("DELETE FROM feed_binds WHERE chat_id = ?", (int(chat_id),))
         conn.commit()
+
+
+def get_chain_trade(user_id: int, chain: str) -> dict:
+    cid = (chain or "sol").lower()
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT buy_slip, sell_slip, gas FROM chain_trade WHERE user_id = ? AND chain = ?",
+            (int(user_id), cid),
+        ).fetchone()
+    if not row:
+        return {"buy_slip": 10.0, "sell_slip": 10.0, "gas": 0.0}
+    return {
+        "buy_slip": float(row["buy_slip"] or 10),
+        "sell_slip": float(row["sell_slip"] or 10),
+        "gas": float(row["gas"] or 0),
+    }
+
+
+def set_chain_trade(user_id: int, chain: str, **fields: float) -> dict:
+    cur = get_chain_trade(user_id, chain)
+    cur.update({k: float(v) for k, v in fields.items() if k in {"buy_slip", "sell_slip", "gas"}})
+    cid = (chain or "sol").lower()
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO chain_trade (user_id, chain, buy_slip, sell_slip, gas)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(user_id, chain) DO UPDATE SET
+                buy_slip = excluded.buy_slip,
+                sell_slip = excluded.sell_slip,
+                gas = excluded.gas
+            """,
+            (int(user_id), cid, cur["buy_slip"], cur["sell_slip"], cur["gas"]),
+        )
+        conn.commit()
+    return cur
 
 
 def get_native_mark(chain: str) -> tuple[float, int] | None:

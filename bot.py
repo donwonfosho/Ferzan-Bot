@@ -216,7 +216,25 @@ def _age_ms(ms: int | None) -> str:
     return f"{sec // 86400}d"
 
 
-def render_card(card: SignalCard) -> str:
+def _card_wallet(uid: int | None, ca: str, chain: str) -> str:
+    if not uid:
+        return "💼 Balance → /bag"
+    try:
+        sol_secret, _evm = user_wallets.secrets(uid)
+        kp = signer.keypair_from_secret(sol_secret)
+        sol = signer.sol_balance_lamports(str(kp.pubkey())) / 1e9
+        tok = 0.0
+        if ca and not ca.startswith("0x"):
+            for row in signer.holdings(sol_secret):
+                if row.get("mint") == ca:
+                    tok = float(row.get("amount") or 0)
+                    break
+        return f"💼 {sol:.4f} SOL · {tok:.4g} token"
+    except Exception:
+        return "💼 Fund /wallet · see /bag"
+
+
+def render_card(card: SignalCard, uid: int | None = None) -> str:
     s = card.snapshot
     ca = (s.token_address or "").strip()
     chain = (s.chain or "").upper()
@@ -255,7 +273,7 @@ def render_card(card: SignalCard) -> str:
         f"📊 1h 🟢{s.buys_h1} / 🔴{s.sells_h1}   24h {_esc(f'${vol:,.0f}' if vol else '—')}",
         f"🏅 Score <b>{card.score}</b>/100 {_bar(card.score)}  {_esc(card.bias)}",
         f"🎯 TP {card.take_pct:g}%   🛑 SL {card.stop_pct:g}%",
-        "💼 Balance → /bag",
+        _card_wallet(uid, ca, s.chain or ""),
     ]
     pasted = str((s.extras or {}).get("pasted") or s.query or "")
     if ca and pasted and pasted.lower() != ca.lower():
@@ -274,7 +292,9 @@ def render_card(card: SignalCard) -> str:
     return "\n".join(x for x in lines if x)
 
 
-def card_keyboard(query: str, score: int, ca: str = "", chain: str = "") -> InlineKeyboardMarkup:
+def card_keyboard(
+    query: str, score: int, ca: str = "", chain: str = "", uid: int | None = None
+) -> InlineKeyboardMarkup:
     q = (ca or query)[:44]
     cid = resolve_chain(chain) or ("sol" if q and not str(q).startswith("0x") else "eth")
     unit = {
@@ -303,7 +323,12 @@ def card_keyboard(query: str, score: int, ca: str = "", chain: str = "") -> Inli
             InlineKeyboardButton("📉 Quote", callback_data=f"qte:{cid}:{q}"),
         ],
         [
-            InlineKeyboardButton("🎚 Slippage", callback_data="go:settings"),
+            InlineKeyboardButton(
+                f"🎚 Slip {int((db.get_chain_trade(uid, cid)['buy_slip'] if uid else 10))}%"
+                if uid
+                else "🎚 Slippage",
+                callback_data=f"xslip:{cid}",
+            ),
             InlineKeyboardButton("⚙️ Desk", callback_data="go:settings"),
         ],
         [
@@ -602,12 +627,14 @@ async def _send_signal(update: Update, query: str, edit: bool = False) -> None:
         else:
             await update.effective_message.reply_text(text)
         return
-    text = render_card(card)
+    uid = update.effective_user.id if update.effective_user else None
+    text = render_card(card, uid)
     markup = card_keyboard(
         card.snapshot.query or query,
         card.score,
         ca=card.snapshot.token_address or "",
         chain=card.snapshot.chain or "",
+        uid=uid,
     )
     if edit and update.callback_query:
         await update.callback_query.edit_message_text(
@@ -659,14 +686,19 @@ def _token_liq_usd(mint: str) -> float:
         return -1.0
 
 
-def _slip_bps(uid: int, side: str = "buy") -> int:
-    user = db.get_user(uid) or {}
-    raw = user.get("buy_slip_pct" if side == "buy" else "sell_slip_pct") or 10
-    try:
-        pct = float(raw)
-    except (TypeError, ValueError):
-        pct = 10.0
-    return int(max(10, min(9900, pct * 100)))
+def _slip_bps(uid: int, side: str = "buy", chain: str | None = None) -> int:
+    pct = None
+    if chain:
+        row = db.get_chain_trade(uid, resolve_chain(chain) or chain)
+        pct = row.get("buy_slip" if side == "buy" else "sell_slip")
+    if pct is None:
+        user = db.get_user(uid) or {}
+        raw = user.get("buy_slip_pct" if side == "buy" else "sell_slip_pct") or 10
+        try:
+            pct = float(raw)
+        except (TypeError, ValueError):
+            pct = 10.0
+    return int(max(10, min(9900, float(pct) * 100)))
 
 
 def _default_buy_usd(uid: int) -> float:
@@ -1197,6 +1229,7 @@ async def settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     gate = db.flag_on(uid, "score_gate", 0)
     auto = db.flag_on(uid, "auto_buy", 0)
     mev = db.flag_on(uid, "anti_mev", 1)
+    copy_live = db.flag_on(uid, "copy_live", 0)
     buy_usd = float(user.get("buy_usd") or 25)
     bslip = float(user.get("buy_slip_pct") or 10)
     sslip = float(user.get("sell_slip_pct") or 10)
@@ -1229,6 +1262,10 @@ async def settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 [InlineKeyboardButton(
                     f"{'🟢' if mev else '🔴'} Anti-MEV",
                     callback_data="flg:anti_mev",
+                )],
+                [InlineKeyboardButton(
+                    f"{'🟢' if copy_live else '🔴'} Live copy-mirror",
+                    callback_data="flg:copy_live",
                 )],
                 [InlineKeyboardButton(
                     f"{'🟢' if gate else '🔴'} Score floor gate",
@@ -2349,7 +2386,15 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await query.answer("Saved")
             await context.bot.send_message(uid, f"{'🟢' if on else '🔴'} DM launch alerts")
             return
-        if flag not in {"rug_buy", "honeypot", "lp_watch", "score_gate", "auto_buy", "anti_mev"}:
+        if flag not in {
+            "rug_buy",
+            "honeypot",
+            "lp_watch",
+            "score_gate",
+            "auto_buy",
+            "anti_mev",
+            "copy_live",
+        }:
             return
         now = not db.flag_on(uid, flag, 1)
         db.set_flag(uid, flag, now)
@@ -2429,6 +2474,14 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             return
         ok, msg = trading.paper_close(uid, pos_id, reason="manual")
         await context.bot.send_message(uid, msg)
+        return
+    if data.startswith("xslip:"):
+        cid = resolve_chain(data[6:]) or data[6:] or "sol"
+        cur = db.get_chain_trade(uid, cid)
+        nxt = {5: 10, 10: 15, 15: 25, 25: 50, 50: 5}.get(int(cur["buy_slip"]), 10)
+        db.set_chain_trade(uid, cid, buy_slip=nxt, sell_slip=nxt)
+        await query.answer(f"{cid.upper()} slip {nxt}%")
+        await context.bot.send_message(uid, f"🎚 {cid.upper()} buy/sell slip → {nxt}%")
         return
     if data.startswith("slc:"):
         mint = data[4:].strip()
@@ -2562,19 +2615,24 @@ async def wallet_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         else:
             found = re.findall(r"0x[a-fA-F0-9]{40}", blob)
             mint = found[0] if found else ""
-        if mint:
+        if mint and db.flag_on(int(row["user_id"]), "copy_live", 0):
             try:
-                sol_secret, evm_secret = user_wallets.secrets(int(row["user_id"]))
-                usd = signer.max_usd()
+                uid = int(row["user_id"])
+                sol_secret, evm_secret = user_wallets.secrets(uid)
+                usd = _default_buy_usd(uid)
                 if mint.startswith("0x"):
                     _ok, live = evm_signer.buy_evm(
-                        chain or "base", mint, usd, key_hex=evm_secret, slip_bps=_slip_bps(uid, "buy")
+                        chain or "base",
+                        mint,
+                        usd,
+                        key_hex=evm_secret,
+                        slip_bps=_slip_bps(uid, "buy", chain),
                     )
                 else:
                     _ok, live = signer.buy_sol(
-                        mint, usd, secret=sol_secret, slip_bps=_slip_bps(uid, "buy")
+                        mint, usd, secret=sol_secret, slip_bps=_slip_bps(uid, "buy", "sol")
                     )
-                await context.bot.send_message(row["user_id"], "Copy live\n" + live)
+                await context.bot.send_message(uid, f"👯 Live copy ${usd:.0f}\n{live}")
             except Exception as exc:
                 logger.info("copy live skip: %s", exc)
 
