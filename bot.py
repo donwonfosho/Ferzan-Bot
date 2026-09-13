@@ -1654,6 +1654,15 @@ def _onramp_url(code: str, address: str) -> str:
     return url
 
 
+def _offramp_url(code: str) -> str:
+    pk = (os.getenv("MOONPAY_PK") or os.getenv("MOONPAY_KEY") or "").strip()
+    from urllib.parse import urlencode
+    params = {"baseCurrencyCode": code, "quoteCurrencyCode": "usd"}
+    if pk:
+        params["apiKey"] = pk
+    return "https://sell.moonpay.com/?" + urlencode(params)
+
+
 def buy_fiat_keyboard(uid: int) -> InlineKeyboardMarkup:
     row = db.get_user_wallet(uid) or {}
     sol = row.get("sol_pub") or ""
@@ -1676,6 +1685,15 @@ def buy_fiat_keyboard(uid: int) -> InlineKeyboardMarkup:
         buttons.append(
             [InlineKeyboardButton("🟡 Buy BNB", url=_onramp_url("bnb", evm))]
         )
+    buttons.append(
+        [
+            InlineKeyboardButton("🏦 Cash out SOL", url=_offramp_url("sol")),
+            InlineKeyboardButton("🏦 Cash out ETH", url=_offramp_url("eth")),
+        ]
+    )
+    buttons.append(
+        [InlineKeyboardButton("🏦 Cash out Base ETH", url=_offramp_url("eth_base"))]
+    )
     buttons.append([InlineKeyboardButton("↩️ Wallets", callback_data="go:wallets")])
     return InlineKeyboardMarkup(buttons)
 
@@ -1689,13 +1707,17 @@ async def buy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.effective_message.reply_text("Generate a wallet first: /wallet")
         return
     text = (
-        "🍎 <b>Buy gas with Apple Pay</b>\n\n"
-        "Opens MoonPay. Coins land in <b>your Ferzan wallet</b> on that chain.\n"
-        "Base buttons send <b>on Base</b> — no bridge.\n\n"
-        f"SOL\n<code>{html.escape(row.get('sol_pub') or '')}</code>\n"
-        f"EVM (ETH / Base / BNB)\n<code>{html.escape(row.get('evm_pub') or '')}</code>\n\n"
-        "<i>Checkout MUST show the 0x above. If it shows a MoonPay wallet, stop and change destination.\n"
-        "Lock requires MOONPAY_PK + MOONPAY_SK on the droplet.</i>"
+        "🍎 <b>Buy gas / 🏦 Cash out</b>\n\n"
+        "⚠️ <b>READ THIS BEFORE YOU PAY</b>\n"
+        "MoonPay opens in the browser. Ferzan cannot lock their destination yet.\n"
+        "On the MoonPay screen, set <b>Receive / wallet</b> to the address below.\n"
+        "If it says “MoonPay wallet”, change it or cancel. Funds sent there are not in Ferzan.\n\n"
+        "🟣 SOL (Solana only)\n"
+        f"<code>{html.escape(row.get('sol_pub') or '')}</code>\n\n"
+        "🔷 EVM — same 0x on ETH, Base, and BNB. Pick the <b>network</b> to match the button.\n"
+        f"<code>{html.escape(row.get('evm_pub') or '')}</code>\n\n"
+        "Cash out: MoonPay shows a deposit address. Send FROM Ferzan on that same chain.\n"
+        "Fees and KYC are MoonPay’s. Apple Pay is on their page, not inside Telegram."
     )
     await update.effective_message.reply_text(
         text, parse_mode="HTML", reply_markup=buy_fiat_keyboard(uid)
@@ -3514,6 +3536,8 @@ def main() -> None:
     app.add_handler(CommandHandler("wallet", wallet_cmd))
     app.add_handler(CommandHandler("buy", buy_cmd))
     app.add_handler(CommandHandler("onramp", buy_cmd))
+    app.add_handler(CommandHandler("cashout", buy_cmd))
+    app.add_handler(CommandHandler("offramp", buy_cmd))
     app.add_handler(CommandHandler("importsol", importsol_cmd))
     app.add_handler(CommandHandler("importevm", importevm_cmd))
     app.add_handler(CommandHandler("collectsol", collectsol_cmd))
