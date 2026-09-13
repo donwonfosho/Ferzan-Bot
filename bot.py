@@ -328,12 +328,7 @@ def card_keyboard(
             InlineKeyboardButton("📍 Track", callback_data=f"watch:{q}"),
             InlineKeyboardButton(f"🔄 {unit}", callback_data=f"sig:{q}"),
         ],
-        [InlineKeyboardButton("💸 Go to sell", callback_data=f"slc:{q}")],
-        [
-            InlineKeyboardButton("Sell 25%", callback_data=f"slp:25:{q}"),
-            InlineKeyboardButton("Sell 50%", callback_data=f"slp:50:{q}"),
-            InlineKeyboardButton("Sell 100%", callback_data=f"slp:100:{q}"),
-        ],
+        [InlineKeyboardButton("↔️ Go to sell", callback_data=f"slc:{q}")],
         [
             InlineKeyboardButton(f"0.01 {unit}", callback_data=f"bnv:0.01:{q}"),
             InlineKeyboardButton(f"0.05 {unit}", callback_data=f"bnv:0.05:{q}"),
@@ -345,8 +340,8 @@ def card_keyboard(
             InlineKeyboardButton(f"1 {unit}", callback_data=f"bnv:1:{q}"),
         ],
         [
-            InlineKeyboardButton("💵 Buy default", callback_data=f"buy:{q}"),
             InlineKeyboardButton(f"✏️ Buy X {unit}", callback_data=f"buyx:{q}"),
+            InlineKeyboardButton("✏️ Buy X tokens", callback_data=f"buyx:{q}"),
         ],
         [
             InlineKeyboardButton(
@@ -2684,13 +2679,22 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if mint.startswith("0x"):
             await context.bot.send_message(
                 uid,
-                "Sell this EVM mint with /livesellevm <chain> " + mint,
+                "Sell pad for EVM: /livesellevm <chain> " + mint,
             )
             return
-        _ok, msg = signer.sell_sol(
-            mint, secret=sol_secret, pct=100, slip_bps=_slip_bps(uid, "sell")
-        )
-        await context.bot.send_message(uid, msg)
+        amount = 0.0
+        addr = ""
+        try:
+            kp = signer.keypair_from_secret(sol_secret)
+            addr = str(kp.pubkey())
+            for row in signer.holdings(sol_secret):
+                if row.get("mint") == mint:
+                    amount = float(row.get("amount") or 0)
+                    break
+        except Exception:
+            pass
+        text, kb = _bag_panel(mint, amount, addr, uid)
+        await context.bot.send_message(uid, text, reply_markup=kb, parse_mode="HTML")
         return
     if data.startswith("xsell:"):
         try:
