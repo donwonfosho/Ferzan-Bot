@@ -21,6 +21,7 @@ log = logging.getLogger("buybot")
 
 DB = Path(os.getenv("BUYBOT_DB", "/opt/ferzan/app/buybot.db"))
 TRADE = (os.getenv("FERZAN_BOT_USERNAME") or "Ferzan_Trade_Bot").lstrip("@")
+LAST_MEDIA: dict = {}
 MIN_USD = float(os.getenv("BUYBOT_MIN_USD") or "15")
 
 GT_NET = {
@@ -269,19 +270,35 @@ async def track(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 
+def _file_from(msg) -> tuple[str, str] | tuple[None, None]:
+    if not msg:
+        return None, None
+    if msg.animation:
+        return "animation", msg.animation.file_id
+    if msg.video:
+        return "video", msg.video.file_id
+    if msg.photo:
+        return "photo", msg.photo[-1].file_id
+    if msg.document and (msg.document.mime_type or "").startswith(("video", "image")):
+        return "animation", msg.document.file_id
+    return None, None
+
+
+async def remember_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    kind, fid = _file_from(update.effective_message)
+    if fid:
+        LAST_MEDIA[update.effective_chat.id] = (kind, fid)
+
+
 async def setgif_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     msg = update.effective_message
-    src = msg.reply_to_message
-    kind = file_id = None
-    target = src or msg
-    if target.animation:
-        kind, file_id = "animation", target.animation.file_id
-    elif target.video:
-        kind, file_id = "video", target.video.file_id
-    elif target.photo:
-        kind, file_id = "photo", target.photo[-1].file_id
+    kind, file_id = _file_from(msg.reply_to_message)
     if not file_id:
-        await msg.reply_text("Reply to a GIF, video, or photo with /setgif")
+        kind, file_id = _file_from(msg)
+    if not file_id:
+        kind, file_id = LAST_MEDIA.get(update.effective_chat.id, (None, None))
+    if not file_id:
+        await msg.reply_text("Send the GIF first, then /setgif — or swipe Reply on the GIF and type /setgif.")
         return
     con = _db()
     con.execute("INSERT OR REPLACE INTO media(chat_id, kind, file_id) VALUES(?,?,?)",
@@ -554,6 +571,10 @@ def main() -> None:
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("setgif", setgif_cmd))
     app.add_handler(CommandHandler("cleargif", cleargif_cmd))
+    app.add_handler(MessageHandler(
+        filters.ANIMATION | filters.VIDEO | filters.PHOTO | filters.Document.ALL,
+        remember_media,
+    ))
     app.add_handler(CommandHandler("track", track))
     app.add_handler(CommandHandler("add", track))
     app.add_handler(CommandHandler("untrack", untrack))
