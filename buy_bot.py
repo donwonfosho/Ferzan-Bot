@@ -22,6 +22,7 @@ log = logging.getLogger("buybot")
 DB = Path(os.getenv("BUYBOT_DB", "/opt/ferzan/app/buybot.db"))
 TRADE = (os.getenv("FERZAN_BOT_USERNAME") or "Ferzan_Trade_Bot").lstrip("@")
 LAST_MEDIA: dict = {}
+SETGIF_WAIT: set = set()
 MIN_USD = float(os.getenv("BUYBOT_MIN_USD") or "15")
 
 GT_NET = {
@@ -285,9 +286,19 @@ def _file_from(msg) -> tuple[str, str] | tuple[None, None]:
 
 
 async def remember_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id
     kind, fid = _file_from(update.effective_message)
-    if fid:
-        LAST_MEDIA[update.effective_chat.id] = (kind, fid)
+    if not fid:
+        return
+    LAST_MEDIA[chat_id] = (kind, fid)
+    if chat_id not in SETGIF_WAIT:
+        return
+    SETGIF_WAIT.discard(chat_id)
+    con = _db()
+    con.execute("INSERT OR REPLACE INTO media(chat_id, kind, file_id) VALUES(?,?,?)", (chat_id, kind, fid))
+    con.commit()
+    con.close()
+    await update.effective_message.reply_text("Saved. Buy posts will use that media.")
 
 
 async def setgif_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -295,10 +306,11 @@ async def setgif_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     kind, file_id = _file_from(msg.reply_to_message)
     if not file_id:
         kind, file_id = _file_from(msg)
-    if not file_id:
-        kind, file_id = LAST_MEDIA.get(update.effective_chat.id, (None, None))
-    if not file_id:
-        await msg.reply_text("Send the GIF first, then /setgif — or swipe Reply on the GIF and type /setgif.")
+    if file_id:
+        pass
+    else:
+        SETGIF_WAIT.add(update.effective_chat.id)
+        await msg.reply_text("Send the GIF, video, or photo now (reply to this message).")
         return
     con = _db()
     con.execute("INSERT OR REPLACE INTO media(chat_id, kind, file_id) VALUES(?,?,?)",
