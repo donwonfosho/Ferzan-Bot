@@ -22,6 +22,7 @@ import html
 import logging
 import os
 import re
+import time
 
 import requests
 from pathlib import Path
@@ -202,11 +203,24 @@ def _security_line(chain: str, ca: str) -> str:
     return out
 
 
+def _age_ms(ms: int | None) -> str:
+    if not ms:
+        return ""
+    sec = max(0, int(time.time() - float(ms) / 1000.0))
+    if sec < 60:
+        return f"{sec}s"
+    if sec < 3600:
+        return f"{sec // 60}m {sec % 60}s"
+    if sec < 86400:
+        return f"{sec // 3600}h {(sec % 3600) // 60}m"
+    return f"{sec // 86400}d"
+
+
 def render_card(card: SignalCard) -> str:
     s = card.snapshot
     ca = (s.token_address or "").strip()
     chain = (s.chain or "").upper()
-    dex = (s.dex or "").replace("pumpswap", "Pump.fun AMM").replace("pumpfun", "Pump.fun")
+    dex = (s.dex or "").replace("pumpswap", "Pump.fun").replace("pumpfun", "Pump.fun")
     mc = float(s.fdv or 0)
     liq = float(s.liquidity_usd or 0)
     vol = float(s.volume_24h or 0)
@@ -215,16 +229,33 @@ def render_card(card: SignalCard) -> str:
     if (s.chain or "").lower() in {"solana", "sol"} and ca:
         scan = f"https://solscan.io/token/{ca}"
     ds = s.url or (f"https://dexscreener.com/{s.chain}/{ca}" if ca else "")
+    age = _age_ms(getattr(s, "pair_created_ms", None))
+    info = ((s.extras or {}).get("info") or {}) if hasattr(s, "extras") else {}
+    tw = ""
+    if isinstance(info, dict):
+        tw = (info.get("twitter") or "") if isinstance(info.get("twitter"), str) else ""
+        socials = info.get("socials") or []
+        if not tw and isinstance(socials, list):
+            for row in socials:
+                if isinstance(row, dict) and "twitter" in str(row.get("type") or "").lower():
+                    tw = row.get("url") or ""
+    pump = "pump" in (ca or "").lower() or "pump" in (dex or "").lower()
     lines = [
-        f"🪙 <b>{_esc(s.name)}</b>  ({_esc(s.symbol if str(s.symbol).startswith('$') else '$' + str(s.symbol))})",
-        f"CA\n<code>{_esc(ca)}</code>" if ca else "",
-        f"💧 {_esc(dex)}  ·  ⛓ {_esc(chain)}",
-        "",
+        f"⚡ <b>{_esc(s.name)}</b>  ${_esc(str(s.symbol).lstrip('$'))}",
+        f"<code>{_esc(ca)}</code>" if ca else "",
+        f"{'🧪 Pump.fun · ' if pump else ''}⛓ {_esc(chain)}  ·  {_esc(dex)}",
+    ]
+    if tw:
+        lines.append(f'<a href="{html.escape(str(tw), quote=True)}">Twitter</a>')
+    if age:
+        lines.append(f"⏱ Age {html.escape(age)}")
+    lines += [
         f"🧢 MC {_esc(f'${mc:,.0f}' if mc else '—')}   💵 {_esc(_fmt_px(s.price_usd))}",
         f"💧 Liq {_esc(f'${liq:,.0f}' if liq else '—')}{_esc(liq_pct)}",
-        f"📊 24h {_esc(f'${vol:,.0f}' if vol else '—')}   🟢{s.buys_h1} / 🔴{s.sells_h1}",
+        f"📊 1h 🟢{s.buys_h1} / 🔴{s.sells_h1}   24h {_esc(f'${vol:,.0f}' if vol else '—')}",
         f"🏅 Score <b>{card.score}</b>/100 {_bar(card.score)}  {_esc(card.bias)}",
         f"🎯 TP {card.take_pct:g}%   🛑 SL {card.stop_pct:g}%",
+        "💼 Balance → /bag",
     ]
     pasted = str((s.extras or {}).get("pasted") or s.query or "")
     if ca and pasted and pasted.lower() != ca.lower():
@@ -245,30 +276,39 @@ def render_card(card: SignalCard) -> str:
 
 def card_keyboard(query: str, score: int, ca: str = "", chain: str = "") -> InlineKeyboardMarkup:
     q = (ca or query)[:44]
-    cap = int(signer.max_usd())
-    cid = resolve_chain(chain) or ("sol" if q and not str(q).startswith("0x") else "bsc")
-    unit = {"sol": "SOL", "bsc": "BNB", "eth": "ETH", "base": "ETH", "arb": "ETH", "avax": "AVAX"}.get(cid, "ETH")
-    size_row = [
-        InlineKeyboardButton(f"0.01 {unit}", callback_data=f"bnv:0.01:{q}"),
-        InlineKeyboardButton(f"0.05 {unit}", callback_data=f"bnv:0.05:{q}"),
-        InlineKeyboardButton(f"0.1 {unit}", callback_data=f"bnv:0.1:{q}"),
-    ]
+    cid = resolve_chain(chain) or ("sol" if q and not str(q).startswith("0x") else "eth")
+    unit = {
+        "sol": "SOL", "bsc": "BNB", "eth": "ETH", "base": "ETH",
+        "arb": "ETH", "avax": "AVAX", "pol": "POL", "hood": "ETH",
+    }.get(cid, "ETH")
     rows = [
+        [InlineKeyboardButton("🎯 Snipe now", callback_data=f"snp:{q}")],
         [
-            InlineKeyboardButton("👁 Track", callback_data=f"watch:{q}"),
-            InlineKeyboardButton("🔄 Refresh", callback_data=f"sig:{q}"),
+            InlineKeyboardButton("📍 Track", callback_data=f"watch:{q}"),
+            InlineKeyboardButton(f"🔄 {unit}", callback_data=f"sig:{q}"),
+        ],
+        [InlineKeyboardButton("💸 Go to sell", callback_data=f"slc:{q}")],
+        [
+            InlineKeyboardButton(f"0.01 {unit}", callback_data=f"bnv:0.01:{q}"),
+            InlineKeyboardButton(f"0.05 {unit}", callback_data=f"bnv:0.05:{q}"),
+            InlineKeyboardButton(f"0.1 {unit}", callback_data=f"bnv:0.1:{q}"),
         ],
         [
-            InlineKeyboardButton(f"💵 Buy ${cap}", callback_data=f"buy:{q}"),
-            InlineKeyboardButton("🧨 Override", callback_data=f"force:{q}"),
+            InlineKeyboardButton(f"0.2 {unit}", callback_data=f"bnv:0.2:{q}"),
+            InlineKeyboardButton(f"0.5 {unit}", callback_data=f"bnv:0.5:{q}"),
+            InlineKeyboardButton(f"1 {unit}", callback_data=f"bnv:1:{q}"),
         ],
-        size_row,
         [
-            InlineKeyboardButton("🎯 Snipe", callback_data=f"snp:{q}"),
+            InlineKeyboardButton("💵 Buy default", callback_data=f"buy:{q}"),
             InlineKeyboardButton("📉 Quote", callback_data=f"qte:{cid}:{q}"),
         ],
         [
-            InlineKeyboardButton("⏳ Buy limit −20%", callback_data=f"blm:{q}"),
+            InlineKeyboardButton("🎚 Slippage", callback_data="go:settings"),
+            InlineKeyboardButton("⚙️ Desk", callback_data="go:settings"),
+        ],
+        [
+            InlineKeyboardButton("🎯 Snipe", callback_data=f"snp:{q}"),
+            InlineKeyboardButton("⏳ Buy limit", callback_data=f"blm:{q}"),
         ],
     ]
     addr = (ca or query or "").strip()
@@ -2388,6 +2428,20 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         except ValueError:
             return
         ok, msg = trading.paper_close(uid, pos_id, reason="manual")
+        await context.bot.send_message(uid, msg)
+        return
+    if data.startswith("slc:"):
+        mint = data[4:].strip()
+        sol_secret, evm_secret = user_wallets.secrets(uid)
+        if mint.startswith("0x"):
+            await context.bot.send_message(
+                uid,
+                "Sell this EVM mint with /livesellevm <chain> " + mint,
+            )
+            return
+        _ok, msg = signer.sell_sol(
+            mint, secret=sol_secret, pct=100, slip_bps=_slip_bps(uid, "sell")
+        )
         await context.bot.send_message(uid, msg)
         return
     if data.startswith("xsell:"):

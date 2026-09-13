@@ -147,6 +147,10 @@ def snapshot_from_pair(pair: dict[str, Any], query: str) -> MarketSnapshot:
         pair_created_ms=_int(pair.get("pairCreatedAt")) or None,
         url=pair.get("url") or "",
         source="dexscreener",
+        extras={
+            "info": pair.get("info") or {},
+            "labels": pair.get("labels") or [],
+        },
     )
 
 
