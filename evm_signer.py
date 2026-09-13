@@ -6,11 +6,29 @@ import os
 
 import requests
 
-from chains import CHAINS, resolve_chain
+from chains import CHAINS, ZEROX_LIVE, resolve_chain
 
 NATIVE = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
 ZEROX = "https://api.0x.org/swap/allowance-holder/quote"
-SUPPORTED = {cid for cid, meta in CHAINS.items() if meta.get("chain_id")}
+SUPPORTED = set(ZEROX_LIVE)
+
+# CoinGecko id for the gas token so $ size is right on each chain.
+NATIVE_CG = {
+    "eth": "ethereum",
+    "base": "ethereum",
+    "arb": "ethereum",
+    "op": "ethereum",
+    "linea": "ethereum",
+    "ink": "ethereum",
+    "hood": "ethereum",
+    "bsc": "binancecoin",
+    "avax": "avalanche-2",
+    "pol": "matic-network",
+    "sonic": "sonic-3",
+    "hype": "hyperliquid",
+    "monad": "monad",
+    "pulse": "pulsechain",
+}
 
 
 def _as_int(val, default: int = 0) -> int:
@@ -97,7 +115,7 @@ def status_text() -> str:
     return (
         f"EVM signer {addr}\n"
         f"Live: {flag} · max ${max_usd():.0f}\n"
-        "EVM live: any listed chain 0x will quote."
+        "Live EVM: " + ", ".join(sorted(SUPPORTED))
     )
 
 
@@ -115,12 +133,12 @@ def buy_evm(
     if not live_enabled():
         return False, "Live buys OFF. LIVE_BUYS=1"
     cid = resolve_chain(chain)
-    if cid == "hood":
-        import hood
-
-        return hood.buy_hood(buy_token, usd, key_hex)
     if not key_hex and not configured():
         return False, "Set SIGNER_KEY_EVM and ZEROX_API_KEY."
+    if cid == "pulse":
+        return False, "Pulse is signals-only until PulseX is wired. Use SOL / ETH / Base / BNB / ARB / AVAX / POL / OP / Linea / Sonic / HYPE / Hood / Ink / Monad."
+    if cid in {"trx", "ton"}:
+        return False, f"{cid.upper()} is signals-only. Live swap is EVM + Solana."
     if cid not in SUPPORTED:
         return False, f"Live EVM is {', '.join(sorted(SUPPORTED))}. Not {chain}."
     token = (buy_token or "").strip()
@@ -135,14 +153,11 @@ def buy_evm(
 
     meta = CHAINS[cid]
     try:
-        px = float(get_price_usd("ethereum") if cid != "bsc" else get_price_usd("binancecoin") or 300)
+        px = float(get_price_usd(NATIVE_CG.get(cid, "ethereum")) or 0)
     except Exception:
-        px = 300.0 if cid != "bsc" else 600.0
-    if cid == "bsc":
-        try:
-            px = float(get_price_usd("binancecoin") or 600)
-        except Exception:
-            px = 600.0
+        px = 0.0
+    if px <= 0:
+        px = 600.0 if cid == "bsc" else 20.0 if cid in {"avax", "pol", "hype", "sonic", "monad"} else 3000.0
     wei = max(10**12, int((usd / max(px, 1e-9)) * 10 ** _native_decimals(cid)))
     raw = (key_hex or _key_hex()).replace("0x", "").replace("0X", "")
     acct = Account.from_key("0x" + raw)
@@ -168,8 +183,16 @@ def buy_evm(
         )
         quote = qr.json() if qr.content else {}
     except requests.RequestException as exc:
+        if cid == "hood":
+            import hood
+
+            return hood.buy_hood(buy_token, usd, key_hex)
         return False, f"0x quote failed: {exc}"
     if qr.status_code >= 400:
+        if cid == "hood":
+            import hood
+
+            return hood.buy_hood(buy_token, usd, key_hex)
         return False, str(quote.get("reason") or quote.get("message") or qr.text[:180])
     tx = (quote.get("transaction") or quote.get("tx") or {})
     if not tx.get("to") or not tx.get("data"):
@@ -304,12 +327,12 @@ def sell_evm(chain: str, sell_token: str, key_hex: str | None = None, pct: int =
     if not live_enabled():
         return False, "Live sells OFF. LIVE_BUYS=1"
     cid = resolve_chain(chain)
-    if cid == "hood":
-        import hood
-
-        return hood.sell_hood(sell_token, key_hex)
     if not key_hex and not configured():
         return False, "Set SIGNER_KEY_EVM and ZEROX_API_KEY."
+    if cid == "pulse":
+        return False, "Pulse sell is not wired yet."
+    if cid in {"trx", "ton"}:
+        return False, f"{cid.upper()} is signals-only."
     if cid not in SUPPORTED:
         return False, f"Live EVM is {', '.join(sorted(SUPPORTED))}. Not {chain}."
     token = _addr(sell_token)
@@ -363,8 +386,16 @@ def sell_evm(chain: str, sell_token: str, key_hex: str | None = None, pct: int =
         )
         quote = qr.json() if qr.content else {}
     except requests.RequestException as exc:
+        if cid == "hood":
+            import hood
+
+            return hood.sell_hood(sell_token, key_hex)
         return False, f"0x quote failed: {exc}"
     if qr.status_code >= 400:
+        if cid == "hood":
+            import hood
+
+            return hood.sell_hood(sell_token, key_hex)
         return False, str(quote.get("reason") or quote.get("message") or qr.text[:180])
     issues = quote.get("issues") or {}
     allow = issues.get("allowance") if isinstance(issues, dict) else None

@@ -2075,8 +2075,10 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     prio = os.getenv("PRIORITY_FEE_LAMPORTS", "1000000")
     jito = "ON" if os.getenv("JITO_ENABLED", "").strip() in {"1", "true", "yes"} else "OFF"
     await update.effective_message.reply_text(
-        "🩺 Ferzan status\n"
+        "🩺 Ferzan Trade Bot\n"
         f"Live buys {live}\n"
+        "Live swap: SOL + ETH BASE BNB ARB AVAX POL OP LINEA SONIC HYPE HOOD INK MONAD\n"
+        "Signals only: Pulse TON TRON\n"
         f"SOL send {rpc_on}\n"
         f"Tip {prio} lamports · Jito {jito}\n"
         f"Feed binds {binds}\n"
