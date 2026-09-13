@@ -36,7 +36,8 @@ except Exception as _exc:
 CHAT = os.getenv("FERZAN_CHAT_URL") or "https://t.me/Ferzan_Chat"
 DS = "https://api.dexscreener.com/latest/dex/tokens/{}"
 EVM = re.compile(r"^0x[a-fA-F0-9]{40}$")
-CHAINS = ["solana", "base", "ethereum", "bsc"]
+CHAINS = ["solana", "ethereum", "bsc", "base", "hood"]
+CHAIN_LABEL = {"solana": "Solana · SOL", "ethereum": "Ethereum · ETH", "bsc": "BNB Chain · BNB", "base": "Base · ETH", "hood": "Robinhood · ETH"}
 CHAIN_PREF: dict[int, str] = {}
 SOL = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
 
@@ -69,43 +70,53 @@ def _score(liq: float, vol: float) -> float:
 
 def _menu(uid: int = 0) -> InlineKeyboardMarkup:
     chain = CHAIN_PREF.get(uid, "solana")
+    lab = CHAIN_LABEL.get(chain, chain)
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("🏆 Rank (real unique from chart)", callback_data="liq:rank")],
+            [InlineKeyboardButton("🏆 Rank Boost", callback_data="liq:rank")],
             [
                 InlineKeyboardButton("📊 Chart Maker", callback_data="liq:chart"),
                 InlineKeyboardButton("⚡ Testnet quotes", callback_data="liq:vol"),
             ],
             [
-                InlineKeyboardButton("👥 Holders (Dex)", callback_data="liq:hold"),
-                InlineKeyboardButton("😮 Reactions (off)", callback_data="liq:react"),
+                InlineKeyboardButton("👥 Holders", callback_data="liq:hold"),
+                InlineKeyboardButton("😮 Reactions", callback_data="liq:react"),
             ],
             [
                 InlineKeyboardButton("🎁 Earn", callback_data="liq:earn"),
                 InlineKeyboardButton("🏧 Withdraw", callback_data="liq:wd"),
             ],
-            [InlineKeyboardButton(f"⛓ Chain: {chain} 🔄", callback_data="liq:chain")],
+            [InlineKeyboardButton(f"⛓ Chain: {lab}", callback_data="liq:chain")],
             [
-                InlineKeyboardButton("⚡ Trade", url=f"https://t.me/{TRADE}"),
                 InlineKeyboardButton("💬 Support", url=CHAT),
+                InlineKeyboardButton("⚡ Ferzan Trade", url=f"https://t.me/{TRADE}"),
             ],
         ]
     )
 
+def _chain_kb() -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(CHAIN_LABEL[c], callback_data=f"liq:setchain:{c}")] for c in CHAINS]
+    rows.append([InlineKeyboardButton("« Back", callback_data="liq:menu")])
+    return InlineKeyboardMarkup(rows)
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    text = (
-        "💧 <b>Ferzan Liq</b>\n\n"
-        "Pool analytics for tokens you already trade.\n"
-        "Paste a CA or tap Chart.\n\n"
-        "• Chart — DexScreener price, liq, volume, holders link\n"
-        "• Pool score — 0–100 from depth + turnover\n"
-        "• Impact — AMM estimate for $100 / $1k / $10k\n"
-        "• Earn — referral cut on real Ferzan swaps\n"
-        "• Withdraw — use Ferzan Trade wallets (this bot does not hold keys)\n\n"
-        "<i>No fake volume, fake holders, or reaction farms.</i>"
+
+def _start_text() -> str:
+    return (
+
+        "💧 <b>Ferzan Liq</b> · ⛓ play desk\n\n"
+        "Welcome. Multi-chain pool tools for tokens you already trade.\n\n"
+        "📊 <b>Chart Maker</b> — live DexScreener card from a CA\n"
+        "⚡ <b>Testnet quotes</b> — CEX sandbox maker (/setkeys)\n"
+        "🏆 <b>Rank</b> — real unique flow from the chart, not bought prints\n"
+        "👥 <b>Holders</b> — real Dex holder/liq numbers\n"
+        "😮 <b>Reactions</b> — off (no farms)\n"
+        "🎁 <b>Earn</b> — cut of real Ferzan Trade fees\n"
+        "🏧 <b>Withdraw</b> — Trade wallets hold funds, not this bot\n\n"
+        "Paste a CA any time. Switch chain from the list. "
+        "Bottom right opens <b>Ferzan Trade</b> to buy."
     )
-    await update.effective_message.reply_text(text, parse_mode="HTML", reply_markup=_menu(update.effective_user.id if update.effective_user else 0))
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.effective_message.reply_text(_start_text(), parse_mode="HTML", reply_markup=_menu(update.effective_user.id if update.effective_user else 0))
 
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -170,10 +181,21 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     data = q.data or ""
     uid = q.from_user.id
     if data == "liq:chain":
-        cur = CHAIN_PREF.get(uid, "solana")
-        nxt = CHAINS[(CHAINS.index(cur) + 1) % len(CHAINS)] if cur in CHAINS else "base"
-        CHAIN_PREF[uid] = nxt
-        await q.edit_message_reply_markup(reply_markup=_menu(uid))
+        await q.edit_message_text(
+            "⛓ <b>Choose a chain</b>\n\n"
+            "Which network do you want to work on? Lookups follow this chain.\n"
+            "You can switch any time.",
+            parse_mode="HTML",
+            reply_markup=_chain_kb(),
+        )
+        return
+    if data.startswith("liq:setchain:"):
+        CHAIN_PREF[uid] = data.split(":")[-1]
+        await q.edit_message_text(
+            _start_text(),
+            parse_mode="HTML",
+            reply_markup=_menu(uid),
+        )
         return
     if data == "liq:vol":
         await q.message.reply_text(
@@ -191,7 +213,10 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if data == "liq:react":
         await q.message.reply_text("😮 Reaction boost is off. No session-token farms.")
         return
-    if data in ("liq:menu", "liq:chart", "liq:score", "liq:impact"):
+    if data == "liq:menu":
+        await q.edit_message_text(_start_text(), parse_mode="HTML", reply_markup=_menu(uid))
+        return
+    if data in ("liq:chart", "liq:score", "liq:impact"):
         await q.message.reply_text("Paste a contract address (CA) in this chat.")
         return
     if data == "liq:earn":
