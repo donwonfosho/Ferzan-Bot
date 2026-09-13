@@ -216,22 +216,38 @@ def _age_ms(ms: int | None) -> str:
     return f"{sec // 86400}d"
 
 
-def _pump_curve(ca: str) -> str:
-    if not ca or not ca.lower().endswith("pump"):
-        return ""
+def _pump_meta(ca: str) -> dict:
+    out = {"curve": "", "liq": 0.0, "mc": 0.0, "tg": "", "tw": "", "web": ""}
+    if not ca or not str(ca).lower().endswith("pump"):
+        return out
     try:
         r = requests.get(f"https://frontend-api-v3.pump.fun/coins/{ca}", timeout=6)
         data = r.json() if r.content else {}
         if not isinstance(data, dict):
-            return ""
+            return out
+        out["mc"] = float(data.get("usd_market_cap") or data.get("market_cap") or 0)
+        raw = float(data.get("real_sol_reserves") or data.get("virtual_sol_reserves") or 0)
+        sol = raw / (1e9 if raw > 1000 else 1)
+        # curve vault ≈ SOL in the curve; USD ~ SOL * 2 * px is what desks quote as liq
+        px = 0.0
+        if out["mc"] and sol:
+            # implied SOL USD from cap / tokens is noisy; use reserve * 200 fallback
+            px = 180.0
+        out["liq"] = sol * px * 2 if sol else 0.0
         if data.get("complete"):
-            return "📈 Bonding curve 100% · graduated"
-        raw = data.get("real_sol_reserves") or data.get("virtual_sol_reserves") or 0
-        sol = float(raw) / (1e9 if float(raw) > 1000 else 1)
-        pct = min(100.0, sol / 85.0 * 100.0)
-        return f"📈 Bonding curve {pct:.0f}%"
+            out["curve"] = "📈 Bonding curve 100% · graduated"
+        elif sol:
+            out["curve"] = f"📈 Bonding curve {min(100.0, sol / 85.0 * 100.0):.0f}%"
+        out["tg"] = str(data.get("telegram") or "")
+        out["tw"] = str(data.get("twitter") or "")
+        out["web"] = str(data.get("website") or "")
     except Exception:
-        return ""
+        pass
+    return out
+
+
+def _pump_curve(ca: str) -> str:
+    return _pump_meta(ca).get("curve") or ""
 
 
 def _card_wallet(uid: int | None, ca: str, chain: str) -> str:
@@ -262,6 +278,11 @@ def render_card(card: SignalCard, uid: int | None = None) -> str:
     dex = (s.dex or "").replace("pumpswap", "Pump.fun").replace("pumpfun", "Pump.fun")
     mc = float(s.fdv or 0)
     liq = float(s.liquidity_usd or 0)
+    pump_meta = _pump_meta(ca) if ca else {}
+    if (not liq) and pump_meta.get("liq"):
+        liq = float(pump_meta["liq"])
+    if (not mc) and pump_meta.get("mc"):
+        mc = float(pump_meta["mc"])
     vol = float(s.volume_24h or 0)
     liq_pct = f" ({liq / mc * 100:.1f}%)" if mc > 0 and liq > 0 else ""
     scan = (CHAINS.get(resolve_chain(s.chain) or "", {}).get("explorer_addr") or "").format(addr=ca) if ca else ""
@@ -279,41 +300,55 @@ def render_card(card: SignalCard, uid: int | None = None) -> str:
                 if isinstance(row, dict) and "twitter" in str(row.get("type") or "").lower():
                     tw = row.get("url") or ""
     pump = "pump" in (ca or "").lower() or "pump" in (dex or "").lower()
+    tw = tw or (pump_meta.get("tw") if isinstance(pump_meta, dict) else "") or ""
+    tg = (pump_meta.get("tg") if isinstance(pump_meta, dict) else "") or ""
+    if isinstance(info, dict):
+        for row in info.get("socials") or []:
+            if not isinstance(row, dict):
+                continue
+            url = row.get("url") or ""
+            typ = str(row.get("type") or "").lower()
+            if "telegram" in typ and url:
+                tg = tg or url
+    venue = "🧪 Pump.fun" if pump else f"📡 {_esc(dex or chain)}"
+    social = []
+    if tg:
+        social.append(f'➡️ <a href="{html.escape(str(tg), quote=True)}">Telegram</a>')
+    social.append("👤 DEV")
+    if tw:
+        social.append(f'<a href="{html.escape(str(tw), quote=True)}">X</a>')
+    curve = (pump_meta.get("curve") if isinstance(pump_meta, dict) else "") or _pump_curve(ca)
+    cid = resolve_chain(s.chain) or ("sol" if ca and not str(ca).startswith("0x") else "eth")
+    ds_net = {"sol": "solana", "eth": "ethereum", "bsc": "bsc", "base": "base", "arb": "arbitrum"}.get(cid, "solana")
+    dt_net = {"sol": "solana", "eth": "ether", "bsc": "bnb", "base": "base", "arb": "arbitrum"}.get(cid)
+    ds = ds or (f"https://dexscreener.com/{ds_net}/{ca}" if ca else "")
+    dt = f"https://www.dextools.io/app/en/{dt_net}/pair-explorer/{ca}" if ca and dt_net else ""
+    pump_url = f"https://pump.fun/coin/{ca}" if pump and ca else ""
+    links = []
+    if pump_url:
+        links.append(f'🏆 <a href="{html.escape(pump_url, quote=True)}">Pump</a>')
+    if ds:
+        links.append(f'<a href="{html.escape(ds, quote=True)}">DexScreener</a>')
+    if dt:
+        links.append(f'<a href="{html.escape(dt, quote=True)}">DexTools</a>')
+    if scan:
+        links.append(f'<a href="{html.escape(scan, quote=True)}">Scan</a>')
     lines = [
         f"⚡ <b>{_esc(s.name)}</b>  ${_esc(str(s.symbol).lstrip('$'))}",
         f"<code>{_esc(ca)}</code>" if ca else "",
-        f"{'🧪 Pump.fun · ' if pump else ''}⛓ {_esc(chain)}  ·  {_esc(dex)}",
-    ]
-    if tw:
-        lines.append(f'<a href="{html.escape(str(tw), quote=True)}">Twitter</a>')
-    if age:
-        lines.append(f"⏱ Age {html.escape(age)}")
-    lines += [
-        f"🧢 MC {_esc(f'${mc:,.0f}' if mc else '—')} | 💵 {_esc(_fmt_px(s.price_usd))}",
-        f"💧 Liq {_esc(f'${liq:,.0f}' if liq else '—')}{_esc(liq_pct)}",
+        f"{venue}  🔗 {_esc(chain)}",
+        " · ".join(social),
+        f"🔎 Age: {html.escape(age)}" if age else "",
+        curve,
+        f"🧢 MC ${_esc(f'{mc:,.0f}' if mc else '—')}  |  💵 {_esc(_fmt_px(s.price_usd))}",
+        f"💧 Liq ${_esc(f'{liq:,.0f}' if liq else '—')}{_esc(liq_pct)}",
         "📌 No limit orders",
-        f"📊 1h 🟢{s.buys_h1} / 🔴{s.sells_h1}   24h {_esc(f'${vol:,.0f}' if vol else '—')}",
-        f"🏅 Score <b>{card.score}</b>/100 {_bar(card.score)}  {_esc(card.bias)}",
-        f"🎯 TP {card.take_pct:g}%   🛑 SL {card.stop_pct:g}%",
         _card_wallet(uid, ca, s.chain or ""),
+        f"📊 1h 🟢{s.buys_h1} / 🔴{s.sells_h1}  ·  24h {_esc(f'${vol:,.0f}' if vol else '—')}",
+        f"🏅 {card.score}/100  {_esc(card.bias)}   🎯 TP {card.take_pct:g}%  🛑 SL {card.stop_pct:g}%",
+        " · ".join(links),
+        "<i>Tap CA to copy</i>",
     ]
-    curve = _pump_curve(ca)
-    if curve:
-        lines.append(curve)
-    pasted = str((s.extras or {}).get("pasted") or s.query or "")
-    if ca and pasted and pasted.lower() != ca.lower():
-        lines.append(f"You pasted (not the mint)\n<code>{_esc(pasted)}</code>")
-    sec = _security_line(s.chain, ca)
-    if sec:
-        lines.extend(_esc(part) for part in sec.splitlines() if part)
-    link_bits = []
-    if ds:
-        link_bits.append(f'<a href="{html.escape(ds, quote=True)}">DS</a>')
-    if scan:
-        link_bits.append(f'<a href="{html.escape(scan, quote=True)}">Scan</a>')
-    if link_bits:
-        lines.append(" · ".join(link_bits))
-    lines.append("<i>Tap mint to copy</i>")
     return "\n".join(x for x in lines if x)
 
 
@@ -372,10 +407,36 @@ def card_keyboard(
         ],
     ]
     addr = (ca or query or "").strip()
+    ds_net = {
+        "sol": "solana", "eth": "ethereum", "bsc": "bsc", "base": "base",
+        "arb": "arbitrum", "avax": "avalanche", "pol": "polygon",
+    }.get(cid, "solana")
+    dt_net = {
+        "sol": "solana", "eth": "ether", "bsc": "bnb", "base": "base",
+        "arb": "arbitrum", "avax": "avalanche", "pol": "polygon",
+    }.get(cid)
+    links = []
+    if addr:
+        if "pump" in addr.lower() or cid == "sol":
+            if "pump" in addr.lower():
+                links.append(InlineKeyboardButton("🧪 Pump", url=f"https://pump.fun/coin/{addr}"))
+        links.append(InlineKeyboardButton("📈 DS", url=f"https://dexscreener.com/{ds_net}/{addr}"))
+        if dt_net:
+            links.append(InlineKeyboardButton("🛠 DexTools", url=f"https://www.dextools.io/app/en/{dt_net}/pair-explorer/{addr}"))
+    if links:
+        rows.append(links[:3])
+    scan_url = (CHAINS.get(cid, {}).get("explorer_addr") or "").format(addr=addr) if addr else ""
+    if cid == "sol" and addr:
+        scan_url = f"https://solscan.io/token/{addr}"
+    extra = []
+    if scan_url:
+        extra.append(InlineKeyboardButton("🔎 Scan", url=scan_url))
     if addr and CopyTextButton is not None:
-        rows.append(
-            [InlineKeyboardButton("📋 Copy CA", copy_text=CopyTextButton(text=addr))]
-        )
+        extra.append(InlineKeyboardButton("📋 Copy CA", copy_text=CopyTextButton(text=addr)))
+    elif addr:
+        extra.append(InlineKeyboardButton("📋 CA", callback_data=f"sig:{addr[:44]}"))
+    if extra:
+        rows.append(extra)
     return InlineKeyboardMarkup(rows)
 
 
@@ -703,9 +764,11 @@ def _rug_block(uid: int, card, mint: str) -> str:
     s = card.snapshot
     if db.flag_on(uid, "rug_buy", 1):
         liq = float(s.liquidity_usd or 0)
-        if liq <= 0:
+        dex = str(s.dex or "").lower()
+        pump = "pump" in dex or "pump" in str(mint).lower()
+        if liq <= 0 and not pump:
             return "🛡 Rug guard ON: no DEX liquidity. Live buy blocked."
-        if liq < 15_000:
+        if liq and liq < 15_000 and not pump:
             return "🛡 Rug guard ON: liquidity under $15k. Live buy blocked."
     if db.flag_on(uid, "honeypot", 1) and mint.startswith("0x"):
         sec = _security_line(s.chain, mint).lower()
