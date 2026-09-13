@@ -145,6 +145,81 @@ def _chart_kb() -> InlineKeyboardMarkup:
         ]
     )
 
+
+def _nav_kb(*extra):
+    rows = list(extra)
+    rows.append([
+        InlineKeyboardButton("🔄 Refresh", callback_data="liq:refresh"),
+        InlineKeyboardButton("⬅️ Back", callback_data="liq:menu"),
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
+def _earn_text(uid: int) -> str:
+    link = f"https://t.me/{TRADE}?start=r-{uid}"
+    return (
+        "🎁 <b>Earn with Ferzan</b>\n\n"
+        "Share your link. When someone you referred <b>actually swaps on Ferzan Trade</b>, "
+        "a cut of the real fee can land for you — not a fake-volume rebate.\n\n"
+        f"🔗 <b>Your link</b>\n<code>{link}</code>\n\n"
+        "👥 Referrals — tracked when Trade referral desk is live\n"
+        "💰 Earned — 0 until a referred live swap pays a fee\n\n"
+        "<i>Nothing yet — share the link. Payout is on real trades only.</i>"
+    )
+
+
+def _wd_text() -> str:
+    return (
+        "🏧 <b>Withdraw</b>\n\n"
+        "Ferzan Liq does <b>not</b> hold a deposit wallet.\n"
+        "Balances live in <b>Ferzan Trade</b> wallets you already funded.\n\n"
+        "Open Trade → Wallets → send out.\n"
+        "Network fee is the only amount the chain keeps.\n\n"
+        f"⚡ @{TRADE}"
+    )
+
+
+def _rank_text() -> str:
+    return (
+        "🏆 <b>Rank</b>\n\n"
+        "Odin-style unique-buyer farms are <b>off</b>.\n"
+        "We do not spin a fresh wallet per tiny buy to juice maker count.\n\n"
+        "What you get instead: paste a CA and read <b>real</b> DexScreener "
+        "volume / makers on that pool.\n\n"
+        "📄 Set token → paste CA."
+    )
+
+
+def _hold_text() -> str:
+    return (
+        "👥 <b>Holders</b>\n\n"
+        "No batch airdrop to 100 or 1,000 empty wallets.\n"
+        "Holder count on the card is whatever DexScreener / the explorer shows.\n\n"
+        "📄 Set token → paste CA."
+    )
+
+
+def _vol_text() -> str:
+    return (
+        "⚡ <b>Testnet quotes</b>\n\n"
+        "Not Fast Volume. We will not buy and sell in one bundle to print 2× volume.\n\n"
+        "Play path (CEX sandbox only):\n"
+        "/setkeys exchange SYMBOL KEY SECRET\n"
+        "/start_liquidity\n"
+        "/stop_liquidity\n\n"
+        "For a live pool, Set token and read 24h volume that already happened."
+    )
+
+
+def _react_text() -> str:
+    return (
+        "😮 <b>Reactions</b>\n\n"
+        "DexScreener emoji farms are <b>off</b>.\n"
+        "No packages, no Start Boost, no session-token clicks.\n\n"
+        "If the pair is busy, the chart already shows it."
+    )
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.effective_message.reply_text(_start_text(), parse_mode="HTML", reply_markup=_menu(update.effective_user.id if update.effective_user else 0))
 
@@ -235,21 +310,26 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             reply_markup=_menu(uid),
         )
         return
+    if data == "liq:refresh":
+        await q.edit_message_text(_start_text(), parse_mode="HTML", reply_markup=_menu(uid))
+        return
     if data == "liq:vol":
-        await q.message.reply_text(
-            "⚡ Testnet quotes (play)\n"
-            "DM only:\n/setkeys binance BTC/USDT KEY SECRET\n/start_liquidity\n/stop_liquidity\n"
-            "Sandbox CEX quotes. Not DEX wash volume."
-        )
+        await q.edit_message_text(_vol_text(), parse_mode="HTML", reply_markup=_nav_kb(
+            [InlineKeyboardButton("📄 Set token", callback_data="liq:settoken")]
+        ))
         return
     if data == "liq:rank":
-        await q.message.reply_text("🏆 Rank here means real DexScreener activity after you paste a CA — not bought unique-buyer prints.")
+        await q.edit_message_text(_rank_text(), parse_mode="HTML", reply_markup=_nav_kb(
+            [InlineKeyboardButton("📄 Set token", callback_data="liq:settoken")]
+        ))
         return
     if data == "liq:hold":
-        await q.message.reply_text("👥 Paste a CA. Holder/liq numbers come from DexScreener. We do not dust 500 wallets.")
+        await q.edit_message_text(_hold_text(), parse_mode="HTML", reply_markup=_nav_kb(
+            [InlineKeyboardButton("📄 Set token", callback_data="liq:settoken")]
+        ))
         return
     if data == "liq:react":
-        await q.message.reply_text("😮 Reaction boost is off. No session-token farms.")
+        await q.edit_message_text(_react_text(), parse_mode="HTML", reply_markup=_nav_kb())
         return
     if data == "liq:menu":
         await q.edit_message_text(_start_text(), parse_mode="HTML", reply_markup=_menu(uid))
@@ -265,16 +345,14 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await q.message.reply_text("Paste a contract address (CA) in this chat.")
         return
     if data == "liq:earn":
-        await q.message.reply_text(
-            "🎁 Earn is a cut of real Ferzan Trade swap fees from people you refer.\n"
-            "Open Trade → referral when that desk is live. No fake-volume payouts."
-        )
+        await q.edit_message_text(_earn_text(uid), parse_mode="HTML", reply_markup=_nav_kb(
+            [InlineKeyboardButton("⚡ Open Trade", url=f"https://t.me/{TRADE}?start=r-{uid}")]
+        ))
         return
     if data == "liq:wd":
-        await q.message.reply_text(
-            "🏧 Ferzan Liq does not hold your keys.\n"
-            f"Withdraw from @{TRADE} → Wallets."
-        )
+        await q.edit_message_text(_wd_text(), parse_mode="HTML", reply_markup=_nav_kb(
+            [InlineKeyboardButton("⚡ Open Trade wallets", url=f"https://t.me/{TRADE}")]
+        ))
         return
 
 
