@@ -1630,14 +1630,28 @@ async def watchwallet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 def _onramp_url(code: str, address: str) -> str:
     pk = (os.getenv("MOONPAY_PK") or os.getenv("MOONPAY_KEY") or "").strip()
-    q = (
-        f"currencyCode={code}&walletAddress={address}"
-        "&baseCurrencyCode=usd"
-        "&enabledPaymentMethods=apple_pay,google_pay,credit_debit_card"
-    )
+    sk = (os.getenv("MOONPAY_SK") or "").strip()
+    from urllib.parse import quote, urlencode
+    params = {
+        "currencyCode": code,
+        "walletAddress": address,
+        "baseCurrencyCode": "usd",
+        "enabledPaymentMethods": "apple_pay,google_pay,credit_debit_card",
+        "showWalletAddressForm": "true",
+    }
     if pk:
-        q = f"apiKey={pk}&{q}"
-    return "https://buy.moonpay.com/?" + q
+        params["apiKey"] = pk
+    q = urlencode(params)
+    url = "https://buy.moonpay.com/?" + q
+    if pk and sk:
+        import base64
+        import hashlib
+        import hmac
+        sig = base64.b64encode(
+            hmac.new(sk.encode(), ("?" + q).encode(), hashlib.sha256).digest()
+        ).decode()
+        url += "&signature=" + quote(sig)
+    return url
 
 
 def buy_fiat_keyboard(uid: int) -> InlineKeyboardMarkup:
@@ -1680,8 +1694,8 @@ async def buy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Base buttons send <b>on Base</b> — no bridge.\n\n"
         f"SOL\n<code>{html.escape(row.get('sol_pub') or '')}</code>\n"
         f"EVM (ETH / Base / BNB)\n<code>{html.escape(row.get('evm_pub') or '')}</code>\n\n"
-        "<i>MoonPay KYC is theirs. Fees ~3–5% on Apple Pay. "
-        "Add MOONPAY_PK on the droplet for a branded widget.</i>"
+        "<i>Checkout MUST show the 0x above. If it shows a MoonPay wallet, stop and change destination.\n"
+        "Lock requires MOONPAY_PK + MOONPAY_SK on the droplet.</i>"
     )
     await update.effective_message.reply_text(
         text, parse_mode="HTML", reply_markup=buy_fiat_keyboard(uid)
