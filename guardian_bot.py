@@ -9,7 +9,7 @@ import sqlite3
 from pathlib import Path
 
 from dotenv import load_dotenv
-from telegram import ChatPermissions, InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import BotCommand, ChatPermissions, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatMemberStatus
 from telegram.ext import Application, ChatMemberHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
@@ -287,6 +287,21 @@ def main() -> None:
     app.add_handler(CommandHandler("gunban", gunban))
     app.add_handler(ChatMemberHandler(on_member, ChatMemberHandler.CHAT_MEMBER))
     app.add_handler(MessageHandler(filters.TEXT | filters.CAPTION, on_text))
+
+    async def _post(application):
+        cmds = [
+            BotCommand("start", "Welcome and add to group"),
+            BotCommand("help", "What Guardian does"),
+            BotCommand("gmenu", "Shield menu"),
+            BotCommand("gfilter", "Block a phrase"),
+            BotCommand("gunfilter", "Unblock a phrase"),
+            BotCommand("gfilters", "List extra filters"),
+            BotCommand("gban", "Global ban"),
+            BotCommand("gunban", "Lift a global ban"),
+        ]
+        await application.bot.set_my_commands(cmds)
+
+    app.post_init = _post
     log.info("Ferzan Guardian running")
     app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
 
