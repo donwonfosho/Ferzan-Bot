@@ -1628,6 +1628,66 @@ async def watchwallet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     )
 
 
+def _onramp_url(code: str, address: str) -> str:
+    pk = (os.getenv("MOONPAY_PK") or os.getenv("MOONPAY_KEY") or "").strip()
+    q = (
+        f"currencyCode={code}&walletAddress={address}"
+        "&baseCurrencyCode=usd"
+        "&enabledPaymentMethods=apple_pay,google_pay,credit_debit_card"
+    )
+    if pk:
+        q = f"apiKey={pk}&{q}"
+    return "https://buy.moonpay.com/?" + q
+
+
+def buy_fiat_keyboard(uid: int) -> InlineKeyboardMarkup:
+    row = db.get_user_wallet(uid) or {}
+    sol = row.get("sol_pub") or ""
+    evm = row.get("evm_pub") or ""
+    buttons = []
+    if sol:
+        buttons.append(
+            [InlineKeyboardButton("🍎 Buy SOL · Apple Pay", url=_onramp_url("sol", sol))]
+        )
+    if evm:
+        buttons.append(
+            [InlineKeyboardButton("🍎 Buy ETH", url=_onramp_url("eth", evm))]
+        )
+        buttons.append(
+            [
+                InlineKeyboardButton("🟦 Buy ETH on Base", url=_onramp_url("eth_base", evm)),
+                InlineKeyboardButton("💵 USDC on Base", url=_onramp_url("usdc_base", evm)),
+            ]
+        )
+        buttons.append(
+            [InlineKeyboardButton("🟡 Buy BNB", url=_onramp_url("bnb", evm))]
+        )
+    buttons.append([InlineKeyboardButton("↩️ Wallets", callback_data="go:wallets")])
+    return InlineKeyboardMarkup(buttons)
+
+
+async def buy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard(update):
+        return
+    uid = update.effective_user.id
+    row = db.get_user_wallet(uid)
+    if not row:
+        await update.effective_message.reply_text("Generate a wallet first: /wallet")
+        return
+    text = (
+        "🍎 <b>Buy gas with Apple Pay</b>\n\n"
+        "Opens MoonPay. Coins land in <b>your Ferzan wallet</b> on that chain.\n"
+        "Base buttons send <b>on Base</b> — no bridge.\n\n"
+        f"SOL\n<code>{html.escape(row.get('sol_pub') or '')}</code>\n"
+        f"EVM (ETH / Base / BNB)\n<code>{html.escape(row.get('evm_pub') or '')}</code>\n\n"
+        "<i>MoonPay KYC is theirs. Fees ~3–5% on Apple Pay. "
+        "Add MOONPAY_PK on the droplet for a branded widget.</i>"
+    )
+    await update.effective_message.reply_text(
+        text, parse_mode="HTML", reply_markup=buy_fiat_keyboard(uid)
+    )
+
+
 def wallet_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
@@ -1642,6 +1702,7 @@ def wallet_menu_keyboard() -> InlineKeyboardMarkup:
             ],
             [InlineKeyboardButton("🧲 Collect", callback_data="wi:col")],
             [InlineKeyboardButton("📤 Disperse", callback_data="wi:dis")],
+            [InlineKeyboardButton("🍎 Buy SOL / ETH / Base", callback_data="go:buy")],
             [InlineKeyboardButton("🔗 Addresses by chain", callback_data="wi:chains")],
             [InlineKeyboardButton("🗝️ Export keys", callback_data="wi:exp")],
         ]
@@ -2544,6 +2605,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await fees_cmd(update, context)
         elif kind == "wallets":
             await wallet_cmd(update, context)
+        elif kind == "buy":
+            await buy_cmd(update, context)
         elif kind == "bag":
             await bag_cmd(update, context)
         elif kind == "settings":
@@ -3435,6 +3498,8 @@ def main() -> None:
     app.add_handler(CommandHandler("resetpaper", resetpaper_cmd))
     app.add_handler(CommandHandler("watchwallet", watchwallet_cmd))
     app.add_handler(CommandHandler("wallet", wallet_cmd))
+    app.add_handler(CommandHandler("buy", buy_cmd))
+    app.add_handler(CommandHandler("onramp", buy_cmd))
     app.add_handler(CommandHandler("importsol", importsol_cmd))
     app.add_handler(CommandHandler("importevm", importevm_cmd))
     app.add_handler(CommandHandler("collectsol", collectsol_cmd))
