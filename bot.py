@@ -480,7 +480,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             me = update.effective_user.id
             if rid and rid != me:
                 db.ensure_user(me, update.effective_user.username)
-                db.update_user(me, referred_by=rid)
+                db.update_user(me, referred_by=rid, discount_until=int(time.time()) + 30 * 86400)
         except (TypeError, ValueError):
             pass
     if extra and extra.startswith("sig_"):
@@ -785,6 +785,9 @@ def _live_buy_followup(
         if _ok:
             db.add_live_cost(uid, mint, usd)
             db.set_lp_mark(uid, mint, float(card.snapshot.liquidity_usd or 0))
+            extra = db.credit_desk_share(uid, usd)
+            if extra:
+                msg = f"{msg}\n{extra}"
         return msg
     if "sol" not in chain and not (len(mint) >= 32 and not mint.startswith("0x")):
         return f"Live: {chain or 'unknown'} is not Solana."
@@ -792,6 +795,9 @@ def _live_buy_followup(
     if _ok:
         db.add_live_cost(uid, mint, usd)
         db.set_lp_mark(uid, mint, float(card.snapshot.liquidity_usd or 0))
+        extra = db.credit_desk_share(uid, usd)
+        if extra:
+            msg = f"{msg}\n{extra}"
     return msg
 
 
@@ -2087,12 +2093,40 @@ async def ref_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     link = f"https://t.me/{bot}?start=ref_{uid}"
     user = db.get_user(uid) or {}
     parent = user.get("referred_by") or "none"
+    st = db.referral_stats(uid)
     await update.effective_message.reply_text(
-        "🤝 Referral\n"
-        f"Your link:\n{link}\n\n"
+        "🤝 FERZAN DESK SHARE\n"
+        "Not a cashback gimmick. You earn a slice of OUR cut when they trade.\n"
+        "They get Ape Pass — first 30 days on your link.\n\n"
+        f"Tier  <b>{st['tier']}</b>\n"
+        f"Invites  {st['invites']}\n"
+        f"Their volume  ${st['volume']:,.0f}\n"
+        f"Your share  ${st['earned']:.4f}\n"
+        f"Claimable  ${st['open']:.4f}\n\n"
+        f"Scout 30% of our cut · Captain 35% at $50k · Desk 40% at $250k\n\n"
+        f"Link\n{link}\n"
         f"Referred by: {parent}\n"
-        "Friends who start that link are tagged to you.\n"
-        "Fee split to referrers ships as a ledger cut — not auto-payout yet."
+        "/claim when claimable ≥ $5 — paid from treasury to your /wallet.",
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+    )
+
+
+async def claim_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard(update):
+        return
+    uid = update.effective_user.id
+    st = db.referral_stats(uid)
+    if st["open"] < 5:
+        await update.effective_message.reply_text(
+            f"Claimable ${st['open']:.4f}. Minimum $5. Keep sharing /ref."
+        )
+        return
+    amt = db.request_referral_claim(uid)
+    await update.effective_message.reply_text(
+        f"🧾 Claim locked ${amt:.4f}.\n"
+        "Operator pays this from FEE_WALLET to your Ferzan SOL address.\n"
+        "Not instant on-chain in this build — the ticket is in the ledger."
     )
 
 
@@ -3201,6 +3235,7 @@ def main() -> None:
     app.add_handler(CommandHandler("status", status_cmd))
     app.add_handler(CommandHandler("ref", ref_cmd))
     app.add_handler(CommandHandler("referral", ref_cmd))
+    app.add_handler(CommandHandler("claim", claim_cmd))
     app.add_handler(CommandHandler("snipe", snipe_cmd))
     app.add_handler(CommandHandler("snipes", snipes_cmd))
     app.add_handler(CommandHandler("cancelsnipe", cancelsnipe_cmd))

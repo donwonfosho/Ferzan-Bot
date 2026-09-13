@@ -241,6 +241,22 @@ def init_db() -> None:
             conn.execute("ALTER TABLE users ADD COLUMN auto_buy_usd REAL DEFAULT 0")
         if "referred_by" not in cols:
             conn.execute("ALTER TABLE users ADD COLUMN referred_by INTEGER")
+        if "discount_until" not in cols:
+            conn.execute("ALTER TABLE users ADD COLUMN discount_until INTEGER DEFAULT 0")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS referral_ledger (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                from_user INTEGER,
+                created_at INTEGER NOT NULL,
+                volume_usd REAL NOT NULL,
+                share_usd REAL NOT NULL,
+                kind TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'open'
+            )
+            """
+        )
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS chain_trade (
@@ -1088,3 +1104,99 @@ def clear_live_cost(user_id: int, mint: str) -> None:
             (user_id, mint),
         )
         conn.commit()
+
+
+def credit_desk_share(trader_id: int, volume_usd: float) -> str:
+    """Pay the referrer from Ferzan's cut. Invitee keeps an Ape Pass window."""
+    vol = max(0.0, float(volume_usd))
+    if vol <= 0:
+        return ""
+    trader = get_user(int(trader_id)) or {}
+    parent = trader.get("referred_by")
+    now = int(time.time())
+    if not trader.get("discount_until"):
+        update_user(int(trader_id), discount_until=now + 30 * 86400)
+    if not parent:
+        return ""
+    parent = int(parent)
+    if parent == int(trader_id):
+        return ""
+    with get_conn() as conn:
+        tot = conn.execute(
+            "SELECT COALESCE(SUM(volume_usd),0) FROM referral_ledger WHERE user_id = ? AND kind = 'share'",
+            (parent,),
+        ).fetchone()[0]
+    tot = float(tot or 0) + vol
+    if tot >= 250_000:
+        pct = 0.40
+        tier = "Desk"
+    elif tot >= 50_000:
+        pct = 0.35
+        tier = "Captain"
+    else:
+        pct = 0.30
+        tier = "Scout"
+    import fees as _fees
+
+    cut = vol * (_fees.current_bps() / 10_000.0)
+    share = cut * pct
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO referral_ledger
+            (user_id, from_user, created_at, volume_usd, share_usd, kind, status)
+            VALUES (?, ?, ?, ?, ?, 'share', 'open')
+            """,
+            (parent, int(trader_id), now, vol, share),
+        )
+        conn.commit()
+    return f"Desk Share {tier} +${share:.4f} → {parent}"
+
+
+def referral_stats(user_id: int) -> dict:
+    with get_conn() as conn:
+        row = conn.execute(
+            """
+            SELECT
+              COALESCE(SUM(volume_usd),0),
+              COALESCE(SUM(share_usd),0),
+              COALESCE(SUM(CASE WHEN status='open' THEN share_usd ELSE 0 END),0),
+              COUNT(*)
+            FROM referral_ledger WHERE user_id = ? AND kind = 'share'
+            """,
+            (int(user_id),),
+        ).fetchone()
+        kids = conn.execute(
+            "SELECT COUNT(*) FROM users WHERE referred_by = ?",
+            (int(user_id),),
+        ).fetchone()[0]
+    vol, earned, open_usd, n = [float(x or 0) for x in row]
+    if vol >= 250_000:
+        tier = "Desk"
+    elif vol >= 50_000:
+        tier = "Captain"
+    elif vol > 0 or kids:
+        tier = "Scout"
+    else:
+        tier = "Rookie"
+    return {
+        "volume": vol,
+        "earned": earned,
+        "open": open_usd,
+        "fills": int(n),
+        "invites": int(kids or 0),
+        "tier": tier,
+    }
+
+
+def request_referral_claim(user_id: int) -> float:
+    stats = referral_stats(user_id)
+    if stats["open"] <= 0:
+        return 0.0
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE referral_ledger SET status = 'claimed' WHERE user_id = ? AND status = 'open'",
+            (int(user_id),),
+        )
+        conn.commit()
+    return stats["open"]
