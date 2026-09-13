@@ -59,6 +59,10 @@ def _db() -> sqlite3.Connection:
         con.execute("ALTER TABLE watches ADD COLUMN min_usd REAL DEFAULT 15")
     except sqlite3.OperationalError:
         pass
+    try:
+        con.execute("ALTER TABLE watches ADD COLUMN emoji TEXT DEFAULT '🟢'")
+    except sqlite3.OperationalError:
+        pass
     con.execute(
         """CREATE TABLE IF NOT EXISTS raids (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -168,49 +172,97 @@ def _trades(net: str, pool: str, last_ts: int) -> list[dict]:
     return out
 
 
-def _bar(usd: float) -> str:
-    n = 1 if usd < 20 else 3 if usd < 50 else 8 if usd < 150 else 16 if usd < 500 else 24
-    return "🟢" * min(n, 24)
+def _bar(usd: float, emoji: str = "🟢") -> str:
+    em = (emoji or "🟢").strip()[:8] or "🟢"
+    if usd < 20:
+        n = 3
+    elif usd < 50:
+        n = 8
+    elif usd < 100:
+        n = 12
+    elif usd < 250:
+        n = 18
+    elif usd < 500:
+        n = 24
+    else:
+        n = 36
+    row = 12
+    chunks = [em * min(row, n - i) for i in range(0, n, row)]
+    return "\n".join(chunks)
 
 
-def _card(chain: str, ca: str, tr: dict, attrs: dict) -> tuple[str, InlineKeyboardMarkup]:
+def _usd(v) -> str:
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        return "—"
+    if x >= 1_000_000:
+        return f"${x/1_000_000:.2f}M"
+    if x >= 1_000:
+        return f"${x:,.0f}"
+    if x <= 0:
+        return "—"
+    return f"${x:,.2f}"
+
+
+def _card(chain: str, ca: str, tr: dict, attrs: dict, emoji: str = "🟢") -> tuple[str, InlineKeyboardMarkup]:
     usd = float(tr.get("volume_in_usd") or 0)
     got = tr.get("to_token_amount") or tr.get("to_token_output") or ""
     spent = tr.get("from_token_amount") or ""
     buyer = tr.get("tx_from_address") or tr.get("origin_from_address") or ""
     tx = tr.get("tx_hash") or ""
-    name = attrs.get("name") or ca[:8]
-    mc = attrs.get("fdv_usd") or attrs.get("market_cap_usd") or attrs.get("reserve_in_usd") or ""
-    ds = f"https://dexscreener.com/{GT_NET.get(chain, chain)}/{ca}"
+    pair = _ds(ca)
+    name = attrs.get("name") or (pair.get("baseToken") or {}).get("name") or ca[:8]
+    sym = attrs.get("symbol") or (pair.get("baseToken") or {}).get("symbol") or name
+    mc = (
+        attrs.get("fdv_usd")
+        or attrs.get("market_cap_usd")
+        or pair.get("marketCap")
+        or pair.get("fdv")
+        or ""
+    )
+    net = GT_NET.get(chain, chain)
+    ds = pair.get("url") or f"https://dexscreener.com/{net}/{ca}"
+    info = pair.get("info") or {}
+    tg = ""
+    for s in info.get("socials") or []:
+        if str(s.get("type") or "").lower() in ("telegram", "tg"):
+            tg = s.get("url") or ""
+            break
     buy = f"https://t.me/{TRADE}?start={ca}"
     scan = {
         "sol": f"https://solscan.io/tx/{tx}",
+        "solana": f"https://solscan.io/tx/{tx}",
         "base": f"https://basescan.org/tx/{tx}",
         "eth": f"https://etherscan.io/tx/{tx}",
+        "ethereum": f"https://etherscan.io/tx/{tx}",
         "bsc": f"https://bscscan.com/tx/{tx}",
         "arb": f"https://arbiscan.io/tx/{tx}",
     }.get(chain, ds)
+    buyer_url = scan.replace("/tx/", "/address/") if buyer and "/tx/" in scan else ds
     liq = (os.getenv("FERZAN_LIQ_BOT") or "FerzanLiqBot").lstrip("@")
-    boost = f"https://t.me/{liq}" if liq else "https://t.me/Ferzan_Chat"
+    boost = f"https://t.me/{liq}"
+    chat = os.getenv("FERZAN_CHAT_URL") or "https://t.me/Ferzan_Chat"
+    spent_s = spent or f"{usd:,.2f}"
     text = (
-        f"<b>{_esc(name)}</b> [{_esc(str(attrs.get('symbol') or name))}] ⚡ Buy!\n"
-        f"{_bar(usd)}\n\n"
-        f"💵 | {_esc(spent or f'${usd:,.2f}')} (${usd:,.2f})\n"
+        f"<b>{_esc(name)}</b> [{_esc(sym)}] ⚡ Buy!\n"
+        f"{_bar(usd, emoji)}\n\n"
+        f"💵 | {_esc(spent_s)} (${usd:,.2f})\n"
         f"💼 | Got: {_esc(got)}\n"
-        f"👤 | Buyer | Tx\n"
-        f"🎯 | Market Cap: {_esc(str(mc)[:20])}\n"
-        f"📈 | Dex\n"
-        f"<code>{_esc(ca)}</code>"
+        f"👤 | <a href=\"{_esc(buyer_url)}\">Buyer</a> | <a href=\"{_esc(scan)}\">Txn</a>\n"
+        f"🎯 | Market Cap: {_usd(mc)}\n"
     )
+    if tg:
+        text += f"👥 | <a href=\"{_esc(tg)}\">Telegram</a>\n"
+    text += f"📈 | <a href=\"{_esc(ds)}\">Dex</a>"
     rows = [
         [
             InlineKeyboardButton("⚡ Ferzan Buy", url=buy),
             InlineKeyboardButton("📈 Dex", url=ds),
+            InlineKeyboardButton("🗳 Vote", url=chat),
         ],
+        [InlineKeyboardButton("🚀 Boost Rank and Volume", url=boost)],
     ]
-    if tx:
-        rows.append([InlineKeyboardButton("🔎 Tx", url=scan)])
-    rows.append([InlineKeyboardButton("🚀 Boost Rank and Volume", url=boost)])
     kb = InlineKeyboardMarkup(rows)
     return text, kb
 
@@ -229,6 +281,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/nextlist /queuelist  show queue\n"
         "/lb /clb  raid leaderboards\n"
         "/raidevent /relb  event scores\n"
+        "/setemoji 🚕  buy-size bar emoji\n"
         "/untrack  stop buy alerts\n"
         "/help"
     )
@@ -338,9 +391,13 @@ async def settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.effective_message.reply_text("No token paired. /add base 0xCA 25")
         return
     chain, ca, pool, min_usd = row
+    con = _db()
+    em = con.execute("SELECT emoji FROM watches WHERE chat_id=?", (update.effective_chat.id,)).fetchone()
+    con.close()
+    mark = (em[0] if em and em[0] else "🟢")
     await update.effective_message.reply_text(
-        f"⚙️ Settings\nChain: {chain.upper()}\nCA: `{ca}`\nMin buy: ${float(min_usd or 15):.0f}\n"
-        "Change min: /add {chain} {ca} 50".replace("{chain}", chain).replace("{ca}", ca),
+        f"⚙️ Settings\nChain: {chain.upper()}\nCA: `{ca}`\nMin buy: ${float(min_usd or 15):.0f}\nBar: {mark}\n"
+        f"Change min: /add {chain} {ca} 50\nChange bar: /setemoji 🚕",
         parse_mode="Markdown",
     )
 
@@ -527,6 +584,18 @@ async def raidevent_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     )
 
 
+async def setemoji_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not context.args:
+        await update.effective_message.reply_text("Usage: /setemoji 🚕")
+        return
+    em = context.args[0][:8]
+    con = _db()
+    con.execute("UPDATE watches SET emoji=? WHERE chat_id=?", (em, update.effective_chat.id))
+    con.commit()
+    con.close()
+    await update.effective_message.reply_text(f"Buy bar set to {em}{em}{em}")
+
+
 async def untrack(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     con = _db()
     con.execute("DELETE FROM watches WHERE chat_id=?", (update.effective_chat.id,))
@@ -537,8 +606,8 @@ async def untrack(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def tick(context: ContextTypes.DEFAULT_TYPE) -> None:
     con = _db()
-    rows = list(con.execute("SELECT chat_id, chain, ca, pool, last_ts, min_usd FROM watches"))
-    for chat_id, chain, ca, pool, last_ts, min_usd in rows:
+    rows = list(con.execute("SELECT chat_id, chain, ca, pool, last_ts, min_usd, emoji FROM watches"))
+    for chat_id, chain, ca, pool, last_ts, min_usd, emoji in rows:
         floor = float(min_usd or MIN_USD)
         net = GT_NET.get(chain, chain)
         trades = _trades(net, pool, int(last_ts or 0))
@@ -551,7 +620,7 @@ async def tick(context: ContextTypes.DEFAULT_TYPE) -> None:
             if usd < floor:
                 newest = max(newest, tr["ts"])
                 continue
-            text, kb = _card(chain, ca, tr, attrs)
+            text, kb = _card(chain, ca, tr, attrs, emoji or "🟢")
             try:
                 media = _media(chat_id)
                 if media and media[0] == "animation":
@@ -592,6 +661,7 @@ def main() -> None:
     app.add_handler(CommandHandler("add", track))
     app.add_handler(CommandHandler("untrack", untrack))
     app.add_handler(CommandHandler("settings", settings_cmd))
+    app.add_handler(CommandHandler("setemoji", setemoji_cmd))
     app.add_handler(CommandHandler("stats", stats_cmd))
     app.add_handler(CommandHandler("price", price_cmd))
     app.add_handler(CommandHandler("dex", dex_cmd))
