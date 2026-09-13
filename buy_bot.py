@@ -11,7 +11,7 @@ from pathlib import Path
 import requests
 from dotenv import load_dotenv
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import Application, CommandHandler, ContextTypes, filters
+from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
 load_dotenv("/opt/ferzan/.env")
 load_dotenv()
@@ -291,7 +291,8 @@ async def remember_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not fid:
         return
     LAST_MEDIA[chat_id] = (kind, fid)
-    if chat_id not in SETGIF_WAIT:
+    cap = (update.effective_message.caption or "").strip().lower()
+    if chat_id not in SETGIF_WAIT and not cap.startswith("/setgif"):
         return
     SETGIF_WAIT.discard(chat_id)
     con = _db()
