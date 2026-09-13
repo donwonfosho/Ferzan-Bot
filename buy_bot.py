@@ -190,7 +190,7 @@ def _card(chain: str, ca: str, tr: dict, attrs: dict) -> tuple[str, InlineKeyboa
         "bsc": f"https://bscscan.com/tx/{tx}",
         "arb": f"https://arbiscan.io/tx/{tx}",
     }.get(chain, ds)
-    liq = (os.getenv("FERZAN_LIQ_BOT") or "").lstrip("@")
+    liq = (os.getenv("FERZAN_LIQ_BOT") or "FerzanLiqBot").lstrip("@")
     boost = f"https://t.me/{liq}" if liq else "https://t.me/Ferzan_Chat"
     text = (
         f"<b>{_esc(name)}</b> [{_esc(str(attrs.get('symbol') or name))}] ⚡ Buy!\n"
@@ -204,7 +204,7 @@ def _card(chain: str, ca: str, tr: dict, attrs: dict) -> tuple[str, InlineKeyboa
     )
     rows = [
         [
-            InlineKeyboardButton("⚡ Buy", url=buy),
+            InlineKeyboardButton("⚡ Ferzan Buy", url=buy),
             InlineKeyboardButton("📈 Dex", url=ds),
         ],
     ]
