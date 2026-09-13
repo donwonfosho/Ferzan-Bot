@@ -1506,9 +1506,7 @@ def chain_board_keyboard(user_id: int | None = None) -> InlineKeyboardMarkup:
     for cid in ACTIVE:
         label = "HOOD" if cid == "hood" else cid.upper()
         left = InlineKeyboardButton(f"🟢 {label}", callback_data=f"ch:{cid}")
-        if cid in {"trx", "ton"}:
-            right = InlineKeyboardButton("⚠️ Soon", callback_data=f"wa:{cid}")
-        elif has:
+        if has:
             right = InlineKeyboardButton("👛 Wallet", callback_data=f"wa:{cid}")
         else:
             right = InlineKeyboardButton("✨ Generate", callback_data="wi:gen")
@@ -1539,8 +1537,8 @@ async def wallet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if row:
         text = (
             "🟢 Enable a chain · 👛 open its address\n"
-            "Same EVM key covers ETH / Base / BSC / Hood / Arb / Avax.\n"
-            "SOL is its own key. TON / TRX adapters next."
+            "Same EVM key covers ETH / Base / BNB / Hood / Arb / Avax / TRON.\n"
+            "SOL is its own key. TON quotes on STON.fi."
         )
     else:
         text = "ℹ️ Wallet not found. Generate or import, then every chain lights up."
@@ -2318,6 +2316,18 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 bal_line = f"{lamports / 1_000_000_000:.6f} SOL"
             except Exception:
                 bal_line = "—"
+        elif cid == "trx":
+            try:
+                import tron_signer
+
+                _, evm_secret = user_wallets.secrets(uid)
+                addr, _ = tron_signer.evm_key_to_tron(evm_secret)
+            except Exception:
+                addr = row["evm_pub"]
+            bal_line = "Fund TRX + energy"
+        elif cid == "ton":
+            addr = "STON.fi quotes live · send after pytoniq"
+            bal_line = "TON wallet next"
         else:
             addr = row["evm_pub"]
             try:
@@ -2325,14 +2335,22 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 bal_line = f"{amt:.6f} {sym}"
             except Exception:
                 bal_line = f"— {native}"
-        href = (meta.get("explorer_addr") or "{addr}").format(addr=addr)
-        text = (
-            f"{mark} <a href=\"{_esc(href)}\"><b>{_esc(label)}</b></a>\n"
-            f"<code>{_esc(addr)}</code>\n"
-            f"🟢 Balance {_esc(bal_line)}\n\n"
-            f"<i>Blue name opens the explorer. Tap the address to copy.</i>\n"
-            f"Gas in {_esc(native)}. Paste a {_esc(label)} CA to buy."
-        )
+        if cid == "ton":
+            text = (
+                f"{mark} <b>TON</b>\n"
+                "STON.fi quotes are live. Paste an EQ… jetton to buy.\n"
+                "Send path: pytoniq is on the droplet.\n"
+                "Dedicated TON deposit address ships next."
+            )
+        else:
+            href = (meta.get("explorer_addr") or "{addr}").format(addr=addr)
+            text = (
+                f"{mark} <a href=\"{_esc(href)}\"><b>{_esc(label)}</b></a>\n"
+                f"<code>{_esc(addr)}</code>\n"
+                f"🟢 Balance {_esc(bal_line)}\n\n"
+                f"<i>Blue name opens the explorer. Tap the address to copy.</i>\n"
+                f"Gas in {_esc(native)}. Paste a {_esc(label)} CA to buy."
+            )
         await context.bot.send_message(
             uid,
             text,
