@@ -240,7 +240,11 @@ def _pump_meta(ca: str) -> dict:
             out["curve"] = f"📈 Bonding curve {min(100.0, sol / 85.0 * 100.0):.0f}%"
         out["tg"] = str(data.get("telegram") or "")
         out["tw"] = str(data.get("twitter") or "")
-        out["web"] = str(data.get("website") or "")
+        web = str(data.get("website") or "")
+        if web and ("x.com" in web.lower() or "twitter.com" in web.lower()):
+            out["tw"] = out["tw"] or web
+        else:
+            out["web"] = web
     except Exception:
         pass
     return out
@@ -252,23 +256,35 @@ def _pump_curve(ca: str) -> str:
 
 def _card_wallet(uid: int | None, ca: str, chain: str) -> str:
     if not uid:
-        return "💼 Balance → /bag"
+        return "<blockquote>💰 <b>Balance</b>\nFund /wallet</blockquote>"
+    cid = resolve_chain(chain) or ("sol" if ca and not str(ca).startswith("0x") else "eth")
+    tok = 0.0
+    native = 0.0
+    unit = "SOL"
     try:
-        sol_secret, _evm = user_wallets.secrets(uid)
-        kp = signer.keypair_from_secret(sol_secret)
-        sol = signer.sol_balance_lamports(str(kp.pubkey())) / 1e9
-        tok = 0.0
-        if ca and not ca.startswith("0x"):
-            for row in signer.holdings(sol_secret):
-                if row.get("mint") == ca:
-                    tok = float(row.get("amount") or 0)
-                    break
-        return (
-            "💰 <b>Balance</b>\n"
-            f"{sol:.4f} SOL · {tok:.4g} token (0%)"
-        )
+        sol_secret, evm_secret = user_wallets.secrets(uid)
+        if cid == "sol":
+            kp = signer.keypair_from_secret(sol_secret)
+            native = signer.sol_balance_lamports(str(kp.pubkey())) / 1e9
+            unit = "SOL"
+            if ca:
+                for row in signer.holdings(sol_secret):
+                    if row.get("mint") == ca:
+                        tok = float(row.get("amount") or 0)
+                        break
+        else:
+            from eth_account import Account
+            addr = Account.from_key(evm_secret).address
+            native, unit = evm_signer.native_balance(cid, addr)
     except Exception:
-        return "💰 Fund /wallet · see /bag"
+        return "<blockquote>💰 <b>Balance</b>\nFund /wallet</blockquote>"
+    return (
+        "<blockquote>"
+        "💰 <b>Balance</b>\n"
+        f"{unit}  {native:.6f}\n"
+        f"Token  {tok:.4g}"
+        "</blockquote>"
+    )
 
 
 def render_card(card: SignalCard, uid: int | None = None) -> str:
