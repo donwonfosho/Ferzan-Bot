@@ -200,10 +200,18 @@ def _ds_chain_pairs(cid: str) -> list[Launch]:
                 params={"q": q},
                 timeout=TIMEOUT,
             )
-            pairs = (r.json() or {}).get("pairs") or []
-        except requests.RequestException:
+            payload = r.json() if r.content else {}
+            if isinstance(payload, dict):
+                pairs = payload.get("pairs") or []
+            elif isinstance(payload, list):
+                pairs = payload
+            else:
+                pairs = []
+        except (requests.RequestException, ValueError, TypeError):
             continue
         for p in pairs[:25]:
+            if not isinstance(p, dict):
+                continue
             raw = (p.get("chainId") or "").lower()
             pcid = resolve_chain(raw) or raw
             if pcid != cid and raw not in {ds, cid}:

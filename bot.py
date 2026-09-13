@@ -2729,7 +2729,11 @@ async def _launch_feed_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 rows.extend(sniper.fetch_new_pools(major, limit=8))
             cache[key] = rows
             return rows
-        rows = sniper.fetch_new_pools(key, limit=16)
+        try:
+            rows = sniper.fetch_new_pools(key, limit=16)
+        except Exception:
+            logger.exception("pool fetch failed for %s", key)
+            rows = []
         cache[key] = rows
         return rows
 
