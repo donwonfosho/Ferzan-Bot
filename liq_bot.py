@@ -1,0 +1,220 @@
+"""Ferzan Liq — pool analytics + real LP desk hook. Token: LIQBOT_TOKEN"""
+from __future__ import annotations
+
+import html
+import logging
+import os
+import re
+from pathlib import Path
+
+import requests
+from dotenv import load_dotenv
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
+
+load_dotenv("/opt/ferzan/.env")
+load_dotenv()
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s liqbot %(message)s")
+log = logging.getLogger("liqbot")
+
+TRADE = (os.getenv("FERZAN_BOT_USERNAME") or "Ferzan_Trade_Bot").lstrip("@")
+
+# Optional CEX testnet quoting (sandbox only)
+import sys
+sys.path.append("/opt/ferzan/app/liq")
+sys.path.append(str(Path(__file__).resolve().parent / "liq"))
+try:
+    import credentials_db
+    from liquidity_commands import start_liquidity, stop_liquidity
+    HAS_MM = True
+except Exception as _exc:
+    HAS_MM = False
+    start_liquidity = stop_liquidity = None
+    log.warning("testnet MM modules not loaded: %s", _exc)
+
+CHAT = os.getenv("FERZAN_CHAT_URL") or "https://t.me/Ferzan_Chat"
+DS = "https://api.dexscreener.com/latest/dex/tokens/{}"
+EVM = re.compile(r"^0x[a-fA-F0-9]{40}$")
+SOL = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
+
+
+def _esc(s) -> str:
+    return html.escape(str(s or ""), quote=False)
+
+
+def _pools(ca: str) -> list[dict]:
+    r = requests.get(DS.format(ca), timeout=12)
+    pairs = (r.json() or {}).get("pairs") or []
+    pairs.sort(key=lambda p: float((p.get("liquidity") or {}).get("usd") or 0), reverse=True)
+    return pairs
+
+
+def _impact(liq: float, trade: float) -> float:
+    if liq <= 0:
+        return float("inf")
+    side = liq / 2
+    return trade / (side + trade) * 100
+
+
+def _score(liq: float, vol: float) -> float:
+    if liq <= 0:
+        return 0.0
+    depth = min(100.0, liq / 500_000 * 100)
+    turn = min(100.0, (vol / liq) * 100)
+    return round(0.65 * depth + 0.35 * turn, 1)
+
+
+def _menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("📊 Chart / CA lookup", callback_data="liq:chart")],
+            [
+                InlineKeyboardButton("💧 Pool score", callback_data="liq:score"),
+                InlineKeyboardButton("⚖️ Impact $100–10k", callback_data="liq:impact"),
+            ],
+            [
+                InlineKeyboardButton("🎁 Earn", callback_data="liq:earn"),
+                InlineKeyboardButton("🏧 Withdraw", callback_data="liq:wd"),
+            ],
+            [InlineKeyboardButton("⚡ Open Ferzan Trade", url=f"https://t.me/{TRADE}")],
+            [InlineKeyboardButton("💬 Support", url=CHAT)],
+        ]
+    )
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    text = (
+        "💧 <b>Ferzan Liq</b>\n\n"
+        "Pool analytics for tokens you already trade.\n"
+        "Paste a CA or tap Chart.\n\n"
+        "• Chart — DexScreener price, liq, volume, holders link\n"
+        "• Pool score — 0–100 from depth + turnover\n"
+        "• Impact — AMM estimate for $100 / $1k / $10k\n"
+        "• Earn — referral cut on real Ferzan swaps\n"
+        "• Withdraw — use Ferzan Trade wallets (this bot does not hold keys)\n\n"
+        "<i>No fake volume, fake holders, or reaction farms.</i>"
+    )
+    await update.effective_message.reply_text(text, parse_mode="HTML", reply_markup=_menu())
+
+
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await start(update, context)
+
+
+async def token_card(update: Update, ca: str) -> None:
+    try:
+        pools = _pools(ca)
+    except Exception as exc:
+        await update.effective_message.reply_text(f"Lookup failed: {exc}")
+        return
+    if not pools:
+        await update.effective_message.reply_text("No DexScreener pool for that CA.")
+        return
+    p = pools[0]
+    base = p.get("baseToken") or {}
+    liq = float((p.get("liquidity") or {}).get("usd") or 0)
+    vol = float((p.get("volume") or {}).get("h24") or 0)
+    lines = [
+        f"💧 <b>{_esc(base.get('name'))}</b> ${_esc(base.get('symbol'))}",
+        f"<code>{_esc(ca)}</code>",
+        f"⛓ {_esc(p.get('chainId'))} · {_esc(p.get('dexId'))}",
+        f"💵 ${_esc(p.get('priceUsd'))}",
+        f"💧 Liq ${liq:,.0f}",
+        f"📈 24h vol ${vol:,.0f}",
+        f"🎯 Score {_score(liq, vol)}/100",
+        "",
+        "Impact (ballpark AMM):",
+    ]
+    for size in (100, 1000, 10000):
+        lines.append(f"  ${size:,} → ~{_impact(liq, size):.2f}%")
+    if len(pools) > 1:
+        lines.append(f"\n+{len(pools)-1} other pool(s)")
+    url = p.get("url") or f"https://dexscreener.com/{p.get('chainId')}/{ca}"
+    kb = InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("📈 DexScreener", url=url)],
+            [InlineKeyboardButton("⚡ Buy on Ferzan", url=f"https://t.me/{TRADE}?start={ca}")],
+            [InlineKeyboardButton("« Menu", callback_data="liq:menu")],
+        ]
+    )
+    await update.effective_message.reply_text("\n".join(lines), parse_mode="HTML", reply_markup=kb)
+
+
+async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    text = (update.effective_message.text or "").strip()
+    if EVM.match(text) or SOL.match(text):
+        await token_card(update, text)
+
+
+async def token_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not context.args:
+        await update.effective_message.reply_text("Usage: /token 0x… or /token SOL_MINT")
+        return
+    await token_card(update, context.args[0].strip())
+
+
+async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    await q.answer()
+    data = q.data or ""
+    if data in ("liq:menu", "liq:chart", "liq:score", "liq:impact"):
+        await q.message.reply_text("Paste a contract address (CA) in this chat.")
+        return
+    if data == "liq:earn":
+        await q.message.reply_text(
+            "🎁 Earn is a cut of real Ferzan Trade swap fees from people you refer.\n"
+            "Open Trade → referral when that desk is live. No fake-volume payouts."
+        )
+        return
+    if data == "liq:wd":
+        await q.message.reply_text(
+            "🏧 Ferzan Liq does not hold your keys.\n"
+            f"Withdraw from @{TRADE} → Wallets."
+        )
+        return
+
+
+
+async def setkeys(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_chat.type != "private":
+        await update.effective_message.reply_text("Send /setkeys in a private chat with this bot.")
+        return
+    if not HAS_MM:
+        await update.effective_message.reply_text("Testnet maker modules are not installed on this host.")
+        return
+    if len(context.args) < 4:
+        await update.effective_message.reply_text(
+            "Usage (DM only):\n/setkeys <exchange> <symbol> <api_key> <api_secret>\n"
+            "Example: /setkeys binance BTC/USDT KEY SECRET\n"
+            "Key must be TRADE only, no withdraw. Loop is testnet/sandbox."
+        )
+        return
+    credentials_db.init_db()
+    credentials_db.store_credentials(
+        update.effective_user.id, context.args[0], context.args[1], context.args[2], context.args[3]
+    )
+    await update.effective_message.reply_text("Keys stored encrypted. /start_liquidity to quote on testnet.")
+
+
+def main() -> None:
+    token = (os.getenv("LIQBOT_TOKEN") or os.getenv("FERZAN_LIQ_TOKEN") or "").strip()
+    if not token:
+        raise SystemExit("Set LIQBOT_TOKEN in /opt/ferzan/.env")
+    app = Application.builder().token(token).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_cmd))
+    app.add_handler(CommandHandler("token", token_cmd))
+    if HAS_MM:
+        credentials_db.init_db()
+        app.add_handler(CommandHandler("setkeys", setkeys))
+        app.add_handler(CommandHandler("start_liquidity", start_liquidity))
+        app.add_handler(CommandHandler("stop_liquidity", stop_liquidity))
+    app.add_handler(CallbackQueryHandler(buttons, pattern=r"^liq:"))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
+    log.info("Ferzan Liq running")
+    app.run_polling(drop_pending_updates=True)
+
+
+if __name__ == "__main__":
+    main()
