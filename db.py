@@ -239,6 +239,8 @@ def init_db() -> None:
             conn.execute("ALTER TABLE users ADD COLUMN sell_slip_pct REAL DEFAULT 10")
         if "auto_buy_usd" not in cols:
             conn.execute("ALTER TABLE users ADD COLUMN auto_buy_usd REAL DEFAULT 0")
+        if "referred_by" not in cols:
+            conn.execute("ALTER TABLE users ADD COLUMN referred_by INTEGER")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS chain_trade (

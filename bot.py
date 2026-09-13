@@ -216,6 +216,24 @@ def _age_ms(ms: int | None) -> str:
     return f"{sec // 86400}d"
 
 
+def _pump_curve(ca: str) -> str:
+    if not ca or not ca.lower().endswith("pump"):
+        return ""
+    try:
+        r = requests.get(f"https://frontend-api-v3.pump.fun/coins/{ca}", timeout=6)
+        data = r.json() if r.content else {}
+        if not isinstance(data, dict):
+            return ""
+        if data.get("complete"):
+            return "📈 Bonding curve 100% · graduated"
+        raw = data.get("real_sol_reserves") or data.get("virtual_sol_reserves") or 0
+        sol = float(raw) / (1e9 if float(raw) > 1000 else 1)
+        pct = min(100.0, sol / 85.0 * 100.0)
+        return f"📈 Bonding curve {pct:.0f}%"
+    except Exception:
+        return ""
+
+
 def _card_wallet(uid: int | None, ca: str, chain: str) -> str:
     if not uid:
         return "💼 Balance → /bag"
@@ -275,6 +293,9 @@ def render_card(card: SignalCard, uid: int | None = None) -> str:
         f"🎯 TP {card.take_pct:g}%   🛑 SL {card.stop_pct:g}%",
         _card_wallet(uid, ca, s.chain or ""),
     ]
+    curve = _pump_curve(ca)
+    if curve:
+        lines.append(curve)
     pasted = str((s.extras or {}).get("pasted") or s.query or "")
     if ca and pasted and pasted.lower() != ca.lower():
         lines.append(f"You pasted (not the mint)\n<code>{_esc(pasted)}</code>")
@@ -309,6 +330,11 @@ def card_keyboard(
         ],
         [InlineKeyboardButton("💸 Go to sell", callback_data=f"slc:{q}")],
         [
+            InlineKeyboardButton("Sell 25%", callback_data=f"slp:25:{q}"),
+            InlineKeyboardButton("Sell 50%", callback_data=f"slp:50:{q}"),
+            InlineKeyboardButton("Sell 100%", callback_data=f"slp:100:{q}"),
+        ],
+        [
             InlineKeyboardButton(f"0.01 {unit}", callback_data=f"bnv:0.01:{q}"),
             InlineKeyboardButton(f"0.05 {unit}", callback_data=f"bnv:0.05:{q}"),
             InlineKeyboardButton(f"0.1 {unit}", callback_data=f"bnv:0.1:{q}"),
@@ -320,7 +346,7 @@ def card_keyboard(
         ],
         [
             InlineKeyboardButton("💵 Buy default", callback_data=f"buy:{q}"),
-            InlineKeyboardButton("📉 Quote", callback_data=f"qte:{cid}:{q}"),
+            InlineKeyboardButton(f"✏️ Buy X {unit}", callback_data=f"buyx:{q}"),
         ],
         [
             InlineKeyboardButton(
@@ -448,6 +474,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update):
         return
     extra = (context.args or [None])[0]
+    if extra and extra.startswith("ref"):
+        try:
+            rid = int(str(extra).replace("ref_", "").replace("ref", ""))
+            me = update.effective_user.id
+            if rid and rid != me:
+                db.ensure_user(me, update.effective_user.username)
+                db.update_user(me, referred_by=rid)
+        except (TypeError, ValueError):
+            pass
     if extra and extra.startswith("sig_"):
         await _send_signal(update, extra[4:], edit=False)
         return
@@ -2024,12 +2059,57 @@ async def launches_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await send_launch(context.bot, update.effective_chat.id, text, markup)
 
 
+async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard(update):
+        return
+    rpc = (os.getenv("SOLANA_RPC_URL") or os.getenv("HELIUS_API_KEY") or "").strip()
+    rpc_on = "Helius/RPC set" if rpc else "public RPC"
+    binds = len(db.list_feed_binds())
+    live = "ON" if signer.live_enabled() else "OFF"
+    prio = os.getenv("PRIORITY_FEE_LAMPORTS", "1000000")
+    jito = "ON" if os.getenv("JITO_ENABLED", "").strip() in {"1", "true", "yes"} else "OFF"
+    await update.effective_message.reply_text(
+        "🩺 Ferzan status\n"
+        f"Live buys {live}\n"
+        f"SOL send {rpc_on}\n"
+        f"Tip {prio} lamports · Jito {jito}\n"
+        f"Feed binds {binds}\n"
+        f"Cut {fees.current_bps() / 100:.2f}%\n"
+        "If rooms go quiet: systemctl status ferzan"
+    )
+
+
+async def ref_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard(update):
+        return
+    uid = update.effective_user.id
+    bot = os.getenv("FERZAN_BOT_USERNAME", "Ferzan_Trade_Bot").lstrip("@")
+    link = f"https://t.me/{bot}?start=ref_{uid}"
+    user = db.get_user(uid) or {}
+    parent = user.get("referred_by") or "none"
+    await update.effective_message.reply_text(
+        "🤝 Referral\n"
+        f"Your link:\n{link}\n\n"
+        f"Referred by: {parent}\n"
+        "Friends who start that link are tagged to you.\n"
+        "Fee split to referrers ships as a ledger cut — not auto-payout yet."
+    )
+
+
 async def treasury_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update):
         return
     if not _is_operator(update.effective_user.id):
         await update.effective_message.reply_text("Operator only.")
         return
+    wallets = fees.fee_wallets()
+    await update.effective_message.reply_text(
+        "🏦 Treasury\n"
+        f"SOL  {wallets.get('sol') or 'FEE_WALLET_SOL not set'}\n"
+        f"EVM  {wallets.get('evm') or 'FEE_WALLET_EVM not set'}\n"
+        f"Jup  {wallets.get('jupiter_fee_account') or 'JUPITER_FEE_ACCOUNT not set'}\n"
+        f"Cut  {fees.current_bps() / 100:.2f}%"
+    )
     await fees_cmd(update, context)
 
 
@@ -2038,6 +2118,31 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     text = (update.message.text or "").strip()
     if not text or text.startswith("/"):
+        return
+    pending = (context.user_data or {}).get("buyx")
+    if pending:
+        context.user_data["buyx"] = None
+        try:
+            amt = float(text.replace(",", ""))
+        except ValueError:
+            await update.effective_message.reply_text("Send a number. Example: 0.05")
+            return
+        try:
+            card = analyze(pending)
+        except Exception as exc:
+            await update.effective_message.reply_text(str(exc))
+            return
+        cid = resolve_chain(card.snapshot.chain) or "sol"
+        gecko = {"sol": "solana", "bsc": "binancecoin", "avax": "avalanche-2"}.get(cid, "ethereum")
+        try:
+            px = get_price_usd(gecko)
+        except Exception:
+            px = 0
+        usd_o = amt * px if px > 0 else _default_buy_usd(update.effective_user.id)
+        live_msg = _live_buy_followup(
+            update.effective_user.id, card, pending, True, True, usd_override=usd_o
+        )
+        await update.effective_message.reply_text(f"{amt:g} native ≈ ${usd_o:.2f}\n{live_msg}")
         return
     if len(text) > 80:
         return
@@ -2474,6 +2579,13 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             return
         ok, msg = trading.paper_close(uid, pos_id, reason="manual")
         await context.bot.send_message(uid, msg)
+        return
+    if data.startswith("buyx:"):
+        context.user_data["buyx"] = data[5:]
+        await context.bot.send_message(
+            uid,
+            "✏️ Buy X — send the native amount now.\nExample: 0.05",
+        )
         return
     if data.startswith("xslip:"):
         cid = resolve_chain(data[6:]) or data[6:] or "sol"
@@ -3086,6 +3198,9 @@ def main() -> None:
     app.add_handler(CommandHandler("livesell", livesell_cmd))
     app.add_handler(CommandHandler("livesellevm", livesellevm_cmd))
     app.add_handler(CommandHandler("treasury", treasury_cmd))
+    app.add_handler(CommandHandler("status", status_cmd))
+    app.add_handler(CommandHandler("ref", ref_cmd))
+    app.add_handler(CommandHandler("referral", ref_cmd))
     app.add_handler(CommandHandler("snipe", snipe_cmd))
     app.add_handler(CommandHandler("snipes", snipes_cmd))
     app.add_handler(CommandHandler("cancelsnipe", cancelsnipe_cmd))
