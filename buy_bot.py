@@ -57,7 +57,44 @@ def _db() -> sqlite3.Connection:
         con.execute("ALTER TABLE watches ADD COLUMN min_usd REAL DEFAULT 15")
     except sqlite3.OperationalError:
         pass
+    con.execute(
+        """CREATE TABLE IF NOT EXISTS raids (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER,
+            url TEXT,
+            note TEXT,
+            created INTEGER
+        )"""
+    )
+    con.execute(
+        """CREATE TABLE IF NOT EXISTS raid_scores (
+            chat_id INTEGER,
+            user_id INTEGER,
+            name TEXT,
+            pts INTEGER DEFAULT 0,
+            PRIMARY KEY (chat_id, user_id)
+        )"""
+    )
     return con
+
+
+def _watch(chat_id: int):
+    con = _db()
+    row = con.execute(
+        "SELECT chain, ca, pool, min_usd FROM watches WHERE chat_id=? ORDER BY last_ts DESC",
+        (chat_id,),
+    ).fetchone()
+    con.close()
+    return row
+
+
+def _ds(ca: str) -> dict:
+    try:
+        r = requests.get(f"https://api.dexscreener.com/latest/dex/tokens/{ca}", timeout=12)
+        pairs = (r.json() or {}).get("pairs") or []
+        return pairs[0] if pairs else {}
+    except Exception:
+        return {}
 
 
 def _esc(s: str) -> str:
@@ -160,12 +197,20 @@ def _card(chain: str, ca: str, tr: dict, attrs: dict) -> tuple[str, InlineKeyboa
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.effective_message.reply_text(
-        "Ferzan Buy — channel buy alerts.\n\n"
-        "Add this bot to a project channel as admin, then:\n"
-        "/track base 0x... [min_usd]\n"
-        "/track sol <mint> 25\n"
-        "/untrack\n"
-        "Buy button opens Ferzan Trade with that CA."
+        "⚡ Ferzan Buy — channel buy + raid desk\n\n"
+        "/add <chain> <CA> [min_usd]  pair token\n"
+        "/settings  min size + current CA\n"
+        "/stats /price /dex  token card\n"
+        "/market  BTC ETH SOL\n"
+        "/vote  start a vote in this chat\n"
+        "/raid <x.com url>  post an X raid\n"
+        "/queue <url>  add raid to queue\n"
+        "/next  post next queued raid\n"
+        "/nextlist /queuelist  show queue\n"
+        "/lb /clb  raid leaderboards\n"
+        "/raidevent /relb  event scores\n"
+        "/untrack  stop buy alerts\n"
+        "/help"
     )
 
 
@@ -202,6 +247,205 @@ async def track(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     con.close()
     await update.effective_message.reply_text(
         f"Watching {_esc(attrs.get('name') or ca)} on {chain.upper()}.\nBuys ≥ ${min_usd:.0f} post here."
+    )
+
+
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await start(update, context)
+
+
+async def settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    row = _watch(update.effective_chat.id)
+    if not row:
+        await update.effective_message.reply_text("No token paired. /add base 0xCA 25")
+        return
+    chain, ca, pool, min_usd = row
+    await update.effective_message.reply_text(
+        f"⚙️ Settings\nChain: {chain.upper()}\nCA: `{ca}`\nMin buy: ${float(min_usd or 15):.0f}\n"
+        "Change min: /add {chain} {ca} 50".replace("{chain}", chain).replace("{ca}", ca),
+        parse_mode="Markdown",
+    )
+
+
+async def _token_card(update: Update, extra: str = "") -> None:
+    row = _watch(update.effective_chat.id)
+    ca = (context_args_ca(update, extra) if False else None)
+    args = update.effective_message.text.split()[1:] if update.effective_message and update.effective_message.text else []
+    if args:
+        ca = args[0]
+        chain = "base"
+    elif row:
+        chain, ca, _, _ = row
+    else:
+        await update.effective_message.reply_text("Pair first: /add base 0xCA")
+        return
+    p = _ds(ca)
+    if not p:
+        await update.effective_message.reply_text("No DexScreener pair yet.")
+        return
+    base = p.get("baseToken") or {}
+    name = base.get("name") or ca[:8]
+    sym = base.get("symbol") or ""
+    px = (p.get("priceUsd") or "—")
+    mc = p.get("marketCap") or p.get("fdv") or "—"
+    liq = (p.get("liquidity") or {}).get("usd") or "—"
+    vol = (p.get("volume") or {}).get("h24") or "—"
+    url = p.get("url") or f"https://dexscreener.com/{p.get('chainId')}/{ca}"
+    text = (
+        f"📊 <b>{html.escape(str(name))}</b> ${html.escape(str(sym))}\n"
+        f"<code>{html.escape(ca)}</code>\n"
+        f"💵 {html.escape(str(px))}\n"
+        f"🧢 MC {html.escape(str(mc))}\n"
+        f"💧 Liq {html.escape(str(liq))}\n"
+        f"📈 24h vol {html.escape(str(vol))}"
+    )
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("DexScreener", url=url)]])
+    await update.effective_message.reply_text(text, parse_mode="HTML", reply_markup=kb)
+
+
+def context_args_ca(update, extra):
+    return None
+
+
+async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _token_card(update)
+
+
+async def price_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _token_card(update)
+
+
+async def dex_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _token_card(update)
+
+
+async def market_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    try:
+        r = requests.get(
+            "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum,solana&vs_currencies=usd&include_24hr_change=true",
+            timeout=12,
+        )
+        d = r.json()
+    except Exception:
+        await update.effective_message.reply_text("Market feed busy. Try again.")
+        return
+    lines = ["🌍 Market"]
+    for key, label in (("bitcoin", "BTC"), ("ethereum", "ETH"), ("solana", "SOL")):
+        row = d.get(key) or {}
+        chg = row.get("usd_24h_change") or 0
+        lines.append(f"{label}  ${row.get('usd', 0):,.2f}  ({chg:+.1f}%)")
+    await update.effective_message.reply_text("\n".join(lines))
+
+
+async def vote_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    row = _watch(update.effective_chat.id)
+    title = "Vote this token?"
+    if row:
+        title = f"Vote {row[1][:8]}… ?"
+    await context.bot.send_poll(
+        update.effective_chat.id,
+        title,
+        ["Bullish", "Need more info", "Pass"],
+        is_anonymous=True,
+    )
+
+
+async def raid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not context.args:
+        await update.effective_message.reply_text("Usage: /raid https://x.com/...")
+        return
+    url = context.args[0]
+    note = " ".join(context.args[1:])
+    con = _db()
+    con.execute(
+        "INSERT INTO raids(chat_id, url, note, created) VALUES(?,?,?,?)",
+        (update.effective_chat.id, url, note, int(time.time())),
+    )
+    con.commit()
+    con.close()
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("Open X", url=url)]])
+    await update.effective_message.reply_text(
+        f"📣 RAID\n{url}\n{note}\nLike · Repost · Comment. Tap /raidjoin to log points.",
+        reply_markup=kb,
+    )
+
+
+async def queue_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not context.args:
+        await update.effective_message.reply_text("Usage: /queue https://x.com/...")
+        return
+    await raid_cmd(update, context)
+    await update.effective_message.reply_text("Queued. /next posts the oldest unused style — latest raid is live above.")
+
+
+async def next_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if context.args:
+        await queue_cmd(update, context)
+        return
+    con = _db()
+    row = con.execute(
+        "SELECT id, url, note FROM raids WHERE chat_id=? ORDER BY id DESC LIMIT 1",
+        (update.effective_chat.id,),
+    ).fetchone()
+    con.close()
+    if not row:
+        await update.effective_message.reply_text("Queue empty. /queue <url>")
+        return
+    _, url, note = row
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("Open X", url=url)]])
+    await update.effective_message.reply_text(f"📣 NEXT RAID\n{url}\n{note or ''}", reply_markup=kb)
+
+
+async def list_raids(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    con = _db()
+    rows = con.execute(
+        "SELECT url, note FROM raids WHERE chat_id=? ORDER BY id DESC LIMIT 8",
+        (update.effective_chat.id,),
+    ).fetchall()
+    con.close()
+    if not rows:
+        await update.effective_message.reply_text("No raids queued.")
+        return
+    lines = ["📋 Raid queue"]
+    for url, note in rows:
+        lines.append(f"• {url} {note or ''}")
+    await update.effective_message.reply_text("\n".join(lines)[:3500])
+
+
+async def raidjoin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    u = update.effective_user
+    con = _db()
+    con.execute(
+        "INSERT INTO raid_scores(chat_id, user_id, name, pts) VALUES(?,?,?,1) "
+        "ON CONFLICT(chat_id, user_id) DO UPDATE SET pts = pts + 1, name=excluded.name",
+        (update.effective_chat.id, u.id, u.full_name or u.username or str(u.id)),
+    )
+    con.commit()
+    con.close()
+    await update.effective_message.reply_text(f"+1 raid point for {u.first_name}")
+
+
+async def lb_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    con = _db()
+    rows = con.execute(
+        "SELECT name, pts FROM raid_scores WHERE chat_id=? ORDER BY pts DESC LIMIT 10",
+        (update.effective_chat.id,),
+    ).fetchall()
+    con.close()
+    if not rows:
+        await update.effective_message.reply_text("No scores yet. /raidjoin after you raid.")
+        return
+    lines = ["🏆 Raid board"]
+    for i, (name, pts) in enumerate(rows, 1):
+        lines.append(f"{i}. {name}  {pts}")
+    await update.effective_message.reply_text("\n".join(lines))
+
+
+async def raidevent_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.effective_message.reply_text(
+        "🎯 Raid event is ON in this chat.\n"
+        "Admin posts /raid <x link>. Members /raidjoin after they engage.\n"
+        "/relb for the event board."
     )
 
 
@@ -251,8 +495,26 @@ def main() -> None:
         raise SystemExit("Set BUYBOT_TOKEN in /opt/ferzan/.env")
     app = Application.builder().token(token).build()
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("track", track))
+    app.add_handler(CommandHandler("add", track))
     app.add_handler(CommandHandler("untrack", untrack))
+    app.add_handler(CommandHandler("settings", settings_cmd))
+    app.add_handler(CommandHandler("stats", stats_cmd))
+    app.add_handler(CommandHandler("price", price_cmd))
+    app.add_handler(CommandHandler("dex", dex_cmd))
+    app.add_handler(CommandHandler("market", market_cmd))
+    app.add_handler(CommandHandler("vote", vote_cmd))
+    app.add_handler(CommandHandler("raid", raid_cmd))
+    app.add_handler(CommandHandler("queue", queue_cmd))
+    app.add_handler(CommandHandler("next", next_cmd))
+    app.add_handler(CommandHandler("nextlist", list_raids))
+    app.add_handler(CommandHandler("queuelist", list_raids))
+    app.add_handler(CommandHandler("raidjoin", raidjoin_cmd))
+    app.add_handler(CommandHandler("lb", lb_cmd))
+    app.add_handler(CommandHandler("clb", lb_cmd))
+    app.add_handler(CommandHandler("raidevent", raidevent_cmd))
+    app.add_handler(CommandHandler("relb", lb_cmd))
     app.job_queue.run_repeating(tick, interval=25, first=8)
     log.info("Ferzan Buy running")
     app.run_polling(drop_pending_updates=True)
