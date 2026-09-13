@@ -36,6 +36,8 @@ except Exception as _exc:
 CHAT = os.getenv("FERZAN_CHAT_URL") or "https://t.me/Ferzan_Chat"
 DS = "https://api.dexscreener.com/latest/dex/tokens/{}"
 EVM = re.compile(r"^0x[a-fA-F0-9]{40}$")
+CHAINS = ["solana", "base", "ethereum", "bsc"]
+CHAIN_PREF: dict[int, str] = {}
 SOL = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
 
 
@@ -65,20 +67,28 @@ def _score(liq: float, vol: float) -> float:
     return round(0.65 * depth + 0.35 * turn, 1)
 
 
-def _menu() -> InlineKeyboardMarkup:
+def _menu(uid: int = 0) -> InlineKeyboardMarkup:
+    chain = CHAIN_PREF.get(uid, "solana")
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("📊 Chart / CA lookup", callback_data="liq:chart")],
+            [InlineKeyboardButton("🏆 Rank (real unique from chart)", callback_data="liq:rank")],
             [
-                InlineKeyboardButton("💧 Pool score", callback_data="liq:score"),
-                InlineKeyboardButton("⚖️ Impact $100–10k", callback_data="liq:impact"),
+                InlineKeyboardButton("📊 Chart Maker", callback_data="liq:chart"),
+                InlineKeyboardButton("⚡ Testnet quotes", callback_data="liq:vol"),
+            ],
+            [
+                InlineKeyboardButton("👥 Holders (Dex)", callback_data="liq:hold"),
+                InlineKeyboardButton("😮 Reactions (off)", callback_data="liq:react"),
             ],
             [
                 InlineKeyboardButton("🎁 Earn", callback_data="liq:earn"),
                 InlineKeyboardButton("🏧 Withdraw", callback_data="liq:wd"),
             ],
-            [InlineKeyboardButton("⚡ Open Ferzan Trade", url=f"https://t.me/{TRADE}")],
-            [InlineKeyboardButton("💬 Support", url=CHAT)],
+            [InlineKeyboardButton(f"⛓ Chain: {chain} 🔄", callback_data="liq:chain")],
+            [
+                InlineKeyboardButton("⚡ Trade", url=f"https://t.me/{TRADE}"),
+                InlineKeyboardButton("💬 Support", url=CHAT),
+            ],
         ]
     )
 
@@ -95,7 +105,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "• Withdraw — use Ferzan Trade wallets (this bot does not hold keys)\n\n"
         "<i>No fake volume, fake holders, or reaction farms.</i>"
     )
-    await update.effective_message.reply_text(text, parse_mode="HTML", reply_markup=_menu())
+    await update.effective_message.reply_text(text, parse_mode="HTML", reply_markup=_menu(update.effective_user.id if update.effective_user else 0))
 
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -158,6 +168,29 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
     await q.answer()
     data = q.data or ""
+    uid = q.from_user.id
+    if data == "liq:chain":
+        cur = CHAIN_PREF.get(uid, "solana")
+        nxt = CHAINS[(CHAINS.index(cur) + 1) % len(CHAINS)] if cur in CHAINS else "base"
+        CHAIN_PREF[uid] = nxt
+        await q.edit_message_reply_markup(reply_markup=_menu(uid))
+        return
+    if data == "liq:vol":
+        await q.message.reply_text(
+            "⚡ Testnet quotes (play)\n"
+            "DM only:\n/setkeys binance BTC/USDT KEY SECRET\n/start_liquidity\n/stop_liquidity\n"
+            "Sandbox CEX quotes. Not DEX wash volume."
+        )
+        return
+    if data == "liq:rank":
+        await q.message.reply_text("🏆 Rank here means real DexScreener activity after you paste a CA — not bought unique-buyer prints.")
+        return
+    if data == "liq:hold":
+        await q.message.reply_text("👥 Paste a CA. Holder/liq numbers come from DexScreener. We do not dust 500 wallets.")
+        return
+    if data == "liq:react":
+        await q.message.reply_text("😮 Reaction boost is off. No session-token farms.")
+        return
     if data in ("liq:menu", "liq:chart", "liq:score", "liq:impact"):
         await q.message.reply_text("Paste a contract address (CA) in this chat.")
         return
