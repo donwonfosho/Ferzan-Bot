@@ -188,24 +188,28 @@ def _card(chain: str, ca: str, tr: dict, attrs: dict) -> tuple[str, InlineKeyboa
         "bsc": f"https://bscscan.com/tx/{tx}",
         "arb": f"https://arbiscan.io/tx/{tx}",
     }.get(chain, ds)
+    liq = (os.getenv("FERZAN_LIQ_BOT") or "").lstrip("@")
+    boost = f"https://t.me/{liq}" if liq else "https://t.me/Ferzan_Chat"
     text = (
-        f"⚡ <b>FERZAN BUY</b> · {_esc(name)}\n"
+        f"<b>{_esc(name)}</b> [{_esc(str(attrs.get('symbol') or name))}] ⚡ Buy!\n"
         f"{_bar(usd)}\n\n"
-        f"💵 {_esc(f'${usd:,.2f}' if usd else spent)}\n"
-        f"🎒 Got {_esc(got)}\n"
-        f"👤 <code>{_esc(buyer[:10])}…</code>\n"
-        f"🧢 MC {_esc(str(mc)[:16])}\n"
+        f"💵 | {_esc(spent or f'${usd:,.2f}')} (${usd:,.2f})\n"
+        f"💼 | Got: {_esc(got)}\n"
+        f"👤 | Buyer | Tx\n"
+        f"🎯 | Market Cap: {_esc(str(mc)[:20])}\n"
+        f"📈 | Dex\n"
         f"<code>{_esc(ca)}</code>"
     )
-    kb = InlineKeyboardMarkup(
+    rows = [
         [
-            [
-                InlineKeyboardButton("⚡ Buy on Ferzan", url=buy),
-                InlineKeyboardButton("📈 Chart", url=ds),
-            ],
-            [InlineKeyboardButton("🔎 Tx", url=scan)] if tx else [],
-        ]
-    )
+            InlineKeyboardButton("⚡ Buy", url=buy),
+            InlineKeyboardButton("📈 Dex", url=ds),
+        ],
+    ]
+    if tx:
+        rows.append([InlineKeyboardButton("🔎 Tx", url=scan)])
+    rows.append([InlineKeyboardButton("🚀 Boost Rank and Volume", url=boost)])
+    kb = InlineKeyboardMarkup(rows)
     return text, kb
 
 
