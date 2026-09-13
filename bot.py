@@ -2714,6 +2714,9 @@ async def launch_feed_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def _launch_feed_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     binds = db.list_feed_binds()
+    logger.info("launch feed binds=%s", len(binds))
+    if not binds:
+        logger.warning("no /setfeed binds — chain rooms will stay silent")
     cache: dict[str, list] = {}
 
     def _pool_for(bind: str) -> list:
@@ -2773,15 +2776,18 @@ async def _launch_feed_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 if (resolve_chain(ln.chain) or (ln.chain or "").lower()) == want
                 or (ln.chain or "").lower() == bind
             ] or rows[:4]
+        sent = 0
         for ln in pool[:12]:
             key = f"ch:{chat_id}:{ln.chain}:{(ln.token or '')[:20]}"
             if not db.should_resend_signal(int(chat_id), key, 1, cooldown_s=4 * 60):
                 continue
             text, markup = launch_card(ln)
             try:
-                await send_launch(context.bot, chat_id, text, markup, promo=True)
+                await send_launch(context.bot, chat_id, text, markup, promo=False)
+                sent += 1
             except Exception:
                 logger.exception("channel feed failed for %s", chat_id)
+        logger.info("feed chat=%s bind=%s rows=%s sent=%s", chat_id, bind, len(rows), sent)
 
 
 CG_NATIVE = {
