@@ -75,7 +75,21 @@ def _db() -> sqlite3.Connection:
             PRIMARY KEY (chat_id, user_id)
         )"""
     )
+    con.execute(
+        """CREATE TABLE IF NOT EXISTS media (
+            chat_id INTEGER PRIMARY KEY,
+            kind TEXT,
+            file_id TEXT
+        )"""
+    )
     return con
+
+
+def _media(chat_id: int):
+    con = _db()
+    row = con.execute("SELECT kind, file_id FROM media WHERE chat_id=?", (chat_id,)).fetchone()
+    con.close()
+    return row
 
 
 def _watch(chat_id: int):
@@ -249,6 +263,36 @@ async def track(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"Watching {_esc(attrs.get('name') or ca)} on {chain.upper()}.\nBuys ≥ ${min_usd:.0f} post here."
     )
 
+
+
+async def setgif_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    msg = update.effective_message
+    src = msg.reply_to_message
+    kind = file_id = None
+    target = src or msg
+    if target.animation:
+        kind, file_id = "animation", target.animation.file_id
+    elif target.video:
+        kind, file_id = "video", target.video.file_id
+    elif target.photo:
+        kind, file_id = "photo", target.photo[-1].file_id
+    if not file_id:
+        await msg.reply_text("Reply to a GIF, video, or photo with /setgif")
+        return
+    con = _db()
+    con.execute("INSERT OR REPLACE INTO media(chat_id, kind, file_id) VALUES(?,?,?)",
+                (update.effective_chat.id, kind, file_id))
+    con.commit()
+    con.close()
+    await msg.reply_text("Buy posts will use that media.")
+
+
+async def cleargif_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    con = _db()
+    con.execute("DELETE FROM media WHERE chat_id=?", (update.effective_chat.id,))
+    con.commit()
+    con.close()
+    await update.effective_message.reply_text("Buy posts are text-only again.")
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await start(update, context)
@@ -475,9 +519,17 @@ async def tick(context: ContextTypes.DEFAULT_TYPE) -> None:
                 continue
             text, kb = _card(chain, ca, tr, attrs)
             try:
-                await context.bot.send_message(
-                    chat_id, text, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True
-                )
+                media = _media(chat_id)
+                if media and media[0] == "animation":
+                    await context.bot.send_animation(chat_id, media[1], caption=text, parse_mode="HTML", reply_markup=kb)
+                elif media and media[0] == "video":
+                    await context.bot.send_video(chat_id, media[1], caption=text, parse_mode="HTML", reply_markup=kb)
+                elif media and media[0] == "photo":
+                    await context.bot.send_photo(chat_id, media[1], caption=text, parse_mode="HTML", reply_markup=kb)
+                else:
+                    await context.bot.send_message(
+                        chat_id, text, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True
+                    )
             except Exception as exc:
                 log.warning("post %s %s", chat_id, exc)
             newest = max(newest, tr["ts"])
@@ -496,6 +548,8 @@ def main() -> None:
     app = Application.builder().token(token).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
+    app.add_handler(CommandHandler("setgif", setgif_cmd))
+    app.add_handler(CommandHandler("cleargif", cleargif_cmd))
     app.add_handler(CommandHandler("track", track))
     app.add_handler(CommandHandler("add", track))
     app.add_handler(CommandHandler("untrack", untrack))
