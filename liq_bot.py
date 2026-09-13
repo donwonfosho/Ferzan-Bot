@@ -9,7 +9,7 @@ from pathlib import Path
 
 import requests
 from dotenv import load_dotenv
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 load_dotenv("/opt/ferzan/.env")
@@ -393,6 +393,18 @@ def main() -> None:
         app.add_handler(CommandHandler("stop_liquidity", stop_liquidity))
     app.add_handler(CallbackQueryHandler(buttons, pattern=r"^liq:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
+    async def _post(app):
+        await app.bot.set_my_commands(
+            [
+                BotCommand("start", "Start the bot"),
+                BotCommand("help", "Help and desk"),
+                BotCommand("token", "Lookup a CA"),
+                BotCommand("setkeys", "Testnet API keys (DM)"),
+                BotCommand("start_liquidity", "Start testnet quotes"),
+                BotCommand("stop_liquidity", "Stop testnet quotes"),
+            ]
+        )
+    app.post_init = _post
     log.info("Ferzan Liq running")
     app.run_polling(drop_pending_updates=True)
 
