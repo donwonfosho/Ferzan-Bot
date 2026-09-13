@@ -1711,27 +1711,31 @@ def wallet_menu_keyboard() -> InlineKeyboardMarkup:
 
 def chain_board_keyboard(user_id: int | None = None) -> InlineKeyboardMarkup:
     has = bool(user_id and db.get_user_wallet(user_id))
+    labels = {
+        "sol": "SOL", "bsc": "BSC", "base": "BASE", "eth": "ETH",
+        "monad": "MONAD", "sonic": "SONIC", "avax": "AVAX", "arb": "ARB",
+        "hype": "HYPE", "hood": "HOOD", "pol": "POL", "pulse": "PULSE",
+        "ink": "INK", "op": "OP", "linea": "LINEA", "arc": "ARC",
+        "stable": "STABLE", "trx": "TRX", "ton": "TON",
+    }
     rows: list[list[InlineKeyboardButton]] = []
+    row: list[InlineKeyboardButton] = []
     for cid in ACTIVE:
-        label = "HOOD" if cid == "hood" else cid.upper()
-        left = InlineKeyboardButton(f"🟢 {label}", callback_data=f"ch:{cid}")
-        if has:
-            right = InlineKeyboardButton("👛 Wallet", callback_data=f"wa:{cid}")
-        else:
-            right = InlineKeyboardButton("✨ Generate", callback_data="wi:gen")
-        rows.append([left, right])
+        tap = f"wa:{cid}" if has else "wi:gen"
+        row.append(InlineKeyboardButton(labels.get(cid, cid.upper()), callback_data=tap))
+        if len(row) == 3:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([InlineKeyboardButton("🍎 Buy gas", callback_data="go:buy")])
     rows.append(
         [
             InlineKeyboardButton("📥 Import", callback_data="wi:imp"),
             InlineKeyboardButton("✨ Generate", callback_data="wi:gen"),
         ]
     )
-    rows.append(
-        [
-            InlineKeyboardButton("ℹ️ Help", callback_data="go:help"),
-            InlineKeyboardButton("↩️ Return", callback_data="go:home"),
-        ]
-    )
+    rows.append([InlineKeyboardButton("↩️ Return", callback_data="go:home")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -1744,11 +1748,7 @@ async def wallet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
     row = db.get_user_wallet(update.effective_user.id)
     if row:
-        text = (
-            "🟢 Enable a chain · 👛 open its address\n"
-            "Same EVM key covers ETH / Base / BNB / Hood / Arb / Avax / TRON.\n"
-            "SOL is its own key. TON quotes on STON.fi."
-        )
+        text = "Tap a chain for the deposit address and balance."
     else:
         text = "ℹ️ Wallet not found. Generate or import, then every chain lights up."
     await update.effective_message.reply_text(
