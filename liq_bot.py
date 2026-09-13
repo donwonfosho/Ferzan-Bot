@@ -39,6 +39,7 @@ EVM = re.compile(r"^0x[a-fA-F0-9]{40}$")
 CHAINS = ["solana", "ethereum", "bsc", "base", "hood"]
 CHAIN_LABEL = {"solana": "Solana · SOL", "ethereum": "Ethereum · ETH", "bsc": "BNB Chain · BNB", "base": "Base · ETH", "hood": "Robinhood · ETH"}
 CHAIN_PREF: dict[int, str] = {}
+SET_TOKEN: set[int] = set()
 SOL = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
 
 
@@ -115,6 +116,35 @@ def _start_text() -> str:
         "Paste a CA any time. Switch chain from the list. "
         "Bottom right opens <b>Ferzan Trade</b> to buy."
     )
+
+def _chart_text(uid: int = 0) -> str:
+    chain = CHAIN_LABEL.get(CHAIN_PREF.get(uid, "solana"), "Solana · SOL")
+    return (
+        "📊 <b>Chart Maker</b>\n\n"
+        "<b>What it shows</b>\n"
+        "👥 <b>Holders</b> — count from the live Dex card\n"
+        "📈 <b>Volume</b> — real 24h volume on that pool\n"
+        "💧 <b>Liquidity</b> — pool TVL, not a painted book\n"
+        "🎯 <b>Score</b> — depth + turnover 0–100\n\n"
+        "<b>Play desk</b>\n"
+        "This screen does not run a 5-wallet uptrend. "
+        "No aged-wallet pool, no scheduled buy/sell to draw candles.\n\n"
+        "<b>How to use</b>\n"
+        "1. Tap <b>Set token</b>\n"
+        "2. Paste the CA\n"
+        "3. Get the Ferzan card (price, liq, vol, impact)\n\n"
+        f"⛓ Active chain: {chain}\n"
+        "Buy from the card opens <b>Ferzan Trade</b>."
+    )
+
+def _chart_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("📄 Set token", callback_data="liq:settoken")],
+            [InlineKeyboardButton("⬅️ Back", callback_data="liq:menu")],
+        ]
+    )
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.effective_message.reply_text(_start_text(), parse_mode="HTML", reply_markup=_menu(update.effective_user.id if update.effective_user else 0))
 
@@ -164,6 +194,14 @@ async def token_card(update: Update, ca: str) -> None:
 
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = (update.effective_message.text or "").strip()
+    uid = update.effective_user.id if update.effective_user else 0
+    if uid in SET_TOKEN:
+        SET_TOKEN.discard(uid)
+        if EVM.match(text) or SOL.match(text):
+            await token_card(update, text)
+        else:
+            await update.effective_message.reply_text("That is not a CA. Tap Set token and paste the address.")
+        return
     if EVM.match(text) or SOL.match(text):
         await token_card(update, text)
 
@@ -216,7 +254,14 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if data == "liq:menu":
         await q.edit_message_text(_start_text(), parse_mode="HTML", reply_markup=_menu(uid))
         return
-    if data in ("liq:chart", "liq:score", "liq:impact"):
+    if data == "liq:chart":
+        await q.edit_message_text(_chart_text(uid), parse_mode="HTML", reply_markup=_chart_kb())
+        return
+    if data == "liq:settoken":
+        SET_TOKEN.add(uid)
+        await q.message.reply_text("Send the contract address (CA) now.")
+        return
+    if data in ("liq:score", "liq:impact"):
         await q.message.reply_text("Paste a contract address (CA) in this chat.")
         return
     if data == "liq:earn":
