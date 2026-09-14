@@ -225,8 +225,8 @@ def buy_evm(
     txh = body.get("result") or ""
     if not txh:
         return False, "RPC accepted nothing."
-    exp = meta.get("explorer") or "https://etherscan.io"
-    return True, f"Live {cid.upper()} buy ~${usd:.2f}\n{exp}/tx/{txh}"
+    exp = (meta.get("explorer_tx") or "https://basescan.org/tx/{txid}").format(txid=txh)
+    return True, f"Live {cid.upper()} buy ~${usd:.2f}\n{exp}"
 
 
 def _nonce(rpc: str, addr: str) -> int:
@@ -295,8 +295,8 @@ def _broadcast(acct, meta: dict, to: str, data: str, value: int = 0) -> tuple[bo
     if not txh:
         return False, "RPC accepted nothing."
     cid = int(meta.get("chain_id") or 1)
-    exp = meta.get("explorer") or "https://etherscan.io"
-    return True, f"{exp}/tx/{txh}"
+    exp = (meta.get("explorer_tx") or "https://basescan.org/tx/{txid}").format(txid=txh)
+    return True, exp
 
 
 def send_native(chain: str, dest: str, key_hex: str | None = None) -> tuple[bool, str]:
