@@ -4,9 +4,9 @@ After=network.target
 
 [Service]
 Type=simple
-WorkingDirectory=/opt/ferzan/app/launch
+WorkingDirectory=/opt/ferzan/app
 EnvironmentFile=/opt/ferzan/.env
-ExecStart=/opt/ferzan/.venv/bin/python /opt/ferzan/app/launch/launch_bot.py
+ExecStart=/opt/ferzan/.venv/bin/python /opt/ferzan/app/launch_bot.py
 Restart=always
 RestartSec=4
 

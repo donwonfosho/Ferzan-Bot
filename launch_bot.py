@@ -204,15 +204,26 @@ async def confirmed(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # pages (evm.html / solana.html) rather than one universal page that
     # switches wallet adapters mid-session, which avoids a known bug
     # class in multichain wallet-connect libraries.
-    page = "evm.html" if launch["chain"] != "solana" else "solana.html"
-    mini_app_url = f"{MINI_APP_BASE_URL}/{page}?request_id={req.id}"
-
-    buttons = [[InlineKeyboardButton("🔗 Connect Wallet & Launch", web_app=WebAppInfo(url=mini_app_url))]]
-    await query.edit_message_text(
-        "Tap below to connect your wallet and review the exact transaction "
-        "before signing. Nothing is sent until you approve it in your own wallet.",
-        reply_markup=InlineKeyboardMarkup(buttons),
-    )
+    live = MINI_APP_BASE_URL.startswith("https://") and "yourdomain.com" not in MINI_APP_BASE_URL
+    if not live:
+        treas = os.environ.get("PLATFORM_TREASURY_EVM") or os.environ.get("TREASURY_EVM") or "(set PLATFORM_TREASURY_EVM)"
+        await query.edit_message_text(
+            f"✅ Request saved: {req.name} ({req.symbol}) on {req.chain}\n"
+            f"ID: `{req.id}`\n\n"
+            "Wallet signing is not live yet (no HTTPS Mini App).\n"
+            f"When it is live, platform fees go to treasury:\n`{treas}`\n\n"
+            "Close the blank Mini App if it opened. Use /launch to file another request.",
+            parse_mode="Markdown",
+        )
+    else:
+        page = "evm.html" if launch["chain"] != "solana" else "solana.html"
+        mini_app_url = f"{MINI_APP_BASE_URL}/{page}?request_id={req.id}"
+        buttons = [[InlineKeyboardButton("🔗 Connect Wallet & Launch", web_app=WebAppInfo(url=mini_app_url))]]
+        await query.edit_message_text(
+            "Tap below to connect your wallet and review the exact transaction "
+            "before signing. Nothing is sent until you approve it in your own wallet.",
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
 
     context.user_data.pop("launch", None)
     return ConversationHandler.END
