@@ -81,9 +81,9 @@ def _start_kb() -> InlineKeyboardMarkup:
                 InlineKeyboardButton("👑 Community", url=CHAT),
                 InlineKeyboardButton("🤝 Support", url=CHAT),
             ],
-            [InlineKeyboardButton("⚡ Optional: Ferzan Trade", url=f"https://t.me/{TRADE}")],
-            [InlineKeyboardButton("🟢 Optional: Ferzan Buy", url=f"https://t.me/{BUY}?startgroup=true")],
-            [InlineKeyboardButton("💧 Optional: Ferzan Liq", url=f"https://t.me/{LIQ}?startgroup=true")],
+            [InlineKeyboardButton("⚡ Ferzan Trade", url=f"https://t.me/{TRADE}")],
+            [InlineKeyboardButton("🟢 Ferzan Buy", url=f"https://t.me/{TRADE}")],
+            [InlineKeyboardButton("💧 Ferzan Liq", url=f"https://t.me/{LIQ}")],
         ]
     )
 
