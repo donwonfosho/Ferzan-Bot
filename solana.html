@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Launch Token</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  body { font-family: -apple-system, sans-serif; background: var(--tg-theme-bg-color, #fff);
+         color: var(--tg-theme-text-color, #000); padding: 16px; margin: 0; }
+  button { width: 100%; padding: 14px; font-size: 16px; border-radius: 10px; border: none;
+            margin-top: 12px; cursor: pointer; }
+  .primary { background: var(--tg-theme-button-color, #2481cc); color: var(--tg-theme-button-text-color, #fff); }
+  #status { margin-top: 16px; padding: 12px; border-radius: 8px; background: #f5f5f5; font-size: 14px; }
+  .error { background: #fde8e8 !important; color: #a00; }
+  .success { background: #e6f7e6 !important; color: #060; }
+  .detail-row { display: flex; justify-content: space-between; padding: 6px 0; font-size: 14px; border-bottom: 1px solid #eee; }
+</style>
+</head>
+<body>
+  <h2>Review Your Launch</h2>
+  <div id="details">Loading launch details...</div>
+  <div id="status" style="display:none"></div>
+  <button id="connectBtn" class="primary" style="display:none">Connect Wallet</button>
+  <button id="signBtn" class="primary" style="display:none">Review & Sign Transaction</button>
+
+<script type="module">
+  /*
+    ============================================================
+    CONFIDENCE NOTE -- same as evm.html, please read before deploying
+    ============================================================
+    Untested against any real browser, wallet, or RPC endpoint. The
+    flow is correct; the exact Reown AppKit Solana adapter API surface
+    below needs verification against current docs (docs.reown.com ->
+    Solana adapter) before production use.
+
+    Separate page from evm.html on purpose -- a single Mini App page
+    that initializes both an EVM and a Solana AppKit adapter in one
+    session has a documented bug in some AppKit versions. Keeping them
+    fully separate sidesteps it entirely.
+
+    FOR TESTNET/LIVE TESTING: set the backend's SOLANA_RPC_URL to
+    https://api.devnet.solana.com (see TESTNET_SETUP.md), and make sure
+    your wallet app (Phantom/Solflare) is itself switched to Devnet in
+    its own settings -- a wallet set to Mainnet cannot sign against a
+    devnet transaction correctly.
+  */
+
+  import { createAppKit } from 'https://esm.sh/@reown/appkit@1?bundle';
+  import { SolanaAdapter } from 'https://esm.sh/@reown/appkit-adapter-solana@1?bundle';
+  import { Transaction } from 'https://esm.sh/@solana/web3.js@1?bundle';
+
+  const tg = window.Telegram?.WebApp;
+  tg?.ready();
+  tg?.expand();
+
+  const params = new URLSearchParams(window.location.search);
+  const requestId = params.get('request_id');
+  const API_BASE = 'https://yourdomain.com/api'; // set to your deployed backend
+
+  const detailsEl = document.getElementById('details');
+  const statusEl = document.getElementById('status');
+  const connectBtn = document.getElementById('connectBtn');
+  const signBtn = document.getElementById('signBtn');
+
+  let appKit = null;
+  let connectedAddress = null;
+
+  function showStatus(text, kind) {
+    statusEl.style.display = 'block';
+    statusEl.textContent = text;
+    statusEl.className = kind || '';
+  }
+
+  async function loadRequest() {
+    if (!requestId) {
+      detailsEl.textContent = 'Missing request ID -- open this from the bot, not directly.';
+      return;
+    }
+    const res = await fetch(`${API_BASE}/launch-requests/${requestId}`);
+    if (!res.ok) {
+      detailsEl.textContent = 'Could not load launch details (may have expired).';
+      return;
+    }
+    const req = await res.json();
+    detailsEl.innerHTML = `
+      <div class="detail-row"><span>Name</span><b>${req.name}</b></div>
+      <div class="detail-row"><span>Symbol</span><b>${req.symbol}</b></div>
+      <div class="detail-row"><span>Mode</span><b>${req.mode}</b></div>
+    `;
+    connectBtn.style.display = 'block';
+  }
+
+  function initAppKit() {
+    appKit = createAppKit({
+      adapters: [new SolanaAdapter()],
+      networks: [], // TODO: Solana mainnet network config per current AppKit docs
+      projectId: 'YOUR_REOWN_PROJECT_ID',
+      metadata: {
+        name: 'Launch Bot',
+        description: 'Launch a token',
+        url: window.location.origin,
+        icons: [],
+      },
+    });
+  }
+
+  connectBtn.addEventListener('click', async () => {
+    try {
+      initAppKit();
+      await appKit.open();
+      connectedAddress = await appKit.getAddress(); // verify exact accessor against current docs
+      showStatus(`Connected: ${connectedAddress}`, 'success');
+      connectBtn.style.display = 'none';
+      signBtn.style.display = 'block';
+    } catch (e) {
+      showStatus(`Wallet connection failed: ${e.message}`, 'error');
+    }
+  });
+
+  signBtn.addEventListener('click', async () => {
+    try {
+      showStatus('Building transaction...');
+      const buildRes = await fetch(`${API_BASE}/launch-requests/${requestId}/build-tx`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ wallet_address: connectedAddress }),
+      });
+      if (!buildRes.ok) {
+        const err = await buildRes.json();
+        throw new Error(err.detail || 'Failed to build transaction');
+      }
+      const { unsigned_transaction, mint_address } = await buildRes.json();
+
+      // Backend sends the solders-serialized tx as a hex string --
+      // reconstruct it as a web3.js Transaction. Verify this
+      // deserializes correctly; legacy vs versioned transaction
+      // handling differs and should be confirmed against exactly what
+      // solana_launch.py produces.
+      const txBytes = Uint8Array.from(Buffer.from(unsigned_transaction, 'hex'));
+      const tx = Transaction.from(txBytes);
+
+      showStatus('Please review and approve in your wallet...');
+      const walletProvider = appKit.getWalletProvider();
+      const signature = await walletProvider.signAndSendTransaction(tx);
+
+      await fetch(`${API_BASE}/launch-requests/${requestId}/complete`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tx_hash: signature, result_token_address: mint_address || '' }),
+      });
+
+      showStatus(`✅ Launched! Tx: ${signature}`, 'success');
+      signBtn.style.display = 'none';
+      setTimeout(() => tg?.close(), 2500);
+
+    } catch (e) {
+      showStatus(`Failed: ${e.message}`, 'error');
+      await fetch(`${API_BASE}/launch-requests/${requestId}/fail`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tx_hash: e.message }),
+      }).catch(() => {});
+    }
+  });
+
+  loadRequest();
+</script>
+</body>
+</html>
