@@ -11,7 +11,15 @@ from pathlib import Path
 import requests
 from dotenv import load_dotenv
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import (
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    ConversationHandler,
+    MessageHandler,
+    filters,
+)
 
 load_dotenv("/opt/ferzan/.env")
 load_dotenv()
@@ -21,6 +29,9 @@ log = logging.getLogger("buybot")
 
 DB = Path(os.getenv("BUYBOT_DB", "/opt/ferzan/app/buybot.db"))
 TRADE = (os.getenv("FERZAN_BOT_USERNAME") or "Ferzan_Trade_Bot").lstrip("@")
+CHAT = os.getenv("FERZAN_CHAT") or "https://t.me/Ferzan_Chat"
+TREASURY_SOL = (os.getenv("FEE_WALLET_SOL") or os.getenv("PLATFORM_TREASURY_SOL") or "").strip()
+TREASURY_EVM = (os.getenv("FEE_WALLET_EVM") or os.getenv("PLATFORM_TREASURY_EVM") or "").strip()
 LAST_MEDIA: dict = {}
 SETGIF_WAIT: set = set()
 MIN_USD = float(os.getenv("BUYBOT_MIN_USD") or "15")
@@ -267,24 +278,130 @@ def _card(chain: str, ca: str, tr: dict, attrs: dict, emoji: str = "🟢") -> tu
     return text, kb
 
 
+SETUP_CHAIN, SETUP_CA, SETUP_MIN, SETUP_EMOJI = range(4)
+
+CHAIN_BTNS = [
+    [InlineKeyboardButton("◎ Solana", callback_data="su:sol"),
+     InlineKeyboardButton("Ξ Ethereum", callback_data="su:eth")],
+    [InlineKeyboardButton("🔵 Base", callback_data="su:base"),
+     InlineKeyboardButton("🟡 BNB", callback_data="su:bsc")],
+    [InlineKeyboardButton("🔵 Arbitrum", callback_data="su:arb"),
+     InlineKeyboardButton("🔺 Avalanche", callback_data="su:avax")],
+    [InlineKeyboardButton("🟣 Polygon", callback_data="su:pol")],
+]
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.effective_message.reply_text(
-        "⚡ Ferzan Buy — channel buy + raid desk\n\n"
-        "/add <chain> <CA> [min_usd]  pair token\n"
-        "/settings  min size + current CA\n"
-        "/stats /price /dex  token card\n"
-        "/market  BTC ETH SOL\n"
-        "/vote  start a vote in this chat\n"
-        "/raid <x.com url>  post an X raid\n"
-        "/queue <url>  add raid to queue\n"
-        "/next  post next queued raid\n"
-        "/nextlist /queuelist  show queue\n"
-        "/lb /clb  raid leaderboards\n"
-        "/raidevent /relb  event scores\n"
-        "/setemoji 🚕  buy-size bar emoji\n"
-        "/untrack  stop buy alerts\n"
+        "⚡ Ferzan Buy — channel buy alerts for any project chat.\n\n"
+        "Dev setup (easiest):\n"
+        "/setup  — I ask chain → CA → min buy $ → bar emoji\n\n"
+        "Or one line: /add base 0xCA 25\n"
+        "/settings  current pair + min\n"
+        "/setemoji 🚕  buy-size bar\n"
+        "/setgif  buy card GIF\n"
+        "/untrack  stop alerts\n"
+        "/stats /price /dex /market /vote /raid\n"
         "/help"
     )
+
+
+async def setup_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    if chat.type == "private":
+        await update.effective_message.reply_text(
+            "Add @Ferzan_Buy_Bot to the project channel first, then run /setup there."
+        )
+        return ConversationHandler.END
+    context.user_data["setup"] = {"chat_id": chat.id}
+    await update.effective_message.reply_text(
+        "⚡ Ferzan Buy setup\n\nWhich chain is this token on?",
+        reply_markup=InlineKeyboardMarkup(CHAIN_BTNS),
+    )
+    return SETUP_CHAIN
+
+
+async def setup_chain(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    chain = (q.data or "").split(":")[-1]
+    if chain not in GT_NET:
+        await q.edit_message_text("Pick a chain button.")
+        return SETUP_CHAIN
+    context.user_data.setdefault("setup", {})["chain"] = chain
+    await q.edit_message_text(
+        f"Chain: {chain.upper()}\n\nPaste the token contract / mint (CA)."
+    )
+    return SETUP_CA
+
+
+async def setup_ca(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    ca = (update.message.text or "").strip()
+    if len(ca) < 8:
+        await update.message.reply_text("That is not a CA. Paste the full contract.")
+        return SETUP_CA
+    context.user_data["setup"]["ca"] = ca
+    await update.message.reply_text(
+        "Minimum buy in USD to post an alert?\nExample: 15\nSend 1 to show almost every buy."
+    )
+    return SETUP_MIN
+
+
+async def setup_min(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    raw = (update.message.text or "").replace("$", "").strip()
+    try:
+        floor = max(1.0, float(raw))
+    except ValueError:
+        await update.message.reply_text("Number only. Example: 25")
+        return SETUP_MIN
+    context.user_data["setup"]["min_usd"] = floor
+    await update.message.reply_text(
+        "Emoji for the buy-size bar?\nExample: 🟢 or 🚕\nSend skip to keep 🟢"
+    )
+    return SETUP_EMOJI
+
+
+async def setup_emoji(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    raw = (update.message.text or "").strip()
+    emoji = "🟢" if raw.lower() in {"skip", "-", "default"} else (raw[:8] or "🟢")
+    st = context.user_data.get("setup") or {}
+    chain, ca = st.get("chain"), st.get("ca")
+    floor = float(st.get("min_usd") or MIN_USD)
+    chat_id = update.effective_chat.id
+    pool, attrs = _pool_for(chain, ca)
+    if not pool:
+        await update.message.reply_text(
+            "No Dex/Gecko pool for that CA yet. Check chain + CA, then /setup again."
+        )
+        return ConversationHandler.END
+    con = _db()
+    try:
+        con.execute(
+            "INSERT OR REPLACE INTO watches(chat_id, chain, ca, pool, last_ts, min_usd, emoji) VALUES(?,?,?,?,?,?,?)",
+            (chat_id, chain, ca, pool, int(time.time()), floor, emoji),
+        )
+    except sqlite3.OperationalError:
+        con.execute(
+            "INSERT OR REPLACE INTO watches(chat_id, chain, ca, pool, last_ts, min_usd) VALUES(?,?,?,?,?,?)",
+            (chat_id, chain, ca, pool, int(time.time()), floor),
+        )
+    con.commit()
+    con.close()
+    name = attrs.get("name") or ca
+    await update.message.reply_text(
+        f"✅ Watching {name} on {chain.upper()}\n"
+        f"CA: `{ca}`\nBuys ≥ ${floor:.0f}\nBar: {emoji}\n\n"
+        "Optional: /setgif then send a GIF for buy cards.",
+        parse_mode="Markdown",
+    )
+    context.user_data.pop("setup", None)
+    return ConversationHandler.END
+
+
+async def setup_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.pop("setup", None)
+    await update.effective_message.reply_text("Setup cancelled. /setup to start over.")
+    return ConversationHandler.END
 
 
 async def track(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -644,6 +761,132 @@ async def tick(context: ContextTypes.DEFAULT_TYPE) -> None:
     con.close()
 
 
+def _pay_box() -> str:
+    sol = TREASURY_SOL or "(set FEE_WALLET_SOL in .env)"
+    evm = TREASURY_EVM or "(set FEE_WALLET_EVM in .env)"
+    return (
+        f"Pay treasury\n"
+        f"◎ SOL `{sol}`\n"
+        f"Ξ EVM `{evm}`\n\n"
+        "After payment send /paid &lt;tx hash&gt; and your CA.\n"
+        f"Booking help: {CHAT}"
+    )
+
+
+PAY_CHAINS = [
+    [InlineKeyboardButton("BNB Smart Chain", callback_data="mk:bsc")],
+    [InlineKeyboardButton("Ethereum", callback_data="mk:eth")],
+    [InlineKeyboardButton("Base", callback_data="mk:base")],
+    [InlineKeyboardButton("Arbitrum One", callback_data="mk:arb")],
+    [InlineKeyboardButton("Solana", callback_data="mk:sol")],
+    [InlineKeyboardButton("❌ Cancel", callback_data="mk:x")],
+]
+
+
+async def marketing_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.effective_message.reply_text(
+        "📣 Ferzan promotion\n\nChoose the chain you want to pay on:",
+        reply_markup=InlineKeyboardMarkup(PAY_CHAINS),
+    )
+
+
+async def marketing_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    await q.answer()
+    key = (q.data or "").split(":")[-1]
+    if key == "x":
+        await q.edit_message_text("Cancelled.")
+        return
+    if key.startswith("svc"):
+        kind = key.split("-")[-1]
+        chain = context.user_data.get("mk_chain", "sol")
+        pay = TREASURY_SOL if chain == "sol" else TREASURY_EVM
+        label = {
+            "trend": "Trending 24h · 12 SOL / 0.5 ETH",
+            "ads": "Button ad 24h · 2.7 SOL",
+            "max": "Max pack · 14 SOL",
+        }.get(kind, kind)
+        await q.edit_message_text(
+            f"✅ {label}\nPay on {chain.upper()}\nTreasury:\n`{pay or 'set FEE_WALLET in .env'}`\n\n"
+            "Send payment then /paid <txhash> <CA>",
+            parse_mode="Markdown",
+        )
+        return
+    context.user_data["mk_chain"] = key
+    await q.edit_message_text(
+        f"📣 Marketing on {key.upper()}\n\nChoose a service:",
+        reply_markup=InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("📈 Trending", callback_data="mk:svc-trend")],
+                [InlineKeyboardButton("📊 Buy-card button ads", callback_data="mk:svc-ads")],
+                [InlineKeyboardButton("🚀 Maximum exposure", callback_data="mk:svc-max")],
+                [InlineKeyboardButton("❌ Cancel", callback_data="mk:x")],
+            ]
+        ),
+    )
+
+
+async def trending_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.effective_message.reply_text(
+        "🔥 List on Trending\nRanked in Ferzan signal channels.\n\nFirst, choose your token's CHAIN:",
+        reply_markup=InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("BNB Smart Chain", callback_data="td:bsc")],
+                [InlineKeyboardButton("Ethereum", callback_data="td:eth")],
+                [InlineKeyboardButton("Base", callback_data="td:base")],
+                [InlineKeyboardButton("Arbitrum One", callback_data="td:arb")],
+                [InlineKeyboardButton("Solana", callback_data="td:sol")],
+                [InlineKeyboardButton("❌ Cancel", callback_data="td:x")],
+            ]
+        ),
+    )
+
+
+async def trending_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    await q.answer()
+    key = (q.data or "").split(":")[-1]
+    if key == "x":
+        await q.edit_message_text("Cancelled.")
+        return
+    context.user_data["td_chain"] = key
+    await q.edit_message_text(
+        f"🌐 Chain: {key.upper()}\n\nSend the contract address of the token to list.\n"
+        "Then /paid <txhash> after you pay treasury."
+    )
+
+
+async def ads_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.effective_message.reply_text(
+        "📢 BUY-CARD BUTTON AD\n\n"
+        "Your link sits on Ferzan buy alerts for the term you pay.\n\n"
+        "24 hours  2.7 SOL\n"
+        "3 days    6.3 SOL\n"
+        "7 days    13.5 SOL\n\n"
+        "Include destination URL in /paid.\n\n"
+        + _pay_box(),
+        parse_mode="Markdown",
+        disable_web_page_preview=True,
+    )
+
+
+async def paid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    args = context.args or []
+    if not args:
+        await update.effective_message.reply_text("Usage: /paid <txhash> [CA or url]")
+        return
+    tx = args[0]
+    extra = " ".join(args[1:])
+    log.info("PAID claim uid=%s tx=%s extra=%s", update.effective_user.id, tx, extra)
+    await update.effective_message.reply_text(
+        "Got it. Treasury will confirm the tx.\n"
+        f"Tx: `{tx}`\n{extra}\n"
+        f"If it is not confirmed in a bit, ping {CHAT}",
+        parse_mode="Markdown",
+        disable_web_page_preview=True,
+    )
+
+
 def main() -> None:
     token = (os.getenv("BUYBOT_TOKEN") or os.getenv("FERZAN_BUY_TOKEN") or "").strip()
     if not token:
@@ -651,6 +894,20 @@ def main() -> None:
     app = Application.builder().token(token).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
+    app.add_handler(
+        ConversationHandler(
+            entry_points=[CommandHandler("setup", setup_start)],
+            states={
+                SETUP_CHAIN: [CallbackQueryHandler(setup_chain, pattern=r"^su:")],
+                SETUP_CA: [MessageHandler(filters.TEXT & ~filters.COMMAND, setup_ca)],
+                SETUP_MIN: [MessageHandler(filters.TEXT & ~filters.COMMAND, setup_min)],
+                SETUP_EMOJI: [MessageHandler(filters.TEXT & ~filters.COMMAND, setup_emoji)],
+            },
+            fallbacks=[CommandHandler("cancel", setup_cancel)],
+            per_chat=True,
+            per_user=True,
+        )
+    )
     app.add_handler(CommandHandler("setgif", setgif_cmd))
     app.add_handler(CommandHandler("cleargif", cleargif_cmd))
     app.add_handler(MessageHandler(
@@ -665,6 +922,12 @@ def main() -> None:
     app.add_handler(CommandHandler("stats", stats_cmd))
     app.add_handler(CommandHandler("price", price_cmd))
     app.add_handler(CommandHandler("dex", dex_cmd))
+    app.add_handler(CommandHandler("marketing", marketing_cmd))
+    app.add_handler(CallbackQueryHandler(marketing_cb, pattern=r"^mk:"))
+    app.add_handler(CommandHandler("trending", trending_cmd))
+    app.add_handler(CallbackQueryHandler(trending_cb, pattern=r"^td:"))
+    app.add_handler(CommandHandler("ads", ads_cmd))
+    app.add_handler(CommandHandler("paid", paid_cmd))
     app.add_handler(CommandHandler("market", market_cmd))
     app.add_handler(CommandHandler("vote", vote_cmd))
     app.add_handler(CommandHandler("raid", raid_cmd))
