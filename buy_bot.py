@@ -4,13 +4,14 @@ from __future__ import annotations
 import html
 import logging
 import os
+import re
 import sqlite3
 import time
 from pathlib import Path
 
 import requests
 from dotenv import load_dotenv
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -845,6 +846,133 @@ async def settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     )
 
 
+def _extract_ca(text: str) -> str:
+    raw = text or ""
+    m = re.search(r"0x[a-fA-F0-9]{40}", raw)
+    if m:
+        return m.group(0)
+    compact = "".join(raw.split())
+    m = re.search(r"0x[a-fA-F0-9]{40}", compact)
+    if m:
+        return m.group(0)
+    m = re.search(r"\b[1-9A-HJ-NP-Za-km-z]{32,44}\b", raw)
+    if m and not m.group(0).isdigit():
+        return m.group(0)
+    return ""
+
+
+def _chain_from_ds(pair: dict) -> str:
+    cid = str((pair or {}).get("chainId") or "").lower()
+    return {
+        "solana": "sol",
+        "ethereum": "eth",
+        "base": "base",
+        "bsc": "bsc",
+        "arbitrum": "arb",
+        "polygon": "pol",
+        "avalanche": "avax",
+        "optimism": "op",
+    }.get(cid, cid or "base")
+
+
+async def scan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    context.user_data.pop("setup", None)
+    msg = update.effective_message
+    if not msg:
+        return
+    await msg.reply_text("Scanning…")
+    blob = " ".join(context.args or []) or (msg.text or "")
+    ca = _extract_ca(blob)
+    if not ca:
+        await msg.reply_text("Usage: /scan 0xCA   (space after /scan, one line)")
+        return
+    await paste_ca(update, context, forced_ca=ca)
+
+
+async def paste_ca(update: Update, context: ContextTypes.DEFAULT_TYPE, forced_ca: str = "") -> None:
+    msg = update.effective_message
+    if not msg:
+        return
+    txt = msg.text or ""
+    is_scan = txt.lower().startswith("/scan")
+    if txt.startswith("/") and not is_scan and not forced_ca:
+        return
+    if context.user_data.get("setup") and not is_scan and not forced_ca:
+        return
+    ca = forced_ca or _extract_ca(txt)
+    if not ca:
+        if is_scan:
+            await msg.reply_text("Usage: /scan 0xCA   (one line)")
+        return
+    pair = _ds(ca)
+    if not pair:
+        await msg.reply_text(
+            f"FERZAN · scanned\n<code>{html.escape(ca)}</code>\nNo Dex pair yet. Check the chain and try /setup.",
+            parse_mode="HTML",
+        )
+        return
+    chain = _chain_from_ds(pair)
+    base = pair.get("baseToken") or {}
+    name = base.get("name") or "Token"
+    sym = base.get("symbol") or ""
+    px = pair.get("priceUsd") or "—"
+    mc = _usd(pair.get("marketCap") or pair.get("fdv"))
+    liq = _usd((pair.get("liquidity") or {}).get("usd"))
+    vol = _usd((pair.get("volume") or {}).get("h24"))
+    chg = pair.get("priceChange") or {}
+    h24 = chg.get("h24")
+    try:
+        h24s = f"{float(h24):+.1f}%" if h24 is not None else "—"
+    except (TypeError, ValueError):
+        h24s = "—"
+    created = pair.get("pairCreatedAt") or 0
+    age = "—"
+    if created:
+        hrs = max(0, (time.time() * 1000 - float(created)) / 3600000)
+        age = f"{hrs:.1f}h" if hrs < 48 else f"{hrs/24:.1f}d"
+    dex = (pair.get("dexId") or "dex").title()
+    ds = pair.get("url") or f"https://dexscreener.com/{pair.get('chainId')}/{ca}"
+    buy = f"https://t.me/{TRADE}?start={ca}"
+    hub = os.getenv("FERZAN_CHAT_URL") or "https://t.me/Ferzan_Chat"
+    scan = {
+        "sol": f"https://solscan.io/token/{ca}",
+        "eth": f"https://etherscan.io/token/{ca}",
+        "base": f"https://basescan.org/token/{ca}",
+        "bsc": f"https://bscscan.com/token/{ca}",
+        "arb": f"https://arbiscan.io/token/{ca}",
+    }.get(chain, ds)
+    text = (
+        f"⚡ <b>FERZAN SCAN</b> · {html.escape(chain.upper())}\n"
+        f"<b>{html.escape(str(name))}</b>  ${html.escape(str(sym))}\n"
+        f"<code>{html.escape(ca)}</code>\n"
+        f"<i>tap CA to copy</i>\n\n"
+        f"💵 ${html.escape(str(px))}   {html.escape(h24s)} 24h\n"
+        f"🧢 {mc}   💧 {liq}\n"
+        f"📊 24h {vol}   ⏱ {html.escape(age)}\n"
+        f"🛣 {html.escape(dex)}\n"
+        f"<i>See it. Ape it. Send it.</i>"
+    )
+    kb = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("Buy", url=buy),
+                InlineKeyboardButton("Chart", url=ds),
+                InlineKeyboardButton("Scan", url=scan),
+            ],
+            [InlineKeyboardButton("See it. Ape it. Send it.", url=buy)],
+            [InlineKeyboardButton("Desk", url=hub)],
+        ]
+    )
+    header = (pair.get("info") or {}).get("header") or (pair.get("info") or {}).get("imageUrl")
+    try:
+        if header:
+            await msg.reply_photo(header, caption=text, parse_mode="HTML", reply_markup=kb)
+            return
+    except Exception:
+        pass
+    await msg.reply_text(text, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True)
+
+
 async def _token_card(update: Update, extra: str = "") -> None:
     row = _watch(update.effective_chat.id)
     ca = (context_args_ca(update, extra) if False else None)
@@ -1228,6 +1356,24 @@ def main() -> None:
     if not token:
         raise SystemExit("Set BUYBOT_TOKEN in /opt/ferzan/.env")
     app = Application.builder().token(token).build()
+    async def _menu(app_):
+        await app_.bot.set_my_commands(
+            [
+                BotCommand("start", "Ferzan Buy home"),
+                BotCommand("setup", "Pair a token"),
+                BotCommand("scan", "Scan a CA"),
+                BotCommand("preview", "Fake buy card"),
+                BotCommand("tape", "Tape on or off"),
+                BotCommand("mute", "Quiet 1h"),
+                BotCommand("min", "Min buy USD"),
+                BotCommand("who", "Last buys"),
+                BotCommand("status", "Watching"),
+                BotCommand("untrack", "Stop alerts"),
+                BotCommand("chart", "Token chart"),
+                BotCommand("help", "Help"),
+            ]
+        )
+    app.post_init = _menu
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(
@@ -1240,11 +1386,16 @@ def main() -> None:
                 SETUP_EMOJI: [MessageHandler(filters.TEXT & ~filters.COMMAND, setup_emoji)],
                 SETUP_TG: [MessageHandler(filters.TEXT & ~filters.COMMAND, setup_tg)],
             },
-            fallbacks=[CommandHandler("cancel", setup_cancel)],
+            fallbacks=[
+                CommandHandler("cancel", setup_cancel),
+                CommandHandler("scan", scan_cmd),
+            ],
             per_chat=True,
             per_user=True,
+            block=False,
         )
     )
+    app.add_handler(CommandHandler("scan", scan_cmd))
     app.add_handler(CommandHandler("setgif", setgif_cmd))
     app.add_handler(CommandHandler("settelegram", settelegram_cmd))
     app.add_handler(CommandHandler("preview", preview_cmd))
@@ -1258,6 +1409,7 @@ def main() -> None:
         filters.ANIMATION | filters.VIDEO | filters.PHOTO | filters.Document.ALL,
         remember_media,
     ))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, paste_ca))
     app.add_handler(CommandHandler("track", track))
     app.add_handler(CommandHandler("add", track))
     app.add_handler(CommandHandler("untrack", untrack))

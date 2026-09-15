@@ -1434,7 +1434,7 @@ async def settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.effective_message.reply_text("Updated.")
     rug = db.flag_on(uid, "rug_buy", 1)
     honey = db.flag_on(uid, "honeypot", 1)
-    lpw = db.flag_on(uid, "lp_watch", 1)
+    lpw = db.flag_on(uid, "lp_watch", 0)
     gate = db.flag_on(uid, "score_gate", 0)
     auto = db.flag_on(uid, "auto_buy", 0)
     mev = db.flag_on(uid, "anti_mev", 1)
@@ -3160,7 +3160,7 @@ async def lp_watch_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     except Exception:
         return
     for uid in users:
-        if not db.flag_on(uid, "lp_watch", 1):
+        if not db.flag_on(uid, "lp_watch", 0):
             continue
         try:
             sol_secret, evm_secret = user_wallets.secrets(uid)
