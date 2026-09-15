@@ -4,6 +4,7 @@ from __future__ import annotations
 import html
 import logging
 import os
+import re
 import sqlite3
 import time
 from pathlib import Path
@@ -76,6 +77,26 @@ def _db() -> sqlite3.Connection:
         con.execute("ALTER TABLE watches ADD COLUMN emoji TEXT DEFAULT '🟢'")
     except sqlite3.OperationalError:
         pass
+    try:
+        con.execute("ALTER TABLE watches ADD COLUMN tg_url TEXT")
+    except sqlite3.OperationalError:
+        pass
+    con.execute(
+        """CREATE TABLE IF NOT EXISTS chat_flags (
+            chat_id INTEGER PRIMARY KEY,
+            tape INTEGER DEFAULT 1,
+            mute_until INTEGER DEFAULT 0
+        )"""
+    )
+    con.execute(
+        """CREATE TABLE IF NOT EXISTS buy_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER,
+            ca TEXT,
+            usd REAL,
+            ts INTEGER
+        )"""
+    )
     con.execute(
         """CREATE TABLE IF NOT EXISTS raids (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -226,23 +247,23 @@ def _trades(net: str, pool: str, last_ts: int) -> list[dict]:
     return out
 
 
+def _tier(usd: float) -> tuple[str, str]:
+    if usd < 25:
+        return "SIP", "Sip"
+    if usd < 150:
+        return "APE", "Ape"
+    return "SEND", "Send it"
+
+
 def _bar(usd: float, emoji: str = "🟢") -> str:
     em = (emoji or "🟢").strip()[:8] or "🟢"
-    if usd < 20:
+    if usd < 25:
         n = 3
-    elif usd < 50:
+    elif usd < 150:
         n = 8
-    elif usd < 100:
-        n = 12
-    elif usd < 250:
-        n = 18
-    elif usd < 500:
-        n = 24
     else:
-        n = 36
-    row = 12
-    chunks = [em * min(row, n - i) for i in range(0, n, row)]
-    return "\n".join(chunks)
+        n = 14
+    return em * n
 
 
 def _usd(v) -> str:
@@ -259,7 +280,7 @@ def _usd(v) -> str:
     return f"${x:,.2f}"
 
 
-def _card(chain: str, ca: str, tr: dict, attrs: dict, emoji: str = "🟢") -> tuple[str, InlineKeyboardMarkup]:
+def _card(chain: str, ca: str, tr: dict, attrs: dict, emoji: str = "🟢", tg_url: str = "", cluster: int = 1) -> tuple[str, InlineKeyboardMarkup]:
     usd = float(tr.get("volume_in_usd") or 0)
     got = tr.get("to_token_amount") or tr.get("to_token_output") or ""
     spent = tr.get("from_token_amount") or ""
@@ -278,8 +299,10 @@ def _card(chain: str, ca: str, tr: dict, attrs: dict, emoji: str = "🟢") -> tu
     net = GT_NET.get(chain, chain)
     ds = pair.get("url") or f"https://dexscreener.com/{net}/{ca}"
     info = pair.get("info") or {}
-    tg = ""
+    tg = (tg_url or "").strip()
     for s in info.get("socials") or []:
+        if tg:
+            break
         if str(s.get("type") or "").lower() in ("telegram", "tg"):
             tg = s.get("url") or ""
             break
@@ -296,32 +319,66 @@ def _card(chain: str, ca: str, tr: dict, attrs: dict, emoji: str = "🟢") -> tu
     buyer_url = scan.replace("/tx/", "/address/") if buyer and "/tx/" in scan else ds
     liq = (os.getenv("FERZAN_LIQ_BOT") or "FerzanLiqBot").lstrip("@")
     boost = f"https://t.me/{liq}"
-    chat = os.getenv("FERZAN_CHAT_URL") or "https://t.me/Ferzan_Chat"
-    spent_s = spent or f"{usd:,.2f}"
+    chat = tg or os.getenv("FERZAN_CHAT_URL") or "https://t.me/Ferzan_Chat"
+    def _num(v):
+        try:
+            x = float(v)
+            return f"{x:,.2f}" if x < 1000 else f"{x:,.0f}"
+        except (TypeError, ValueError):
+            return str(v or "")
+    spent_s = _num(spent) if spent else f"{usd:,.2f}"
+    got = _num(got) if got else got
+    tag, label = _tier(usd)
+    dex_name = (pair.get("dexId") or attrs.get("dex") or "").title()
+    liq_usd = _usd((pair.get("liquidity") or {}).get("usd"))
+    holders = pair.get("holders") or attrs.get("holders") or ""
+    xurl = ""
+    web = ""
+    for s in info.get("socials") or []:
+        typ = str(s.get("type") or "").lower()
+        if typ in ("twitter", "x") and not xurl:
+            xurl = s.get("url") or ""
+    for w in info.get("websites") or []:
+        web = w.get("url") or web
     text = (
-        f"<b>{_esc(name)}</b> [{_esc(sym)}] ⚡ Buy!\n"
+        f"FERZAN · {_esc(str(chain).upper())} · <b>{_esc(sym)}</b>\n"
+        f"{_esc(name)} · {_esc(label).upper()}\n"
         f"{_bar(usd, emoji)}\n\n"
-        f"💵 | {_esc(spent_s)} (${usd:,.2f})\n"
-        f"💼 | Got: {_esc(got)}\n"
-        f"👤 | <a href=\"{_esc(buyer_url)}\">Buyer</a> | <a href=\"{_esc(scan)}\">Txn</a>\n"
-        f"🎯 | Market Cap: {_usd(mc)}\n"
+        f"${usd:,.2f} in · {_esc(got)} {_esc(sym)}\n"
+        f"MC {_usd(mc)}"
     )
+    if liq_usd != "—":
+        text += f" · Liq {liq_usd}"
+    if dex_name:
+        text += f"\nRoute {_esc(dex_name)}"
+    if cluster and cluster > 1:
+        text += f"\n{cluster} buys in 12s"
+    if holders:
+        try:
+            text += f"\nHolders {int(holders):,}"
+        except (TypeError, ValueError):
+            pass
+    text += f"\n<a href=\"{_esc(buyer_url)}\">Buyer</a> · <a href=\"{_esc(scan)}\">Txn</a>"
     if tg:
-        text += f"👥 | <a href=\"{_esc(tg)}\">Telegram</a>\n"
-    text += f"📈 | <a href=\"{_esc(ds)}\">Dex</a>"
+        text += f" · <a href=\"{_esc(tg)}\">Telegram</a>"
+    if xurl:
+        text += f" · <a href=\"{_esc(xurl)}\">X</a>"
+    text += "\n<i>Routed by Ferzan</i>"
+    hub = os.getenv("FERZAN_CHAT_URL") or "https://t.me/Ferzan_Chat"
     rows = [
         [
-            InlineKeyboardButton("⚡ Ferzan Buy", url=buy),
-            InlineKeyboardButton("📈 Dex", url=ds),
-            InlineKeyboardButton("🗳 Vote", url=chat),
+            InlineKeyboardButton("Buy", url=buy),
+            InlineKeyboardButton("Chart", url=ds),
+            InlineKeyboardButton("Desk", url=hub),
         ],
-        [InlineKeyboardButton("🚀 Boost Rank and Volume", url=boost)],
+        [InlineKeyboardButton("See it. Ape it. Send it.", url=buy)],
+        [InlineKeyboardButton("Boost this alert", url=boost)],
     ]
     kb = InlineKeyboardMarkup(rows)
     return text, kb
 
 
-SETUP_CHAIN, SETUP_CA, SETUP_MIN, SETUP_EMOJI = range(4)
+SETUP_CHAIN, SETUP_CA, SETUP_MIN, SETUP_EMOJI, SETUP_TG = range(5)
 
 CHAIN_BTNS = [
     [InlineKeyboardButton("◎ Solana", callback_data="su:sol"),
@@ -345,6 +402,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/setemoji 🚕  buy-size bar\n"
         "/setgif  buy card GIF\n"
         "/untrack  stop alerts\n"
+        "/preview  fake card   /status\n"
+        "/tape on|off   /mute 1h   /min 50   /who\n"
+        "/chart  token card + Dex chart\n"
         "/stats /price /dex /market /vote /raid\n"
         "/help"
     )
@@ -380,9 +440,17 @@ async def setup_chain(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def setup_ca(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    ca = (update.message.text or "").strip()
-    if len(ca) < 8:
-        await update.message.reply_text("That is not a CA. Paste the full contract.")
+    ca = "".join((update.message.text or "").split())
+    if ca.startswith("0x") or ca.startswith("0X"):
+        ca = "0x" + ca[2:]
+        if len(ca) != 42:
+            await update.message.reply_text(
+                "EVM CA must be 42 characters on ONE line (0x + 40 hex).\n"
+                "Telegram wrapped yours. Copy from DexScreener and paste once."
+            )
+            return SETUP_CA
+    elif len(ca) < 32:
+        await update.message.reply_text("That is not a CA. Paste the full mint on one line.")
         return SETUP_CA
     context.user_data["setup"]["ca"] = ca
     await update.message.reply_text(
@@ -405,41 +473,169 @@ async def setup_min(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return SETUP_EMOJI
 
 
-async def setup_emoji(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    raw = (update.message.text or "").strip()
-    emoji = "🟢" if raw.lower() in {"skip", "-", "default"} else (raw[:8] or "🟢")
-    st = context.user_data.get("setup") or {}
-    chain, ca = st.get("chain"), st.get("ca")
-    floor = float(st.get("min_usd") or MIN_USD)
-    chat_id = update.effective_chat.id
-    pool, attrs = _pool_for(chain, ca)
-    if not pool:
-        await update.message.reply_text(
-            "No Dex/Gecko pool for that CA yet. Check chain + CA, then /setup again."
-        )
-        return ConversationHandler.END
+def _save_watch(chat_id: int, chain: str, ca: str, pool: str, floor: float, emoji: str, tg_url: str = "") -> None:
     con = _db()
     try:
+        con.execute(
+            "INSERT OR REPLACE INTO watches(chat_id, chain, ca, pool, last_ts, min_usd, emoji, tg_url) VALUES(?,?,?,?,?,?,?,?)",
+            (chat_id, chain, ca, pool, int(time.time()), floor, emoji, tg_url),
+        )
+    except sqlite3.OperationalError:
         con.execute(
             "INSERT OR REPLACE INTO watches(chat_id, chain, ca, pool, last_ts, min_usd, emoji) VALUES(?,?,?,?,?,?,?)",
             (chat_id, chain, ca, pool, int(time.time()), floor, emoji),
         )
-    except sqlite3.OperationalError:
-        con.execute(
-            "INSERT OR REPLACE INTO watches(chat_id, chain, ca, pool, last_ts, min_usd) VALUES(?,?,?,?,?,?)",
-            (chat_id, chain, ca, pool, int(time.time()), floor),
-        )
     con.commit()
     con.close()
+
+
+async def setup_emoji(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    raw = (update.message.text or "").strip()
+    emoji = "🟢" if raw.lower() in {"skip", "-", "default"} else (raw[:8] or "🟢")
+    context.user_data.setdefault("setup", {})["emoji"] = emoji
+    await update.message.reply_text(
+        "Now set the project Telegram.\n"
+        "USE https://t.me FORM only.\n"
+        "Example: https://t.me/Ferzan_Chat\n"
+        "Send skip to leave it empty."
+    )
+    return SETUP_TG
+
+
+async def setup_tg(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    raw = (update.message.text or "").strip()
+    tg = ""
+    if raw.lower() not in {"skip", "-", "none"}:
+        if "t.me/" not in raw.lower() and "telegram.me/" not in raw.lower():
+            await update.message.reply_text("Must be https://t.me/YourGroup — or send skip.")
+            return SETUP_TG
+        tg = raw.split()[0]
+        if not tg.startswith("http"):
+            tg = "https://" + tg.lstrip("/")
+    st = context.user_data.get("setup") or {}
+    chain, ca = st.get("chain"), st.get("ca")
+    floor = float(st.get("min_usd") or MIN_USD)
+    emoji = st.get("emoji") or "🟢"
+    pool, attrs = _pool_for(chain, ca)
+    if not pool:
+        pool = ca
+        attrs = attrs or {"name": ca[:10], "source": "manual"}
+    _save_watch(update.effective_chat.id, chain, ca, pool, floor, emoji, tg)
     name = attrs.get("name") or ca
+    extra = f"\nTelegram: {tg}" if tg else "\nTelegram: not set (/settelegram https://t.me/...)"
     await update.message.reply_text(
         f"✅ Watching {name} on {chain.upper()}\n"
-        f"CA: `{ca}`\nBuys ≥ ${floor:.0f}\nBar: {emoji}\n\n"
+        f"CA: `{ca}`\nBuys ≥ ${floor:.0f}\nBar: {emoji}{extra}\n\n"
         "Optional: /setgif then send a GIF for buy cards.",
         parse_mode="Markdown",
     )
     context.user_data.pop("setup", None)
     return ConversationHandler.END
+
+
+async def settelegram_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    raw = " ".join(context.args or []).strip()
+    if not raw or "t.me/" not in raw.lower():
+        await update.effective_message.reply_text("Usage: /settelegram https://t.me/YourGroup")
+        return
+    url = raw.split()[0]
+    if not url.startswith("http"):
+        url = "https://" + url
+    con = _db()
+    con.execute("UPDATE watches SET tg_url=? WHERE chat_id=?", (url, update.effective_chat.id))
+    con.commit()
+    con.close()
+    await update.effective_message.reply_text(f"Telegram link set: {url}")
+
+
+def _flags(chat_id: int) -> tuple[int, int]:
+    con = _db()
+    row = con.execute("SELECT tape, mute_until FROM chat_flags WHERE chat_id=?", (chat_id,)).fetchone()
+    con.close()
+    if not row:
+        return 1, 0
+    return int(row[0] or 1), int(row[1] or 0)
+
+
+async def preview_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    row = _watch(update.effective_chat.id)
+    if not row:
+        await update.effective_message.reply_text("Pair a token first. /setup")
+        return
+    chain, ca, pool, _ = row
+    _, attrs = _pool_for(chain, ca)
+    fake = {"volume_in_usd": 25, "to_token_amount": "100000", "from_token_amount": "0.01", "tx_hash": "", "tx_from_address": ""}
+    text, kb = _card(chain, ca, fake, attrs, "🟢", "")
+    await update.effective_message.reply_text("PREVIEW — not a live buy.\n" + text, parse_mode="HTML", reply_markup=kb)
+
+
+async def tape_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    arg = (context.args[0] if context.args else "").lower()
+    if arg not in {"on", "off"}:
+        await update.effective_message.reply_text("Usage: /tape on   or   /tape off")
+        return
+    on = 1 if arg == "on" else 0
+    con = _db()
+    con.execute("INSERT INTO chat_flags(chat_id, tape, mute_until) VALUES(?,?,0) ON CONFLICT(chat_id) DO UPDATE SET tape=excluded.tape", (update.effective_chat.id, on))
+    con.commit()
+    con.close()
+    await update.effective_message.reply_text("Tape ON" if on else "Tape OFF — pairing kept, no buy posts")
+
+
+async def mute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    raw = (context.args[0] if context.args else "1h").lower()
+    mins = 60
+    if raw.endswith("h"):
+        mins = int(float(raw[:-1] or 1) * 60)
+    elif raw.endswith("m"):
+        mins = int(float(raw[:-1] or 30))
+    until = int(time.time()) + max(5, mins) * 60
+    con = _db()
+    con.execute("INSERT INTO chat_flags(chat_id, tape, mute_until) VALUES(?,1,?) ON CONFLICT(chat_id) DO UPDATE SET mute_until=excluded.mute_until", (update.effective_chat.id, until))
+    con.commit()
+    con.close()
+    await update.effective_message.reply_text(f"Muted until {time.strftime('%H:%M', time.localtime(until))}")
+
+
+async def min_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not context.args:
+        await update.effective_message.reply_text("Usage: /min 50")
+        return
+    try:
+        floor = max(1.0, float(context.args[0]))
+    except ValueError:
+        await update.effective_message.reply_text("Number only. /min 50")
+        return
+    con = _db()
+    con.execute("UPDATE watches SET min_usd=? WHERE chat_id=?", (floor, update.effective_chat.id))
+    con.commit()
+    con.close()
+    await update.effective_message.reply_text(f"Floor set to ${floor:.0f}")
+
+
+async def who_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    con = _db()
+    rows = con.execute("SELECT ca, usd, ts FROM buy_log WHERE chat_id=? ORDER BY id DESC LIMIT 5", (update.effective_chat.id,)).fetchall()
+    con.close()
+    if not rows:
+        await update.effective_message.reply_text("No Ferzan buys logged in this chat yet.")
+        return
+    lines = [f"${r[1]:.2f} · {r[0][:8]}… · {time.strftime('%H:%M', time.localtime(r[2]))}" for r in rows]
+    await update.effective_message.reply_text("Last Ferzan posts\n" + "\n".join(lines))
+
+
+async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    row = _watch(update.effective_chat.id)
+    tape, mute = _flags(update.effective_chat.id)
+    if not row:
+        await update.effective_message.reply_text("No token paired. /setup")
+        return
+    chain, ca, pool, floor = row
+    muted = mute > time.time()
+    await update.effective_message.reply_text(
+        f"Watching {ca[:10]}… · {chain.upper()} · ≥ ${float(floor):.0f}\n"
+        f"Tape {'ON' if tape else 'OFF'} · Mute {'ON' if muted else 'off'}"
+    )
 
 
 async def setup_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -491,7 +687,7 @@ def _file_from(msg) -> tuple[str, str] | tuple[None, None]:
     if msg.animation:
         return "animation", msg.animation.file_id
     if msg.video:
-        return "video", msg.video.file_id
+        return "animation", msg.video.file_id
     if msg.photo:
         return "photo", msg.photo[-1].file_id
     if msg.document and (msg.document.mime_type or "").startswith(("video", "image")):
@@ -546,6 +742,93 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await start(update, context)
 
 
+def _chart_caption(chain: str, ca: str, p: dict) -> str:
+    base = p.get("baseToken") or {}
+    name = base.get("name") or "Token"
+    sym = base.get("symbol") or ""
+    cid = p.get("chainId") or chain
+    price = p.get("priceUsd") or "—"
+    mc = _usd(p.get("marketCap") or p.get("fdv"))
+    liq = _usd((p.get("liquidity") or {}).get("usd"))
+    vol = p.get("volume") or {}
+    ch = p.get("priceChange") or {}
+    tx = p.get("txns") or {}
+    h24 = tx.get("h24") or {}
+    created = p.get("pairCreatedAt")
+    age = "—"
+    if created:
+        try:
+            sec = int(time.time() - int(created) / (1000 if int(created) > 10_000_000_000 else 1))
+            if sec < 3600:
+                age = f"{sec // 60}m"
+            elif sec < 86400:
+                age = f"{sec // 3600}h"
+            else:
+                age = f"{sec // 86400}d {(sec % 86400) // 3600}h"
+        except Exception:
+            age = "—"
+    info = p.get("info") or {}
+    social_lines = []
+    for s in info.get("socials") or []:
+        typ = str(s.get("type") or "").lower()
+        url = s.get("url") or ""
+        if typ in ("telegram", "tg") and url:
+            social_lines.append(f"👥 <a href=\"{_esc(url)}\">Telegram</a>")
+        if typ in ("twitter", "x") and url:
+            social_lines.append(f"🐦 <a href=\"{_esc(url)}\">X</a>")
+    ds = p.get("url") or f"https://dexscreener.com/{cid}/{ca}"
+    buy = f"https://t.me/{TRADE}?start={ca}"
+    v5 = vol.get("m5") or 0
+    v1 = vol.get("h1") or 0
+    v24 = vol.get("h24") or 0
+    return (
+        f"<b>{_esc(name)} ({_esc(sym)})</b>  Chain: {_esc(str(cid))}\n"
+        f"CA: <code>{_esc(ca)}</code>\n\n"
+        f"💵 Price: ${price}\n"
+        f"🎯 Market cap: {mc}\n"
+        f"💧 Liquidity: {liq}\n"
+        f"⏱ Age: {age}\n\n"
+        f"Vol 5m {_usd(v5)} · 1h {_usd(v1)} · 24h {_usd(v24)}\n"
+        f"Ch 5m {ch.get('m5', '—')}% · 1h {ch.get('h1', '—')}% · 24h {ch.get('h24', '—')}%\n"
+        f"Tx 24h {(h24.get('buys') or 0) + (h24.get('sells') or 0)}\n"
+        + (("\n" + " · ".join(social_lines)) if social_lines else "")
+        + f"\n📈 <a href=\"{_esc(ds)}\">Dex</a> · ⚡ <a href=\"{_esc(buy)}\">Ferzan</a>"
+    )
+
+
+async def chart_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    row = _watch(update.effective_chat.id)
+    args = context.args or []
+    if args:
+        ca = args[0].strip()
+        chain = args[1].strip() if len(args) > 1 else (row[0] if row else "base")
+    elif row:
+        chain, ca, _, _ = row
+    else:
+        await update.effective_message.reply_text("Pair first: /setup   or  /chart 0xCA base")
+        return
+    p = _ds(ca, chain)
+    if not p:
+        await update.effective_message.reply_text("No DexScreener pair for that CA on this chain.")
+        return
+    cid = p.get("chainId") or DS_CHAIN.get(chain, chain)
+    token = (p.get("baseToken") or {}).get("address") or ca
+    header = f"https://dd.dexscreener.com/ds-data/tokens/{cid}/{token}/header.png?size=lg"
+    cap = _chart_caption(chain, ca, p)
+    buy = f"https://t.me/{TRADE}?start={ca}"
+    ds = p.get("url") or f"https://dexscreener.com/{cid}/{ca}"
+    kb = InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("📈 Dex", url=ds), InlineKeyboardButton("⚡ Ferzan", url=buy)],
+            [InlineKeyboardButton("See it. Ape it. Send it. Use Ferzan", url=buy)],
+        ]
+    )
+    try:
+        await update.effective_message.reply_photo(header, caption=cap, parse_mode="HTML", reply_markup=kb)
+    except Exception:
+        await update.effective_message.reply_text(cap, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=False)
+
+
 async def settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     row = _watch(update.effective_chat.id)
     if not row:
@@ -561,6 +844,113 @@ async def settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         f"Change min: /add {chain} {ca} 50\nChange bar: /setemoji 🚕",
         parse_mode="Markdown",
     )
+
+
+def _extract_ca(text: str) -> str:
+    raw = text or ""
+    m = re.search(r"0x[a-fA-F0-9]{40}", raw)
+    if m:
+        return m.group(0)
+    compact = "".join(raw.split())
+    m = re.search(r"0x[a-fA-F0-9]{40}", compact)
+    if m:
+        return m.group(0)
+    m = re.search(r"\b[1-9A-HJ-NP-Za-km-z]{32,44}\b", raw)
+    if m and not m.group(0).isdigit():
+        return m.group(0)
+    return ""
+
+
+def _chain_from_ds(pair: dict) -> str:
+    cid = str((pair or {}).get("chainId") or "").lower()
+    return {
+        "solana": "sol",
+        "ethereum": "eth",
+        "base": "base",
+        "bsc": "bsc",
+        "arbitrum": "arb",
+        "polygon": "pol",
+        "avalanche": "avax",
+        "optimism": "op",
+    }.get(cid, cid or "base")
+
+
+async def paste_ca(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    msg = update.effective_message
+    if not msg or not msg.text or msg.text.startswith("/"):
+        return
+    if context.user_data.get("setup"):
+        return
+    ca = _extract_ca(msg.text)
+    if not ca:
+        return
+    pair = _ds(ca)
+    if not pair:
+        await msg.reply_text(
+            f"FERZAN · scanned\n<code>{html.escape(ca)}</code>\nNo Dex pair yet. Check the chain and try /setup.",
+            parse_mode="HTML",
+        )
+        return
+    chain = _chain_from_ds(pair)
+    base = pair.get("baseToken") or {}
+    name = base.get("name") or "Token"
+    sym = base.get("symbol") or ""
+    px = pair.get("priceUsd") or "—"
+    mc = _usd(pair.get("marketCap") or pair.get("fdv"))
+    liq = _usd((pair.get("liquidity") or {}).get("usd"))
+    vol = _usd((pair.get("volume") or {}).get("h24"))
+    chg = pair.get("priceChange") or {}
+    h24 = chg.get("h24")
+    try:
+        h24s = f"{float(h24):+.1f}%" if h24 is not None else "—"
+    except (TypeError, ValueError):
+        h24s = "—"
+    created = pair.get("pairCreatedAt") or 0
+    age = "—"
+    if created:
+        hrs = max(0, (time.time() * 1000 - float(created)) / 3600000)
+        age = f"{hrs:.1f}h" if hrs < 48 else f"{hrs/24:.1f}d"
+    dex = (pair.get("dexId") or "dex").title()
+    ds = pair.get("url") or f"https://dexscreener.com/{pair.get('chainId')}/{ca}"
+    buy = f"https://t.me/{TRADE}?start={ca}"
+    hub = os.getenv("FERZAN_CHAT_URL") or "https://t.me/Ferzan_Chat"
+    scan = {
+        "sol": f"https://solscan.io/token/{ca}",
+        "eth": f"https://etherscan.io/token/{ca}",
+        "base": f"https://basescan.org/token/{ca}",
+        "bsc": f"https://bscscan.com/token/{ca}",
+        "arb": f"https://arbiscan.io/token/{ca}",
+    }.get(chain, ds)
+    text = (
+        f"⚡ <b>FERZAN SCAN</b> · {html.escape(chain.upper())}\n"
+        f"<b>{html.escape(str(name))}</b>  ${html.escape(str(sym))}\n"
+        f"<code>{html.escape(ca)}</code>\n"
+        f"<i>tap CA to copy</i>\n\n"
+        f"💵 ${html.escape(str(px))}   {html.escape(h24s)} 24h\n"
+        f"🧢 {mc}   💧 {liq}\n"
+        f"📊 24h {vol}   ⏱ {html.escape(age)}\n"
+        f"🛣 {html.escape(dex)}\n"
+        f"<i>See it. Ape it. Send it.</i>"
+    )
+    kb = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("Buy", url=buy),
+                InlineKeyboardButton("Chart", url=ds),
+                InlineKeyboardButton("Scan", url=scan),
+            ],
+            [InlineKeyboardButton("See it. Ape it. Send it.", url=buy)],
+            [InlineKeyboardButton("Desk", url=hub)],
+        ]
+    )
+    header = (pair.get("info") or {}).get("header") or (pair.get("info") or {}).get("imageUrl")
+    try:
+        if header:
+            await msg.reply_photo(header, caption=text, parse_mode="HTML", reply_markup=kb)
+            return
+    except Exception:
+        pass
+    await msg.reply_text(text, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True)
 
 
 async def _token_card(update: Update, extra: str = "") -> None:
@@ -767,8 +1157,15 @@ async def untrack(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def tick(context: ContextTypes.DEFAULT_TYPE) -> None:
     con = _db()
-    rows = list(con.execute("SELECT chat_id, chain, ca, pool, last_ts, min_usd, emoji FROM watches"))
-    for chat_id, chain, ca, pool, last_ts, min_usd, emoji in rows:
+    try:
+        rows = list(con.execute("SELECT chat_id, chain, ca, pool, last_ts, min_usd, emoji, tg_url FROM watches"))
+    except sqlite3.OperationalError:
+        rows = [(*r, "") for r in con.execute("SELECT chat_id, chain, ca, pool, last_ts, min_usd, emoji FROM watches")]
+    for chat_id, chain, ca, pool, last_ts, min_usd, emoji, *rest in rows:
+        tg_url = rest[0] if rest else ""
+        tape, mute_until = _flags(chat_id)
+        if not tape or mute_until > time.time():
+            continue
         floor = float(min_usd or MIN_USD)
         net = GT_NET.get(chain, chain)
         trades = _trades(net, pool, int(last_ts or 0))
@@ -781,13 +1178,16 @@ async def tick(context: ContextTypes.DEFAULT_TYPE) -> None:
             if usd < floor:
                 newest = max(newest, tr["ts"])
                 continue
-            text, kb = _card(chain, ca, tr, attrs, emoji or "🟢")
+            cluster = sum(1 for x in trades if abs(x["ts"] - tr["ts"]) <= 12)
+            text, kb = _card(chain, ca, tr, attrs, emoji or "🟢", tg_url or "", cluster)
+            con.execute("INSERT INTO buy_log(chat_id, ca, usd, ts) VALUES(?,?,?,?)", (chat_id, ca, usd, tr["ts"]))
             try:
                 media = _media(chat_id)
-                if media and media[0] == "animation":
-                    await context.bot.send_animation(chat_id, media[1], caption=text, parse_mode="HTML", reply_markup=kb)
-                elif media and media[0] == "video":
-                    await context.bot.send_video(chat_id, media[1], caption=text, parse_mode="HTML", reply_markup=kb)
+                if media and media[0] in {"animation", "video"}:
+                    try:
+                        await context.bot.send_animation(chat_id, media[1], caption=text, parse_mode="HTML", reply_markup=kb)
+                    except Exception:
+                        await context.bot.send_video(chat_id, media[1], caption=text, parse_mode="HTML", reply_markup=kb)
                 elif media and media[0] == "photo":
                     await context.bot.send_photo(chat_id, media[1], caption=text, parse_mode="HTML", reply_markup=kb)
                 else:
@@ -946,6 +1346,7 @@ def main() -> None:
                 SETUP_CA: [MessageHandler(filters.TEXT & ~filters.COMMAND, setup_ca)],
                 SETUP_MIN: [MessageHandler(filters.TEXT & ~filters.COMMAND, setup_min)],
                 SETUP_EMOJI: [MessageHandler(filters.TEXT & ~filters.COMMAND, setup_emoji)],
+                SETUP_TG: [MessageHandler(filters.TEXT & ~filters.COMMAND, setup_tg)],
             },
             fallbacks=[CommandHandler("cancel", setup_cancel)],
             per_chat=True,
@@ -953,11 +1354,19 @@ def main() -> None:
         )
     )
     app.add_handler(CommandHandler("setgif", setgif_cmd))
+    app.add_handler(CommandHandler("settelegram", settelegram_cmd))
+    app.add_handler(CommandHandler("preview", preview_cmd))
+    app.add_handler(CommandHandler("tape", tape_cmd))
+    app.add_handler(CommandHandler("mute", mute_cmd))
+    app.add_handler(CommandHandler("min", min_cmd))
+    app.add_handler(CommandHandler("who", who_cmd))
+    app.add_handler(CommandHandler("status", status_cmd))
     app.add_handler(CommandHandler("cleargif", cleargif_cmd))
     app.add_handler(MessageHandler(
         filters.ANIMATION | filters.VIDEO | filters.PHOTO | filters.Document.ALL,
         remember_media,
     ))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, paste_ca))
     app.add_handler(CommandHandler("track", track))
     app.add_handler(CommandHandler("add", track))
     app.add_handler(CommandHandler("untrack", untrack))
@@ -966,6 +1375,7 @@ def main() -> None:
     app.add_handler(CommandHandler("stats", stats_cmd))
     app.add_handler(CommandHandler("price", price_cmd))
     app.add_handler(CommandHandler("dex", dex_cmd))
+    app.add_handler(CommandHandler("chart", chart_cmd))
     app.add_handler(CommandHandler("marketing", marketing_cmd))
     app.add_handler(CallbackQueryHandler(marketing_cb, pattern=r"^mk:"))
     app.add_handler(CommandHandler("trending", trending_cmd))
