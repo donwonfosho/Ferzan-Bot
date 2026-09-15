@@ -1,9 +1,20 @@
-python-telegram-bot[job-queue]==21.4
-requests==2.32.3
-python-dotenv==1.0.1
-solders==0.21.0
-eth-account==0.13.7
-cryptography==43.0.3
-# optional: TON send
-# pytoniq
-# pytoniq-core
+web3==7.*
+solana>=0.34
+solders>=0.21
+
+# solana-py's packaging around the spl.token submodule has shifted across
+# versions -- if `from spl.token.instructions import ...` fails after
+# installing `solana`, try:
+#   pip install spl-token
+# and verify against whatever version actually lands, per the confidence
+# note in solana_launch.py.
+
+anchorpy>=0.20
+# Used by pumpfun_launch.py to fetch pump.fun's on-chain IDL live rather
+# than hardcoding instruction layouts. Version pinning here is loose
+# since I could not test against a live install -- verify compatibility
+# with whatever `solana`/`solders` versions actually land together.
+
+fastapi>=0.110
+uvicorn>=0.29
+pydantic>=2

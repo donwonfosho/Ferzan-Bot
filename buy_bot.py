@@ -266,6 +266,37 @@ def _bar(usd: float, emoji: str = "🟢") -> str:
     return em * min(n, 10)
 
 
+def _holders(chain: str, ca: str, pair: dict) -> str:
+    n = pair.get("holders") or (pair.get("info") or {}).get("holders")
+    if n:
+        try:
+            return f"{int(n):,}"
+        except (TypeError, ValueError):
+            pass
+    net = GT_NET.get(chain, chain)
+    data = _gt(f"/networks/{net}/tokens/{ca}")
+    attrs = ((data or {}).get("data") or {}).get("attributes") or {}
+    for key in ("holders", "holder_count", "unique_holders"):
+        if attrs.get(key):
+            try:
+                return f"{int(float(attrs[key])):,}"
+            except (TypeError, ValueError):
+                pass
+    if str(chain).lower() in {"eth", "ethereum"} and ca.startswith("0x"):
+        try:
+            r = requests.get(
+                f"https://api.ethplorer.io/getTokenInfo/{ca}",
+                params={"apiKey": "freekey"},
+                timeout=10,
+            )
+            hc = (r.json() or {}).get("holdersCount")
+            if hc:
+                return f"{int(hc):,}"
+        except Exception:
+            pass
+    return ""
+
+
 def _usd(v) -> str:
     try:
         x = float(v)
@@ -331,7 +362,7 @@ def _card(chain: str, ca: str, tr: dict, attrs: dict, emoji: str = "🟢", tg_ur
     tag, label = _tier(usd)
     dex_name = (pair.get("dexId") or attrs.get("dex") or "").title()
     liq_usd = _usd((pair.get("liquidity") or {}).get("usd"))
-    holders = pair.get("holders") or attrs.get("holders") or ""
+    holders = _holders(chain, ca, pair) or attrs.get("holders") or ""
     xurl = ""
     web = ""
     for s in info.get("socials") or []:
@@ -355,10 +386,7 @@ def _card(chain: str, ca: str, tr: dict, attrs: dict, emoji: str = "🟢", tg_ur
     if cluster and cluster > 1:
         lines.append(f"🔥  {cluster} buys in 12s")
     if holders:
-        try:
-            lines.append(f"👥  Holders: {int(holders):,}")
-        except (TypeError, ValueError):
-            pass
+        lines.append(f"👥  Holders: {_esc(str(holders))}")
     links = f"👤  <a href=\"{_esc(buyer_url)}\">Buyer</a>  ·  <a href=\"{_esc(scan)}\">Txn</a>"
     if tg:
         links += f"  ·  <a href=\"{_esc(tg)}\">Telegram</a>"
