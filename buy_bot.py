@@ -1396,6 +1396,8 @@ def main() -> None:
         )
     )
     app.add_handler(CommandHandler("scan", scan_cmd))
+    app.add_handler(CommandHandler("fscan", scan_cmd))
+    app.add_handler(CommandHandler("ca", scan_cmd))
     app.add_handler(CommandHandler("setgif", setgif_cmd))
     app.add_handler(CommandHandler("settelegram", settelegram_cmd))
     app.add_handler(CommandHandler("preview", preview_cmd))
