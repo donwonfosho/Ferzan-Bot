@@ -259,11 +259,11 @@ def _bar(usd: float, emoji: str = "🟢") -> str:
     em = (emoji or "🟢").strip()[:8] or "🟢"
     if usd < 25:
         n = 3
-    elif usd < 150:
-        n = 8
+    elif usd < 80:
+        n = 6
     else:
-        n = 14
-    return em * n
+        n = 10
+    return em * min(n, 10)
 
 
 def _usd(v) -> str:
@@ -340,30 +340,34 @@ def _card(chain: str, ca: str, tr: dict, attrs: dict, emoji: str = "🟢", tg_ur
             xurl = s.get("url") or ""
     for w in info.get("websites") or []:
         web = w.get("url") or web
-    text = (
-        f"FERZAN · {_esc(str(chain).upper())} · <b>{_esc(sym)}</b>\n"
-        f"{_esc(name)} · {_esc(label).upper()}\n"
-        f"{_bar(usd, emoji)}\n\n"
-        f"${usd:,.2f} in · {_esc(got)} {_esc(sym)}\n"
-        f"MC {_usd(mc)}"
-    )
-    if liq_usd != "—":
-        text += f" · Liq {liq_usd}"
+    lines = [
+        f"⚡ FERZAN · {_esc(str(chain).upper())}",
+        f"<b>{_esc(name)}</b>  [${_esc(sym)}]  {_esc(label).upper()}",
+        _bar(usd, emoji),
+        "",
+        f"💵  {_esc(spent_s)}   (${usd:,.2f})",
+        f"🎒  Got: {_esc(got)} {_esc(sym)}",
+        f"🧢  Market cap: {_usd(mc)}",
+        f"💧  Liquidity: {liq_usd}",
+    ]
     if dex_name:
-        text += f"\nRoute {_esc(dex_name)}"
+        lines.append(f"🛣  Route: {_esc(dex_name)}")
     if cluster and cluster > 1:
-        text += f"\n{cluster} buys in 12s"
+        lines.append(f"🔥  {cluster} buys in 12s")
     if holders:
         try:
-            text += f"\nHolders {int(holders):,}"
+            lines.append(f"👥  Holders: {int(holders):,}")
         except (TypeError, ValueError):
             pass
-    text += f"\n<a href=\"{_esc(buyer_url)}\">Buyer</a> · <a href=\"{_esc(scan)}\">Txn</a>"
+    links = f"👤  <a href=\"{_esc(buyer_url)}\">Buyer</a>  ·  <a href=\"{_esc(scan)}\">Txn</a>"
     if tg:
-        text += f" · <a href=\"{_esc(tg)}\">Telegram</a>"
+        links += f"  ·  <a href=\"{_esc(tg)}\">Telegram</a>"
     if xurl:
-        text += f" · <a href=\"{_esc(xurl)}\">X</a>"
-    text += "\n<i>Routed by Ferzan</i>"
+        links += f"  ·  <a href=\"{_esc(xurl)}\">X</a>"
+    lines.append(links)
+    lines.append("")
+    lines.append("<i>See it. Ape it. Send it.</i>")
+    text = "\n".join(lines)
     hub = os.getenv("FERZAN_CHAT_URL") or "https://t.me/Ferzan_Chat"
     rows = [
         [
