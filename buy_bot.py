@@ -36,6 +36,38 @@ TREASURY_EVM = (os.getenv("FEE_WALLET_EVM") or os.getenv("PLATFORM_TREASURY_EVM"
 LAST_MEDIA: dict = {}
 SETGIF_WAIT: set = set()
 MIN_USD = float(os.getenv("BUYBOT_MIN_USD") or "15")
+EMOJI_PACK = (os.getenv("FERZAN_EMOJI_PACK") or "FerzanEcosytem").strip()
+_PACK_IDS: list[str] = []
+_PACK_FACE: list[str] = []
+
+
+def _ce(i: int, fallback: str) -> str:
+    if 0 <= i < len(_PACK_IDS) and _PACK_IDS[i]:
+        return f'<tg-emoji emoji-id="{_PACK_IDS[i]}">{fallback}</tg-emoji>'
+    return fallback
+
+
+def _face(i: int = 0) -> str:
+    if 0 <= i < len(_PACK_FACE) and _PACK_FACE[i]:
+        return _PACK_FACE[i]
+    return ""
+
+
+async def _load_pack(bot) -> None:
+    global _PACK_IDS, _PACK_FACE
+    try:
+        st = await bot.get_sticker_set(EMOJI_PACK)
+        _PACK_IDS, _PACK_FACE = [], []
+        for s in st.stickers or []:
+            cid = getattr(s, "custom_emoji_id", None)
+            if not cid:
+                continue
+            _PACK_IDS.append(cid)
+            _PACK_FACE.append(getattr(s, "emoji", None) or "")
+        log.info("emoji pack %s loaded %s icons", EMOJI_PACK, len(_PACK_IDS))
+    except Exception as exc:
+        log.warning("emoji pack %s: %s", EMOJI_PACK, exc)
+        _PACK_IDS, _PACK_FACE = [], []
 
 GT_NET = {
     "sol": "solana",
@@ -372,24 +404,24 @@ def _card(chain: str, ca: str, tr: dict, attrs: dict, emoji: str = "🟢", tg_ur
     for w in info.get("websites") or []:
         web = w.get("url") or web
     lines = [
-        f"⚡ FERZAN · {_esc(str(chain).upper())}",
+        f"{_ce(0, '⚡')} FERZAN · {_esc(str(chain).upper())}",
         f"<b>{_esc(name)}</b>  [${_esc(sym)}]  {_esc(label).upper()}",
         _bar(usd, emoji),
         "",
-        f"💵  {_esc(spent_s)}   (${usd:,.2f})",
-        f"🎒  Got: {_esc(got)} {_esc(sym)}",
-        f"🧢  Market cap: {_usd(mc)}",
-        f"💧  Liquidity: {liq_usd}",
+        f"{_ce(1, '💵')}  {_esc(spent_s)}   (${usd:,.2f})",
+        f"{_ce(2, '🎒')}  Got: {_esc(got)} {_esc(sym)}",
+        f"{_ce(3, '🧢')}  Market cap: {_usd(mc)}",
+        f"{_ce(4, '💧')}  Liquidity: {liq_usd}",
     ]
     if dex_name:
-        lines.append(f"🛣  Route: {_esc(dex_name)}")
+        lines.append(f"{_ce(5, '🛣')}  Route: {_esc(dex_name)}")
     if cluster and cluster > 1:
         lines.append(f"🔥  {cluster} buys in 12s")
     if holders:
-        lines.append(f"👥  Holders: {_esc(str(holders))}")
-    links = f"👤  <a href=\"{_esc(buyer_url)}\">Buyer</a>  ·  <a href=\"{_esc(scan)}\">Txn</a>"
+        lines.append(f"{_ce(7, '👥')}  Holders: {_esc(str(holders))}")
+    links = f"{_ce(6, '👤')}  <a href=\"{_esc(buyer_url)}\">Buyer</a>  ·  <a href=\"{_esc(scan)}\">Txn</a>"
     if tg:
-        links += f"  ·  <a href=\"{_esc(tg)}\">Telegram</a>"
+        links += f"  ·  {_ce(8, '💬')} <a href=\"{_esc(tg)}\">Telegram</a>"
     if xurl:
         links += f"  ·  <a href=\"{_esc(xurl)}\">X</a>"
     lines.append(links)
@@ -399,7 +431,7 @@ def _card(chain: str, ca: str, tr: dict, attrs: dict, emoji: str = "🟢", tg_ur
     hub = os.getenv("FERZAN_CHAT_URL") or "https://t.me/Ferzan_Chat"
     rows = [
         [
-            InlineKeyboardButton("Buy", url=buy),
+            InlineKeyboardButton(f"{_face(0)} Buy".strip(), url=buy),
             InlineKeyboardButton("Chart", url=ds),
             InlineKeyboardButton("Desk", url=hub),
         ],
@@ -1055,7 +1087,7 @@ async def paste_ca(update: Update, context: ContextTypes.DEFAULT_TYPE, forced_ca
     kb = InlineKeyboardMarkup(
         [
             [
-                InlineKeyboardButton("Buy", url=buy),
+                InlineKeyboardButton(f"{_face(0)} Buy".strip(), url=buy),
                 InlineKeyboardButton("Chart", url=ds),
                 InlineKeyboardButton("Scan", url=scan),
             ],
@@ -1457,6 +1489,7 @@ def main() -> None:
         raise SystemExit("Set BUYBOT_TOKEN in /opt/ferzan/.env")
     app = Application.builder().token(token).build()
     async def _menu(app_):
+        await _load_pack(app_.bot)
         await app_.bot.set_my_commands(
             [
                 BotCommand("start", "Ferzan Buy home"),
