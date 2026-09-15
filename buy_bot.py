@@ -530,9 +530,12 @@ async def setup_tg(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"✅ Watching {name} on {chain.upper()}\n"
         f"CA: `{ca}`\nBuys ≥ ${floor:.0f}\nBar: {emoji}{extra}\n\n"
-        "Optional: /setgif then send a GIF for buy cards.",
+        "Optional: /setgif then send a GIF for buy cards.\n"
+        "/setlogo — group photo = token logo (bot stays Ferzan).\n"
+        "/banner — pin a Ferzan ad in this chat.",
         parse_mode="Markdown",
     )
+    await _apply_token_logo(update, ca)
     context.user_data.pop("setup", None)
     return ConversationHandler.END
 
@@ -550,6 +553,71 @@ async def settelegram_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     con.commit()
     con.close()
     await update.effective_message.reply_text(f"Telegram link set: {url}")
+
+
+def _token_img(ca: str) -> str:
+    p = _ds(ca) or {}
+    info = p.get("info") or {}
+    return info.get("imageUrl") or info.get("header") or ""
+
+
+async def _apply_token_logo(update: Update, ca: str) -> None:
+    chat = update.effective_chat
+    if not chat or chat.type == "private":
+        return
+    url = _token_img(ca)
+    if not url:
+        return
+    try:
+        img = requests.get(url, timeout=15)
+        img.raise_for_status()
+        from io import BytesIO
+        bio = BytesIO(img.content)
+        bio.name = "logo.jpg"
+        await update.get_bot().set_chat_photo(chat.id, photo=bio)
+    except Exception as exc:
+        log.warning("set chat photo %s", exc)
+
+
+async def setlogo_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    row = _watch(update.effective_chat.id)
+    if not row:
+        await update.effective_message.reply_text("Pair a token first. /setup")
+        return
+    _, ca, _, _ = row
+    await _apply_token_logo(update, ca)
+    await update.effective_message.reply_text(
+        "Tried to set this GROUP photo to the token logo.\n"
+        "The bot avatar (circled) stays Ferzan — Telegram does not allow a per-chat bot PFP.\n"
+        "Bot needs admin right: Change group info."
+    )
+
+
+async def banner_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    banner = Path("/opt/ferzan/app/logo.jpg")
+    if not banner.exists():
+        banner = Path(__file__).resolve().parent / "logo.jpg"
+    cap = (
+        "⚡ FERZAN ECOSYSTEM\n"
+        "Trade · Signals · Launch · Liquidity · Guardian\n"
+        "See it. Ape it. Send it.\n"
+        f"{CHAT}"
+    )
+    kb = InlineKeyboardMarkup(
+        [[InlineKeyboardButton("Open Ferzan Desk", url=CHAT if CHAT.startswith("http") else f"https://t.me/{CHAT.lstrip('@')}")]]
+    )
+    try:
+        if banner.exists():
+            with banner.open("rb") as fh:
+                msg = await update.effective_message.reply_photo(fh, caption=cap, reply_markup=kb)
+        else:
+            msg = await update.effective_message.reply_text(cap, reply_markup=kb)
+        try:
+            await update.get_bot().pin_chat_message(update.effective_chat.id, msg.message_id, disable_notification=True)
+        except Exception:
+            pass
+    except Exception as exc:
+        await update.effective_message.reply_text(f"Banner failed: {exc}")
 
 
 def _flags(chat_id: int) -> tuple[int, int]:
@@ -1402,6 +1470,8 @@ def main() -> None:
     app.add_handler(CommandHandler("scan", scan_cmd))
     app.add_handler(CommandHandler("fscan", scan_cmd))
     app.add_handler(CommandHandler("ca", scan_cmd))
+    app.add_handler(CommandHandler("setlogo", setlogo_cmd))
+    app.add_handler(CommandHandler("banner", banner_cmd))
     app.add_handler(CommandHandler("setgif", setgif_cmd))
     app.add_handler(CommandHandler("settelegram", settelegram_cmd))
     app.add_handler(CommandHandler("preview", preview_cmd))
