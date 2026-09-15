@@ -1,121 +1,132 @@
-# CONFLUENCE
+# Launch Bot — Complete Stack
 
-A Telegram bot for **scored trading signals**, **paper execution**, **wallet watches**, **drawdown alerts**, and a **disclosed per-trade cut**.
+Non-custodial multi-chain token launcher for Telegram: Solana, Ethereum,
+BNB Chain, Base, and Robinhood Chain, with pump.fun-style bonding-curve
+revenue on the EVM chains and fee-on-usage routing through pump.fun's
+own program for Solana.
 
-It starts from the price-alert bot Claude already wrote (`/price`, `/alert`, `/list`, `/remove`) and adds the thing Banana Gun-class bots do not do: **it will refuse a trade**.
+**This is now a complete architecture, not just building blocks** — every
+piece from "user types /launch" to "token exists on-chain" has code.
+Read "Honest status" below before assuming any of it is production-ready,
+though — a lot of it needs real-world testing this sandbox couldn't do.
 
-Banana Gun, Trojan, Maestro, BonkBot optimize for speed — paste a contract, buy in the same chat. That is a crowded product. Confluence scores five independent factors (liquidity, activity, momentum, order flow, structure) and only paper-fills when they agree.
+## Full file map
 
-## What this is
-
-- Signal cards with the math visible
-- Paper long with auto stop / target
-- Daily loss circuit breaker
-- Watchlist scanner that pings you only on high-confluence names
-- Original CoinGecko price alerts, kept intact
-- Allowlist so you can run it as a private bot
-- Wallet-activity pings (Etherscan V2 + Helius / public Solana RPC)
-- Portfolio drawdown alerts off paper peak
-- 0.50% platform cut on paper fills, ready to map onto Jupiter/0x fee accounts
-
-## What this is not
-
-- Not a live sniper
-- Not a custodial wallet
-- Not financial advice
-- Not a “guaranteed signal” service
-
-Live on-chain execution (Jupiter / Uniswap, key custody, MEV relays) is how those other bots work — and how users get drained when a bot is compromised. That path is intentionally left out. If you later want a live adapter, it should sign on *your* machine, never store a seed in this process, and stay behind the same confluence + risk checks.
-
-## Setup
-
-```bash
-cd confluence-bot
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env
+```
+launch_bot.py                  -- Telegram bot: menu, conversation flow, opens the Mini App
+launch_bot_db.py                -- shared SQLite state between the bot and the API
+api.py                          -- FastAPI backend the Mini App talks to
+miniapp/
+  evm.html                      -- wallet-connect + signing UI for Ethereum/BNB/Base/Robinhood
+  solana.html                   -- wallet-connect + signing UI for Solana
+contracts/
+  LaunchToken.sol                -- fixed-supply ERC-20, no mint function
+  LaunchTokenFactory.sol         -- plain launch factory (mode 1)
+  BondingCurve.sol                -- pump.fun-style curve, 1% fee, 70/30 platform/creator split
+  BondingCurveFactory.sol         -- deploys token + curve together
+evm_launch.py                   -- unsigned-tx builders (plain + bonding curve), 4 EVM chains
+solana_launch.py                -- unsigned-tx builder, plain SPL launch
+pumpfun_launch.py               -- routes Solana launches through pump.fun + your fee
+requirements.txt
+LAUNCH_BOT_DEPLOYMENT.md        -- full deployment walkthrough (nginx, HTTPS, systemd x2)
 ```
 
-1. Open Telegram, talk to [@BotFather](https://t.me/BotFather)
-2. `/newbot` → copy the token into `.env` as `TELEGRAM_BOT_TOKEN`
-3. Optional: set `ALLOWED_USER_IDS` to your numeric id (`@userinfobot` will tell you)
-4. Run it:
+## How a launch actually flows, end to end
 
-```bash
-python bot.py
-```
+1. User sends `/launch` in Telegram
+2. Bot conversation collects: chain → mode → name → symbol → supply
+3. Bot writes a `launch_request` row to shared SQLite, opens the
+   chain-appropriate Mini App (`evm.html` or `solana.html`) with that
+   request's ID in the URL
+4. Mini App loads request details, user taps "Connect Wallet" (Reown
+   AppKit — MetaMask/WalletConnect for EVM, Phantom/Solflare for Solana)
+5. Mini App calls the backend to build the actual unsigned transaction
+   (this is where `evm_launch.py`/`solana_launch.py`/`pumpfun_launch.py`
+   get invoked)
+6. User's own wallet shows them the real transaction to approve — **the
+   bot and backend never see a private key at any point**
+7. Wallet signs and broadcasts; Mini App reports the result back to the
+   backend, which notifies the user in Telegram chat
 
-Then DM your bot `/start`.
+## Revenue model recap
 
-## Commands
-
-| Command | What it does |
+| Chain | Mechanism |
 |---|---|
-| `/signal sol` | Score a ticker or contract |
-| `/buy jup` | Paper-buy only if score ≥ your floor |
-| `/positions` | Open book + recent closes |
-| `/sell 3` | Close position `#3` at mark |
-| `/watch bonk` | Add to the scanner |
-| `/journal` | Decision log |
-| `/settings floor 70` | Raise the refusal threshold |
-| `/price sol` | CoinGecko spot (original bot) |
-| `/alert sol above 200` | Price ping (original bot) |
-| `/resetpaper` | Wipe the paper book back to $10k |
-| `/watchwallet sol <addr>` | Ping on new on-chain prints |
-| `/wallets` | List watched wallets |
-| `/drawdown` | Paper peak vs now |
-| `/fees` | Your cut paid + live fee-account status |
-| `/treasury` | Operator fee ledger |
-| `/snipe sol <CA> 40` | Arm a gated paper snipe |
-| `/snipes` | List armed / filled snipes |
-| `/cancelsnipe 3` | Cancel an armed snipe |
-| `/launches sol` | Fresh pools on a chain |
+| Ethereum, BNB, Base, Robinhood Chain | Your own `BondingCurve.sol` — 1% fee on every trade, forever, split 70/30 platform/creator |
+| Solana | Fee bundled into transactions your bot initiates, routed through pump.fun's live program — not a persistent cut of all trading, since you don't own that venue |
 
-Pasting a ticker or contract with no slash also scores it.
+## Getting to live testing
 
-## Fees (your cut)
+**→ Start with `TESTNET_SETUP.md`** — the concrete, ordered path from
+this code to an actual test launch on real testnets, including a real
+compatibility issue it flags (Uniswap V2 vs V3 router interfaces) and
+faucet links for every chain.
 
-Paper fills take `FEE_BPS` (default 50 = 0.50%) out of notional on both buy and sell. The ticket text shows the cut before it is recorded. Hard cap in code is 1%.
-
-Live money does **not** flow through this process. When you later attach Jupiter or 0x:
-
-- Solana: pass `platformFeeBps` + your `JUPITER_FEE_ACCOUNT` (token account for the fee mint)
-- EVM: pass `swapFeeRecipient` + `swapFeeBps` to 0x
-
-The router pays `FEE_WALLET_SOL` / `FEE_WALLET_EVM`. No user seed is stored. That is the same economic model as Banana Gun without the custody hole.
-
-## On-chain providers
-
-Free, no card:
-
-1. [Etherscan API V2](https://etherscan.io/apis) — one key, `chainid` selects eth/base/bsc/arb/op/polygon
-2. [Helius](https://dashboard.helius.dev) — parsed Solana history. If the key is empty, Solana watch falls back to public `getSignaturesForAddress`
-
-Without an Etherscan key, `/watchwallet eth …` will tell you to add one. Solana watch works the same day with no key.
-
-## How scoring works
-
-Each factor is 0–100, then weighted:
-
-- Liquidity 22%
-- Activity 18%
-- Momentum 24%
-- Order flow 16%
-- Structure 20%
-
-Hard vetoes (brand-new pool, sub-$40k liquidity, already +25% on 5m) cap the score at 54 so the bot cannot “like” a rug setup. Bias is `LONG` / `WATCH` / `AVOID`. A `LONG` below your floor still requires the Override button.
-
-## Files
-
+Quick version:
+```bash
+pip install -r requirements.txt
+npm install
+npx hardhat compile
+npx hardhat test          # test/LaunchToken.test.js -- some cases still need a mock-router fixture filled in
 ```
-bot.py             Telegram layer
-db.py              SQLite: alerts, users, positions, wallets, fees
-price_fetcher.py   CoinGecko + DexScreener
-confluence.py      Scoring
-trading.py         Paper broker + risk vault
-onchain.py         Etherscan V2 + Helius/public Solana
-fees.py            Cut math, ledger, Jupiter/0x param helpers
-```
+Then deploy per `TESTNET_SETUP.md`'s ordering, and full bot/API
+deployment per `LAUNCH_BOT_DEPLOYMENT.md`.
 
-Same three dependencies Claude used: `python-telegram-bot`, `requests`, `python-dotenv`.
+## Verified facts (checked directly during this build, not from memory)
+
+- Chain IDs: Ethereum 1, BNB Chain 56, Base 8453, Robinhood Chain 4663
+- WalletConnect Inc. rebranded to **Reown**; their SDK is **Reown AppKit**,
+  which explicitly documents Telegram Mini App support and covers both
+  EVM and Solana
+- pump.fun's program ID and public account-structure fragments, from
+  public documentation (not a live on-chain check)
+
+## Honest status, file by file — confidence varies a lot
+
+- **`launch_bot.py`, `launch_bot_db.py`** — high confidence. The
+  conversation flow was actually simulated end-to-end with stub objects
+  during development (not just eyeballed) — state transitions, data
+  handling, and the database write were all verified to work correctly.
+  One real bug (a misregistered callback handler that would have broken
+  the bot on every user's first click) was caught this way and fixed.
+
+- **`api.py`** — high confidence in structure (FastAPI's core API is
+  very stable), but not run against a live server — do a real local
+  test before deploying.
+
+- **`evm_launch.py`, `LaunchToken.sol`, `LaunchTokenFactory.sol`** —
+  high confidence. Stable, well-trodden patterns.
+
+- **`BondingCurve.sol`, `BondingCurveFactory.sol`** — **the highest-risk
+  code in this project.** Not compiled or tested. Needs unit tests, fuzz
+  testing, and a professional audit before real funds — this is not
+  optional for a custom AMM/bonding-curve contract holding real money.
+
+- **`solana_launch.py`** — medium confidence; `solana-py`/`solders` have
+  broken compatibility across versions before.
+
+- **`pumpfun_launch.py`** — lowest Python-side confidence, and
+  incomplete by design (two functions intentionally raise
+  `NotImplementedError` rather than guess at pump.fun's exact account
+  structure).
+
+- **`miniapp/evm.html`, `miniapp/solana.html`** — **lowest confidence of
+  anything in this entire project.** Never run in a browser, never
+  connected to a real wallet, never hit a real RPC endpoint — I have no
+  way to test JavaScript/browser code in the environment I built this
+  in. The overall flow (connect → build-tx → sign → report back) is the
+  right architecture, but treat every Reown AppKit API call as
+  "needs verification against current docs," not "known correct." This
+  is the part of the whole stack most likely to need real debugging
+  before it works.
+
+## What's genuinely still missing
+
+- Contracts aren't deployed anywhere yet — `TESTNET_SETUP.md` walks
+  through this
+- A Reown Project ID (free signup) needs to go in both Mini App files
+- pump.fun's account context (the two `NotImplementedError`s)
+- A real security audit of the bonding curve contracts — required before
+  mainnet, not before testnet
+- The `BondingCurve` test cases that currently call `this.skip()` need a
+  real mock-router fixture

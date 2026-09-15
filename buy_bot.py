@@ -36,15 +36,26 @@ TREASURY_EVM = (os.getenv("FEE_WALLET_EVM") or os.getenv("PLATFORM_TREASURY_EVM"
 LAST_MEDIA: dict = {}
 SETGIF_WAIT: set = set()
 MIN_USD = float(os.getenv("BUYBOT_MIN_USD") or "15")
-EMOJI_PACK = (os.getenv("FERZAN_EMOJI_PACK") or "FerzanEcosytem").strip()
+EMOJI_PACK = (os.getenv("FERZAN_EMOJI_PACK") or "FerzanBuyBot").strip()
 _PACK_IDS: list[str] = []
 _PACK_FACE: list[str] = []
+
+
+def _slot(name: str, default: int) -> int:
+    raw = os.getenv(f"FERZAN_EMOJI_{name}", "")
+    if raw.isdigit():
+        return int(raw)
+    return default
 
 
 def _ce(i: int, fallback: str) -> str:
     if 0 <= i < len(_PACK_IDS) and _PACK_IDS[i]:
         return f'<tg-emoji emoji-id="{_PACK_IDS[i]}">{fallback}</tg-emoji>'
     return fallback
+
+
+def _icon(name: str, default: int, fallback: str) -> str:
+    return _ce(_slot(name, default), fallback)
 
 
 def _face(i: int = 0) -> str:
@@ -404,24 +415,24 @@ def _card(chain: str, ca: str, tr: dict, attrs: dict, emoji: str = "🟢", tg_ur
     for w in info.get("websites") or []:
         web = w.get("url") or web
     lines = [
-        f"{_ce(0, '⚡')} FERZAN · {_esc(str(chain).upper())}",
+        f"{_icon('TITLE', 0, '⚡')} FERZAN · {_esc(str(chain).upper())}",
         f"<b>{_esc(name)}</b>  [${_esc(sym)}]  {_esc(label).upper()}",
         _bar(usd, emoji),
         "",
-        f"{_ce(1, '💵')}  {_esc(spent_s)}   (${usd:,.2f})",
-        f"{_ce(2, '🎒')}  Got: {_esc(got)} {_esc(sym)}",
-        f"{_ce(3, '🧢')}  Market cap: {_usd(mc)}",
-        f"{_ce(4, '💧')}  Liquidity: {liq_usd}",
+        f"{_icon('USD', 1, '💵')}  {_esc(spent_s)}   (${usd:,.2f})",
+        f"{_icon('BAG', 2, '🎒')}  Got: {_esc(got)} {_esc(sym)}",
+        f"{_icon('MC', 3, '🧢')}  Market cap: {_usd(mc)}",
+        f"{_icon('LIQ', 4, '💧')}  Liquidity: {liq_usd}",
     ]
     if dex_name:
-        lines.append(f"{_ce(5, '🛣')}  Route: {_esc(dex_name)}")
+        lines.append(f"{_icon('ROUTE', 5, '🛣')}  Route: {_esc(dex_name)}")
     if cluster and cluster > 1:
         lines.append(f"🔥  {cluster} buys in 12s")
     if holders:
-        lines.append(f"{_ce(7, '👥')}  Holders: {_esc(str(holders))}")
-    links = f"{_ce(6, '👤')}  <a href=\"{_esc(buyer_url)}\">Buyer</a>  ·  <a href=\"{_esc(scan)}\">Txn</a>"
+        lines.append(f"{_icon('HOLD', 7, '👥')}  Holders: {_esc(str(holders))}")
+    links = f"{_icon('BUYER', 6, '👤')}  <a href=\"{_esc(buyer_url)}\">Buyer</a>  ·  <a href=\"{_esc(scan)}\">Txn</a>"
     if tg:
-        links += f"  ·  {_ce(8, '💬')} <a href=\"{_esc(tg)}\">Telegram</a>"
+        links += f"  ·  {_icon('TG', 8, '💬')} <a href=\"{_esc(tg)}\">Telegram</a>"
     if xurl:
         links += f"  ·  <a href=\"{_esc(xurl)}\">X</a>"
     lines.append(links)
@@ -431,7 +442,7 @@ def _card(chain: str, ca: str, tr: dict, attrs: dict, emoji: str = "🟢", tg_ur
     hub = os.getenv("FERZAN_CHAT_URL") or "https://t.me/Ferzan_Chat"
     rows = [
         [
-            InlineKeyboardButton(f"{_face(0)} Buy".strip(), url=buy),
+            InlineKeyboardButton("Buy", url=buy),
             InlineKeyboardButton("Chart", url=ds),
             InlineKeyboardButton("Desk", url=hub),
         ],
@@ -678,6 +689,24 @@ async def banner_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             pass
     except Exception as exc:
         await update.effective_message.reply_text(f"Banner failed: {exc}")
+
+
+async def emojimap_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _PACK_IDS:
+        await _load_pack(update.get_bot())
+    if not _PACK_IDS:
+        await update.effective_message.reply_text(f"Pack {EMOJI_PACK} did not load.")
+        return
+    rows = []
+    for i, cid in enumerate(_PACK_IDS[:40]):
+        face = _PACK_FACE[i] if i < len(_PACK_FACE) else ""
+        rows.append(f"{i}: {face or '—'}  `{cid}`")
+    await update.effective_message.reply_text(
+        f"Pack {EMOJI_PACK} ({len(_PACK_IDS)} icons)\n"
+        "Number = slot on the card if we set FERZAN_EMOJI_TITLE=N etc.\n\n"
+        + "\n".join(rows),
+        parse_mode="Markdown",
+    )
 
 
 def _flags(chat_id: int) -> tuple[int, int]:
@@ -1087,7 +1116,7 @@ async def paste_ca(update: Update, context: ContextTypes.DEFAULT_TYPE, forced_ca
     kb = InlineKeyboardMarkup(
         [
             [
-                InlineKeyboardButton(f"{_face(0)} Buy".strip(), url=buy),
+                InlineKeyboardButton("Buy", url=buy),
                 InlineKeyboardButton("Chart", url=ds),
                 InlineKeyboardButton("Scan", url=scan),
             ],
@@ -1533,6 +1562,7 @@ def main() -> None:
     app.add_handler(CommandHandler("ca", scan_cmd))
     app.add_handler(CommandHandler("setlogo", setlogo_cmd))
     app.add_handler(CommandHandler("banner", banner_cmd))
+    app.add_handler(CommandHandler("emojimap", emojimap_cmd))
     app.add_handler(CommandHandler("setgif", setgif_cmd))
     app.add_handler(CommandHandler("settelegram", settelegram_cmd))
     app.add_handler(CommandHandler("preview", preview_cmd))
