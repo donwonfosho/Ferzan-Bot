@@ -3175,7 +3175,10 @@ async def lp_watch_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 if liq > 0:
                     db.set_lp_mark(uid, mint, liq)
                 continue
-            yanked = liq <= max(500.0, prev * 0.25)
+            if liq >= prev * 0.80:
+                db.set_lp_mark(uid, mint, liq)
+                continue
+            yanked = prev >= 200 and liq <= prev * 0.25
             if not yanked:
                 db.set_lp_mark(uid, mint, liq)
                 continue
@@ -3200,6 +3203,8 @@ async def lp_watch_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             if _ok:
                 db.clear_live_cost(uid, mint)
                 db.clear_live_exit(uid, mint)
+            if "Nothing to sell" in str(msg) or "holds 0" in str(msg):
+                continue
             try:
                 await context.bot.send_message(
                     uid,
