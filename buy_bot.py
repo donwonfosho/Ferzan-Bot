@@ -1849,14 +1849,27 @@ async def lb_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.effective_message.reply_text("\n".join(lines), reply_markup=kb)
     con2 = _db()
     live = con2.execute(
-        "SELECT cashtag FROM raids WHERE chat_id=? AND active=1 ORDER BY id DESC LIMIT 1",
+        "SELECT cashtag FROM raids WHERE chat_id=? ORDER BY id DESC LIMIT 1",
         (update.effective_chat.id,),
     ).fetchone()
+    w = _watch(update.effective_chat.id)
+    tag = ((live[0] if live else "") or "").strip()
+    if not tag and w:
+        pair = _ds(w[1]) or {}
+        sym = ((pair.get("baseToken") or {}).get("symbol") or "TOKEN")
+        tag = "$" + str(sym)
+    if tag and not str(tag).startswith("$"):
+        tag = "$" + tag
+    try:
+        con2.execute(
+            "INSERT OR IGNORE INTO raid_tokens(cashtag, chat_id, pts) VALUES(?,?,1)",
+            (tag, update.effective_chat.id),
+        )
+        con2.commit()
+    except Exception:
+        pass
     con2.close()
-    tag = (live[0] if live else "") or ""
-    if tag:
-        w = _watch(update.effective_chat.id)
-        await _bump_token(context.bot, update.effective_chat, tag, w[1] if w else "")
+    await _bump_token(context.bot, update.effective_chat, tag, w[1] if w else "")
     err = await _post_board(context.bot)
     if err:
         await update.effective_message.reply_text(f"Board failed → {RAID_CH}\n{err}")
