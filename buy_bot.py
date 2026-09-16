@@ -32,8 +32,17 @@ DB = Path(os.getenv("BUYBOT_DB", "/opt/ferzan/app/buybot.db"))
 TRADE = (os.getenv("FERZAN_BOT_USERNAME") or "Ferzan_Trade_Bot").lstrip("@")
 CHAT = os.getenv("FERZAN_CHAT") or "https://t.me/Ferzan_Chat"
 HUB = os.getenv("FERZAN_HUB_URL") or "https://t.me/Ferzan_Trade_Ecosystem"
-RAID_CH = (os.getenv("FERZAN_RAID_CHAT") or "@Ferzan_Raid").strip()
-TRENDING_CH = (os.getenv("FERZAN_TRENDING_CHAT") or "@Ferzan_Trending").strip()
+def _tg_chat(val: str, fallback: str) -> str:
+    v = (val or fallback or "").strip()
+    if "t.me/" in v:
+        v = "@" + v.split("t.me/")[-1].split("?")[0].strip("/")
+    if v and not v.startswith("@") and not v.lstrip("-").isdigit():
+        v = "@" + v
+    return v
+
+
+RAID_CH = _tg_chat(os.getenv("FERZAN_RAID_CHAT") or "", "@Ferzan_Raid")
+TRENDING_CH = _tg_chat(os.getenv("FERZAN_TRENDING_CHAT") or "", "@Ferzan_Trending")
 TREASURY_SOL = (os.getenv("FEE_WALLET_SOL") or os.getenv("PLATFORM_TREASURY_SOL") or "").strip()
 TREASURY_EVM = (os.getenv("FEE_WALLET_EVM") or os.getenv("PLATFORM_TREASURY_EVM") or "").strip()
 LAST_MEDIA: dict = {}
@@ -1826,12 +1835,12 @@ async def lb_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         (update.effective_chat.id,),
     ).fetchall()
     con.close()
-    if not rows:
-        await update.effective_message.reply_text("No scores yet. /raidjoin after you raid.")
-        return
     lines = ["🏆 This chat — raiders"]
-    for i, (name, pts) in enumerate(rows, 1):
-        lines.append(f"{i}. {name}  {pts}")
+    if not rows:
+        lines.append("No taps in this chat yet.")
+    else:
+        for i, (name, pts) in enumerate(rows, 1):
+            lines.append(f"{i}. {name}  {pts}")
     kb = InlineKeyboardMarkup(
         [[InlineKeyboardButton("Token leaderboard", url="https://t.me/Ferzan_Raid")]]
     )
@@ -2243,6 +2252,7 @@ def main() -> None:
     app.add_handler(CommandHandler("queuelist", list_raids))
     app.add_handler(CommandHandler("raidjoin", raidjoin_cmd))
     app.add_handler(CommandHandler("lb", lb_cmd))
+    app.add_handler(CommandHandler("raidlb", lb_cmd))
     app.add_handler(CommandHandler("clb", lb_cmd))
     app.add_handler(CommandHandler("raidevent", raidevent_cmd))
     app.add_handler(CommandHandler("relb", lb_cmd))
