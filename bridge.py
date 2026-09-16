@@ -174,7 +174,7 @@ def _exec_sol(uid: int, pack: dict, data: dict) -> str:
             if isinstance(d, str) and len(d) > 80 and not d.startswith("0x"):
                 blob = d
             elif isinstance(d, dict):
-                for key in ("transaction", "tx", "serializedTransaction", "serializedTx"):
+                for key in ("transaction", "tx", "serializedTransaction", "serializedTx", "data"):
                     val = d.get(key)
                     if isinstance(val, str) and len(val) > 80:
                         blob = val
@@ -230,7 +230,18 @@ def _exec_sol(uid: int, pack: dict, data: dict) -> str:
         return f"Bridge deposit sent.\n{msg}\nDestination credit can take 30–90s."
 
     kinds = [str(s.get("kind") or s.get("id") or "") for s in (data.get("steps") or [])]
+    preview = ""
+    try:
+        item = ((data.get("steps") or [{}])[0].get("items") or [{}])[0]
+        d = item.get("data")
+        if isinstance(d, dict):
+            preview = "data keys: " + ",".join(list(d.keys())[:24])
+        else:
+            preview = f"data type={type(d).__name__}"
+    except Exception:
+        preview = "no item.data"
     raise RuntimeError(
-        "Relay did not return a signable Solana tx. "
-        f"Steps: {kinds or 'none'}. Try Base → ETH first."
+        "Relay Solana step is not a raw tx we can sign yet.\n"
+        f"Steps: {kinds or 'none'}. {preview}\n"
+        "Use Base → ETH until that payload is wired."
     )
