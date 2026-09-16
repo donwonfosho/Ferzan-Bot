@@ -1636,20 +1636,12 @@ async def _bump_token(bot, chat, tag: str, ca: str = "") -> None:
                 f"{_icon('TITLE', 0, 'F')} <b>{_esc(tag)}</b> entered the Raid Leaderboard.\n\n"
                 + (f"{_icon('TG', 8, 'F')} Group: <a href=\"{_esc(invite)}\">Open group</a>\n" if invite else "")
                 + f"{_icon('USD', 1, 'F')} Points: {pts}\n"
-                + f"{_icon('MC', 3, 'F')} Market cap: {mc or '—'}\n"
-                + f"{_icon('ROUTE', 5, 'F')} Dex: {dex or '—'}\n\n"
+                + f"{_icon('MC', 3, 'F')} Market cap: {mc or '—'}\n\n"
                 + f"<i>See it. Ape it. Send it.</i>"
             )
-            ban = _banner()
-            if ban:
-                with ban.open("rb") as fh:
-                    await bot.send_photo(
-                        RAID_CH, fh, caption=cap, parse_mode="HTML", reply_markup=kb
-                    )
-            else:
-                await bot.send_message(
-                    RAID_CH, cap, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True
-                )
+            await bot.send_message(
+                RAID_CH, cap, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True
+            )
             con3 = _db()
             con3.execute("UPDATE raid_tokens SET announced=1 WHERE cashtag=?", (tag,))
             con3.commit()
@@ -1686,8 +1678,8 @@ async def _post_board(bot) -> str:
     lines.append("\n<i>See it. Ape it. Send it.</i>")
     kb = InlineKeyboardMarkup(btn_rows[:8])
     text = "\n".join(lines)
-    try:
-        if mid:
+    if mid:
+        try:
             await bot.edit_message_caption(
                 chat_id=RAID_CH,
                 message_id=int(mid[0]),
@@ -1696,8 +1688,19 @@ async def _post_board(bot) -> str:
                 reply_markup=kb,
             )
             return ""
-    except Exception as exc:
-        log.warning("lb edit %s", exc)
+        except Exception:
+            try:
+                await bot.edit_message_text(
+                    chat_id=RAID_CH,
+                    message_id=int(mid[0]),
+                    text=text,
+                    parse_mode="HTML",
+                    reply_markup=kb,
+                    disable_web_page_preview=True,
+                )
+                return ""
+            except Exception as exc:
+                log.warning("lb edit %s", exc)
     try:
         ban = _banner()
         if ban:
