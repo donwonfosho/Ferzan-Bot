@@ -183,6 +183,7 @@ def _db() -> sqlite3.Connection:
             con.execute(f"ALTER TABLE raids ADD COLUMN {col} {spec}")
         except sqlite3.OperationalError:
             pass
+    con.execute("CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT)")
     con.execute(
         """CREATE TABLE IF NOT EXISTS raid_tokens (
             cashtag TEXT PRIMARY KEY,
@@ -190,9 +191,14 @@ def _db() -> sqlite3.Connection:
             invite TEXT,
             pts INTEGER DEFAULT 0,
             ca TEXT,
-            mc TEXT
+            mc TEXT,
+            dex TEXT
         )"""
     )
+    try:
+        con.execute("ALTER TABLE raid_tokens ADD COLUMN dex TEXT")
+    except sqlite3.OperationalError:
+        pass
     con.execute(
         """CREATE TABLE IF NOT EXISTS raid_taps (
             raid_id INTEGER,
@@ -201,7 +207,7 @@ def _db() -> sqlite3.Connection:
             PRIMARY KEY (raid_id, user_id, kind)
         )"""
     )
-    for col, spec in (("last_ping", "INTEGER DEFAULT 0"), ("ping_min", "INTEGER DEFAULT 5")):
+    for col, spec in (("last_ping", "INTEGER DEFAULT 0"), ("ping_min", "INTEGER DEFAULT 15")):
         try:
             con.execute(f"ALTER TABLE raids ADD COLUMN {col} {spec}")
         except sqlite3.OperationalError:
@@ -1529,7 +1535,7 @@ async def raid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         msg = await update.effective_message.reply_text(start, parse_mode="HTML", reply_markup=kb)
     con = _db()
     con.execute(
-        "UPDATE raids SET msg_id=?, last_ping=?, ping_min=5 WHERE id=?",
+        "UPDATE raids SET msg_id=?, last_ping=?, ping_min=15 WHERE id=?",
         (msg.message_id, int(time.time()), rid),
     )
     con.commit()
@@ -1559,22 +1565,24 @@ async def _bump_token(bot, chat, tag: str, ca: str = "") -> None:
         return
     invite = f"https://t.me/{chat.username}" if getattr(chat, "username", None) else ""
     mc = ""
+    dex = ""
     if ca:
-        pair = _ds(ca)
-        mc = _usd((pair.get("marketCap") if pair else None) or (pair or {}).get("fdv"))
+        pair = _ds(ca) or {}
+        mc = _usd(pair.get("marketCap") or pair.get("fdv"))
+        dex = (pair.get("dexId") or "").title()
     con = _db()
     row = con.execute("SELECT pts FROM raid_tokens WHERE cashtag=?", (tag,)).fetchone()
     first = not row
     if row:
         con.execute(
-            "UPDATE raid_tokens SET pts=pts+1, chat_id=?, invite=?, ca=?, mc=? WHERE cashtag=?",
-            (chat.id, invite, ca, mc, tag),
+            "UPDATE raid_tokens SET pts=pts+1, chat_id=?, invite=?, ca=?, mc=?, dex=? WHERE cashtag=?",
+            (chat.id, invite, ca, mc, dex, tag),
         )
         pts = int(row[0]) + 1
     else:
         con.execute(
-            "INSERT INTO raid_tokens(cashtag,chat_id,invite,pts,ca,mc) VALUES(?,?,?,?,?,?)",
-            (tag, chat.id, invite, 1, ca, mc),
+            "INSERT INTO raid_tokens(cashtag,chat_id,invite,pts,ca,mc,dex) VALUES(?,?,?,?,?,?,?)",
+            (tag, chat.id, invite, 1, ca, mc, dex),
         )
         pts = 1
     con.commit()
@@ -1589,10 +1597,11 @@ async def _bump_token(bot, chat, tag: str, ca: str = "") -> None:
         try:
             await bot.send_message(
                 RAID_CH,
-                f"⚔️ <b>{_esc(tag)}</b> entered the Raid Leaderboard.\n\n"
-                f"📣 Group: {invite or '—'}\n"
-                f"⚡ Points: {pts}\n"
-                f"🧢 Market cap: {mc or '—'}\n\n"
+                f"{_icon('TITLE', 0, '⚡')} <b>{_esc(tag)}</b>\n"
+                f"entered the Raid Leaderboard\n\n"
+                f"{_icon('TG', 8, '📣')}  Group: {invite or '—'}\n"
+                f"{_icon('USD', 1, '⚡')}  Points: {pts}\n"
+                f"{_icon('MC', 3, '🧢')}  Market cap: {mc or '—'}\n\n"
                 f"<i>See it. Ape it. Send it.</i>",
                 parse_mode="HTML",
                 reply_markup=kb,
@@ -1600,30 +1609,67 @@ async def _bump_token(bot, chat, tag: str, ca: str = "") -> None:
             )
         except Exception as exc:
             log.warning("lb enter %s", exc)
+    await _post_board(bot)
 
 
 async def _post_board(bot) -> None:
     con = _db()
     rows = con.execute(
-        "SELECT cashtag, pts, invite, mc FROM raid_tokens ORDER BY pts DESC LIMIT 10"
+        "SELECT cashtag, pts, invite, mc, ca, dex FROM raid_tokens ORDER BY pts DESC LIMIT 10"
     ).fetchall()
+    mid = con.execute("SELECT v FROM kv WHERE k='raid_board_msg'").fetchone()
     con.close()
     if not rows:
         return
-    medals = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"]
+    medals = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
     lines = [f"{_icon('TITLE', 0, '⚡')} <b>FERZAN RAID LEADERBOARD</b>\n"]
-    for i, (tag, pts, invite, mc) in enumerate(rows):
-        link = f"<a href=\"{_esc(invite)}\">{_esc(tag)}</a>" if invite else _esc(tag)
-        lines.append(f"{medals[i]}  {link}  ⚡ {pts}")
-        lines.append(f"    🧢 {mc or '—'}   🛒 Buy")
+    btn_rows = []
+    for i, (tag, pts, invite, mc, ca, dex) in enumerate(rows):
+        name = _esc(tag)
+        buy = f"https://t.me/{TRADE}?start={ca}" if ca else HUB
+        grp = f"<a href=\"{_esc(invite)}\">{name}</a>" if invite else name
+        lines.append(f"{medals[i]}  <b>{grp}</b>  {_icon('USD', 1, '⚡')} {pts}")
+        lines.append(
+            f"     {_icon('MC', 3, '🧢')} {mc or '—'}   "
+            f"{_icon('ROUTE', 5, '🛣')} {_esc(dex or '—')}   "
+            f"{_icon('BAG', 2, '🛒')} <a href=\"{_esc(buy)}\">Buy</a>"
+        )
+        btn_rows.append([InlineKeyboardButton(f"Buy {tag[:16]}", url=buy)])
     lines.append("\n<i>See it. Ape it. Send it.</i>")
+    kb = InlineKeyboardMarkup(btn_rows[:8])
+    text = "\n".join(lines)
     try:
-        await bot.send_message(
+        if mid:
+            await bot.edit_message_text(
+                chat_id=RAID_CH,
+                message_id=int(mid[0]),
+                text=text,
+                parse_mode="HTML",
+                reply_markup=kb,
+                disable_web_page_preview=True,
+            )
+            return
+    except Exception as exc:
+        log.warning("lb edit %s", exc)
+    try:
+        msg = await bot.send_message(
             RAID_CH,
-            "\n".join(lines),
+            text,
             parse_mode="HTML",
+            reply_markup=kb,
             disable_web_page_preview=True,
         )
+        con = _db()
+        con.execute(
+            "INSERT OR REPLACE INTO kv(k,v) VALUES('raid_board_msg',?)",
+            (str(msg.message_id),),
+        )
+        con.commit()
+        con.close()
+        try:
+            await bot.pin_chat_message(RAID_CH, msg.message_id, disable_notification=True)
+        except Exception:
+            pass
     except Exception as exc:
         log.warning("lb board %s", exc)
 
@@ -1825,7 +1871,7 @@ async def raidgoal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 async def raidint_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not context.args or not context.args[0].isdigit():
-        await update.effective_message.reply_text("Usage: /raidint 5    (minutes, 2–60)")
+        await update.effective_message.reply_text("Usage: /raidint 15    (minutes, 2–60). Default 15.")
         return
     mins = max(2, min(60, int(context.args[0])))
     con = _db()
@@ -1874,24 +1920,46 @@ async def tick(context: ContextTypes.DEFAULT_TYPE) -> None:
         if ends and now > int(ends):
             con.execute("UPDATE raids SET active=0 WHERE id=?", (rid,))
             continue
-        every = max(2, int(ping_min or 5)) * 60
+        every = max(2, int(ping_min or 15)) * 60
         if now - int(last_ping or 0) < every:
             continue
         txt = (
-            f"⚔️ RAID LIVE {tag or ''}\n"
-            f"❤️ {lh}/{lt}  🔁 {rh}/{rt}  💬 {eh}/{et}\n"
-            f"<a href=\"{_esc(url)}\">Open the post</a>\n"
+            f"{_icon('TITLE', 0, '⚡')}  <b>{_esc(tag or 'RAID')}</b>\n"
+            f"{_icon('ROUTE', 5, '📡')}  LIVE RAID\n"
+            f"────────────────\n"
+            f"{_icon('USD', 1, '❤️')}  Likes      <b>{lh}</b> / {lt}\n"
+            f"{_icon('BAG', 2, '🔁')}  Reposts    <b>{rh}</b> / {rt}\n"
+            f"{_icon('TG', 8, '💬')}  Replies    <b>{eh}</b> / {et}\n"
+            f"────────────────\n"
+            f"{_icon('BUYER', 6, '🔗')}  <a href=\"{_esc(url)}\">Open the post</a>\n"
             f"<i>See it. Ape it. Send it.</i>"
         )
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("Open Post", url=url)]])
+        kb = InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("Open Post", url=url)],
+                [InlineKeyboardButton("Leaderboard", url="https://t.me/Ferzan_Raid")],
+            ]
+        )
+        banner = Path("/opt/ferzan/app/raid.jpg")
+        if not banner.exists():
+            banner = Path(__file__).resolve().parent / "raid.jpg"
+        async def _send(dest):
+            if banner.exists():
+                with banner.open("rb") as fh:
+                    await context.bot.send_photo(
+                        dest, fh, caption=txt, parse_mode="HTML", reply_markup=kb
+                    )
+            else:
+                await context.bot.send_message(
+                    dest, txt, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True
+                )
         try:
-            await context.bot.send_message(
-                chat_id,
-                txt,
-                parse_mode="HTML",
-                reply_markup=kb,
-                disable_web_page_preview=True,
-            )
+            await _send(chat_id)
+            if RAID_CH and str(chat_id) != RAID_CH:
+                try:
+                    await _send(RAID_CH)
+                except Exception as exc:
+                    log.warning("raid ping channel %s", exc)
             con.execute("UPDATE raids SET last_ping=? WHERE id=?", (now, rid))
         except Exception as exc:
             log.warning("raid ping %s: %s", chat_id, exc)
