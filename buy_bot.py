@@ -1667,15 +1667,14 @@ async def _post_board(bot) -> str:
     for i, (tag, pts, invite, mc, ca, dex) in enumerate(rows):
         name = _esc(tag)
         buy = f"https://t.me/{TRADE}?start={ca}" if ca else HUB
-        grp = f"<a href=\"{_esc(invite)}\">{name}</a>" if invite else name
-        lines.append(f"{medals[i]}  <b>{grp}</b>  {_icon('USD', 1, 'F')} {pts}")
-        lines.append(
-            f"     {_icon('MC', 3, 'F')} {mc or '—'}   "
-            f"{_icon('ROUTE', 5, 'F')} {_esc(dex or '—')}   "
-            f"{_icon('BAG', 2, 'F')} <a href=\"{_esc(buy)}\">Buy</a>"
-        )
+        title = f"<a href=\"{_esc(invite)}\">{name}</a>" if invite else name
+        lines.append(f"{medals[i]}  <b>{title}</b>")
+        lines.append(f"{_icon('USD', 1, 'F')} Points: {pts}")
+        lines.append(f"{_icon('MC', 3, 'F')} Market cap: {mc or '—'}")
+        lines.append(f"{_icon('ROUTE', 5, 'F')} Dex: {_esc(dex or '—')}")
+        lines.append(f"{_icon('BAG', 2, 'F')} <a href=\"{_esc(buy)}\">Buy</a>\n")
         btn_rows.append([InlineKeyboardButton(f"Buy {tag[:16]}", url=buy)])
-    lines.append("\n<i>See it. Ape it. Send it.</i>")
+    lines.append("<i>See it. Ape it. Send it.</i>")
     kb = InlineKeyboardMarkup(btn_rows[:8])
     text = "\n".join(lines)
     if mid:
@@ -1719,6 +1718,10 @@ async def _post_board(bot) -> str:
         )
         con.commit()
         con.close()
+        try:
+            await bot.pin_chat_message(RAID_CH, msg.message_id, disable_notification=True)
+        except Exception:
+            pass
         return ""
     except Exception as exc:
         log.warning("lb board %s", exc)
