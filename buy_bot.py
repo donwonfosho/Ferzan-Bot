@@ -32,6 +32,8 @@ DB = Path(os.getenv("BUYBOT_DB", "/opt/ferzan/app/buybot.db"))
 TRADE = (os.getenv("FERZAN_BOT_USERNAME") or "Ferzan_Trade_Bot").lstrip("@")
 CHAT = os.getenv("FERZAN_CHAT") or "https://t.me/Ferzan_Chat"
 HUB = os.getenv("FERZAN_HUB_URL") or "https://t.me/Ferzan_Trade_Ecosystem"
+RAID_CH = (os.getenv("FERZAN_RAID_CHAT") or "@Ferzan_Raid").strip()
+TRENDING_CH = (os.getenv("FERZAN_TRENDING_CHAT") or "@Ferzan_Trending").strip()
 TREASURY_SOL = (os.getenv("FEE_WALLET_SOL") or os.getenv("PLATFORM_TREASURY_SOL") or "").strip()
 TREASURY_EVM = (os.getenv("FEE_WALLET_EVM") or os.getenv("PLATFORM_TREASURY_EVM") or "").strip()
 LAST_MEDIA: dict = {}
@@ -1496,6 +1498,15 @@ async def raid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     con.execute("UPDATE raids SET msg_id=? WHERE id=?", (msg.message_id, rid))
     con.commit()
     con.close()
+    if RAID_CH and str(update.effective_chat.username or "") != RAID_CH.lstrip("@"):
+        try:
+            if banner.exists():
+                with banner.open("rb") as fh:
+                    await context.bot.send_photo(RAID_CH, fh, caption=start, reply_markup=kb)
+            else:
+                await context.bot.send_message(RAID_CH, start, reply_markup=kb)
+        except Exception as exc:
+            log.warning("raid mirror %s: %s", RAID_CH, exc)
 
 
 async def raidstop_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1835,6 +1846,14 @@ async def paid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         parse_mode="Markdown",
         disable_web_page_preview=True,
     )
+    try:
+        await context.bot.send_message(
+            TRENDING_CH,
+            f"🔥 TRENDING REQUEST\nTx `{tx}`\n{extra or '—'}\nfrom {update.effective_user.mention_html()}",
+            parse_mode="HTML",
+        )
+    except Exception as exc:
+        log.warning("trending mirror %s: %s", TRENDING_CH, exc)
 
 
 def main() -> None:
