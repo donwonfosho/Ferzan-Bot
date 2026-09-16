@@ -227,12 +227,14 @@ def _exec_dln_sol(uid: int, pack: dict, data: dict) -> str:
         raise RuntimeError("sol_bridge_send.js is missing next to bridge.py.")
     env = os.environ.copy()
     env["FERZAN_SOL_KEY"] = sol_key
+    env["NODE_PATH"] = str(helper.parent / "node_modules")
     proc = subprocess.run(
         ["node", str(helper), rpc, base64.b64encode(raw).decode()],
         capture_output=True,
         text=True,
         timeout=25,
         env=env,
+        cwd=str(helper.parent),
     )
     if proc.returncode != 0:
         raise RuntimeError((proc.stderr or proc.stdout or "node sender failed").strip()[:400])
