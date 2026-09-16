@@ -31,6 +31,7 @@ log = logging.getLogger("buybot")
 DB = Path(os.getenv("BUYBOT_DB", "/opt/ferzan/app/buybot.db"))
 TRADE = (os.getenv("FERZAN_BOT_USERNAME") or "Ferzan_Trade_Bot").lstrip("@")
 CHAT = os.getenv("FERZAN_CHAT") or "https://t.me/Ferzan_Chat"
+HUB = os.getenv("FERZAN_HUB_URL") or "https://t.me/Ferzan_Trade_Ecosystem"
 TREASURY_SOL = (os.getenv("FEE_WALLET_SOL") or os.getenv("PLATFORM_TREASURY_SOL") or "").strip()
 TREASURY_EVM = (os.getenv("FEE_WALLET_EVM") or os.getenv("PLATFORM_TREASURY_EVM") or "").strip()
 LAST_MEDIA: dict = {}
@@ -124,6 +125,11 @@ def _db() -> sqlite3.Connection:
         con.execute("ALTER TABLE watches ADD COLUMN tg_url TEXT")
     except sqlite3.OperationalError:
         pass
+    for col in ("discord_url", "x_url"):
+        try:
+            con.execute(f"ALTER TABLE watches ADD COLUMN {col} TEXT")
+        except sqlite3.OperationalError:
+            pass
     con.execute(
         """CREATE TABLE IF NOT EXISTS chat_flags (
             chat_id INTEGER PRIMARY KEY,
@@ -292,10 +298,10 @@ def _trades(net: str, pool: str, last_ts: int) -> list[dict]:
 
 def _tier(usd: float) -> tuple[str, str]:
     if usd < 25:
-        return "SIP", "Sip"
+        return "SIP", "🦍 sip"
     if usd < 150:
-        return "APE", "Ape"
-    return "SEND", "Send it"
+        return "APE", "🦍 APE NOW"
+    return "SEND", "🦍 SEND IT"
 
 
 def _bar(usd: float, emoji: str = "🟢") -> str:
@@ -305,8 +311,8 @@ def _bar(usd: float, emoji: str = "🟢") -> str:
     elif usd < 80:
         n = 6
     else:
-        n = 10
-    return em * min(n, 10)
+        n = 8
+    return em * min(n, 8)
 
 
 def _holders(chain: str, ca: str, pair: dict) -> str:
@@ -354,7 +360,7 @@ def _usd(v) -> str:
     return f"${x:,.2f}"
 
 
-def _card(chain: str, ca: str, tr: dict, attrs: dict, emoji: str = "🟢", tg_url: str = "", cluster: int = 1) -> tuple[str, InlineKeyboardMarkup]:
+def _card(chain: str, ca: str, tr: dict, attrs: dict, emoji: str = "🟢", tg_url: str = "", cluster: int = 1, discord_url: str = "", x_url: str = "") -> tuple[str, InlineKeyboardMarkup]:
     usd = float(tr.get("volume_in_usd") or 0)
     got = tr.get("to_token_amount") or tr.get("to_token_output") or ""
     spent = tr.get("from_token_amount") or ""
@@ -393,7 +399,7 @@ def _card(chain: str, ca: str, tr: dict, attrs: dict, emoji: str = "🟢", tg_ur
     buyer_url = scan.replace("/tx/", "/address/") if buyer and "/tx/" in scan else ds
     liq = (os.getenv("FERZAN_LIQ_BOT") or "FerzanLiqBot").lstrip("@")
     boost = f"https://t.me/{liq}"
-    chat = tg or os.getenv("FERZAN_CHAT_URL") or "https://t.me/Ferzan_Chat"
+    chat = tg or os.getenv("FERZAN_CHAT_URL") or "https://t.me/Ferzan_Trade_Ecosystem"
     def _num(v):
         try:
             x = float(v)
@@ -414,16 +420,63 @@ def _card(chain: str, ca: str, tr: dict, attrs: dict, emoji: str = "🟢", tg_ur
             xurl = s.get("url") or ""
     for w in info.get("websites") or []:
         web = w.get("url") or web
+    chg = pair.get("priceChange") or {}
+    def _pct(key):
+        try:
+            x = float(chg.get(key) or 0)
+            return f"{'+' if x >= 0 else ''}{x:.1f}%"
+        except (TypeError, ValueError):
+            return "—"
+    age = ""
+    created = pair.get("pairCreatedAt") or pair.get("createdAt")
+    try:
+        created = int(created)
+        if created > 10_000_000_000:
+            created //= 1000
+        sec = max(0, int(time.time()) - created)
+        if sec < 3600:
+            age = f"{sec // 60}m"
+        elif sec < 86400:
+            age = f"{sec // 3600}h"
+        else:
+            age = f"{sec // 86400}d"
+    except (TypeError, ValueError):
+        age = ""
+    tax = attrs.get("buy_tax") or attrs.get("sell_tax") or ""
+    locked = ""
+    labels = [str(x).lower() for x in (pair.get("labels") or [])]
+    if any("lock" in x for x in labels):
+        locked = "LP lock"
+    top10 = attrs.get("top10") or attrs.get("top_10_holders") or ""
+    flags = []
+    if any(x in labels for x in ("honeypot", "scam")):
+        flags.append("⚠ honeypot flag")
+    if any("bundle" in x for x in labels):
+        flags.append("bundled")
+    if str(attrs.get("dev_sold") or "").lower() in {"1", "true", "yes"}:
+        flags.append("dev sold")
     lines = [
-        f"{_icon('TITLE', 0, '⚡')} FERZAN · {_esc(str(chain).upper())}",
-        f"<b>{_esc(name)}</b>  [${_esc(sym)}]  {_esc(label).upper()}",
+        f"<b>{_esc(name)}</b>  [${_esc(sym)}]  ·  {_esc(str(chain).upper())}",
+        f"{_esc(label)}",
         _bar(usd, emoji),
+        f"<code>{_esc(ca)}</code>",
+        "<i>tap CA to copy</i>",
         "",
         f"{_icon('USD', 1, '💵')}  {_esc(spent_s)}   (${usd:,.2f})",
         f"{_icon('BAG', 2, '🎒')}  Got: {_esc(got)} {_esc(sym)}",
         f"{_icon('MC', 3, '🧢')}  Market cap: {_usd(mc)}",
         f"{_icon('LIQ', 4, '💧')}  Liquidity: {liq_usd}",
     ]
+    if age or chg:
+        lines.append(f"⏱  {age or '—'}   5m {_pct('m5')}   1h {_pct('h1')}")
+    if tax:
+        lines.append(f"🧾  Tax: {_esc(str(tax))}")
+    if locked:
+        lines.append(f"🔒  {locked}")
+    if top10:
+        lines.append(f"📊  Top 10: {_esc(str(top10))}")
+    if flags:
+        lines.append("⚠  " + " · ".join(flags))
     if dex_name:
         lines.append(f"{_icon('ROUTE', 5, '🛣')}  Route: {_esc(dex_name)}")
     if cluster and cluster > 1:
@@ -433,18 +486,28 @@ def _card(chain: str, ca: str, tr: dict, attrs: dict, emoji: str = "🟢", tg_ur
     links = f"{_icon('BUYER', 6, '👤')}  <a href=\"{_esc(buyer_url)}\">Buyer</a>  ·  <a href=\"{_esc(scan)}\">Txn</a>"
     if tg:
         links += f"  ·  {_icon('TG', 8, '💬')} <a href=\"{_esc(tg)}\">Telegram</a>"
+    xurl = (x_url or "").strip() or xurl
+    disc = (discord_url or "").strip()
     if xurl:
         links += f"  ·  <a href=\"{_esc(xurl)}\">X</a>"
+    if disc:
+        links += f"  ·  <a href=\"{_esc(disc)}\">Discord</a>"
     lines.append(links)
     lines.append("")
     lines.append("<i>See it. Ape it. Send it.</i>")
+    lines.append(f'{_icon("TITLE", 0, "⚡")} <a href="{_esc(HUB)}">FERZAN ECO HUB</a>')
     text = "\n".join(lines)
-    hub = os.getenv("FERZAN_CHAT_URL") or "https://t.me/Ferzan_Chat"
+    hub = HUB
     rows = [
         [
             InlineKeyboardButton("Buy", url=buy),
             InlineKeyboardButton("Chart", url=ds),
-            InlineKeyboardButton("Desk", url=hub),
+            InlineKeyboardButton("Eco Hub", url=hub),
+        ],
+        [
+            InlineKeyboardButton("0.05", url=buy),
+            InlineKeyboardButton("0.1", url=buy),
+            InlineKeyboardButton("0.25", url=buy),
         ],
         [InlineKeyboardButton("See it. Ape it. Send it.", url=buy)],
         [InlineKeyboardButton("Boost this alert", url=boost)],
@@ -571,7 +634,7 @@ async def setup_emoji(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Now set the project Telegram.\n"
         "USE https://t.me FORM only.\n"
-        "Example: https://t.me/Ferzan_Chat\n"
+        "Example: https://t.me/YourGroup\n"
         "Send skip to leave it empty."
     )
     return SETUP_TG
@@ -624,6 +687,38 @@ async def settelegram_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     con.commit()
     con.close()
     await update.effective_message.reply_text(f"Telegram link set: {url}")
+
+
+def _set_watch_url(chat_id: int, col: str, url: str) -> None:
+    con = _db()
+    con.execute(f"UPDATE watches SET {col}=? WHERE chat_id=?", (url, chat_id))
+    con.commit()
+    con.close()
+
+
+async def setdiscord_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    raw = " ".join(context.args or []).strip()
+    if "discord.gg/" not in raw.lower() and "discord.com/" not in raw.lower():
+        await update.effective_message.reply_text("Usage: /setdiscord https://discord.gg/yourinvite")
+        return
+    url = raw.split()[0]
+    if not url.startswith("http"):
+        url = "https://" + url
+    _set_watch_url(update.effective_chat.id, "discord_url", url)
+    await update.effective_message.reply_text(f"Discord set: {url}")
+
+
+async def setx_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    raw = " ".join(context.args or []).strip()
+    low = raw.lower()
+    if "x.com/" not in low and "twitter.com/" not in low:
+        await update.effective_message.reply_text("Usage: /setx https://x.com/yourproject")
+        return
+    url = raw.split()[0]
+    if not url.startswith("http"):
+        url = "https://" + url
+    _set_watch_url(update.effective_chat.id, "x_url", url)
+    await update.effective_message.reply_text(f"X set: {url}")
 
 
 def _token_img(ca: str) -> str:
@@ -725,8 +820,18 @@ async def preview_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     chain, ca, pool, _ = row
     _, attrs = _pool_for(chain, ca)
+    con = _db()
+    extra = con.execute(
+        "SELECT tg_url, discord_url, x_url, emoji FROM watches WHERE chat_id=?",
+        (update.effective_chat.id,),
+    ).fetchone()
+    con.close()
+    tg = extra[0] if extra else ""
+    disc = extra[1] if extra and len(extra) > 1 else ""
+    xx = extra[2] if extra and len(extra) > 2 else ""
+    em = extra[3] if extra and len(extra) > 3 else "🟢"
     fake = {"volume_in_usd": 25, "to_token_amount": "100000", "from_token_amount": "0.01", "tx_hash": "", "tx_from_address": ""}
-    text, kb = _card(chain, ca, fake, attrs, "🟢", "")
+    text, kb = _card(chain, ca, fake, attrs, em or "🟢", tg or "", 1, disc or "", xx or "")
     await update.effective_message.reply_text("PREVIEW — not a live buy.\n" + text, parse_mode="HTML", reply_markup=kb)
 
 
@@ -1094,7 +1199,7 @@ async def paste_ca(update: Update, context: ContextTypes.DEFAULT_TYPE, forced_ca
     dex = (pair.get("dexId") or "dex").title()
     ds = pair.get("url") or f"https://dexscreener.com/{pair.get('chainId')}/{ca}"
     buy = f"https://t.me/{TRADE}?start={ca}"
-    hub = os.getenv("FERZAN_CHAT_URL") or "https://t.me/Ferzan_Chat"
+    hub = HUB
     scan = {
         "sol": f"https://solscan.io/token/{ca}",
         "eth": f"https://etherscan.io/token/{ca}",
@@ -1121,7 +1226,7 @@ async def paste_ca(update: Update, context: ContextTypes.DEFAULT_TYPE, forced_ca
                 InlineKeyboardButton("Scan", url=scan),
             ],
             [InlineKeyboardButton("See it. Ape it. Send it.", url=buy)],
-            [InlineKeyboardButton("Desk", url=hub)],
+            [InlineKeyboardButton("Eco Hub", url=hub)],
         ]
     )
     header = (pair.get("info") or {}).get("header") or (pair.get("info") or {}).get("imageUrl")
@@ -1339,11 +1444,13 @@ async def untrack(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def tick(context: ContextTypes.DEFAULT_TYPE) -> None:
     con = _db()
     try:
-        rows = list(con.execute("SELECT chat_id, chain, ca, pool, last_ts, min_usd, emoji, tg_url FROM watches"))
+        rows = list(con.execute("SELECT chat_id, chain, ca, pool, last_ts, min_usd, emoji, tg_url, discord_url, x_url FROM watches"))
     except sqlite3.OperationalError:
         rows = [(*r, "") for r in con.execute("SELECT chat_id, chain, ca, pool, last_ts, min_usd, emoji FROM watches")]
     for chat_id, chain, ca, pool, last_ts, min_usd, emoji, *rest in rows:
         tg_url = rest[0] if rest else ""
+        discord_url = rest[1] if len(rest) > 1 else ""
+        x_url = rest[2] if len(rest) > 2 else ""
         tape, mute_until = _flags(chat_id)
         if not tape or mute_until > time.time():
             continue
@@ -1360,7 +1467,7 @@ async def tick(context: ContextTypes.DEFAULT_TYPE) -> None:
                 newest = max(newest, tr["ts"])
                 continue
             cluster = sum(1 for x in trades if abs(x["ts"] - tr["ts"]) <= 12)
-            text, kb = _card(chain, ca, tr, attrs, emoji or "🟢", tg_url or "", cluster)
+            text, kb = _card(chain, ca, tr, attrs, emoji or "🟢", tg_url or "", cluster, discord_url, x_url)
             con.execute("INSERT INTO buy_log(chat_id, ca, usd, ts) VALUES(?,?,?,?)", (chat_id, ca, usd, tr["ts"]))
             try:
                 media = _media(chat_id)
@@ -1565,6 +1672,8 @@ def main() -> None:
     app.add_handler(CommandHandler("emojimap", emojimap_cmd))
     app.add_handler(CommandHandler("setgif", setgif_cmd))
     app.add_handler(CommandHandler("settelegram", settelegram_cmd))
+    app.add_handler(CommandHandler("setdiscord", setdiscord_cmd))
+    app.add_handler(CommandHandler("setx", setx_cmd))
     app.add_handler(CommandHandler("preview", preview_cmd))
     app.add_handler(CommandHandler("tape", tape_cmd))
     app.add_handler(CommandHandler("mute", mute_cmd))
