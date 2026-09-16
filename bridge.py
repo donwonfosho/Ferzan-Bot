@@ -12,7 +12,7 @@ NATIVE_EVM = "0x0000000000000000000000000000000000000000"
 SOL_NATIVE = "11111111111111111111111111111111"
 
 CHAINS = {
-    "sol": {"name": "Solana", "id": 792703809, "unit": "SOL", "kind": "sol", "dec": 9, "currency": SOL_NATIVE},
+    "sol": {"name": "Solana", "id": 792703809, "unit": "SOL", "kind": "sol", "dec": 9, "currency": "So11111111111111111111111111111111111111112"},
     "eth": {"name": "Ethereum", "id": 1, "unit": "ETH", "kind": "evm", "dec": 18, "currency": NATIVE_EVM},
     "base": {"name": "Base", "id": 8453, "unit": "ETH", "kind": "evm", "dec": 18, "currency": NATIVE_EVM},
     "bsc": {"name": "BNB", "id": 56, "unit": "BNB", "kind": "evm", "dec": 18, "currency": NATIVE_EVM},
@@ -52,6 +52,7 @@ def quote(uid: int, src: str, dst: str, amt: str) -> dict:
         "destinationCurrency": CHAINS[dst]["currency"],
         "amount": _amount_raw(src, amt),
         "tradeType": "EXACT_INPUT",
+        "includeProtocolData": True,
     }
     headers = {"content-type": "application/json"}
     key = (os.getenv("RELAY_API_KEY") or "").strip()
@@ -70,14 +71,23 @@ def summarize(pack: dict) -> str:
     details = data.get("details") or {}
     cin = details.get("currencyIn") or {}
     cout = details.get("currencyOut") or {}
-    fee = details.get("totalImpact") or details.get("timeEstimate") or ""
-    inn = cin.get("amountFormatted") or cin.get("amount") or pack["amt"]
-    out = cout.get("amountFormatted") or cout.get("amount") or "?"
+    impact = details.get("totalImpact") or {}
+    if isinstance(impact, dict):
+        pct = impact.get("percent")
+        fee = f"Impact {pct}%" if pct is not None else ""
+    else:
+        fee = str(impact or "")
+    inn = cin.get("amountFormatted") or pack["amt"]
+    outn = cout.get("amountFormatted") or "?"
+    try:
+        outn = f"{float(outn):.6f}"
+    except (TypeError, ValueError):
+        pass
     return (
-        f"From {CHAINS[pack['src']]['name']}  {inn} {CHAINS[pack['src']]['unit']}\n"
-        f"To {CHAINS[pack['dst']]['name']}  {out} {CHAINS[pack['dst']]['unit']}\n"
-        f"Send {pack['user'][:10]}…\n"
-        f"Receive {pack['recv'][:10]}…\n"
+        f"From {CHAINS[pack['src']]['name']}   {inn} {CHAINS[pack['src']]['unit']}\n"
+        f"To {CHAINS[pack['dst']]['name']}   {outn} {CHAINS[pack['dst']]['unit']}\n"
+        f"Send {pack['user'][:12]}…\n"
+        f"Receive {pack['recv'][:12]}…\n"
         f"{fee}"
     )
 
@@ -132,50 +142,87 @@ def _exec_evm(uid: int, pack: dict, data: dict) -> str:
     return "Bridge submitted.\n" + "\n".join(links) + "\nDestination credit can take 30–90s."
 
 
+def _walk(obj):
+    if isinstance(obj, dict):
+        yield obj
+        for v in obj.values():
+            yield from _walk(v)
+    elif isinstance(obj, list):
+        for v in obj:
+            yield from _walk(v)
+
+
 def _exec_sol(uid: int, pack: dict, data: dict) -> str:
+    import base64
+    import signer as sol_signer
     import user_wallets
     from solders.keypair import Keypair
     from solders.transaction import VersionedTransaction
-    import base64
-    import signer as sol_signer
 
     sol_key, _evm = user_wallets.secrets(uid)
     try:
         kp = Keypair.from_base58_string(sol_key)
     except Exception:
         kp = Keypair.from_bytes(base64.b64decode(sol_key))
+
     blob = None
-    for step in data.get("steps") or []:
-        for item in step.get("items") or []:
-            d = item.get("data") or {}
-            if isinstance(d, str) and len(d) > 40:
-                blob = d
-            elif isinstance(d, dict):
-                blob = d.get("transaction") or d.get("tx") or d.get("serializedTransaction")
-            if blob:
-                break
-        if blob:
-            break
-    if not blob:
-        raise RuntimeError("Relay sent no Solana tx. Use an EVM→EVM pair or smaller size.")
-    raw = base64.b64decode(blob)
-    tx = VersionedTransaction.from_bytes(raw)
-    signed = VersionedTransaction(tx.message, [kp])
-    rpc = sol_signer._rpc()
-    payload = {
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "sendTransaction",
-        "params": [
-            base64.b64encode(bytes(signed)).decode(),
-            {"encoding": "base64", "skipPreflight": True},
-        ],
-    }
-    r = requests.post(rpc, json=payload, timeout=25)
-    body = r.json() if r.content else {}
-    if body.get("error"):
-        raise RuntimeError(str(body["error"]))
-    sig = body.get("result") or ""
-    if not sig:
-        raise RuntimeError("Solana RPC accepted nothing.")
-    return f"Bridge submitted.\nhttps://solscan.io/tx/{sig}\nDestination credit can take 30–90s."
+    deposit_to = ""
+    deposit_amt = 0
+    for node in _walk(data):
+        for key in ("transaction", "tx", "serializedTransaction", "serializedTx"):
+            val = node.get(key)
+            if isinstance(val, str) and len(val) > 80:
+                blob = val
+        raw = node.get("data")
+        if isinstance(raw, str) and len(raw) > 80 and not raw.startswith("0x"):
+            blob = raw
+        dest = str(node.get("to") or node.get("depositAddress") or "")
+        if dest and not dest.startswith("0x") and 32 <= len(dest) <= 48:
+            deposit_to = dest
+            raw_amt = node.get("value") or node.get("amount") or node.get("lamports") or 0
+            try:
+                deposit_amt = int(str(raw_amt), 0)
+            except (TypeError, ValueError):
+                deposit_amt = 0
+
+    if blob:
+        try:
+            raw = base64.b64decode(blob)
+        except Exception:
+            raw = bytes.fromhex(blob)
+        tx = VersionedTransaction.from_bytes(raw)
+        signed = VersionedTransaction(tx.message, [kp])
+        rpc = sol_signer._rpc()
+        body = requests.post(
+            rpc,
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "sendTransaction",
+                "params": [
+                    base64.b64encode(bytes(signed)).decode(),
+                    {"encoding": "base64", "skipPreflight": True},
+                ],
+            },
+            timeout=25,
+        ).json()
+        if body.get("error"):
+            raise RuntimeError(str(body["error"]))
+        sig = body.get("result") or ""
+        if not sig:
+            raise RuntimeError("Solana RPC accepted nothing.")
+        return f"Bridge submitted.\nhttps://solscan.io/tx/{sig}\nDestination credit can take 30–90s."
+
+    if deposit_to:
+        if deposit_amt <= 0:
+            deposit_amt = int(float(pack["amt"]) * 1_000_000_000)
+        ok, msg = sol_signer.send_sol(deposit_to, sol_key, deposit_amt)
+        if not ok:
+            raise RuntimeError(msg)
+        return f"Bridge deposit sent.\n{msg}\nDestination credit can take 30–90s."
+
+    kinds = [str(s.get("kind") or s.get("id") or "") for s in (data.get("steps") or [])]
+    raise RuntimeError(
+        "Relay did not return a signable Solana tx. "
+        f"Steps: {kinds or 'none'}. Try Base → ETH first."
+    )
