@@ -544,34 +544,41 @@ def _card(chain: str, ca: str, tr: dict, attrs: dict, emoji: str = "🟢", tg_ur
         flags.append("bundled")
     if str(attrs.get("dev_sold") or "").lower() in {"1", "true", "yes"}:
         flags.append("dev sold")
+    extra = []
+    if tax:
+        extra.append(f"tax {_esc(str(tax))}")
+    if locked:
+        extra.append(locked)
+    if top10:
+        extra.append(f"top10 {_esc(str(top10))}")
+    if flags:
+        extra.extend(flags)
+    if cluster and cluster > 1:
+        extra.append(f"{cluster} buys / 12s")
     lines = [
         f"<b>{_esc(name)}</b>  [${_esc(sym)}]  ·  {_esc(str(chain).upper())}",
-        f"{_esc(label)}",
-        _bar(usd, emoji),
+        f"{_esc(label)}   {_bar(usd, emoji)}",
         f"<code>{_esc(ca)}</code>",
-        "<i>tap CA to copy</i>",
-        "",
-        f"{_icon('USD', 1, '💵')}  {_esc(spent_s)}   (${usd:,.2f})",
-        f"{_icon('BAG', 2, '🎒')}  Got: {_esc(got)} {_esc(sym)}",
-        f"{_icon('MC', 3, '🧢')}  Market cap: {_usd(mc)}",
-        f"{_icon('LIQ', 4, '💧')}  Liquidity: {liq_usd}",
+        (
+            f"{_icon('USD', 1, '💵')} {_esc(spent_s)} (${usd:,.2f})"
+            f"   {_icon('BAG', 2, '🎒')} {_esc(got)} {_esc(sym)}"
+        ),
+        (
+            f"{_icon('MC', 3, '🧢')} {_usd(mc)}"
+            f"   {_icon('LIQ', 4, '💧')} {liq_usd}"
+            + (f"   ⏱ {age}" if age else "")
+            + (f"   5m {_pct('m5')}  1h {_pct('h1')}" if chg else "")
+        ),
     ]
-    if age or chg:
-        lines.append(f"⏱  {age or '—'}   5m {_pct('m5')}   1h {_pct('h1')}")
-    if tax:
-        lines.append(f"🧾  Tax: {_esc(str(tax))}")
-    if locked:
-        lines.append(f"🔒  {locked}")
-    if top10:
-        lines.append(f"📊  Top 10: {_esc(str(top10))}")
-    if flags:
-        lines.append("⚠  " + " · ".join(flags))
+    mid = []
     if dex_name:
-        lines.append(f"{_icon('ROUTE', 5, '🛣')}  Route: {_esc(dex_name)}")
-    if cluster and cluster > 1:
-        lines.append(f"🔥  {cluster} buys in 12s")
+        mid.append(f"{_icon('ROUTE', 5, '🛣')} {_esc(dex_name)}")
     if holders:
-        lines.append(f"{_icon('HOLD', 7, '👥')}  Holders: {_esc(str(holders))}")
+        mid.append(f"{_icon('HOLD', 7, '👥')} {_esc(str(holders))}")
+    if mid:
+        lines.append("   ·   ".join(mid))
+    if extra:
+        lines.append(" · ".join(extra))
     links = f"{_icon('BUYER', 6, '👤')}  <a href=\"{_esc(buyer_url)}\">Buyer</a>  ·  <a href=\"{_esc(scan)}\">Txn</a>"
     if tg:
         links += f"  ·  {_icon('TG', 8, '💬')} <a href=\"{_esc(tg)}\">Telegram</a>"
