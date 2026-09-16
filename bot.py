@@ -2602,7 +2602,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             if not pack:
                 await query.edit_message_text("Quote expired. Tap Get Quote again.", reply_markup=_bridge_kb(st, uid))
                 return
-            await query.edit_message_text("Signing on the desk…")
+            await query.edit_message_text("Signing on the desk… (35s cap)")
             try:
                 import asyncio
                 import bridge as ferzan_bridge
