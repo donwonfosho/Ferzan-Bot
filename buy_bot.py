@@ -152,9 +152,35 @@ def _db() -> sqlite3.Connection:
             chat_id INTEGER,
             url TEXT,
             note TEXT,
-            created INTEGER
+            created INTEGER,
+            likes_t INTEGER DEFAULT 5,
+            rt_t INTEGER DEFAULT 5,
+            re_t INTEGER DEFAULT 2,
+            likes_h INTEGER DEFAULT 0,
+            rt_h INTEGER DEFAULT 0,
+            re_h INTEGER DEFAULT 0,
+            ends INTEGER DEFAULT 0,
+            cashtag TEXT,
+            active INTEGER DEFAULT 1,
+            msg_id INTEGER DEFAULT 0
         )"""
     )
+    for col, spec in (
+        ("likes_t", "INTEGER DEFAULT 5"),
+        ("rt_t", "INTEGER DEFAULT 5"),
+        ("re_t", "INTEGER DEFAULT 2"),
+        ("likes_h", "INTEGER DEFAULT 0"),
+        ("rt_h", "INTEGER DEFAULT 0"),
+        ("re_h", "INTEGER DEFAULT 0"),
+        ("ends", "INTEGER DEFAULT 0"),
+        ("cashtag", "TEXT"),
+        ("active", "INTEGER DEFAULT 1"),
+        ("msg_id", "INTEGER DEFAULT 0"),
+    ):
+        try:
+            con.execute(f"ALTER TABLE raids ADD COLUMN {col} {spec}")
+        except sqlite3.OperationalError:
+            pass
     con.execute(
         """CREATE TABLE IF NOT EXISTS raid_scores (
             chat_id INTEGER,
@@ -1322,24 +1348,216 @@ async def vote_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+def _pct_bar(have: int, need: int) -> str:
+    need = max(1, int(need or 1))
+    have = max(0, int(have or 0))
+    return f"{have} | {need}  [{min(100, int(100 * have / need))}%]"
+
+
+def _raid_text(row: dict) -> str:
+    tag = row.get("cashtag") or ""
+    mins = max(1, int((row.get("ends") or 0) - time.time()) // 60) if row.get("active") else 0
+    status = "IN PROGRESS" if row.get("active") else "STOPPED"
+    return (
+        f"{_icon('TITLE', 0, '⚡')} FERZAN RAID · {status}\n"
+        f"{_esc(tag)}\n\n"
+        f"❤️ Likes {_pct_bar(row['likes_h'], row['likes_t'])}\n"
+        f"🔁 Reposts {_pct_bar(row['rt_h'], row['rt_t'])}\n"
+        f"💬 Replies {_pct_bar(row['re_h'], row['re_t'])}\n\n"
+        f"⏱ {mins}m left\n"
+        f"Open the post:\n{_esc(row['url'])}\n"
+        + (f"\nCashtag: {_esc(tag)}" if tag else "")
+        + "\n\nTap ❤️ 🔁 💬 after you engage. Honor system — X does not give us live counts."
+    )
+
+
+def _raid_kb(rid: int, url: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("Open Post", url=url),
+                InlineKeyboardButton("Stop", callback_data=f"rd:stop:{rid}"),
+            ],
+            [
+                InlineKeyboardButton("LB", callback_data=f"rd:lb:{rid}"),
+                InlineKeyboardButton("❤️", callback_data=f"rd:like:{rid}"),
+                InlineKeyboardButton("🔁", callback_data=f"rd:rt:{rid}"),
+                InlineKeyboardButton("💬", callback_data=f"rd:re:{rid}"),
+            ],
+            [InlineKeyboardButton("Eco Hub", url=HUB)],
+        ]
+    )
+
+
+def _active_raid(chat_id: int):
+    con = _db()
+    row = con.execute(
+        "SELECT id, url, likes_t, rt_t, re_t, likes_h, rt_h, re_h, ends, cashtag, active, msg_id "
+        "FROM raids WHERE chat_id=? AND active=1 ORDER BY id DESC LIMIT 1",
+        (chat_id,),
+    ).fetchone()
+    con.close()
+    if not row:
+        return None
+    keys = ["id", "url", "likes_t", "rt_t", "re_t", "likes_h", "rt_h", "re_h", "ends", "cashtag", "active", "msg_id"]
+    return dict(zip(keys, row))
+
+
 async def raid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not context.args:
-        await update.effective_message.reply_text("Usage: /raid https://x.com/...")
+        await update.effective_message.reply_text(
+            "⚔️ FERZAN RAID\n"
+            "/raid <x link> [likes] [reposts] [replies] [minutes]\n"
+            "Example:\n"
+            "/raid https://x.com/user/status/123 5 5 2 60\n"
+            "/raidstop  /raidlb  /queue <link>"
+        )
         return
     url = context.args[0]
-    note = " ".join(context.args[1:])
+    if "x.com/" not in url and "twitter.com/" not in url:
+        await update.effective_message.reply_text("Need an x.com or twitter.com status link.")
+        return
+    nums = []
+    for a in context.args[1:]:
+        if a.isdigit():
+            nums.append(int(a))
+    likes_t = nums[0] if len(nums) > 0 else 5
+    rt_t = nums[1] if len(nums) > 1 else 5
+    re_t = nums[2] if len(nums) > 2 else 2
+    mins = nums[3] if len(nums) > 3 else 60
+    tag = ""
+    w = _watch(update.effective_chat.id)
+    if w:
+        _, ca, _, _ = w
+        pair = _ds(ca)
+        tag = "$" + ((pair.get("baseToken") or {}).get("symbol") or "")
+        if tag == "$":
+            tag = ""
+    extra = " ".join(a for a in context.args[1:] if not a.isdigit())
+    if extra.startswith("$"):
+        tag = extra.split()[0]
     con = _db()
-    con.execute(
-        "INSERT INTO raids(chat_id, url, note, created) VALUES(?,?,?,?)",
-        (update.effective_chat.id, url, note, int(time.time())),
+    con.execute("UPDATE raids SET active=0 WHERE chat_id=?", (update.effective_chat.id,))
+    cur = con.execute(
+        "INSERT INTO raids(chat_id,url,note,created,likes_t,rt_t,re_t,ends,cashtag,active) "
+        "VALUES(?,?,?,?,?,?,?,?,?,1)",
+        (
+            update.effective_chat.id,
+            url,
+            extra,
+            int(time.time()),
+            likes_t,
+            rt_t,
+            re_t,
+            int(time.time()) + mins * 60,
+            tag,
+        ),
     )
+    rid = cur.lastrowid
     con.commit()
     con.close()
-    kb = InlineKeyboardMarkup([[InlineKeyboardButton("Open X", url=url)]])
-    await update.effective_message.reply_text(
-        f"📣 RAID\n{url}\n{note}\nLike · Repost · Comment. Tap /raidjoin to log points.",
-        reply_markup=kb,
+    row = {
+        "id": rid,
+        "url": url,
+        "likes_t": likes_t,
+        "rt_t": rt_t,
+        "re_t": re_t,
+        "likes_h": 0,
+        "rt_h": 0,
+        "re_h": 0,
+        "ends": int(time.time()) + mins * 60,
+        "cashtag": tag,
+        "active": 1,
+    }
+    start = (
+        f"{_icon('TITLE', 0, '⚡')} NEW FERZAN RAID\n{tag or ''}\n\n"
+        f"Targets\n❤️ {likes_t}   🔁 {rt_t}   💬 {re_t}\n"
+        f"⏱ {mins} minutes\n\n{_esc(url)}\n"
+        + (f"Cashtag: {tag}\n" if tag else "")
+        + "Smash the post. Tap ❤️ 🔁 💬 when you have."
     )
+    banner = Path("/opt/ferzan/app/raid.jpg")
+    if not banner.exists():
+        banner = Path(__file__).resolve().parent / "raid.jpg"
+    if not banner.exists():
+        banner = Path("/opt/ferzan/app/logo.jpg")
+    if not banner.exists():
+        banner = Path(__file__).resolve().parent / "logo.jpg"
+    kb = _raid_kb(rid, url)
+    try:
+        if banner.exists():
+            with banner.open("rb") as fh:
+                msg = await update.effective_message.reply_photo(fh, caption=start, reply_markup=kb)
+        else:
+            msg = await update.effective_message.reply_text(start, reply_markup=kb)
+    except Exception:
+        msg = await update.effective_message.reply_text(start, reply_markup=kb)
+    con = _db()
+    con.execute("UPDATE raids SET msg_id=? WHERE id=?", (msg.message_id, rid))
+    con.commit()
+    con.close()
+
+
+async def raidstop_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    con = _db()
+    con.execute("UPDATE raids SET active=0 WHERE chat_id=?", (update.effective_chat.id,))
+    con.commit()
+    con.close()
+    await update.effective_message.reply_text("Raid stopped.")
+
+
+async def raid_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    await q.answer()
+    parts = (q.data or "").split(":")
+    if len(parts) < 3:
+        return
+    _, kind, rid = parts[0], parts[1], int(parts[2])
+    con = _db()
+    if kind == "stop":
+        con.execute("UPDATE raids SET active=0 WHERE id=?", (rid,))
+        con.commit()
+        con.close()
+        await q.edit_message_caption(caption="⚔️ Raid stopped.") if q.message.photo else None
+        try:
+            await q.edit_message_text("⚔️ Raid stopped.")
+        except Exception:
+            pass
+        return
+    if kind == "lb":
+        con.close()
+        await lb_cmd(update, context)
+        return
+    col = {"like": "likes_h", "rt": "rt_h", "re": "re_h"}.get(kind)
+    if not col:
+        con.close()
+        return
+    u = update.effective_user
+    con.execute(
+        "INSERT INTO raid_scores(chat_id, user_id, name, pts) VALUES(?,?,?,1) "
+        "ON CONFLICT(chat_id, user_id) DO UPDATE SET pts = pts + 1, name=excluded.name",
+        (update.effective_chat.id, u.id, u.full_name or u.username or str(u.id)),
+    )
+    con.execute(f"UPDATE raids SET {col} = {col} + 1 WHERE id=? AND active=1", (rid,))
+    con.commit()
+    row = con.execute(
+        "SELECT id, url, likes_t, rt_t, re_t, likes_h, rt_h, re_h, ends, cashtag, active, msg_id "
+        "FROM raids WHERE id=?",
+        (rid,),
+    ).fetchone()
+    con.close()
+    if not row:
+        return
+    keys = ["id", "url", "likes_t", "rt_t", "re_t", "likes_h", "rt_h", "re_h", "ends", "cashtag", "active", "msg_id"]
+    d = dict(zip(keys, row))
+    txt = _raid_text(d)
+    try:
+        if q.message.photo:
+            await q.edit_message_caption(caption=txt, reply_markup=_raid_kb(rid, d["url"]))
+        else:
+            await q.edit_message_text(txt, reply_markup=_raid_kb(rid, d["url"]))
+    except Exception:
+        pass
 
 
 async def queue_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1704,6 +1922,8 @@ def main() -> None:
     app.add_handler(CommandHandler("market", market_cmd))
     app.add_handler(CommandHandler("vote", vote_cmd))
     app.add_handler(CommandHandler("raid", raid_cmd))
+    app.add_handler(CommandHandler("raidstop", raidstop_cmd))
+    app.add_handler(CallbackQueryHandler(raid_cb, pattern=r"^rd:"))
     app.add_handler(CommandHandler("queue", queue_cmd))
     app.add_handler(CommandHandler("next", next_cmd))
     app.add_handler(CommandHandler("nextlist", list_raids))
