@@ -4,13 +4,14 @@ from __future__ import annotations
 import html
 import logging
 import os
+import re
 import sqlite3
 import time
 from pathlib import Path
 
 import requests
 from dotenv import load_dotenv
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -29,12 +30,55 @@ log = logging.getLogger("buybot")
 
 DB = Path(os.getenv("BUYBOT_DB", "/opt/ferzan/app/buybot.db"))
 TRADE = (os.getenv("FERZAN_BOT_USERNAME") or "Ferzan_Trade_Bot").lstrip("@")
-CHAT = os.getenv("FERZAN_CHAT") or "https://t.me/Ferzan_Chat"
+CHAT = os.getenv("FERZAN_CHAT") or "https://t.me/Ferzan_Trade_Ecosystem"
 TREASURY_SOL = (os.getenv("FEE_WALLET_SOL") or os.getenv("PLATFORM_TREASURY_SOL") or "").strip()
 TREASURY_EVM = (os.getenv("FEE_WALLET_EVM") or os.getenv("PLATFORM_TREASURY_EVM") or "").strip()
 LAST_MEDIA: dict = {}
 SETGIF_WAIT: set = set()
 MIN_USD = float(os.getenv("BUYBOT_MIN_USD") or "15")
+EMOJI_PACK = (os.getenv("FERZAN_EMOJI_PACK") or "FerzanBuyBot").strip()
+_PACK_IDS: list[str] = []
+_PACK_FACE: list[str] = []
+
+
+def _slot(name: str, default: int) -> int:
+    raw = os.getenv(f"FERZAN_EMOJI_{name}", "")
+    if raw.isdigit():
+        return int(raw)
+    return default
+
+
+def _ce(i: int, fallback: str) -> str:
+    if 0 <= i < len(_PACK_IDS) and _PACK_IDS[i]:
+        return f'<tg-emoji emoji-id="{_PACK_IDS[i]}">{fallback}</tg-emoji>'
+    return fallback
+
+
+def _icon(name: str, default: int, fallback: str) -> str:
+    return _ce(_slot(name, default), fallback)
+
+
+def _face(i: int = 0) -> str:
+    if 0 <= i < len(_PACK_FACE) and _PACK_FACE[i]:
+        return _PACK_FACE[i]
+    return ""
+
+
+async def _load_pack(bot) -> None:
+    global _PACK_IDS, _PACK_FACE
+    try:
+        st = await bot.get_sticker_set(EMOJI_PACK)
+        _PACK_IDS, _PACK_FACE = [], []
+        for s in st.stickers or []:
+            cid = getattr(s, "custom_emoji_id", None)
+            if not cid:
+                continue
+            _PACK_IDS.append(cid)
+            _PACK_FACE.append(getattr(s, "emoji", None) or "")
+        log.info("emoji pack %s loaded %s icons", EMOJI_PACK, len(_PACK_IDS))
+    except Exception as exc:
+        log.warning("emoji pack %s: %s", EMOJI_PACK, exc)
+        _PACK_IDS, _PACK_FACE = [], []
 
 GT_NET = {
     "sol": "solana",
@@ -76,6 +120,31 @@ def _db() -> sqlite3.Connection:
         con.execute("ALTER TABLE watches ADD COLUMN emoji TEXT DEFAULT '🟢'")
     except sqlite3.OperationalError:
         pass
+    try:
+        con.execute("ALTER TABLE watches ADD COLUMN tg_url TEXT")
+    except sqlite3.OperationalError:
+        pass
+    for col in ("discord_url", "x_url"):
+        try:
+            con.execute(f"ALTER TABLE watches ADD COLUMN {col} TEXT")
+        except sqlite3.OperationalError:
+            pass
+    con.execute(
+        """CREATE TABLE IF NOT EXISTS chat_flags (
+            chat_id INTEGER PRIMARY KEY,
+            tape INTEGER DEFAULT 1,
+            mute_until INTEGER DEFAULT 0
+        )"""
+    )
+    con.execute(
+        """CREATE TABLE IF NOT EXISTS buy_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER,
+            ca TEXT,
+            usd REAL,
+            ts INTEGER
+        )"""
+    )
     con.execute(
         """CREATE TABLE IF NOT EXISTS raids (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -226,23 +295,54 @@ def _trades(net: str, pool: str, last_ts: int) -> list[dict]:
     return out
 
 
+def _tier(usd: float) -> tuple[str, str]:
+    if usd < 25:
+        return "SIP", "🦍 sip"
+    if usd < 150:
+        return "APE", "🦍 APE NOW"
+    return "SEND", "🦍 SEND IT"
+
+
 def _bar(usd: float, emoji: str = "🟢") -> str:
     em = (emoji or "🟢").strip()[:8] or "🟢"
-    if usd < 20:
+    if usd < 25:
         n = 3
-    elif usd < 50:
-        n = 8
-    elif usd < 100:
-        n = 12
-    elif usd < 250:
-        n = 18
-    elif usd < 500:
-        n = 24
+    elif usd < 80:
+        n = 6
     else:
-        n = 36
-    row = 12
-    chunks = [em * min(row, n - i) for i in range(0, n, row)]
-    return "\n".join(chunks)
+        n = 10
+    return em * min(n, 10)
+
+
+def _holders(chain: str, ca: str, pair: dict) -> str:
+    n = pair.get("holders") or (pair.get("info") or {}).get("holders")
+    if n:
+        try:
+            return f"{int(n):,}"
+        except (TypeError, ValueError):
+            pass
+    net = GT_NET.get(chain, chain)
+    data = _gt(f"/networks/{net}/tokens/{ca}")
+    attrs = ((data or {}).get("data") or {}).get("attributes") or {}
+    for key in ("holders", "holder_count", "unique_holders"):
+        if attrs.get(key):
+            try:
+                return f"{int(float(attrs[key])):,}"
+            except (TypeError, ValueError):
+                pass
+    if str(chain).lower() in {"eth", "ethereum"} and ca.startswith("0x"):
+        try:
+            r = requests.get(
+                f"https://api.ethplorer.io/getTokenInfo/{ca}",
+                params={"apiKey": "freekey"},
+                timeout=10,
+            )
+            hc = (r.json() or {}).get("holdersCount")
+            if hc:
+                return f"{int(hc):,}"
+        except Exception:
+            pass
+    return ""
 
 
 def _usd(v) -> str:
@@ -259,7 +359,7 @@ def _usd(v) -> str:
     return f"${x:,.2f}"
 
 
-def _card(chain: str, ca: str, tr: dict, attrs: dict, emoji: str = "🟢") -> tuple[str, InlineKeyboardMarkup]:
+def _card(chain: str, ca: str, tr: dict, attrs: dict, emoji: str = "🟢", tg_url: str = "", cluster: int = 1, discord_url: str = "", x_url: str = "") -> tuple[str, InlineKeyboardMarkup]:
     usd = float(tr.get("volume_in_usd") or 0)
     got = tr.get("to_token_amount") or tr.get("to_token_output") or ""
     spent = tr.get("from_token_amount") or ""
@@ -278,8 +378,10 @@ def _card(chain: str, ca: str, tr: dict, attrs: dict, emoji: str = "🟢") -> tu
     net = GT_NET.get(chain, chain)
     ds = pair.get("url") or f"https://dexscreener.com/{net}/{ca}"
     info = pair.get("info") or {}
-    tg = ""
+    tg = (tg_url or "").strip()
     for s in info.get("socials") or []:
+        if tg:
+            break
         if str(s.get("type") or "").lower() in ("telegram", "tg"):
             tg = s.get("url") or ""
             break
@@ -296,16 +398,19 @@ def _card(chain: str, ca: str, tr: dict, attrs: dict, emoji: str = "🟢") -> tu
     buyer_url = scan.replace("/tx/", "/address/") if buyer and "/tx/" in scan else ds
     liq = (os.getenv("FERZAN_LIQ_BOT") or "FerzanLiqBot").lstrip("@")
     boost = f"https://t.me/{liq}"
-    chat = os.getenv("FERZAN_CHAT_URL") or "https://t.me/Ferzan_Chat"
-    spent_s = spent or f"{usd:,.2f}"
-    text = (
-        f"<b>{_esc(name)}</b> [{_esc(sym)}] ⚡ Buy!\n"
-        f"{_bar(usd, emoji)}\n\n"
-        f"💵 | {_esc(spent_s)} (${usd:,.2f})\n"
-        f"💼 | Got: {_esc(got)}\n"
-        f"👤 | <a href=\"{_esc(buyer_url)}\">Buyer</a> | <a href=\"{_esc(scan)}\">Txn</a>\n"
-        f"🎯 | Market Cap: {_usd(mc)}\n"
-    )
+    chat = tg or os.getenv("FERZAN_CHAT_URL") or "https://t.me/Ferzan_Trade_Ecosystem"
+    def _num(v):
+        try:
+            x = float(v)
+            return f"{x:,.2f}" if x < 1000 else f"{x:,.0f}"
+        except (TypeError, ValueError):
+            return str(v or "")
+    spent_s = _num(spent) if spent else f"{usd:,.2f}"
+    got = _num(got) if got else got
+    tag, label = _tier(usd)
+    dex_name = (pair.get("dexId") or attrs.get("dex") or "").title()
+    liq_usd = _usd((pair.get("liquidity") or {}).get("usd"))
+    holders = _holders(chain, ca, pair) or attrs.get("holders") or ""
     xurl = ""
     web = ""
     for s in info.get("socials") or []:
@@ -314,27 +419,51 @@ def _card(chain: str, ca: str, tr: dict, attrs: dict, emoji: str = "🟢") -> tu
             xurl = s.get("url") or ""
     for w in info.get("websites") or []:
         web = w.get("url") or web
+    lines = [
+        f"{_esc(str(chain).upper())} · <b>{_esc(name)}</b>  [${_esc(sym)}]",
+        f"{_esc(label)}",
+        _bar(usd, emoji),
+        "",
+        f"{_icon('USD', 1, '💵')}  {_esc(spent_s)}   (${usd:,.2f})",
+        f"{_icon('BAG', 2, '🎒')}  Got: {_esc(got)} {_esc(sym)}",
+        f"{_icon('MC', 3, '🧢')}  Market cap: {_usd(mc)}",
+        f"{_icon('LIQ', 4, '💧')}  Liquidity: {liq_usd}",
+    ]
+    if dex_name:
+        lines.append(f"{_icon('ROUTE', 5, '🛣')}  Route: {_esc(dex_name)}")
+    if cluster and cluster > 1:
+        lines.append(f"🔥  {cluster} buys in 12s")
+    if holders:
+        lines.append(f"{_icon('HOLD', 7, '👥')}  Holders: {_esc(str(holders))}")
+    links = f"{_icon('BUYER', 6, '👤')}  <a href=\"{_esc(buyer_url)}\">Buyer</a>  ·  <a href=\"{_esc(scan)}\">Txn</a>"
     if tg:
-        text += f"👥 | <a href=\"{_esc(tg)}\">Telegram</a>\n"
+        links += f"  ·  {_icon('TG', 8, '💬')} <a href=\"{_esc(tg)}\">Telegram</a>"
+    xurl = (x_url or "").strip() or xurl
+    disc = (discord_url or "").strip()
     if xurl:
-        text += f"🐦 | <a href=\"{_esc(xurl)}\">X</a>\n"
-    if web:
-        text += f"🌐 | <a href=\"{_esc(web)}\">Web</a>\n"
-    text += f"📈 | <a href=\"{_esc(ds)}\">Dex</a>"
+        links += f"  ·  <a href=\"{_esc(xurl)}\">X</a>"
+    if disc:
+        links += f"  ·  <a href=\"{_esc(disc)}\">Discord</a>"
+    lines.append(links)
+    lines.append("")
+    lines.append("<i>See it. Ape it. Send it.</i>")
+    lines.append(f"{_icon('TITLE', 0, '⚡')} FERZAN ECO HUB")
+    text = "\n".join(lines)
+    hub = os.getenv("FERZAN_CHAT_URL") or "https://t.me/Ferzan_Trade_Ecosystem"
     rows = [
         [
-            InlineKeyboardButton("⚡ Ferzan", url=buy),
-            InlineKeyboardButton("📈 Dex", url=ds),
-            InlineKeyboardButton("🗳 Vote", url=chat),
+            InlineKeyboardButton("Buy", url=buy),
+            InlineKeyboardButton("Chart", url=ds),
+            InlineKeyboardButton("Eco Hub", url=hub),
         ],
-        [InlineKeyboardButton("See it. Ape it. Send it. Use Ferzan", url=buy)],
-        [InlineKeyboardButton("🚀 Boost rank", url=boost)],
+        [InlineKeyboardButton("See it. Ape it. Send it.", url=buy)],
+        [InlineKeyboardButton("Boost this alert", url=boost)],
     ]
     kb = InlineKeyboardMarkup(rows)
     return text, kb
 
 
-SETUP_CHAIN, SETUP_CA, SETUP_MIN, SETUP_EMOJI = range(4)
+SETUP_CHAIN, SETUP_CA, SETUP_MIN, SETUP_EMOJI, SETUP_TG = range(5)
 
 CHAIN_BTNS = [
     [InlineKeyboardButton("◎ Solana", callback_data="su:sol"),
@@ -358,6 +487,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/setemoji 🚕  buy-size bar\n"
         "/setgif  buy card GIF\n"
         "/untrack  stop alerts\n"
+        "/preview  fake card   /status\n"
+        "/tape on|off   /mute 1h   /min 50   /who\n"
         "/chart  token card + Dex chart\n"
         "/stats /price /dex /market /vote /raid\n"
         "/help"
@@ -427,39 +558,297 @@ async def setup_min(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return SETUP_EMOJI
 
 
-async def setup_emoji(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    raw = (update.message.text or "").strip()
-    emoji = "🟢" if raw.lower() in {"skip", "-", "default"} else (raw[:8] or "🟢")
-    st = context.user_data.get("setup") or {}
-    chain, ca = st.get("chain"), st.get("ca")
-    floor = float(st.get("min_usd") or MIN_USD)
-    chat_id = update.effective_chat.id
-    pool, attrs = _pool_for(chain, ca)
-    if not pool:
-        pool = ca
-        attrs = attrs or {"name": ca[:10], "source": "manual"}
+def _save_watch(chat_id: int, chain: str, ca: str, pool: str, floor: float, emoji: str, tg_url: str = "") -> None:
     con = _db()
     try:
+        con.execute(
+            "INSERT OR REPLACE INTO watches(chat_id, chain, ca, pool, last_ts, min_usd, emoji, tg_url) VALUES(?,?,?,?,?,?,?,?)",
+            (chat_id, chain, ca, pool, int(time.time()), floor, emoji, tg_url),
+        )
+    except sqlite3.OperationalError:
         con.execute(
             "INSERT OR REPLACE INTO watches(chat_id, chain, ca, pool, last_ts, min_usd, emoji) VALUES(?,?,?,?,?,?,?)",
             (chat_id, chain, ca, pool, int(time.time()), floor, emoji),
         )
-    except sqlite3.OperationalError:
-        con.execute(
-            "INSERT OR REPLACE INTO watches(chat_id, chain, ca, pool, last_ts, min_usd) VALUES(?,?,?,?,?,?)",
-            (chat_id, chain, ca, pool, int(time.time()), floor),
-        )
     con.commit()
     con.close()
+
+
+async def setup_emoji(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    raw = (update.message.text or "").strip()
+    emoji = "🟢" if raw.lower() in {"skip", "-", "default"} else (raw[:8] or "🟢")
+    context.user_data.setdefault("setup", {})["emoji"] = emoji
+    await update.message.reply_text(
+        "Now set the project Telegram.\n"
+        "USE https://t.me FORM only.\n"
+        "Example: https://t.me/Ferzan_Trade_Ecosystem\n"
+        "Send skip to leave it empty."
+    )
+    return SETUP_TG
+
+
+async def setup_tg(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    raw = (update.message.text or "").strip()
+    tg = ""
+    if raw.lower() not in {"skip", "-", "none"}:
+        if "t.me/" not in raw.lower() and "telegram.me/" not in raw.lower():
+            await update.message.reply_text("Must be https://t.me/YourGroup — or send skip.")
+            return SETUP_TG
+        tg = raw.split()[0]
+        if not tg.startswith("http"):
+            tg = "https://" + tg.lstrip("/")
+    st = context.user_data.get("setup") or {}
+    chain, ca = st.get("chain"), st.get("ca")
+    floor = float(st.get("min_usd") or MIN_USD)
+    emoji = st.get("emoji") or "🟢"
+    pool, attrs = _pool_for(chain, ca)
+    if not pool:
+        pool = ca
+        attrs = attrs or {"name": ca[:10], "source": "manual"}
+    _save_watch(update.effective_chat.id, chain, ca, pool, floor, emoji, tg)
     name = attrs.get("name") or ca
+    extra = f"\nTelegram: {tg}" if tg else "\nTelegram: not set (/settelegram https://t.me/...)"
     await update.message.reply_text(
         f"✅ Watching {name} on {chain.upper()}\n"
-        f"CA: `{ca}`\nBuys ≥ ${floor:.0f}\nBar: {emoji}\n\n"
-        "Optional: /setgif then send a GIF for buy cards.",
+        f"CA: `{ca}`\nBuys ≥ ${floor:.0f}\nBar: {emoji}{extra}\n\n"
+        "Optional: /setgif then send a GIF for buy cards.\n"
+        "/setlogo — group photo = token logo (bot stays Ferzan).\n"
+        "/banner — pin a Ferzan ad in this chat.",
         parse_mode="Markdown",
     )
+    await _apply_token_logo(update, ca)
     context.user_data.pop("setup", None)
     return ConversationHandler.END
+
+
+async def settelegram_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    raw = " ".join(context.args or []).strip()
+    if not raw or "t.me/" not in raw.lower():
+        await update.effective_message.reply_text("Usage: /settelegram https://t.me/YourGroup")
+        return
+    url = raw.split()[0]
+    if not url.startswith("http"):
+        url = "https://" + url
+    con = _db()
+    con.execute("UPDATE watches SET tg_url=? WHERE chat_id=?", (url, update.effective_chat.id))
+    con.commit()
+    con.close()
+    await update.effective_message.reply_text(f"Telegram link set: {url}")
+
+
+def _set_watch_url(chat_id: int, col: str, url: str) -> None:
+    con = _db()
+    con.execute(f"UPDATE watches SET {col}=? WHERE chat_id=?", (url, chat_id))
+    con.commit()
+    con.close()
+
+
+async def setdiscord_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    raw = " ".join(context.args or []).strip()
+    if "discord.gg/" not in raw.lower() and "discord.com/" not in raw.lower():
+        await update.effective_message.reply_text("Usage: /setdiscord https://discord.gg/yourinvite")
+        return
+    url = raw.split()[0]
+    if not url.startswith("http"):
+        url = "https://" + url
+    _set_watch_url(update.effective_chat.id, "discord_url", url)
+    await update.effective_message.reply_text(f"Discord set: {url}")
+
+
+async def setx_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    raw = " ".join(context.args or []).strip()
+    low = raw.lower()
+    if "x.com/" not in low and "twitter.com/" not in low:
+        await update.effective_message.reply_text("Usage: /setx https://x.com/yourproject")
+        return
+    url = raw.split()[0]
+    if not url.startswith("http"):
+        url = "https://" + url
+    _set_watch_url(update.effective_chat.id, "x_url", url)
+    await update.effective_message.reply_text(f"X set: {url}")
+
+
+def _token_img(ca: str) -> str:
+    p = _ds(ca) or {}
+    info = p.get("info") or {}
+    return info.get("imageUrl") or info.get("header") or ""
+
+
+async def _apply_token_logo(update: Update, ca: str) -> None:
+    chat = update.effective_chat
+    if not chat or chat.type == "private":
+        return
+    url = _token_img(ca)
+    if not url:
+        return
+    try:
+        img = requests.get(url, timeout=15)
+        img.raise_for_status()
+        from io import BytesIO
+        bio = BytesIO(img.content)
+        bio.name = "logo.jpg"
+        await update.get_bot().set_chat_photo(chat.id, photo=bio)
+    except Exception as exc:
+        log.warning("set chat photo %s", exc)
+
+
+async def setlogo_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    row = _watch(update.effective_chat.id)
+    if not row:
+        await update.effective_message.reply_text("Pair a token first. /setup")
+        return
+    _, ca, _, _ = row
+    await _apply_token_logo(update, ca)
+    await update.effective_message.reply_text(
+        "Tried to set this GROUP photo to the token logo.\n"
+        "The bot avatar (circled) stays Ferzan — Telegram does not allow a per-chat bot PFP.\n"
+        "Bot needs admin right: Change group info."
+    )
+
+
+async def banner_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    banner = Path("/opt/ferzan/app/logo.jpg")
+    if not banner.exists():
+        banner = Path(__file__).resolve().parent / "logo.jpg"
+    cap = (
+        "⚡ FERZAN ECOSYSTEM\n"
+        "Trade · Signals · Launch · Liquidity · Guardian\n"
+        "See it. Ape it. Send it.\n"
+        f"{CHAT}"
+    )
+    kb = InlineKeyboardMarkup(
+        [[InlineKeyboardButton("Open Ferzan Desk", url=CHAT if CHAT.startswith("http") else f"https://t.me/{CHAT.lstrip('@')}")]]
+    )
+    try:
+        if banner.exists():
+            with banner.open("rb") as fh:
+                msg = await update.effective_message.reply_photo(fh, caption=cap, reply_markup=kb)
+        else:
+            msg = await update.effective_message.reply_text(cap, reply_markup=kb)
+        try:
+            await update.get_bot().pin_chat_message(update.effective_chat.id, msg.message_id, disable_notification=True)
+        except Exception:
+            pass
+    except Exception as exc:
+        await update.effective_message.reply_text(f"Banner failed: {exc}")
+
+
+async def emojimap_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _PACK_IDS:
+        await _load_pack(update.get_bot())
+    if not _PACK_IDS:
+        await update.effective_message.reply_text(f"Pack {EMOJI_PACK} did not load.")
+        return
+    rows = []
+    for i, cid in enumerate(_PACK_IDS[:40]):
+        face = _PACK_FACE[i] if i < len(_PACK_FACE) else ""
+        rows.append(f"{i}: {face or '—'}  `{cid}`")
+    await update.effective_message.reply_text(
+        f"Pack {EMOJI_PACK} ({len(_PACK_IDS)} icons)\n"
+        "Number = slot on the card if we set FERZAN_EMOJI_TITLE=N etc.\n\n"
+        + "\n".join(rows),
+        parse_mode="Markdown",
+    )
+
+
+def _flags(chat_id: int) -> tuple[int, int]:
+    con = _db()
+    row = con.execute("SELECT tape, mute_until FROM chat_flags WHERE chat_id=?", (chat_id,)).fetchone()
+    con.close()
+    if not row:
+        return 1, 0
+    return int(row[0] or 1), int(row[1] or 0)
+
+
+async def preview_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    row = _watch(update.effective_chat.id)
+    if not row:
+        await update.effective_message.reply_text("Pair a token first. /setup")
+        return
+    chain, ca, pool, _ = row
+    _, attrs = _pool_for(chain, ca)
+    con = _db()
+    extra = con.execute(
+        "SELECT tg_url, discord_url, x_url, emoji FROM watches WHERE chat_id=?",
+        (update.effective_chat.id,),
+    ).fetchone()
+    con.close()
+    tg = extra[0] if extra else ""
+    disc = extra[1] if extra and len(extra) > 1 else ""
+    xx = extra[2] if extra and len(extra) > 2 else ""
+    em = extra[3] if extra and len(extra) > 3 else "🟢"
+    fake = {"volume_in_usd": 25, "to_token_amount": "100000", "from_token_amount": "0.01", "tx_hash": "", "tx_from_address": ""}
+    text, kb = _card(chain, ca, fake, attrs, em or "🟢", tg or "", 1, disc or "", xx or "")
+    await update.effective_message.reply_text("PREVIEW — not a live buy.\n" + text, parse_mode="HTML", reply_markup=kb)
+
+
+async def tape_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    arg = (context.args[0] if context.args else "").lower()
+    if arg not in {"on", "off"}:
+        await update.effective_message.reply_text("Usage: /tape on   or   /tape off")
+        return
+    on = 1 if arg == "on" else 0
+    con = _db()
+    con.execute("INSERT INTO chat_flags(chat_id, tape, mute_until) VALUES(?,?,0) ON CONFLICT(chat_id) DO UPDATE SET tape=excluded.tape", (update.effective_chat.id, on))
+    con.commit()
+    con.close()
+    await update.effective_message.reply_text("Tape ON" if on else "Tape OFF — pairing kept, no buy posts")
+
+
+async def mute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    raw = (context.args[0] if context.args else "1h").lower()
+    mins = 60
+    if raw.endswith("h"):
+        mins = int(float(raw[:-1] or 1) * 60)
+    elif raw.endswith("m"):
+        mins = int(float(raw[:-1] or 30))
+    until = int(time.time()) + max(5, mins) * 60
+    con = _db()
+    con.execute("INSERT INTO chat_flags(chat_id, tape, mute_until) VALUES(?,1,?) ON CONFLICT(chat_id) DO UPDATE SET mute_until=excluded.mute_until", (update.effective_chat.id, until))
+    con.commit()
+    con.close()
+    await update.effective_message.reply_text(f"Muted until {time.strftime('%H:%M', time.localtime(until))}")
+
+
+async def min_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not context.args:
+        await update.effective_message.reply_text("Usage: /min 50")
+        return
+    try:
+        floor = max(1.0, float(context.args[0]))
+    except ValueError:
+        await update.effective_message.reply_text("Number only. /min 50")
+        return
+    con = _db()
+    con.execute("UPDATE watches SET min_usd=? WHERE chat_id=?", (floor, update.effective_chat.id))
+    con.commit()
+    con.close()
+    await update.effective_message.reply_text(f"Floor set to ${floor:.0f}")
+
+
+async def who_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    con = _db()
+    rows = con.execute("SELECT ca, usd, ts FROM buy_log WHERE chat_id=? ORDER BY id DESC LIMIT 5", (update.effective_chat.id,)).fetchall()
+    con.close()
+    if not rows:
+        await update.effective_message.reply_text("No Ferzan buys logged in this chat yet.")
+        return
+    lines = [f"${r[1]:.2f} · {r[0][:8]}… · {time.strftime('%H:%M', time.localtime(r[2]))}" for r in rows]
+    await update.effective_message.reply_text("Last Ferzan posts\n" + "\n".join(lines))
+
+
+async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    row = _watch(update.effective_chat.id)
+    tape, mute = _flags(update.effective_chat.id)
+    if not row:
+        await update.effective_message.reply_text("No token paired. /setup")
+        return
+    chain, ca, pool, floor = row
+    muted = mute > time.time()
+    await update.effective_message.reply_text(
+        f"Watching {ca[:10]}… · {chain.upper()} · ≥ ${float(floor):.0f}\n"
+        f"Tape {'ON' if tape else 'OFF'} · Mute {'ON' if muted else 'off'}"
+    )
 
 
 async def setup_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -511,7 +900,7 @@ def _file_from(msg) -> tuple[str, str] | tuple[None, None]:
     if msg.animation:
         return "animation", msg.animation.file_id
     if msg.video:
-        return "video", msg.video.file_id
+        return "animation", msg.video.file_id
     if msg.photo:
         return "photo", msg.photo[-1].file_id
     if msg.document and (msg.document.mime_type or "").startswith(("video", "image")):
@@ -668,6 +1057,133 @@ async def settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         f"Change min: /add {chain} {ca} 50\nChange bar: /setemoji 🚕",
         parse_mode="Markdown",
     )
+
+
+def _extract_ca(text: str) -> str:
+    raw = text or ""
+    m = re.search(r"0x[a-fA-F0-9]{40}", raw)
+    if m:
+        return m.group(0)
+    compact = "".join(raw.split())
+    m = re.search(r"0x[a-fA-F0-9]{40}", compact)
+    if m:
+        return m.group(0)
+    m = re.search(r"\b[1-9A-HJ-NP-Za-km-z]{32,44}\b", raw)
+    if m and not m.group(0).isdigit():
+        return m.group(0)
+    return ""
+
+
+def _chain_from_ds(pair: dict) -> str:
+    cid = str((pair or {}).get("chainId") or "").lower()
+    return {
+        "solana": "sol",
+        "ethereum": "eth",
+        "base": "base",
+        "bsc": "bsc",
+        "arbitrum": "arb",
+        "polygon": "pol",
+        "avalanche": "avax",
+        "optimism": "op",
+    }.get(cid, cid or "base")
+
+
+async def scan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    context.user_data.pop("setup", None)
+    msg = update.effective_message
+    if not msg:
+        return
+    await msg.reply_text("Scanning…")
+    blob = " ".join(context.args or []) or (msg.text or "")
+    ca = _extract_ca(blob)
+    if not ca:
+        await msg.reply_text("Usage: /scan 0xCA   (space after /scan, one line)")
+        return
+    await paste_ca(update, context, forced_ca=ca)
+
+
+async def paste_ca(update: Update, context: ContextTypes.DEFAULT_TYPE, forced_ca: str = "") -> None:
+    msg = update.effective_message
+    if not msg:
+        return
+    txt = msg.text or ""
+    is_scan = txt.lower().startswith("/scan")
+    if txt.startswith("/") and not is_scan and not forced_ca:
+        return
+    if context.user_data.get("setup") and not is_scan and not forced_ca:
+        return
+    ca = forced_ca or _extract_ca(txt)
+    if not ca:
+        if is_scan:
+            await msg.reply_text("Usage: /scan 0xCA   (one line)")
+        return
+    pair = _ds(ca)
+    if not pair:
+        await msg.reply_text(
+            f"FERZAN · scanned\n<code>{html.escape(ca)}</code>\nNo Dex pair yet. Check the chain and try /setup.",
+            parse_mode="HTML",
+        )
+        return
+    chain = _chain_from_ds(pair)
+    base = pair.get("baseToken") or {}
+    name = base.get("name") or "Token"
+    sym = base.get("symbol") or ""
+    px = pair.get("priceUsd") or "—"
+    mc = _usd(pair.get("marketCap") or pair.get("fdv"))
+    liq = _usd((pair.get("liquidity") or {}).get("usd"))
+    vol = _usd((pair.get("volume") or {}).get("h24"))
+    chg = pair.get("priceChange") or {}
+    h24 = chg.get("h24")
+    try:
+        h24s = f"{float(h24):+.1f}%" if h24 is not None else "—"
+    except (TypeError, ValueError):
+        h24s = "—"
+    created = pair.get("pairCreatedAt") or 0
+    age = "—"
+    if created:
+        hrs = max(0, (time.time() * 1000 - float(created)) / 3600000)
+        age = f"{hrs:.1f}h" if hrs < 48 else f"{hrs/24:.1f}d"
+    dex = (pair.get("dexId") or "dex").title()
+    ds = pair.get("url") or f"https://dexscreener.com/{pair.get('chainId')}/{ca}"
+    buy = f"https://t.me/{TRADE}?start={ca}"
+    hub = os.getenv("FERZAN_CHAT_URL") or "https://t.me/Ferzan_Trade_Ecosystem"
+    scan = {
+        "sol": f"https://solscan.io/token/{ca}",
+        "eth": f"https://etherscan.io/token/{ca}",
+        "base": f"https://basescan.org/token/{ca}",
+        "bsc": f"https://bscscan.com/token/{ca}",
+        "arb": f"https://arbiscan.io/token/{ca}",
+    }.get(chain, ds)
+    text = (
+        f"⚡ <b>FERZAN SCAN</b> · {html.escape(chain.upper())}\n"
+        f"<b>{html.escape(str(name))}</b>  ${html.escape(str(sym))}\n"
+        f"<code>{html.escape(ca)}</code>\n"
+        f"<i>tap CA to copy</i>\n\n"
+        f"💵 ${html.escape(str(px))}   {html.escape(h24s)} 24h\n"
+        f"🧢 {mc}   💧 {liq}\n"
+        f"📊 24h {vol}   ⏱ {html.escape(age)}\n"
+        f"🛣 {html.escape(dex)}\n"
+        f"<i>See it. Ape it. Send it.</i>"
+    )
+    kb = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("Buy", url=buy),
+                InlineKeyboardButton("Chart", url=ds),
+                InlineKeyboardButton("Scan", url=scan),
+            ],
+            [InlineKeyboardButton("See it. Ape it. Send it.", url=buy)],
+            [InlineKeyboardButton("Eco Hub", url=hub)],
+        ]
+    )
+    header = (pair.get("info") or {}).get("header") or (pair.get("info") or {}).get("imageUrl")
+    try:
+        if header:
+            await msg.reply_photo(header, caption=text, parse_mode="HTML", reply_markup=kb)
+            return
+    except Exception:
+        pass
+    await msg.reply_text(text, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True)
 
 
 async def _token_card(update: Update, extra: str = "") -> None:
@@ -874,8 +1390,17 @@ async def untrack(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def tick(context: ContextTypes.DEFAULT_TYPE) -> None:
     con = _db()
-    rows = list(con.execute("SELECT chat_id, chain, ca, pool, last_ts, min_usd, emoji FROM watches"))
-    for chat_id, chain, ca, pool, last_ts, min_usd, emoji in rows:
+    try:
+        rows = list(con.execute("SELECT chat_id, chain, ca, pool, last_ts, min_usd, emoji, tg_url, discord_url, x_url FROM watches"))
+    except sqlite3.OperationalError:
+        rows = [(*r, "") for r in con.execute("SELECT chat_id, chain, ca, pool, last_ts, min_usd, emoji FROM watches")]
+    for chat_id, chain, ca, pool, last_ts, min_usd, emoji, *rest in rows:
+        tg_url = rest[0] if rest else ""
+        discord_url = rest[1] if len(rest) > 1 else ""
+        x_url = rest[2] if len(rest) > 2 else ""
+        tape, mute_until = _flags(chat_id)
+        if not tape or mute_until > time.time():
+            continue
         floor = float(min_usd or MIN_USD)
         net = GT_NET.get(chain, chain)
         trades = _trades(net, pool, int(last_ts or 0))
@@ -888,13 +1413,16 @@ async def tick(context: ContextTypes.DEFAULT_TYPE) -> None:
             if usd < floor:
                 newest = max(newest, tr["ts"])
                 continue
-            text, kb = _card(chain, ca, tr, attrs, emoji or "🟢")
+            cluster = sum(1 for x in trades if abs(x["ts"] - tr["ts"]) <= 12)
+            text, kb = _card(chain, ca, tr, attrs, emoji or "🟢", tg_url or "", cluster, discord_url, x_url)
+            con.execute("INSERT INTO buy_log(chat_id, ca, usd, ts) VALUES(?,?,?,?)", (chat_id, ca, usd, tr["ts"]))
             try:
                 media = _media(chat_id)
-                if media and media[0] == "animation":
-                    await context.bot.send_animation(chat_id, media[1], caption=text, parse_mode="HTML", reply_markup=kb)
-                elif media and media[0] == "video":
-                    await context.bot.send_video(chat_id, media[1], caption=text, parse_mode="HTML", reply_markup=kb)
+                if media and media[0] in {"animation", "video"}:
+                    try:
+                        await context.bot.send_animation(chat_id, media[1], caption=text, parse_mode="HTML", reply_markup=kb)
+                    except Exception:
+                        await context.bot.send_video(chat_id, media[1], caption=text, parse_mode="HTML", reply_markup=kb)
                 elif media and media[0] == "photo":
                     await context.bot.send_photo(chat_id, media[1], caption=text, parse_mode="HTML", reply_markup=kb)
                 else:
@@ -1043,6 +1571,25 @@ def main() -> None:
     if not token:
         raise SystemExit("Set BUYBOT_TOKEN in /opt/ferzan/.env")
     app = Application.builder().token(token).build()
+    async def _menu(app_):
+        await _load_pack(app_.bot)
+        await app_.bot.set_my_commands(
+            [
+                BotCommand("start", "Ferzan Buy home"),
+                BotCommand("setup", "Pair a token"),
+                BotCommand("scan", "Scan a CA"),
+                BotCommand("preview", "Fake buy card"),
+                BotCommand("tape", "Tape on or off"),
+                BotCommand("mute", "Quiet 1h"),
+                BotCommand("min", "Min buy USD"),
+                BotCommand("who", "Last buys"),
+                BotCommand("status", "Watching"),
+                BotCommand("untrack", "Stop alerts"),
+                BotCommand("chart", "Token chart"),
+                BotCommand("help", "Help"),
+            ]
+        )
+    app.post_init = _menu
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(
@@ -1053,18 +1600,39 @@ def main() -> None:
                 SETUP_CA: [MessageHandler(filters.TEXT & ~filters.COMMAND, setup_ca)],
                 SETUP_MIN: [MessageHandler(filters.TEXT & ~filters.COMMAND, setup_min)],
                 SETUP_EMOJI: [MessageHandler(filters.TEXT & ~filters.COMMAND, setup_emoji)],
+                SETUP_TG: [MessageHandler(filters.TEXT & ~filters.COMMAND, setup_tg)],
             },
-            fallbacks=[CommandHandler("cancel", setup_cancel)],
+            fallbacks=[
+                CommandHandler("cancel", setup_cancel),
+                CommandHandler("scan", scan_cmd),
+            ],
             per_chat=True,
             per_user=True,
+            block=False,
         )
     )
+    app.add_handler(CommandHandler("scan", scan_cmd))
+    app.add_handler(CommandHandler("fscan", scan_cmd))
+    app.add_handler(CommandHandler("ca", scan_cmd))
+    app.add_handler(CommandHandler("setlogo", setlogo_cmd))
+    app.add_handler(CommandHandler("banner", banner_cmd))
+    app.add_handler(CommandHandler("emojimap", emojimap_cmd))
     app.add_handler(CommandHandler("setgif", setgif_cmd))
+    app.add_handler(CommandHandler("settelegram", settelegram_cmd))
+    app.add_handler(CommandHandler("setdiscord", setdiscord_cmd))
+    app.add_handler(CommandHandler("setx", setx_cmd))
+    app.add_handler(CommandHandler("preview", preview_cmd))
+    app.add_handler(CommandHandler("tape", tape_cmd))
+    app.add_handler(CommandHandler("mute", mute_cmd))
+    app.add_handler(CommandHandler("min", min_cmd))
+    app.add_handler(CommandHandler("who", who_cmd))
+    app.add_handler(CommandHandler("status", status_cmd))
     app.add_handler(CommandHandler("cleargif", cleargif_cmd))
     app.add_handler(MessageHandler(
         filters.ANIMATION | filters.VIDEO | filters.PHOTO | filters.Document.ALL,
         remember_media,
     ))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, paste_ca))
     app.add_handler(CommandHandler("track", track))
     app.add_handler(CommandHandler("add", track))
     app.add_handler(CommandHandler("untrack", untrack))
