@@ -1621,7 +1621,7 @@ async def _bump_token(bot, chat, tag: str, ca: str = "") -> None:
     await _post_board(bot)
 
 
-async def _post_board(bot) -> None:
+async def _post_board(bot) -> str:
     con = _db()
     rows = con.execute(
         "SELECT cashtag, pts, invite, mc, ca, dex FROM raid_tokens ORDER BY pts DESC LIMIT 10"
@@ -1629,7 +1629,7 @@ async def _post_board(bot) -> None:
     mid = con.execute("SELECT v FROM kv WHERE k='raid_board_msg'").fetchone()
     con.close()
     if not rows:
-        return
+        return "no tokens on the board yet"
     medals = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
     lines = [f"{_icon('TITLE', 0, '⚡')} <b>FERZAN RAID LEADERBOARD</b>\n"]
     btn_rows = []
@@ -1657,7 +1657,7 @@ async def _post_board(bot) -> None:
                 reply_markup=kb,
                 disable_web_page_preview=True,
             )
-            return
+            return ""
     except Exception as exc:
         log.warning("lb edit %s", exc)
     try:
@@ -1679,8 +1679,10 @@ async def _post_board(bot) -> None:
             await bot.pin_chat_message(RAID_CH, msg.message_id, disable_notification=True)
         except Exception:
             pass
+        return ""
     except Exception as exc:
         log.warning("lb board %s", exc)
+        return str(exc)
 
 
 async def raidstop_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1845,7 +1847,21 @@ async def lb_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         [[InlineKeyboardButton("Token leaderboard", url="https://t.me/Ferzan_Raid")]]
     )
     await update.effective_message.reply_text("\n".join(lines), reply_markup=kb)
-    await _post_board(context.bot)
+    con2 = _db()
+    live = con2.execute(
+        "SELECT cashtag FROM raids WHERE chat_id=? AND active=1 ORDER BY id DESC LIMIT 1",
+        (update.effective_chat.id,),
+    ).fetchone()
+    con2.close()
+    tag = (live[0] if live else "") or ""
+    if tag:
+        w = _watch(update.effective_chat.id)
+        await _bump_token(context.bot, update.effective_chat, tag, w[1] if w else "")
+    err = await _post_board(context.bot)
+    if err:
+        await update.effective_message.reply_text(f"Board failed → {RAID_CH}\n{err}")
+    else:
+        await update.effective_message.reply_text(f"Board updated → {RAID_CH}")
 
 
 async def raidevent_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
