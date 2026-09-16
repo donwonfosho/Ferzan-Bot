@@ -69,9 +69,8 @@ def _ce(i: int, fallback: str) -> str:
 
 def _icon(name: str, default: int, fallback: str) -> str:
     i = _slot(name, default)
-    if 0 <= i < len(_PACK_IDS) and _PACK_IDS[i]:
-        return _ce(i, fallback or "F")
-    return ""
+    face = _PACK_FACE[i] if 0 <= i < len(_PACK_FACE) and _PACK_FACE[i] else "F"
+    return _ce(i, face)
 
 
 def _banner() -> Path | None:
@@ -1634,11 +1633,11 @@ async def _bump_token(bot, chat, tag: str, ca: str = "") -> None:
         )
         try:
             cap = (
-                f"<b>{_esc(tag)}</b> entered the Raid Leaderboard.\n\n"
-                + (f"Group: <a href=\"{_esc(invite)}\">Open group</a>\n" if invite else "")
-                + f"Points: {pts}\n"
-                + f"Market cap: {mc or '—'}\n"
-                + f"Dex: {dex or '—'}\n\n"
+                f"{_icon('TITLE', 0, 'F')} <b>{_esc(tag)}</b> entered the Raid Leaderboard.\n\n"
+                + (f"{_icon('TG', 8, 'F')} Group: <a href=\"{_esc(invite)}\">Open group</a>\n" if invite else "")
+                + f"{_icon('USD', 1, 'F')} Points: {pts}\n"
+                + f"{_icon('MC', 3, 'F')} Market cap: {mc or '—'}\n"
+                + f"{_icon('ROUTE', 5, 'F')} Dex: {dex or '—'}\n\n"
                 + f"<i>See it. Ape it. Send it.</i>"
             )
             ban = _banner()
@@ -1670,15 +1669,19 @@ async def _post_board(bot) -> str:
     con.close()
     if not rows:
         return "no tokens on the board yet"
-    medals = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"]
-    lines = ["<b>FERZAN RAID LEADERBOARD</b>\n"]
+    medals = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+    lines = [f"{_icon('TITLE', 0, 'F')} <b>FERZAN RAID LEADERBOARD</b>\n"]
     btn_rows = []
     for i, (tag, pts, invite, mc, ca, dex) in enumerate(rows):
         name = _esc(tag)
         buy = f"https://t.me/{TRADE}?start={ca}" if ca else HUB
         grp = f"<a href=\"{_esc(invite)}\">{name}</a>" if invite else name
-        lines.append(f"{medals[i]}. <b>{grp}</b>   {pts} pts")
-        lines.append(f"     {mc or '—'}  ·  {_esc(dex or '—')}  ·  <a href=\"{_esc(buy)}\">Buy</a>")
+        lines.append(f"{medals[i]}  <b>{grp}</b>  {_icon('USD', 1, 'F')} {pts}")
+        lines.append(
+            f"     {_icon('MC', 3, 'F')} {mc or '—'}   "
+            f"{_icon('ROUTE', 5, 'F')} {_esc(dex or '—')}   "
+            f"{_icon('BAG', 2, 'F')} <a href=\"{_esc(buy)}\">Buy</a>"
+        )
         btn_rows.append([InlineKeyboardButton(f"Buy {tag[:16]}", url=buy)])
     lines.append("\n<i>See it. Ape it. Send it.</i>")
     kb = InlineKeyboardMarkup(btn_rows[:8])
