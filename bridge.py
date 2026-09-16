@@ -31,6 +31,20 @@ def _amount_raw(key: str, amt: str) -> str:
     return str(int(val * (10 ** meta["dec"])))
 
 
+DLN = "https://dln.debridge.finance/v1.0/dln/order/create-tx"
+DLN_CHAIN = {"sol": 7565164, "eth": 1, "base": 8453, "bsc": 56, "arb": 42161, "pol": 137, "avax": 43114, "op": 10}
+DLN_TOKEN = {
+    "sol": SOL_NATIVE,
+    "eth": NATIVE_EVM,
+    "base": NATIVE_EVM,
+    "bsc": NATIVE_EVM,
+    "arb": NATIVE_EVM,
+    "pol": NATIVE_EVM,
+    "avax": NATIVE_EVM,
+    "op": NATIVE_EVM,
+}
+
+
 def quote(uid: int, src: str, dst: str, amt: str) -> dict:
     import user_wallets
 
@@ -43,6 +57,8 @@ def quote(uid: int, src: str, dst: str, amt: str) -> dict:
     recv = w["sol_pub"] if CHAINS[dst]["kind"] == "sol" else w["evm_pub"]
     if not user or not recv:
         raise ValueError("Open /wallet first so Ferzan can create your desk addresses.")
+    if "sol" in {src, dst}:
+        return _quote_dln(user, recv, src, dst, amt)
     body = {
         "user": user,
         "recipient": recv,
@@ -63,11 +79,55 @@ def quote(uid: int, src: str, dst: str, amt: str) -> dict:
     if r.status_code >= 400:
         msg = data.get("message") or data.get("error") or r.text[:240]
         raise RuntimeError(str(msg))
-    return {"raw": data, "user": user, "recv": recv, "src": src, "dst": dst, "amt": amt}
+    return {"raw": data, "user": user, "recv": recv, "src": src, "dst": dst, "amt": amt, "via": "relay"}
+
+
+def _quote_dln(user: str, recv: str, src: str, dst: str, amt: str) -> dict:
+    if src not in DLN_CHAIN or dst not in DLN_CHAIN:
+        raise ValueError("That pair is not on deBridge yet.")
+    r = requests.get(
+        DLN,
+        params={
+            "srcChainId": DLN_CHAIN[src],
+            "srcChainTokenIn": DLN_TOKEN[src],
+            "srcChainTokenInAmount": _amount_raw(src, amt),
+            "dstChainId": DLN_CHAIN[dst],
+            "dstChainTokenOut": DLN_TOKEN[dst],
+            "dstChainTokenOutAmount": "auto",
+            "dstChainTokenOutRecipient": recv,
+            "srcChainOrderAuthorityAddress": user,
+            "dstChainOrderAuthorityAddress": recv,
+        },
+        timeout=25,
+    )
+    data = r.json() if r.content else {}
+    if r.status_code >= 400 or data.get("error"):
+        raise RuntimeError(str(data.get("error") or data.get("message") or r.text[:240]))
+    if not ((data.get("tx") or {}).get("data") or (data.get("tx") or {}).get("to")):
+        raise RuntimeError(str(data.get("errorMessage") or "deBridge returned no tx."))
+    return {"raw": data, "user": user, "recv": recv, "src": src, "dst": dst, "amt": amt, "via": "dln"}
 
 
 def summarize(pack: dict) -> str:
     data = pack["raw"]
+    if pack.get("via") == "dln":
+        est = data.get("estimation") or {}
+        inn = ((est.get("srcChainTokenIn") or {}).get("amount") or pack["amt"])
+        outn = (est.get("dstChainTokenOut") or {}).get("amount") or "?"
+        try:
+            if str(inn).isdigit() and pack["src"] == "sol":
+                inn = f"{int(inn) / 1e9:.4f}"
+            if str(outn).isdigit():
+                outn = f"{int(outn) / (10 ** CHAINS[pack['dst']]['dec']):.6f}"
+        except (TypeError, ValueError):
+            pass
+        return (
+            f"From {CHAINS[pack['src']]['name']}   {inn} {CHAINS[pack['src']]['unit']}\n"
+            f"To {CHAINS[pack['dst']]['name']}   {outn} {CHAINS[pack['dst']]['unit']}\n"
+            f"Send {pack['user'][:12]}…\n"
+            f"Receive {pack['recv'][:12]}…\n"
+            "via deBridge · signed on this desk"
+        )
     details = data.get("details") or {}
     cin = details.get("currencyIn") or {}
     cout = details.get("currencyOut") or {}
@@ -102,14 +162,85 @@ def _evm_items(data: dict) -> list[dict]:
     return items
 
 
-def execute(uid: int, pack: dict) -> str:
-    import user_wallets
+def widget_links(pack: dict) -> tuple[str, str]:
+    jumper_id = {
+        "sol": "1151111081099710",
+        "eth": "1",
+        "base": "8453",
+        "bsc": "56",
+        "arb": "42161",
+    }
+    src, dst = pack["src"], pack["dst"]
+    jumper = (
+        "https://jumper.exchange/"
+        f"?fromChain={jumper_id.get(src, '1')}"
+        f"&toChain={jumper_id.get(dst, '8453')}"
+        f"&fromAmount={pack.get('amt') or ''}"
+    )
+    relay = (
+        "https://relay.link/bridge"
+        f"?fromChainId={CHAINS[src]['id']}"
+        f"&toChainId={CHAINS[dst]['id']}"
+    )
+    return jumper, relay
 
+
+def execute(uid: int, pack: dict) -> str:
     src = pack["src"]
     data = pack["raw"]
+    if pack.get("via") == "dln" and CHAINS[src]["kind"] == "sol":
+        return _exec_dln_sol(uid, pack, data)
     if CHAINS[src]["kind"] == "evm":
         return _exec_evm(uid, pack, data)
+    if pack.get("via") == "dln":
+        return _exec_evm(uid, pack, {"steps": [{"items": [{"data": data.get("tx") or {}}]}]})
     return _exec_sol(uid, pack, data)
+
+
+def _exec_dln_sol(uid: int, pack: dict, data: dict) -> str:
+    import base64
+    import signer as sol_signer
+    import user_wallets
+    from solders.keypair import Keypair
+    from solders.transaction import VersionedTransaction
+
+    sol_key, _evm = user_wallets.secrets(uid)
+    try:
+        kp = Keypair.from_base58_string(sol_key)
+    except Exception:
+        kp = Keypair.from_bytes(base64.b64decode(sol_key))
+    blob = ((data.get("tx") or {}).get("data") or "")
+    if not blob:
+        raise RuntimeError("deBridge sent no Solana tx.")
+    if blob.startswith("0x"):
+        raw = bytes.fromhex(blob[2:])
+    else:
+        try:
+            raw = bytes.fromhex(blob)
+        except ValueError:
+            raw = base64.b64decode(blob)
+    tx = VersionedTransaction.from_bytes(raw)
+    signed = VersionedTransaction(tx.message, [kp])
+    rpc = sol_signer._rpc()
+    body = requests.post(
+        rpc,
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "sendTransaction",
+            "params": [
+                base64.b64encode(bytes(signed)).decode(),
+                {"encoding": "base64", "skipPreflight": False},
+            ],
+        },
+        timeout=20,
+    ).json()
+    if body.get("error"):
+        raise RuntimeError(str(body["error"]))
+    sig = body.get("result") or ""
+    if not sig:
+        raise RuntimeError("Solana RPC accepted nothing.")
+    return f"Bridge submitted.\nhttps://solscan.io/tx/{sig}\nWatch https://app.debridge.finance/orders\nCredit on destination usually 1–3 min."
 
 
 def _exec_evm(uid: int, pack: dict, data: dict) -> str:
