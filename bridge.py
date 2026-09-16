@@ -220,8 +220,31 @@ def _exec_dln_sol(uid: int, pack: dict, data: dict) -> str:
         except ValueError:
             raw = base64.b64decode(blob)
     tx = VersionedTransaction.from_bytes(raw)
-    signed = VersionedTransaction(tx.message, [kp])
     rpc = sol_signer._rpc()
+    bh = requests.post(
+        rpc,
+        json={"jsonrpc": "2.0", "id": 1, "method": "getLatestBlockhash", "params": [{"commitment": "confirmed"}]},
+        timeout=12,
+    ).json()
+    blockhash = ((bh.get("result") or {}).get("value") or {}).get("blockhash")
+    if not blockhash:
+        raise RuntimeError("No Solana blockhash from RPC.")
+    from solders.hash import Hash
+    from solders.message import MessageV0
+
+    fresh = Hash.from_string(blockhash)
+    msg = tx.message
+    try:
+        rebuilt = MessageV0(
+            header=msg.header,
+            account_keys=msg.account_keys,
+            recent_blockhash=fresh,
+            instructions=msg.instructions,
+            address_table_lookups=getattr(msg, "address_table_lookups", []),
+        )
+    except Exception:
+        rebuilt = msg
+    signed = VersionedTransaction(rebuilt, [kp])
     body = requests.post(
         rpc,
         json={
@@ -236,7 +259,10 @@ def _exec_dln_sol(uid: int, pack: dict, data: dict) -> str:
         timeout=20,
     ).json()
     if body.get("error"):
-        raise RuntimeError(str(body["error"]))
+        err = body["error"]
+        if isinstance(err, dict):
+            raise RuntimeError(err.get("message") or str(err))
+        raise RuntimeError(str(err))
     sig = body.get("result") or ""
     if not sig:
         raise RuntimeError("Solana RPC accepted nothing.")
