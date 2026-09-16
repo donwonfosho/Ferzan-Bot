@@ -1700,6 +1700,10 @@ async def _post_board(bot) -> str:
                 return ""
             except Exception as exc:
                 log.warning("lb edit %s", exc)
+                try:
+                    await bot.delete_message(RAID_CH, int(mid[0]))
+                except Exception:
+                    pass
     try:
         ban = _banner()
         if ban:
@@ -1743,6 +1747,31 @@ async def raid_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     _, kind, rid = parts[0], parts[1], int(parts[2])
     con = _db()
+    if kind == "resume":
+        await q.answer("Raid resumed")
+        extra = 60 * 60
+        con.execute(
+            "UPDATE raids SET active=1, ends=? WHERE id=?",
+            (int(time.time()) + extra, rid),
+        )
+        con.commit()
+        row = con.execute(
+            "SELECT url, cashtag FROM raids WHERE id=?", (rid,)
+        ).fetchone()
+        con.close()
+        url = row[0] if row else "https://x.com"
+        try:
+            await q.edit_message_caption(
+                caption=f"▶️ Raid resumed — 60 more minutes.\n<a href=\"{_esc(url)}\">Open the post</a>",
+                parse_mode="HTML",
+                reply_markup=_raid_kb(rid, url),
+            )
+        except Exception:
+            await q.edit_message_text(
+                f"▶️ Raid resumed — 60 more minutes.",
+                reply_markup=_raid_kb(rid, url),
+            )
+        return
     if kind == "stop":
         await q.answer()
         con.execute("UPDATE raids SET active=0 WHERE id=?", (rid,))
@@ -1802,6 +1831,25 @@ async def raid_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         con2.close()
         d["active"] = 0
         await q.answer("Targets hit. Raid done.")
+        try:
+            await context.bot.send_message(
+                update.effective_chat.id,
+                f"{_icon('TITLE', 0, 'F')} <b>RAID ENDED · TARGETS HIT</b>\n"
+                f"{_esc(d.get('cashtag') or 'RAID')}\n\n"
+                f"Resume if you want another 60 minutes.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(
+                    [
+                        [InlineKeyboardButton("Open Post", url=d["url"])],
+                        [
+                            InlineKeyboardButton("Resume Raid", callback_data=f"raid:resume:{rid}"),
+                            InlineKeyboardButton("Leaderboard", url="https://t.me/Ferzan_Raid"),
+                        ],
+                    ]
+                ),
+            )
+        except Exception:
+            pass
     else:
         await q.answer("+1")
     w = _watch(update.effective_chat.id)
@@ -2000,6 +2048,33 @@ async def tick(context: ContextTypes.DEFAULT_TYPE) -> None:
     for rid, chat_id, url, tag, lh, lt, rh, rt, eh, et, ends, last_ping, ping_min in live:
         if ends and now > int(ends):
             con.execute("UPDATE raids SET active=0 WHERE id=?", (rid,))
+            con.commit()
+            ok_l = "✅" if int(lh) >= int(lt) else "❌"
+            ok_r = "✅" if int(rh) >= int(rt) else "❌"
+            ok_e = "✅" if int(eh) >= int(et) else "❌"
+            end = (
+                f"{_icon('TITLE', 0, 'F')} <b>RAID ENDED · TIMEOUT</b>\n"
+                f"{_esc(tag or 'RAID')} — 60 minutes up.\n\n"
+                f"{_icon('USD', 1, 'F')} Likes  {lh} | {lt}  {ok_l}\n"
+                f"{_icon('BAG', 2, 'F')} Reposts  {rh} | {rt}  {ok_r}\n"
+                f"{_icon('TG', 8, 'F')} Replies  {eh} | {et}  {ok_e}\n\n"
+                f"<i>Resume to keep the same post live.</i>"
+            )
+            ekb = InlineKeyboardMarkup(
+                [
+                    [InlineKeyboardButton("Open Post", url=url)],
+                    [
+                        InlineKeyboardButton("Resume Raid", callback_data=f"raid:resume:{rid}"),
+                        InlineKeyboardButton("Leaderboard", url="https://t.me/Ferzan_Raid"),
+                    ],
+                ]
+            )
+            try:
+                await context.bot.send_message(
+                    chat_id, end, parse_mode="HTML", reply_markup=ekb, disable_web_page_preview=True
+                )
+            except Exception as exc:
+                log.warning("raid end %s", exc)
             continue
         every = max(2, int(ping_min or 15)) * 60
         if now - int(last_ping or 0) < every:
