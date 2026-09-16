@@ -152,6 +152,114 @@ def _walk(obj):
             yield from _walk(v)
 
 
+def _ix_bytes(raw) -> bytes:
+    import base64
+    if isinstance(raw, bytes):
+        return raw
+    if isinstance(raw, list):
+        return bytes(int(x) & 255 for x in raw)
+    if not isinstance(raw, str):
+        return b""
+    if raw.startswith("0x"):
+        return bytes.fromhex(raw[2:])
+    try:
+        return base64.b64decode(raw)
+    except Exception:
+        return bytes.fromhex(raw)
+
+
+def _relay_ix(row: dict):
+    from solders.instruction import AccountMeta, Instruction
+    from solders.pubkey import Pubkey
+
+    pid = row.get("programId") or row.get("program_id")
+    accs = row.get("keys") or row.get("accounts") or []
+    metas = []
+    for acc in accs:
+        if isinstance(acc, str):
+            metas.append(AccountMeta(Pubkey.from_string(acc), False, True))
+            continue
+        pk = acc.get("pubkey") or acc.get("pubKey") or acc.get("address")
+        metas.append(
+            AccountMeta(
+                Pubkey.from_string(pk),
+                bool(acc.get("isSigner") or acc.get("is_signer")),
+                bool(acc.get("isWritable") or acc.get("is_writable")),
+            )
+        )
+    return Instruction(Pubkey.from_string(pid), _ix_bytes(row.get("data")), metas)
+
+
+def _fetch_alts(rpc: str, addrs: list):
+    from solders.address_lookup_table_account import AddressLookupTableAccount
+    from solders.pubkey import Pubkey
+
+    out = []
+    for addr in addrs or []:
+        body = requests.post(
+            rpc,
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "getAccountInfo",
+                "params": [addr, {"encoding": "jsonParsed"}],
+            },
+            timeout=20,
+        ).json()
+        info = ((((body.get("result") or {}).get("value") or {}).get("data") or {}).get("parsed") or {}).get("info") or {}
+        names = info.get("addresses") or []
+        if names:
+            out.append(
+                AddressLookupTableAccount(
+                    Pubkey.from_string(addr),
+                    [Pubkey.from_string(x) for x in names],
+                )
+            )
+    return out
+
+
+def _exec_sol_instructions(kp, payload: dict, rpc: str) -> str:
+    import base64
+    from solders.hash import Hash
+    from solders.message import MessageV0
+    from solders.transaction import VersionedTransaction
+
+    raw_ix = payload.get("instructions") or []
+    alts = _fetch_alts(rpc, payload.get("addressLookupTableAddresses") or [])
+    ixs = [_relay_ix(x) for x in raw_ix if isinstance(x, dict)]
+    if not ixs:
+        raise RuntimeError("Relay instructions were empty.")
+    bh = requests.post(
+        rpc,
+        json={"jsonrpc": "2.0", "id": 1, "method": "getLatestBlockhash", "params": [{"commitment": "finalized"}]},
+        timeout=15,
+    ).json()
+    blockhash = ((bh.get("result") or {}).get("value") or {}).get("blockhash")
+    if not blockhash:
+        raise RuntimeError("No Solana blockhash.")
+    msg = MessageV0.try_compile(kp.pubkey(), ixs, alts, Hash.from_string(blockhash))
+    signed = VersionedTransaction(msg, [kp])
+    body = requests.post(
+        rpc,
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "sendTransaction",
+            "params": [
+                base64.b64encode(bytes(signed)).decode(),
+                {"encoding": "base64", "skipPreflight": False},
+            ],
+        },
+        timeout=25,
+    ).json()
+    if body.get("error"):
+        raise RuntimeError(str(body["error"]))
+    sig = body.get("result") or ""
+    if not sig:
+        raise RuntimeError("Solana RPC accepted nothing.")
+    return f"Bridge submitted.\nhttps://solscan.io/tx/{sig}\nDestination credit can take 30–90s."
+
+
 def _exec_sol(uid: int, pack: dict, data: dict) -> str:
     import base64
     import signer as sol_signer
@@ -164,6 +272,13 @@ def _exec_sol(uid: int, pack: dict, data: dict) -> str:
         kp = Keypair.from_base58_string(sol_key)
     except Exception:
         kp = Keypair.from_bytes(base64.b64decode(sol_key))
+
+    rpc = sol_signer._rpc()
+    for step in data.get("steps") or []:
+        for item in step.get("items") or []:
+            d = item.get("data") or {}
+            if isinstance(d, dict) and d.get("instructions"):
+                return _exec_sol_instructions(kp, d, rpc)
 
     blob = None
     deposit_to = ""
