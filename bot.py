@@ -631,22 +631,31 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         buy_usd = float(user.get("buy_usd") or 25)
         bslip = float(user.get("buy_slip_pct") or 10)
         text = (
-            "⚡ FERZAN TRADE BOT · See it. Ape it. Send it.\n"
-            f"Paste a CA · ${buy_usd:.0f} · slip {bslip:.0f}% · cut {fees.current_bps() / 100:.2f}%\n"
-            "/wallet  /bag  /bridge  /settings"
+            "⚡ Welcome to Ferzan — the one-stop desk.\n"
+            "👀 See it.  🦍 Ape it.  🚀 Send it.\n\n"
+            "⛓ Chains: enable the venues you trade.\n"
+            "👛 Wallets: your Ferzan desk addresses.\n"
+            "⚙️ Desk: slip, size, gas.\n"
+            "📊 Bag: open bags and sell %.\n"
+            "📡 Signals: chain rooms.\n"
+            "🎯 Snipe: arm a first-block buy.\n"
+            "⏱ Limits: buy / sell limits.\n"
+            "👯 Copy: watch a wallet.\n"
+            "🌉 Bridge: SOL · ETH · BASE · BSC inside Ferzan.\n\n"
+            "⚡ Paste a token CA to trade now.\n\n"
+            f'<a href="{html.escape(os.getenv("FERZAN_HUB_URL") or "https://t.me/Ferzan_Trade_Ecosystem", quote=True)}">Hub</a> · '
+            f'<a href="{html.escape(os.getenv("FERZAN_CHAT_URL") or "https://t.me/Ferzan_Chat", quote=True)}">Chat</a> · '
+            f'<a href="{html.escape(os.getenv("FERZAN_X_URL") or "https://x.com/ferzaneco", quote=True)}">X</a>'
         )
         target = update.effective_message
         if not target:
             return
-        if LOGO_PATH.exists():
-            with LOGO_PATH.open("rb") as photo:
-                await target.reply_photo(
-                    photo=photo,
-                    caption=text,
-                    reply_markup=home_keyboard(),
-                )
-        else:
-            await target.reply_text(text, reply_markup=home_keyboard())
+        await target.reply_text(
+            text,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+            reply_markup=home_keyboard(),
+        )
         try:
             user_wallets.ensure(update.effective_user.id)
         except Exception:
