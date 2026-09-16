@@ -394,14 +394,14 @@ def _tier(usd: float) -> tuple[str, str]:
 
 
 def _bar(usd: float, emoji: str = "🟢") -> str:
-    em = (emoji or "🟢").strip()[:8] or "🟢"
-    if usd < 25:
-        n = 3
-    elif usd < 80:
-        n = 6
-    else:
-        n = 8
-    return em * min(n, 8)
+    raw = (emoji or "🟢").strip()
+    if raw.startswith("<tg-emoji"):
+        return raw
+    token = raw.split()[0] if raw else "🟢"
+    if len(token) > 4:
+        token = "🚀"
+    n = 3 if usd < 25 else 5 if usd < 80 else 6
+    return token * n
 
 
 def _holders(chain: str, ca: str, pair: dict) -> str:
@@ -485,7 +485,7 @@ def _card(chain: str, ca: str, tr: dict, attrs: dict, emoji: str = "🟢", tg_ur
         "bsc": f"https://bscscan.com/tx/{tx}",
         "arb": f"https://arbiscan.io/tx/{tx}",
     }.get(chain, ds)
-    buyer_url = scan.replace("/tx/", "/address/") if buyer and "/tx/" in scan else ds
+    buyer_url = scan.replace("/tx/", "/address/") if buyer and "/tx/" in scan else scan
     liq = (os.getenv("FERZAN_LIQ_BOT") or "FerzanLiqBot").lstrip("@")
     boost = f"https://t.me/{liq}"
     chat = tg or os.getenv("FERZAN_CHAT_URL") or "https://t.me/Ferzan_Trade_Ecosystem"
@@ -556,29 +556,23 @@ def _card(chain: str, ca: str, tr: dict, attrs: dict, emoji: str = "🟢", tg_ur
     if cluster and cluster > 1:
         extra.append(f"{cluster} buys / 12s")
     lines = [
-        f"<b>{_esc(name)}</b>  [${_esc(sym)}]  ·  {_esc(str(chain).upper())}",
-        f"{_esc(label)}   {_bar(usd, emoji)}",
+        f"<b>{_esc(name)}</b>   [${_esc(sym)}]   ·   {_esc(str(chain).upper())}",
+        f"{_esc(label)}  {_bar(usd, emoji)}",
         f"<code>{_esc(ca)}</code>",
-        (
-            f"{_icon('USD', 1, '💵')} {_esc(spent_s)} (${usd:,.2f})"
-            f"   {_icon('BAG', 2, '🎒')} {_esc(got)} {_esc(sym)}"
-        ),
-        (
-            f"{_icon('MC', 3, '🧢')} {_usd(mc)}"
-            f"   {_icon('LIQ', 4, '💧')} {liq_usd}"
-            + (f"   ⏱ {age}" if age else "")
-            + (f"   5m {_pct('m5')}  1h {_pct('h1')}" if chg else "")
-        ),
+        "",
+        f"{_icon('USD', 1, '💵')}  Spent   {_esc(spent_s)}   (${usd:,.2f})",
+        f"{_icon('BAG', 2, '🎒')}  Got     {_esc(got)} {_esc(sym)}",
+        f"{_icon('MC', 3, '🧢')}  MC      {_usd(mc)}",
+        f"{_icon('LIQ', 4, '💧')}  Liq     {liq_usd}",
     ]
-    mid = []
+    if age or chg:
+        lines.append(f"⏱  Age     {age or '—'}    5m {_pct('m5')}    1h {_pct('h1')}")
     if dex_name:
-        mid.append(f"{_icon('ROUTE', 5, '🛣')} {_esc(dex_name)}")
+        lines.append(f"{_icon('ROUTE', 5, '🛣')}  Dex     {_esc(dex_name)}")
     if holders:
-        mid.append(f"{_icon('HOLD', 7, '👥')} {_esc(str(holders))}")
-    if mid:
-        lines.append("   ·   ".join(mid))
+        lines.append(f"{_icon('HOLD', 7, '👥')}  Holders {_esc(str(holders))}")
     if extra:
-        lines.append(" · ".join(extra))
+        lines.append("⚠  " + " · ".join(extra))
     links = f"{_icon('BUYER', 6, '👤')}  <a href=\"{_esc(buyer_url)}\">Buyer</a>  ·  <a href=\"{_esc(scan)}\">Txn</a>"
     if tg:
         links += f"  ·  {_icon('TG', 8, '💬')} <a href=\"{_esc(tg)}\">Telegram</a>"
@@ -590,7 +584,7 @@ def _card(chain: str, ca: str, tr: dict, attrs: dict, emoji: str = "🟢", tg_ur
         links += f"  ·  <a href=\"{_esc(disc)}\">Discord</a>"
     lines.append(links)
     lines.append("")
-    lines.append("<i>See it. Ape it. Send it.</i>")
+    lines.append("👀 See it.  🦍 Ape it.  🚀 Send it.")
     lines.append(f'{_icon("TITLE", 0, "⚡")} <a href="{_esc(HUB)}">FERZAN ECO HUB</a>')
     text = "\n".join(lines)
     hub = HUB
@@ -1188,7 +1182,7 @@ async def chart_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         await update.effective_message.reply_photo(header, caption=cap, parse_mode="HTML", reply_markup=kb)
     except Exception:
-        await update.effective_message.reply_text(cap, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=False)
+        await update.effective_message.reply_text(cap, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True)
 
 
 async def settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
