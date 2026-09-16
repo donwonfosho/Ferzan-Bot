@@ -194,19 +194,24 @@ def _fetch_alts(rpc: str, addrs: list):
     from solders.address_lookup_table_account import AddressLookupTableAccount
     from solders.pubkey import Pubkey
 
+    if not addrs:
+        return []
+    body = requests.post(
+        rpc,
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "getMultipleAccounts",
+            "params": [list(addrs), {"encoding": "jsonParsed"}],
+        },
+        timeout=10,
+    ).json()
+    values = (body.get("result") or {}).get("value") or []
     out = []
-    for addr in addrs or []:
-        body = requests.post(
-            rpc,
-            json={
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "getAccountInfo",
-                "params": [addr, {"encoding": "jsonParsed"}],
-            },
-            timeout=20,
-        ).json()
-        info = ((((body.get("result") or {}).get("value") or {}).get("data") or {}).get("parsed") or {}).get("info") or {}
+    for addr, val in zip(addrs, values):
+        if not val:
+            continue
+        info = ((val.get("data") or {}).get("parsed") or {}).get("info") or {}
         names = info.get("addresses") or []
         if names:
             out.append(

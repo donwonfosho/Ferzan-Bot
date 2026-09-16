@@ -2604,11 +2604,20 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 return
             await query.edit_message_text("Signing on the desk…")
             try:
+                import asyncio
                 import bridge as ferzan_bridge
 
-                msg = ferzan_bridge.execute(uid, pack)
+                msg = await asyncio.wait_for(
+                    asyncio.to_thread(ferzan_bridge.execute, uid, pack),
+                    timeout=35,
+                )
                 context.user_data.pop("bridge_pack", None)
                 await context.bot.send_message(uid, "✅ " + msg)
+            except asyncio.TimeoutError:
+                await context.bot.send_message(
+                    uid,
+                    "Bridge timed out after 35s (RPC hung).\nTry Base → ETH, or a smaller SOL size.",
+                )
             except Exception as exc:
                 await context.bot.send_message(uid, f"Bridge send failed.\n{exc}")
             return
