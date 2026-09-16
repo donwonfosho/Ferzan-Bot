@@ -606,6 +606,9 @@ def home_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton("💸 Cut", callback_data="go:fees"),
         ],
         [
+            InlineKeyboardButton("🌉 Bridge SOL · ETH · BASE · BSC", callback_data="go:bridge"),
+        ],
+        [
             InlineKeyboardButton("⚡ PASTE A CA — BUY / SELL", callback_data="go:buyhelp"),
         ],
         [
@@ -2467,6 +2470,108 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.effective_message.reply_text(f"⚡️ Auto-buy ${usd:.0f}\n{live_msg}")
 
 
+BRIDGE = {
+    "sol": {"name": "Solana", "id": 792703809, "slug": "solana", "unit": "SOL", "zero": "11111111111111111111111111111111"},
+    "eth": {"name": "Ethereum", "id": 1, "slug": "ethereum", "unit": "ETH", "zero": "0x0000000000000000000000000000000000000000"},
+    "base": {"name": "Base", "id": 8453, "slug": "base", "unit": "ETH", "zero": "0x0000000000000000000000000000000000000000"},
+    "bsc": {"name": "BNB", "id": 56, "slug": "bsc", "unit": "BNB", "zero": "0x0000000000000000000000000000000000000000"},
+    "arb": {"name": "Arbitrum", "id": 42161, "slug": "arbitrum", "unit": "ETH", "zero": "0x0000000000000000000000000000000000000000"},
+    "pol": {"name": "Polygon", "id": 137, "slug": "polygon", "unit": "POL", "zero": "0x0000000000000000000000000000000000000000"},
+    "avax": {"name": "Avalanche", "id": 43114, "slug": "avalanche", "unit": "AVAX", "zero": "0x0000000000000000000000000000000000000000"},
+    "op": {"name": "Optimism", "id": 10, "slug": "optimism", "unit": "ETH", "zero": "0x0000000000000000000000000000000000000000"},
+}
+
+
+def _bridge_state(context) -> dict:
+    st = context.user_data.setdefault("bridge", {"from": "sol", "to": "eth", "amt": "0.1"})
+    return st
+
+
+def _bridge_addr(uid: int, key: str) -> str:
+    try:
+        w = user_wallets.ensure(uid) or {}
+    except Exception:
+        w = {}
+    if key == "sol":
+        return w.get("sol_pub") or ""
+    return w.get("evm_pub") or ""
+
+
+def _bridge_url(st: dict, uid: int) -> str:
+    src, dst = BRIDGE.get(st["from"]), BRIDGE.get(st["to"])
+    if not src or not dst:
+        return "https://relay.link"
+    dest = _bridge_addr(uid, st["to"])
+    q = f"fromChainId={src['id']}&amount={st['amt']}&tradeType=EXACT_INPUT"
+    if dest:
+        q += f"&toAddress={dest}"
+    return f"https://relay.link/bridge/{dst['slug']}?{q}"
+
+
+def _bridge_text(uid: int, st: dict) -> str:
+    src, dst = BRIDGE[st["from"]], BRIDGE[st["to"]]
+    send = _bridge_addr(uid, st["from"]) or "open /wallet"
+    recv = _bridge_addr(uid, st["to"]) or "open /wallet"
+    return (
+        "🌉 <b>FERZAN BRIDGE</b>\n"
+        "See it. Ape it. Send it.\n\n"
+        "1. Pick from / to\n"
+        "2. Set size\n"
+        "3. Get Quote opens Relay with YOUR Ferzan receive address\n\n"
+        f"From ⛓ <b>{src['name']}</b> · {src['unit']}\n"
+        f"To ⛓ <b>{dst['name']}</b> · {dst['unit']}\n"
+        f"Size · <b>{st['amt']}</b> {src['unit']}\n\n"
+        f"📤 Send from\n<code>{send}</code>\n"
+        f"📥 Receive to\n<code>{recv}</code>\n\n"
+        "Powered by Relay. Quote is in the browser. You sign there.\n"
+        "HOOD / XRP routes that Relay lists will show on their page.\n"
+        "<i>Non-custodial bridge. Confirm the receive address is your Ferzan wallet.</i>"
+    )
+
+
+def _bridge_kb(st: dict, uid: int) -> InlineKeyboardMarkup:
+    url = _bridge_url(st, uid)
+    chains = list(BRIDGE.keys())
+    pick_from = [InlineKeyboardButton(BRIDGE[k]["name"], callback_data=f"br:f:{k}") for k in chains]
+    pick_to = [InlineKeyboardButton(BRIDGE[k]["name"], callback_data=f"br:t:{k}") for k in chains]
+    def chunk(xs, n=4):
+        return [xs[i:i + n] for i in range(0, len(xs), n)]
+    rows = [
+        [InlineKeyboardButton("From chain", callback_data="br:noop"),
+         InlineKeyboardButton("To chain", callback_data="br:noop")],
+    ]
+    rows += chunk(pick_from)
+    rows.append([InlineKeyboardButton("⬇️ destination", callback_data="br:noop")])
+    rows += chunk(pick_to)
+    rows.append(
+        [
+            InlineKeyboardButton("0.05", callback_data="br:a:0.05"),
+            InlineKeyboardButton("0.1", callback_data="br:a:0.1"),
+            InlineKeyboardButton("0.25", callback_data="br:a:0.25"),
+            InlineKeyboardButton("0.5", callback_data="br:a:0.5"),
+        ]
+    )
+    rows.append(
+        [
+            InlineKeyboardButton("1", callback_data="br:a:1"),
+            InlineKeyboardButton("↔️ Flip", callback_data="br:flip"),
+        ]
+    )
+    rows.append([InlineKeyboardButton("📋 Get Quote", url=url)])
+    rows.append([InlineKeyboardButton("↩️ Desk", callback_data="go:home")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def bridge_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard(update):
+        return
+    st = _bridge_state(context)
+    uid = update.effective_user.id
+    await update.effective_message.reply_text(
+        _bridge_text(uid, st), parse_mode="HTML", reply_markup=_bridge_kb(st, uid)
+    )
+
+
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
@@ -2474,6 +2579,28 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     uid = update.effective_user.id
     data = query.data or ""
+    if data.startswith("br:"):
+        st = _bridge_state(context)
+        parts = data.split(":")
+        if parts[1] == "f" and parts[2] in BRIDGE:
+            st["from"] = parts[2]
+            if st["from"] == st["to"]:
+                st["to"] = "eth" if st["from"] != "eth" else "base"
+        elif parts[1] == "t" and parts[2] in BRIDGE:
+            st["to"] = parts[2]
+        elif parts[1] == "a":
+            st["amt"] = parts[2]
+        elif parts[1] == "flip":
+            st["from"], st["to"] = st["to"], st["from"]
+        try:
+            await query.edit_message_text(
+                _bridge_text(uid, st), parse_mode="HTML", reply_markup=_bridge_kb(st, uid)
+            )
+        except Exception:
+            await context.bot.send_message(
+                uid, _bridge_text(uid, st), parse_mode="HTML", reply_markup=_bridge_kb(st, uid)
+            )
+        return
     if data.startswith("wi:"):
         kind = data[3:]
         if kind == "gen":
@@ -2641,6 +2768,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await fees_cmd(update, context)
         elif kind == "wallets":
             await wallet_cmd(update, context)
+        elif kind == "bridge":
+            st = _bridge_state(context)
+            await context.bot.send_message(
+                uid, _bridge_text(uid, st), parse_mode="HTML", reply_markup=_bridge_kb(st, uid)
+            )
         elif kind == "buy":
             await buy_cmd(update, context)
         elif kind == "bag":
@@ -3573,6 +3705,7 @@ def main() -> None:
     app.add_handler(CommandHandler("chains", chains_cmd))
     app.add_handler(CommandHandler("quote", quote_cmd))
     app.add_handler(CommandHandler("menu", start))
+    app.add_handler(CommandHandler("bridge", bridge_cmd))
     app.add_handler(CommandHandler("live", quote_cmd))
     app.add_handler(CallbackQueryHandler(on_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
