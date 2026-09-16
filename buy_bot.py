@@ -1395,7 +1395,8 @@ def _raid_text(row: dict) -> str:
         f"⏱  {mins}m left\n"
         f"🔗  <a href=\"{_esc(row['url'])}\">Open the post</a>\n"
         + (f"{_icon('USD', 1, '💵')}  {_esc(tag)}\n" if tag else "")
-        + "\n<i>Tap ❤️ 🔁 💬 after you smash.</i>"
+        + "\n<i>Tap ❤️ 🔁 💬 after you smash.</i>\n"
+        + "<i>See it. Ape it. Send it.</i>"
     )
 
 
@@ -1766,7 +1767,8 @@ async def tick(context: ContextTypes.DEFAULT_TYPE) -> None:
         txt = (
             f"⚔️ RAID LIVE {tag or ''}\n"
             f"❤️ {lh}/{lt}  🔁 {rh}/{rt}  💬 {eh}/{et}\n"
-            f"<a href=\"{_esc(url)}\">Open the post</a>"
+            f"<a href=\"{_esc(url)}\">Open the post</a>\n"
+            f"<i>See it. Ape it. Send it.</i>"
         )
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("Open Post", url=url)]])
         try:
