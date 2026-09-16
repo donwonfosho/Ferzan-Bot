@@ -67,7 +67,10 @@ def _ce(i: int, fallback: str) -> str:
 
 
 def _icon(name: str, default: int, fallback: str) -> str:
-    return _ce(_slot(name, default), fallback)
+    i = _slot(name, default)
+    if 0 <= i < len(_PACK_IDS) and _PACK_IDS[i]:
+        return _ce(i, "•")
+    return ""
 
 
 def _face(i: int = 0) -> str:
