@@ -1360,16 +1360,19 @@ def _raid_text(row: dict) -> str:
     tag = row.get("cashtag") or ""
     mins = max(1, int((row.get("ends") or 0) - time.time()) // 60) if row.get("active") else 0
     status = "IN PROGRESS" if row.get("active") else "STOPPED"
+    def done(h, t):
+        return " ✅" if int(h or 0) >= int(t or 1) else ""
+
     return (
-        f"{_icon('TITLE', 0, '⚡')} FERZAN RAID · {status}\n"
-        f"{_esc(tag)}\n\n"
-        f"❤️ Likes {_pct_bar(row['likes_h'], row['likes_t'])}\n"
-        f"🔁 Reposts {_pct_bar(row['rt_h'], row['rt_t'])}\n"
-        f"💬 Replies {_pct_bar(row['re_h'], row['re_t'])}\n\n"
-        f"⏱ {mins}m left\n"
-        f"Open the post:\n{_esc(row['url'])}\n"
-        + (f"\nCashtag: {_esc(tag)}" if tag else "")
-        + "\n\nTap ❤️ 🔁 💬 after you engage. Honor system — X does not give us live counts."
+        f"{_icon('TITLE', 0, '⚡')} <b>FERZAN RAID</b> · {status}\n"
+        f"<b>{_esc(tag)}</b>\n\n"
+        f"❤️  Likes     {_pct_bar(row['likes_h'], row['likes_t'])}{done(row['likes_h'], row['likes_t'])}\n"
+        f"🔁  Reposts   {_pct_bar(row['rt_h'], row['rt_t'])}{done(row['rt_h'], row['rt_t'])}\n"
+        f"💬  Replies   {_pct_bar(row['re_h'], row['re_t'])}{done(row['re_h'], row['re_t'])}\n\n"
+        f"⏱  {mins}m left\n"
+        f"🔗  <a href=\"{_esc(row['url'])}\">Open the post</a>\n"
+        + (f"{_icon('USD', 1, '💵')}  {_esc(tag)}\n" if tag else "")
+        + "\n<i>Tap ❤️ 🔁 💬 after you smash.</i>"
     )
 
 
@@ -1471,13 +1474,7 @@ async def raid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "cashtag": tag,
         "active": 1,
     }
-    start = (
-        f"{_icon('TITLE', 0, '⚡')} NEW FERZAN RAID\n{tag or ''}\n\n"
-        f"Targets\n❤️ {likes_t}   🔁 {rt_t}   💬 {re_t}\n"
-        f"⏱ {mins} minutes\n\n{_esc(url)}\n"
-        + (f"Cashtag: {tag}\n" if tag else "")
-        + "Smash the post. Tap ❤️ 🔁 💬 when you have."
-    )
+    start = _raid_text(row)
     banner = Path("/opt/ferzan/app/raid.jpg")
     if not banner.exists():
         banner = Path(__file__).resolve().parent / "raid.jpg"
@@ -1489,11 +1486,13 @@ async def raid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         if banner.exists():
             with banner.open("rb") as fh:
-                msg = await update.effective_message.reply_photo(fh, caption=start, reply_markup=kb)
+                msg = await update.effective_message.reply_photo(
+                    fh, caption=start, parse_mode="HTML", reply_markup=kb
+                )
         else:
-            msg = await update.effective_message.reply_text(start, reply_markup=kb)
+            msg = await update.effective_message.reply_text(start, parse_mode="HTML", reply_markup=kb)
     except Exception:
-        msg = await update.effective_message.reply_text(start, reply_markup=kb)
+        msg = await update.effective_message.reply_text(start, parse_mode="HTML", reply_markup=kb)
     con = _db()
     con.execute("UPDATE raids SET msg_id=? WHERE id=?", (msg.message_id, rid))
     con.commit()
@@ -1502,7 +1501,9 @@ async def raid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         try:
             if banner.exists():
                 with banner.open("rb") as fh:
-                    await context.bot.send_photo(RAID_CH, fh, caption=start, reply_markup=kb)
+                    await context.bot.send_photo(
+                        RAID_CH, fh, caption=start, parse_mode="HTML", reply_markup=kb
+                    )
             else:
                 await context.bot.send_message(RAID_CH, start, reply_markup=kb)
         except Exception as exc:
@@ -1564,9 +1565,11 @@ async def raid_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     txt = _raid_text(d)
     try:
         if q.message.photo:
-            await q.edit_message_caption(caption=txt, reply_markup=_raid_kb(rid, d["url"]))
+            await q.edit_message_caption(
+                caption=txt, parse_mode="HTML", reply_markup=_raid_kb(rid, d["url"])
+            )
         else:
-            await q.edit_message_text(txt, reply_markup=_raid_kb(rid, d["url"]))
+            await q.edit_message_text(txt, parse_mode="HTML", reply_markup=_raid_kb(rid, d["url"]))
     except Exception:
         pass
 
@@ -1789,7 +1792,7 @@ async def marketing_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 async def trending_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.effective_message.reply_text(
-        "🔥 List on Trending\nRanked in Ferzan signal channels.\n\nFirst, choose your token's CHAIN:",
+        "🔥 List on Trending\nPosted in https://t.me/Ferzan_Trending after payment.\n\nFirst, choose your token's CHAIN:",
         reply_markup=InlineKeyboardMarkup(
             [
                 [InlineKeyboardButton("BNB Smart Chain", callback_data="td:bsc")],
