@@ -280,9 +280,7 @@ def _card_wallet(uid: int | None, ca: str, chain: str) -> str:
         return "<blockquote>💰 <b>Balance</b>\nFund /wallet</blockquote>"
     return (
         "<blockquote>"
-        "💰 <b>Balance</b>\n"
-        f"{unit}  {native:.6f}\n"
-        f"Token  {tok:.4g}"
+        f"💰 <b>{unit}</b> {native:.4f}   ·   token {tok:.4g}"
         "</blockquote>"
     )
 
@@ -350,25 +348,18 @@ def render_card(card: SignalCard, uid: int | None = None) -> str:
     if scan:
         links.append(f'<a href="{html.escape(scan, quote=True)}">Scan</a>')
     lines = [
-        f"⚡ <b>{_esc(s.name)}</b>  ${_esc(str(s.symbol).lstrip('$'))}",
+        f"⚡ <b>{_esc(s.name)}</b>  ${_esc(str(s.symbol).lstrip('$'))}  ·  {_esc(chain)}",
         f"<code>{_esc(ca)}</code>" if ca else "",
-        f"{venue}  🔗 {_esc(chain)}",
-        "",
-        " · ".join(social),
-        f"🔎 Age: {html.escape(age)}" if age else "",
-        curve,
-        "",
-        f"🧢 MC ${_esc(f'{mc:,.0f}' if mc else '—')}  |  💵 {_esc(_fmt_px(s.price_usd))}",
-        f"💧 Liq ${_esc(f'{liq:,.0f}' if liq else '—')}{_esc(liq_pct)}",
-        "📌 No limit orders",
-        "",
+        " · ".join([x for x in [venue, (f"age {html.escape(age)}" if age else ""), curve] if x]),
+        " · ".join(social) if social else "",
+        (
+            f"🧢 {_esc(f'${mc:,.0f}' if mc else '—')}"
+            f"  💵 {_esc(_fmt_px(s.price_usd))}"
+            f"  💧 {_esc(f'${liq:,.0f}' if liq else '—')}{_esc(liq_pct)}"
+        ),
         _card_wallet(uid, ca, s.chain or ""),
-        "",
-        f"📊 1h 🟢{s.buys_h1} / 🔴{s.sells_h1}  ·  24h {_esc(f'${vol:,.0f}' if vol else '—')}",
-        f"🏅 {card.score}/100  {_esc(card.bias)}   🎯 TP {card.take_pct:g}%  🛑 SL {card.stop_pct:g}%",
-        "",
+        f"📊 1h {s.buys_h1}/{s.sells_h1}  ·  24h {_esc(f'${vol:,.0f}' if vol else '—')}  ·  {card.score}/100 {_esc(card.bias)}",
         " · ".join(links),
-        "<i>Tap CA to copy</i>",
     ]
     return "\n".join(lines)
 
@@ -588,33 +579,25 @@ def home_keyboard() -> InlineKeyboardMarkup:
         [
             InlineKeyboardButton("⛓ Chains", callback_data="go:chains"),
             InlineKeyboardButton("👛 Wallets", callback_data="go:wallets"),
+            InlineKeyboardButton("⚙️ Desk", callback_data="go:settings"),
         ],
         [
-            InlineKeyboardButton("⚙️ Trade desk", callback_data="go:settings"),
             InlineKeyboardButton("📊 Bag", callback_data="go:bag"),
-        ],
-        [
             InlineKeyboardButton("📡 Signals", callback_data="go:feeds"),
             InlineKeyboardButton("🎯 Snipe", callback_data="go:snipehelp"),
         ],
         [
             InlineKeyboardButton("⏱ Limits", callback_data="go:snipes"),
             InlineKeyboardButton("👯 Copy", callback_data="go:copy"),
+            InlineKeyboardButton("🌉 Bridge", callback_data="go:bridge"),
         ],
         [
-            InlineKeyboardButton("🚀 Launches", callback_data="go:launches"),
+            InlineKeyboardButton("🚀 Launch", callback_data="go:launches"),
             InlineKeyboardButton("💸 Cut", callback_data="go:fees"),
-        ],
-        [
-            InlineKeyboardButton("🌉 Bridge SOL · ETH · BASE · BSC", callback_data="go:bridge"),
-        ],
-        [
-            InlineKeyboardButton("⚡ PASTE A CA — BUY / SELL", callback_data="go:buyhelp"),
-        ],
-        [
             InlineKeyboardButton("💬 Chat", url=chat),
-            InlineKeyboardButton("𝕏 @FerzanEco", url=xurl),
         ],
+        [InlineKeyboardButton("⚡ PASTE CA", callback_data="go:buyhelp")],
+        [InlineKeyboardButton("𝕏 @FerzanEco", url=xurl)],
     ]
     return InlineKeyboardMarkup(rows)
 
@@ -648,13 +631,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         buy_usd = float(user.get("buy_usd") or 25)
         bslip = float(user.get("buy_slip_pct") or 10)
         text = (
-            "⚡ FERZAN TRADE BOT\n"
-            "See it. Ape it. Send it.\n\n"
-            "Paste a CA. Score it. Buy from YOUR wallet.\n"
-            "Signals in the chain rooms. Talk in Ferzan Chat.\n"
-            "X — @FerzanEco\n\n"
-            f"💵 Default buy ${buy_usd:.0f} · slip {bslip:.0f}% · cut {fees.current_bps() / 100:.2f}%\n"
-            "/settings  ·  /wallet  ·  /bag"
+            "⚡ FERZAN TRADE BOT · See it. Ape it. Send it.\n"
+            f"Paste a CA · ${buy_usd:.0f} · slip {bslip:.0f}% · cut {fees.current_bps() / 100:.2f}%\n"
+            "/wallet  /bag  /bridge  /settings"
         )
         target = update.effective_message
         if not target:
@@ -2517,49 +2496,40 @@ def _bridge_text(uid: int, st: dict) -> str:
         "See it. Ape it. Send it.\n\n"
         "1. Pick from / to\n"
         "2. Set size\n"
-        "3. Get Quote opens Relay with YOUR Ferzan receive address\n\n"
+        "3. Get Quote inside Ferzan. Confirm. We sign with YOUR desk wallet.\n\n"
         f"From ⛓ <b>{src['name']}</b> · {src['unit']}\n"
         f"To ⛓ <b>{dst['name']}</b> · {dst['unit']}\n"
         f"Size · <b>{st['amt']}</b> {src['unit']}\n\n"
         f"📤 Send from\n<code>{send}</code>\n"
         f"📥 Receive to\n<code>{recv}</code>\n\n"
-        "Powered by Relay. Quote is in the browser. You sign there.\n"
-        "HOOD / XRP routes that Relay lists will show on their page.\n"
-        "<i>Non-custodial bridge. Confirm the receive address is your Ferzan wallet.</i>"
+        "Powered by Relay. Signed on this box — no Telegram Wallet, no seed prompt.\n"
+        "<i>Confirm the receive line is your Ferzan wallet before you tap Send.</i>"
     )
 
 
 def _bridge_kb(st: dict, uid: int) -> InlineKeyboardMarkup:
-    url = _bridge_url(st, uid)
-    chains = list(BRIDGE.keys())
-    pick_from = [InlineKeyboardButton(BRIDGE[k]["name"], callback_data=f"br:f:{k}") for k in chains]
-    pick_to = [InlineKeyboardButton(BRIDGE[k]["name"], callback_data=f"br:t:{k}") for k in chains]
-    def chunk(xs, n=4):
-        return [xs[i:i + n] for i in range(0, len(xs), n)]
-    rows = [
-        [InlineKeyboardButton("From chain", callback_data="br:noop"),
-         InlineKeyboardButton("To chain", callback_data="br:noop")],
-    ]
-    rows += chunk(pick_from)
-    rows.append([InlineKeyboardButton("⬇️ destination", callback_data="br:noop")])
-    rows += chunk(pick_to)
-    rows.append(
+    src, dst = BRIDGE[st["from"]], BRIDGE[st["to"]]
+    return InlineKeyboardMarkup(
         [
-            InlineKeyboardButton("0.05", callback_data="br:a:0.05"),
-            InlineKeyboardButton("0.1", callback_data="br:a:0.1"),
-            InlineKeyboardButton("0.25", callback_data="br:a:0.25"),
-            InlineKeyboardButton("0.5", callback_data="br:a:0.5"),
+            [InlineKeyboardButton("↔️ Flip", callback_data="br:flip")],
+            [
+                InlineKeyboardButton(f"⛓ {src['name']} | {src['unit']}", callback_data="br:pick:from"),
+                InlineKeyboardButton(f"⛓ {dst['name']} | {dst['unit']}", callback_data="br:pick:to"),
+            ],
+            [
+                InlineKeyboardButton("📤 Sending wallet", callback_data="go:wallets"),
+                InlineKeyboardButton("📥 Receiving wallet", callback_data="go:wallets"),
+            ],
+            [
+                InlineKeyboardButton("0.05", callback_data="br:a:0.05"),
+                InlineKeyboardButton("0.1", callback_data="br:a:0.1"),
+                InlineKeyboardButton("0.25", callback_data="br:a:0.25"),
+                InlineKeyboardButton("0.5", callback_data="br:a:0.5"),
+            ],
+            [InlineKeyboardButton("📋 Get Quote", callback_data="br:quote")],
+            [InlineKeyboardButton("✖️ Close", callback_data="go:home")],
         ]
     )
-    rows.append(
-        [
-            InlineKeyboardButton("1", callback_data="br:a:1"),
-            InlineKeyboardButton("↔️ Flip", callback_data="br:flip"),
-        ]
-    )
-    rows.append([InlineKeyboardButton("📋 Get Quote", url=url)])
-    rows.append([InlineKeyboardButton("↩️ Desk", callback_data="go:home")])
-    return InlineKeyboardMarkup(rows)
 
 
 async def bridge_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2582,7 +2552,65 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if data.startswith("br:"):
         st = _bridge_state(context)
         parts = data.split(":")
-        if parts[1] == "f" and parts[2] in BRIDGE:
+        if parts[1] == "noop":
+            return
+        if parts[1] == "quote":
+            try:
+                import bridge as ferzan_bridge
+
+                pack = ferzan_bridge.quote(uid, st["from"], st["to"], st["amt"])
+                context.user_data["bridge_pack"] = pack
+                kb = InlineKeyboardMarkup(
+                    [
+                        [InlineKeyboardButton("✅ Send from Ferzan wallet", callback_data="br:go")],
+                        [InlineKeyboardButton("↩️ Back", callback_data="go:bridge")],
+                    ]
+                )
+                await query.edit_message_text(
+                    "🌉 <b>QUOTE</b>\n" + ferzan_bridge.summarize(pack) + "\n\nTap Send. Signed on this box.",
+                    parse_mode="HTML",
+                    reply_markup=kb,
+                )
+            except Exception as exc:
+                await query.edit_message_text(
+                    f"Quote failed.\n{exc}\n\nFund the FROM wallet on /wallet and try a smaller size.",
+                    reply_markup=_bridge_kb(st, uid),
+                )
+            return
+        if parts[1] == "go":
+            pack = context.user_data.get("bridge_pack")
+            if not pack:
+                await query.edit_message_text("Quote expired. Tap Get Quote again.", reply_markup=_bridge_kb(st, uid))
+                return
+            await query.edit_message_text("Signing on the desk…")
+            try:
+                import bridge as ferzan_bridge
+
+                msg = ferzan_bridge.execute(uid, pack)
+                context.user_data.pop("bridge_pack", None)
+                await context.bot.send_message(uid, "✅ " + msg)
+            except Exception as exc:
+                await context.bot.send_message(uid, f"Bridge send failed.\n{exc}")
+            return
+        if parts[1] == "pick":
+            side = parts[2] if len(parts) > 2 else "from"
+            prefix = "br:f:" if side == "from" else "br:t:"
+            title = "FROM chain" if side == "from" else "TO chain"
+            rows, row = [], []
+            for k, meta in BRIDGE.items():
+                row.append(InlineKeyboardButton(meta["name"], callback_data=prefix + k))
+                if len(row) == 2:
+                    rows.append(row)
+                    row = []
+            if row:
+                rows.append(row)
+            rows.append([InlineKeyboardButton("↩️ Back", callback_data="go:bridge")])
+            await query.edit_message_text(
+                f"Pick {title}",
+                reply_markup=InlineKeyboardMarkup(rows),
+            )
+            return
+        if len(parts) > 2 and parts[1] == "f" and parts[2] in BRIDGE:
             st["from"] = parts[2]
             if st["from"] == st["to"]:
                 st["to"] = "eth" if st["from"] != "eth" else "base"
