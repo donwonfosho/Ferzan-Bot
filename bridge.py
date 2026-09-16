@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+from pathlib import Path
 
 import requests
 
@@ -219,46 +221,29 @@ def _exec_dln_sol(uid: int, pack: dict, data: dict) -> str:
             raw = bytes.fromhex(blob)
         except ValueError:
             raw = base64.b64decode(blob)
-    tx = VersionedTransaction.from_bytes(raw)
     rpc = sol_signer._rpc()
-    bh = requests.post(
-        rpc,
-        json={"jsonrpc": "2.0", "id": 1, "method": "getLatestBlockhash", "params": [{"commitment": "confirmed"}]},
-        timeout=12,
-    ).json()
-    blockhash = ((bh.get("result") or {}).get("value") or {}).get("blockhash")
-    if not blockhash:
-        raise RuntimeError("No Solana blockhash from RPC.")
-    payload = json.loads(tx.to_json())
-    msg_j = payload.get("message") or payload
-    if isinstance(msg_j, dict):
-        msg_j["recentBlockhash"] = blockhash
-        msg_j["recent_blockhash"] = blockhash
-    payload["signatures"] = []
-    tx = VersionedTransaction.from_json(json.dumps(payload))
-    signed = VersionedTransaction(tx.message, [kp])
-    body = requests.post(
-        rpc,
-        json={
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "sendTransaction",
-            "params": [
-                base64.b64encode(bytes(signed)).decode(),
-                {"encoding": "base64", "skipPreflight": False},
-            ],
-        },
-        timeout=20,
-    ).json()
-    if body.get("error"):
-        err = body["error"]
-        if isinstance(err, dict):
-            raise RuntimeError(err.get("message") or str(err))
-        raise RuntimeError(str(err))
-    sig = body.get("result") or ""
+    helper = Path(__file__).resolve().parent / "sol_bridge_send.js"
+    if not helper.exists():
+        raise RuntimeError("sol_bridge_send.js is missing next to bridge.py.")
+    env = os.environ.copy()
+    env["FERZAN_SOL_KEY"] = sol_key
+    proc = subprocess.run(
+        ["node", str(helper), rpc, base64.b64encode(raw).decode()],
+        capture_output=True,
+        text=True,
+        timeout=25,
+        env=env,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError((proc.stderr or proc.stdout or "node sender failed").strip()[:400])
+    sig = (proc.stdout or "").strip()
     if not sig:
-        raise RuntimeError("Solana RPC accepted nothing.")
-    return f"Bridge submitted.\nhttps://solscan.io/tx/{sig}\nWatch https://app.debridge.finance/orders\nCredit on destination usually 1–3 min."
+        raise RuntimeError("Node sender returned no signature.")
+    return (
+        f"Bridge submitted.\nhttps://solscan.io/tx/{sig}\n"
+        "Watch https://app.debridge.finance/orders\n"
+        "Credit on destination usually 1–3 min."
+    )
 
 
 def _exec_evm(uid: int, pack: dict, data: dict) -> str:
