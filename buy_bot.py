@@ -78,19 +78,23 @@ def _face(i: int = 0) -> str:
 
 async def _load_pack(bot) -> None:
     global _PACK_IDS, _PACK_FACE
-    try:
-        st = await bot.get_sticker_set(EMOJI_PACK)
-        _PACK_IDS, _PACK_FACE = [], []
-        for s in st.stickers or []:
-            cid = getattr(s, "custom_emoji_id", None)
-            if not cid:
-                continue
-            _PACK_IDS.append(cid)
-            _PACK_FACE.append(getattr(s, "emoji", None) or "")
-        log.info("emoji pack %s loaded %s icons", EMOJI_PACK, len(_PACK_IDS))
-    except Exception as exc:
-        log.warning("emoji pack %s: %s", EMOJI_PACK, exc)
-        _PACK_IDS, _PACK_FACE = [], []
+    _PACK_IDS, _PACK_FACE = [], []
+    for name in (EMOJI_PACK, "FerzanBuyBot"):
+        if not name:
+            continue
+        try:
+            st = await bot.get_sticker_set(name)
+            for s in st.stickers or []:
+                cid = getattr(s, "custom_emoji_id", None)
+                if not cid:
+                    continue
+                _PACK_IDS.append(str(cid))
+                _PACK_FACE.append(getattr(s, "emoji", None) or "⚡")
+            log.info("emoji pack %s loaded %s icons", name, len(_PACK_IDS))
+            if _PACK_IDS:
+                return
+        except Exception as exc:
+            log.warning("emoji pack %s: %s", name, exc)
 
 GT_NET = {
     "sol": "solana",
@@ -206,6 +210,10 @@ def _db() -> sqlite3.Connection:
     )
     try:
         con.execute("ALTER TABLE raid_tokens ADD COLUMN dex TEXT")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        con.execute("ALTER TABLE raid_tokens ADD COLUMN announced INTEGER DEFAULT 0")
     except sqlite3.OperationalError:
         pass
     con.execute(
@@ -1569,6 +1577,7 @@ async def raid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def _bump_token(bot, chat, tag: str, ca: str = "") -> None:
+    await _load_pack(bot)
     tag = (tag or "").strip()
     if not tag:
         return
@@ -1580,8 +1589,11 @@ async def _bump_token(bot, chat, tag: str, ca: str = "") -> None:
         mc = _usd(pair.get("marketCap") or pair.get("fdv"))
         dex = (pair.get("dexId") or "").title()
     con = _db()
-    row = con.execute("SELECT pts FROM raid_tokens WHERE cashtag=?", (tag,)).fetchone()
+    row = con.execute(
+        "SELECT pts, COALESCE(announced,0) FROM raid_tokens WHERE cashtag=?", (tag,)
+    ).fetchone()
     first = not row
+    announced = int(row[1]) if row else 0
     if row:
         con.execute(
             "UPDATE raid_tokens SET pts=pts+1, chat_id=?, invite=?, ca=?, mc=?, dex=? WHERE cashtag=?",
@@ -1596,32 +1608,40 @@ async def _bump_token(bot, chat, tag: str, ca: str = "") -> None:
         pts = 1
     con.commit()
     con.close()
-    if first:
+    if first or announced == 0:
         kb = InlineKeyboardMarkup(
             [
                 [InlineKeyboardButton("Open group", url=invite or HUB)],
                 [InlineKeyboardButton("Buy", url=f"https://t.me/{TRADE}?start={ca}" if ca else HUB)],
+                [InlineKeyboardButton("Boost", url=HUB)],
             ]
         )
         try:
             await bot.send_message(
                 RAID_CH,
-                f"{_icon('TITLE', 0, '⚡')} <b>{_esc(tag)}</b>\n"
-                f"entered the Raid Leaderboard\n\n"
-                f"{_icon('TG', 8, '📣')}  Group: {invite or '—'}\n"
-                f"{_icon('USD', 1, '⚡')}  Points: {pts}\n"
-                f"{_icon('MC', 3, '🧢')}  Market cap: {mc or '—'}\n\n"
+                f"{_icon('TITLE', 0, '⚡')} <b>{_esc(tag)}</b> entered the Raid Leaderboard.\n\n"
+                f"{_icon('TG', 8, '📣')} Group: "
+                + (f"<a href=\"{_esc(invite)}\">Open group</a>" if invite else "—")
+                + "\n"
+                f"{_icon('USD', 1, '⚡')} Points: {pts}\n"
+                f"{_icon('MC', 3, '🧢')} Market cap: {mc or '—'}\n"
+                f"{_icon('ROUTE', 5, '🛣')} {dex or '—'}\n\n"
                 f"<i>See it. Ape it. Send it.</i>",
                 parse_mode="HTML",
                 reply_markup=kb,
                 disable_web_page_preview=True,
             )
+            con3 = _db()
+            con3.execute("UPDATE raid_tokens SET announced=1 WHERE cashtag=?", (tag,))
+            con3.commit()
+            con3.close()
         except Exception as exc:
             log.warning("lb enter %s", exc)
     await _post_board(bot)
 
 
 async def _post_board(bot) -> str:
+    await _load_pack(bot)
     con = _db()
     rows = con.execute(
         "SELECT cashtag, pts, invite, mc, ca, dex FROM raid_tokens ORDER BY pts DESC LIMIT 10"
@@ -1675,10 +1695,6 @@ async def _post_board(bot) -> str:
         )
         con.commit()
         con.close()
-        try:
-            await bot.pin_chat_message(RAID_CH, msg.message_id, disable_notification=True)
-        except Exception:
-            pass
         return ""
     except Exception as exc:
         log.warning("lb board %s", exc)
