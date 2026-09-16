@@ -168,50 +168,58 @@ def _exec_sol(uid: int, pack: dict, data: dict) -> str:
     blob = None
     deposit_to = ""
     deposit_amt = 0
-    for node in _walk(data):
-        for key in ("transaction", "tx", "serializedTransaction", "serializedTx"):
-            val = node.get(key)
-            if isinstance(val, str) and len(val) > 80:
-                blob = val
-        raw = node.get("data")
-        if isinstance(raw, str) and len(raw) > 80 and not raw.startswith("0x"):
-            blob = raw
-        dest = str(node.get("to") or node.get("depositAddress") or "")
-        if dest and not dest.startswith("0x") and 32 <= len(dest) <= 48:
-            deposit_to = dest
-            raw_amt = node.get("value") or node.get("amount") or node.get("lamports") or 0
-            try:
-                deposit_amt = int(str(raw_amt), 0)
-            except (TypeError, ValueError):
-                deposit_amt = 0
+    for step in data.get("steps") or []:
+        for item in step.get("items") or []:
+            d = item.get("data")
+            if isinstance(d, str) and len(d) > 80 and not d.startswith("0x"):
+                blob = d
+            elif isinstance(d, dict):
+                for key in ("transaction", "tx", "serializedTransaction", "serializedTx"):
+                    val = d.get(key)
+                    if isinstance(val, str) and len(val) > 80:
+                        blob = val
+                dest = str(d.get("to") or d.get("depositAddress") or "")
+                if dest and not dest.startswith("0x") and 32 <= len(dest) <= 48:
+                    deposit_to = dest
+                    raw_amt = d.get("value") or d.get("amount") or d.get("lamports") or 0
+                    try:
+                        deposit_amt = int(str(raw_amt), 0)
+                    except (TypeError, ValueError):
+                        deposit_amt = 0
 
     if blob:
         try:
-            raw = base64.b64decode(blob)
-        except Exception:
-            raw = bytes.fromhex(blob)
-        tx = VersionedTransaction.from_bytes(raw)
-        signed = VersionedTransaction(tx.message, [kp])
-        rpc = sol_signer._rpc()
-        body = requests.post(
-            rpc,
-            json={
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "sendTransaction",
-                "params": [
-                    base64.b64encode(bytes(signed)).decode(),
-                    {"encoding": "base64", "skipPreflight": True},
-                ],
-            },
-            timeout=25,
-        ).json()
-        if body.get("error"):
-            raise RuntimeError(str(body["error"]))
-        sig = body.get("result") or ""
-        if not sig:
-            raise RuntimeError("Solana RPC accepted nothing.")
-        return f"Bridge submitted.\nhttps://solscan.io/tx/{sig}\nDestination credit can take 30–90s."
+            try:
+                raw = base64.b64decode(blob)
+            except Exception:
+                raw = bytes.fromhex(blob)
+            tx = VersionedTransaction.from_bytes(raw)
+            signed = VersionedTransaction(tx.message, [kp])
+            rpc = sol_signer._rpc()
+            body = requests.post(
+                rpc,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "sendTransaction",
+                    "params": [
+                        base64.b64encode(bytes(signed)).decode(),
+                        {"encoding": "base64", "skipPreflight": False},
+                    ],
+                },
+                timeout=25,
+            ).json()
+            if body.get("error"):
+                raise RuntimeError(str(body["error"]))
+            sig = body.get("result") or ""
+            if not sig:
+                raise RuntimeError("Solana RPC accepted nothing.")
+            return f"Bridge submitted.\nhttps://solscan.io/tx/{sig}\nDestination credit can take 30–90s."
+        except Exception as exc:
+            if not deposit_to:
+                raise RuntimeError(
+                    f"{exc}\nSOL→EVM from Relay needs a compiled deposit. Use Base → ETH for now."
+                ) from exc
 
     if deposit_to:
         if deposit_amt <= 0:

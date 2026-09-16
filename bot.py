@@ -81,6 +81,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 LOGO_PATH = Path(__file__).parent / "logo.jpg"
+BANNER_PATH = Path(__file__).parent / "trade-desk.jpg"
 PROMO_PATH = Path(os.getenv("FERZAN_PROMO_GIF", str(Path(__file__).parent / "promo.gif")))
 
 ALERT_INTERVAL_SECONDS = int(os.getenv("ALERT_INTERVAL_SECONDS", "60"))
@@ -650,12 +651,22 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         target = update.effective_message
         if not target:
             return
-        await target.reply_text(
-            text,
-            parse_mode="HTML",
-            disable_web_page_preview=True,
-            reply_markup=home_keyboard(),
-        )
+        banner = BANNER_PATH if BANNER_PATH.exists() else LOGO_PATH
+        if banner.exists():
+            with banner.open("rb") as photo:
+                await target.reply_photo(
+                    photo=photo,
+                    caption=text,
+                    parse_mode="HTML",
+                    reply_markup=home_keyboard(),
+                )
+        else:
+            await target.reply_text(
+                text,
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+                reply_markup=home_keyboard(),
+            )
         try:
             user_wallets.ensure(update.effective_user.id)
         except Exception:
