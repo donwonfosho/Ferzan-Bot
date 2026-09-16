@@ -184,6 +184,19 @@ def _db() -> sqlite3.Connection:
         except sqlite3.OperationalError:
             pass
     con.execute(
+        """CREATE TABLE IF NOT EXISTS raid_taps (
+            raid_id INTEGER,
+            user_id INTEGER,
+            kind TEXT,
+            PRIMARY KEY (raid_id, user_id, kind)
+        )"""
+    )
+    for col, spec in (("last_ping", "INTEGER DEFAULT 0"), ("ping_min", "INTEGER DEFAULT 5")):
+        try:
+            con.execute(f"ALTER TABLE raids ADD COLUMN {col} {spec}")
+        except sqlite3.OperationalError:
+            pass
+    con.execute(
         """CREATE TABLE IF NOT EXISTS raid_scores (
             chat_id INTEGER,
             user_id INTEGER,
@@ -1359,7 +1372,17 @@ def _pct_bar(have: int, need: int) -> str:
 def _raid_text(row: dict) -> str:
     tag = row.get("cashtag") or ""
     mins = max(1, int((row.get("ends") or 0) - time.time()) // 60) if row.get("active") else 0
-    status = "IN PROGRESS" if row.get("active") else "STOPPED"
+    finished = (
+        int(row.get("likes_h") or 0) >= int(row.get("likes_t") or 1)
+        and int(row.get("rt_h") or 0) >= int(row.get("rt_t") or 1)
+        and int(row.get("re_h") or 0) >= int(row.get("re_t") or 1)
+    )
+    if finished:
+        status = "DONE"
+    elif row.get("active"):
+        status = "IN PROGRESS"
+    else:
+        status = "STOPPED"
     def done(h, t):
         return " ✅" if int(h or 0) >= int(t or 1) else ""
 
@@ -1494,9 +1517,18 @@ async def raid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     except Exception:
         msg = await update.effective_message.reply_text(start, parse_mode="HTML", reply_markup=kb)
     con = _db()
-    con.execute("UPDATE raids SET msg_id=? WHERE id=?", (msg.message_id, rid))
+    con.execute(
+        "UPDATE raids SET msg_id=?, last_ping=?, ping_min=5 WHERE id=?",
+        (msg.message_id, int(time.time()), rid),
+    )
     con.commit()
     con.close()
+    try:
+        await context.bot.pin_chat_message(
+            update.effective_chat.id, msg.message_id, disable_notification=True
+        )
+    except Exception as exc:
+        log.warning("raid pin: %s", exc)
     if RAID_CH and str(update.effective_chat.username or "") != RAID_CH.lstrip("@"):
         try:
             if banner.exists():
@@ -1520,13 +1552,13 @@ async def raidstop_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 async def raid_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
-    await q.answer()
     parts = (q.data or "").split(":")
     if len(parts) < 3:
         return
     _, kind, rid = parts[0], parts[1], int(parts[2])
     con = _db()
     if kind == "stop":
+        await q.answer()
         con.execute("UPDATE raids SET active=0 WHERE id=?", (rid,))
         con.commit()
         con.close()
@@ -1537,14 +1569,24 @@ async def raid_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             pass
         return
     if kind == "lb":
+        await q.answer()
         con.close()
         await lb_cmd(update, context)
         return
     col = {"like": "likes_h", "rt": "rt_h", "re": "re_h"}.get(kind)
     if not col:
+        await q.answer()
         con.close()
         return
     u = update.effective_user
+    cur = con.execute(
+        "INSERT OR IGNORE INTO raid_taps(raid_id, user_id, kind) VALUES(?,?,?)",
+        (rid, u.id, kind),
+    )
+    if cur.rowcount == 0:
+        con.close()
+        await q.answer("Already counted on this button.", show_alert=False)
+        return
     con.execute(
         "INSERT INTO raid_scores(chat_id, user_id, name, pts) VALUES(?,?,?,1) "
         "ON CONFLICT(chat_id, user_id) DO UPDATE SET pts = pts + 1, name=excluded.name",
@@ -1562,6 +1604,20 @@ async def raid_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     keys = ["id", "url", "likes_t", "rt_t", "re_t", "likes_h", "rt_h", "re_h", "ends", "cashtag", "active", "msg_id"]
     d = dict(zip(keys, row))
+    done = (
+        int(d["likes_h"]) >= int(d["likes_t"])
+        and int(d["rt_h"]) >= int(d["rt_t"])
+        and int(d["re_h"]) >= int(d["re_t"])
+    )
+    if done:
+        con2 = _db()
+        con2.execute("UPDATE raids SET active=0 WHERE id=?", (rid,))
+        con2.commit()
+        con2.close()
+        d["active"] = 0
+        await q.answer("Targets hit. Raid done.")
+    else:
+        await q.answer("+1")
     txt = _raid_text(d)
     try:
         if q.message.photo:
@@ -1653,6 +1709,21 @@ async def raidevent_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     )
 
 
+async def raidint_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not context.args or not context.args[0].isdigit():
+        await update.effective_message.reply_text("Usage: /raidint 5    (minutes, 2–60)")
+        return
+    mins = max(2, min(60, int(context.args[0])))
+    con = _db()
+    con.execute(
+        "UPDATE raids SET ping_min=? WHERE chat_id=? AND active=1",
+        (mins, update.effective_chat.id),
+    )
+    con.commit()
+    con.close()
+    await update.effective_message.reply_text(f"Raid reminder every {mins} min.")
+
+
 async def setemoji_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not context.args:
         await update.effective_message.reply_text("Usage: /setemoji 🚕")
@@ -1675,6 +1746,35 @@ async def untrack(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def tick(context: ContextTypes.DEFAULT_TYPE) -> None:
     con = _db()
+    now = int(time.time())
+    try:
+        live = list(
+            con.execute(
+                "SELECT id, chat_id, url, cashtag, likes_h, likes_t, rt_h, rt_t, re_h, re_t, ends, last_ping, ping_min "
+                "FROM raids WHERE active=1"
+            )
+        )
+    except sqlite3.OperationalError:
+        live = []
+    for rid, chat_id, url, tag, lh, lt, rh, rt, eh, et, ends, last_ping, ping_min in live:
+        if ends and now > int(ends):
+            con.execute("UPDATE raids SET active=0 WHERE id=?", (rid,))
+            continue
+        every = max(2, int(ping_min or 5)) * 60
+        if now - int(last_ping or 0) < every:
+            continue
+        txt = (
+            f"⚔️ RAID LIVE {tag or ''}\n"
+            f"❤️ {lh}/{lt}  🔁 {rh}/{rt}  💬 {eh}/{et}\n"
+            f"<a href=\"{_esc(url)}\">Open the post</a>"
+        )
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("Open Post", url=url)]])
+        try:
+            await context.bot.send_message(chat_id, txt, parse_mode="HTML", reply_markup=kb)
+            con.execute("UPDATE raids SET last_ping=? WHERE id=?", (now, rid))
+        except Exception as exc:
+            log.warning("raid ping %s: %s", chat_id, exc)
+    con.commit()
     try:
         rows = list(con.execute("SELECT chat_id, chain, ca, pool, last_ts, min_usd, emoji, tg_url, discord_url, x_url FROM watches"))
     except sqlite3.OperationalError:
@@ -1945,6 +2045,7 @@ def main() -> None:
     app.add_handler(CommandHandler("vote", vote_cmd))
     app.add_handler(CommandHandler("raid", raid_cmd))
     app.add_handler(CommandHandler("raidstop", raidstop_cmd))
+    app.add_handler(CommandHandler("raidint", raidint_cmd))
     app.add_handler(CallbackQueryHandler(raid_cb, pattern=r"^rd:"))
     app.add_handler(CommandHandler("queue", queue_cmd))
     app.add_handler(CommandHandler("next", next_cmd))
