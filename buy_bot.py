@@ -1596,7 +1596,6 @@ async def _bump_token(bot, chat, tag: str, ca: str = "") -> None:
     tag = (tag or "").strip()
     if not tag:
         return
-    invite = f"https://t.me/{chat.username}" if getattr(chat, "username", None) else ""
     mc = ""
     dex = ""
     if ca:
@@ -1604,6 +1603,10 @@ async def _bump_token(bot, chat, tag: str, ca: str = "") -> None:
         mc = _usd(pair.get("marketCap") or pair.get("fdv"))
         dex = (pair.get("dexId") or "").title()
     con = _db()
+    tg_row = con.execute("SELECT tg_url FROM watches WHERE chat_id=?", (chat.id,)).fetchone()
+    invite = ((tg_row[0] if tg_row else "") or "").strip()
+    if not invite and getattr(chat, "username", None):
+        invite = f"https://t.me/{chat.username}"
     row = con.execute(
         "SELECT pts, COALESCE(announced,0) FROM raid_tokens WHERE cashtag=?", (tag,)
     ).fetchone()
@@ -1624,17 +1627,20 @@ async def _bump_token(bot, chat, tag: str, ca: str = "") -> None:
     con.commit()
     con.close()
     if first or announced == 0:
-        kb = InlineKeyboardMarkup(
-            [
-                [InlineKeyboardButton("Open group", url=invite or HUB)],
-                [InlineKeyboardButton("Buy", url=f"https://t.me/{TRADE}?start={ca}" if ca else HUB)],
-                [InlineKeyboardButton("Boost", url=HUB)],
-            ]
-        )
+        rows_kb = []
+        if invite:
+            rows_kb.append([InlineKeyboardButton("Open group", url=invite)])
+        rows_kb.append([InlineKeyboardButton("Buy", url=f"https://t.me/{TRADE}?start={ca}" if ca else HUB)])
+        rows_kb.append([InlineKeyboardButton("Boost", url=HUB)])
+        kb = InlineKeyboardMarkup(rows_kb)
         try:
             cap = (
                 f"{_icon('TITLE', 0, 'F')} <b>{_esc(tag)}</b> entered the Raid Leaderboard.\n\n"
-                + (f"{_icon('TG', 8, 'F')} Group: <a href=\"{_esc(invite)}\">Open group</a>\n" if invite else "")
+                + (
+                    f"{_icon('TG', 8, 'F')} Group: <a href=\"{_esc(invite)}\">Open group</a>\n"
+                    if invite
+                    else f"{_icon('TG', 8, 'F')} Group: /settelegram in their chat\n"
+                )
                 + f"{_icon('USD', 1, 'F')} Points: {pts}\n"
                 + f"{_icon('MC', 3, 'F')} Market cap: {mc or '—'}\n\n"
                 + f"<i>See it. Ape it. Send it.</i>"
