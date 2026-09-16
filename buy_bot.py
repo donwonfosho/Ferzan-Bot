@@ -184,6 +184,16 @@ def _db() -> sqlite3.Connection:
         except sqlite3.OperationalError:
             pass
     con.execute(
+        """CREATE TABLE IF NOT EXISTS raid_tokens (
+            cashtag TEXT PRIMARY KEY,
+            chat_id INTEGER,
+            invite TEXT,
+            pts INTEGER DEFAULT 0,
+            ca TEXT,
+            mc TEXT
+        )"""
+    )
+    con.execute(
         """CREATE TABLE IF NOT EXISTS raid_taps (
             raid_id INTEGER,
             user_id INTEGER,
@@ -1408,7 +1418,7 @@ def _raid_kb(rid: int, url: str) -> InlineKeyboardMarkup:
                 InlineKeyboardButton("Stop", callback_data=f"rd:stop:{rid}"),
             ],
             [
-                InlineKeyboardButton("LB", callback_data=f"rd:lb:{rid}"),
+                InlineKeyboardButton("LB", url="https://t.me/Ferzan_Raid"),
                 InlineKeyboardButton("❤️", callback_data=f"rd:like:{rid}"),
                 InlineKeyboardButton("🔁", callback_data=f"rd:rt:{rid}"),
                 InlineKeyboardButton("💬", callback_data=f"rd:re:{rid}"),
@@ -1543,6 +1553,81 @@ async def raid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             log.warning("raid mirror %s: %s", RAID_CH, exc)
 
 
+async def _bump_token(bot, chat, tag: str, ca: str = "") -> None:
+    tag = (tag or "").strip()
+    if not tag:
+        return
+    invite = f"https://t.me/{chat.username}" if getattr(chat, "username", None) else ""
+    mc = ""
+    if ca:
+        pair = _ds(ca)
+        mc = _usd((pair.get("marketCap") if pair else None) or (pair or {}).get("fdv"))
+    con = _db()
+    row = con.execute("SELECT pts FROM raid_tokens WHERE cashtag=?", (tag,)).fetchone()
+    first = not row
+    if row:
+        con.execute(
+            "UPDATE raid_tokens SET pts=pts+1, chat_id=?, invite=?, ca=?, mc=? WHERE cashtag=?",
+            (chat.id, invite, ca, mc, tag),
+        )
+        pts = int(row[0]) + 1
+    else:
+        con.execute(
+            "INSERT INTO raid_tokens(cashtag,chat_id,invite,pts,ca,mc) VALUES(?,?,?,?,?,?)",
+            (tag, chat.id, invite, 1, ca, mc),
+        )
+        pts = 1
+    con.commit()
+    con.close()
+    if first:
+        kb = InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("Open group", url=invite or HUB)],
+                [InlineKeyboardButton("Buy", url=f"https://t.me/{TRADE}?start={ca}" if ca else HUB)],
+            ]
+        )
+        try:
+            await bot.send_message(
+                RAID_CH,
+                f"⚔️ <b>{_esc(tag)}</b> entered the Raid Leaderboard.\n\n"
+                f"📣 Group: {invite or '—'}\n"
+                f"⚡ Points: {pts}\n"
+                f"🧢 Market cap: {mc or '—'}\n\n"
+                f"<i>See it. Ape it. Send it.</i>",
+                parse_mode="HTML",
+                reply_markup=kb,
+                disable_web_page_preview=True,
+            )
+        except Exception as exc:
+            log.warning("lb enter %s", exc)
+
+
+async def _post_board(bot) -> None:
+    con = _db()
+    rows = con.execute(
+        "SELECT cashtag, pts, invite, mc FROM raid_tokens ORDER BY pts DESC LIMIT 10"
+    ).fetchall()
+    con.close()
+    if not rows:
+        return
+    medals = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"]
+    lines = [f"{_icon('TITLE', 0, '⚡')} <b>FERZAN RAID LEADERBOARD</b>\n"]
+    for i, (tag, pts, invite, mc) in enumerate(rows):
+        link = f"<a href=\"{_esc(invite)}\">{_esc(tag)}</a>" if invite else _esc(tag)
+        lines.append(f"{medals[i]}  {link}  ⚡ {pts}")
+        lines.append(f"    🧢 {mc or '—'}   🛒 Buy")
+    lines.append("\n<i>See it. Ape it. Send it.</i>")
+    try:
+        await bot.send_message(
+            RAID_CH,
+            "\n".join(lines),
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+    except Exception as exc:
+        log.warning("lb board %s", exc)
+
+
 async def raidstop_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     con = _db()
     con.execute("UPDATE raids SET active=0 WHERE chat_id=?", (update.effective_chat.id,))
@@ -1619,6 +1704,8 @@ async def raid_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await q.answer("Targets hit. Raid done.")
     else:
         await q.answer("+1")
+    w = _watch(update.effective_chat.id)
+    await _bump_token(context.bot, update.effective_chat, d.get("cashtag") or "", w[1] if w else "")
     txt = _raid_text(d)
     try:
         if q.message.photo:
@@ -1696,10 +1783,14 @@ async def lb_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not rows:
         await update.effective_message.reply_text("No scores yet. /raidjoin after you raid.")
         return
-    lines = ["🏆 Raid board"]
+    lines = ["🏆 This chat — raiders"]
     for i, (name, pts) in enumerate(rows, 1):
         lines.append(f"{i}. {name}  {pts}")
-    await update.effective_message.reply_text("\n".join(lines))
+    kb = InlineKeyboardMarkup(
+        [[InlineKeyboardButton("Token leaderboard", url="https://t.me/Ferzan_Raid")]]
+    )
+    await update.effective_message.reply_text("\n".join(lines), reply_markup=kb)
+    await _post_board(context.bot)
 
 
 async def raidevent_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1708,6 +1799,28 @@ async def raidevent_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "Admin posts /raid <x link>. Members /raidjoin after they engage.\n"
         "/relb for the event board."
     )
+
+
+async def raidgoal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    nums = [int(a) for a in (context.args or []) if a.isdigit()]
+    if len(nums) < 3:
+        await update.effective_message.reply_text(
+            "Usage: /raidgoal <likes> <reposts> <replies>\nExample: /raidgoal 25 25 10"
+        )
+        return
+    likes, rts, reps = nums[0], nums[1], nums[2]
+    con = _db()
+    con.execute(
+        "UPDATE raids SET likes_t=?, rt_t=?, re_t=? WHERE chat_id=? AND active=1",
+        (likes, rts, reps, update.effective_chat.id),
+    )
+    n = con.total_changes
+    con.commit()
+    con.close()
+    if not n:
+        await update.effective_message.reply_text("No live raid in this chat.")
+        return
+    await update.effective_message.reply_text(f"Goals set: ❤️ {likes}  🔁 {rts}  💬 {reps}")
 
 
 async def raidint_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1772,7 +1885,13 @@ async def tick(context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("Open Post", url=url)]])
         try:
-            await context.bot.send_message(chat_id, txt, parse_mode="HTML", reply_markup=kb)
+            await context.bot.send_message(
+                chat_id,
+                txt,
+                parse_mode="HTML",
+                reply_markup=kb,
+                disable_web_page_preview=True,
+            )
             con.execute("UPDATE raids SET last_ping=? WHERE id=?", (now, rid))
         except Exception as exc:
             log.warning("raid ping %s: %s", chat_id, exc)
@@ -2048,6 +2167,7 @@ def main() -> None:
     app.add_handler(CommandHandler("raid", raid_cmd))
     app.add_handler(CommandHandler("raidstop", raidstop_cmd))
     app.add_handler(CommandHandler("raidint", raidint_cmd))
+    app.add_handler(CommandHandler("raidgoal", raidgoal_cmd))
     app.add_handler(CallbackQueryHandler(raid_cb, pattern=r"^rd:"))
     app.add_handler(CommandHandler("queue", queue_cmd))
     app.add_handler(CommandHandler("next", next_cmd))
