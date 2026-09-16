@@ -62,15 +62,28 @@ def _slot(name: str, default: int) -> int:
 
 def _ce(i: int, fallback: str) -> str:
     if 0 <= i < len(_PACK_IDS) and _PACK_IDS[i]:
-        return f'<tg-emoji emoji-id="{_PACK_IDS[i]}">{fallback}</tg-emoji>'
+        face = _PACK_FACE[i] if i < len(_PACK_FACE) and _PACK_FACE[i] else fallback
+        return f'<tg-emoji emoji-id="{_PACK_IDS[i]}">{face}</tg-emoji>'
     return fallback
 
 
 def _icon(name: str, default: int, fallback: str) -> str:
     i = _slot(name, default)
     if 0 <= i < len(_PACK_IDS) and _PACK_IDS[i]:
-        return _ce(i, "•")
+        return _ce(i, fallback or "F")
     return ""
+
+
+def _banner() -> Path | None:
+    for p in (
+        Path("/opt/ferzan/app/raid.jpg"),
+        Path(__file__).resolve().parent / "raid.jpg",
+        Path("/opt/ferzan/app/logo.jpg"),
+        Path(__file__).resolve().parent / "logo.jpg",
+    ):
+        if p.exists():
+            return p
+    return None
 
 
 def _face(i: int = 0) -> str:
@@ -1620,20 +1633,24 @@ async def _bump_token(bot, chat, tag: str, ca: str = "") -> None:
             ]
         )
         try:
-            await bot.send_message(
-                RAID_CH,
-                f"{_icon('TITLE', 0, '⚡')} <b>{_esc(tag)}</b> entered the Raid Leaderboard.\n\n"
-                f"{_icon('TG', 8, '📣')} Group: "
-                + (f"<a href=\"{_esc(invite)}\">Open group</a>" if invite else "—")
-                + "\n"
-                f"{_icon('USD', 1, '⚡')} Points: {pts}\n"
-                f"{_icon('MC', 3, '🧢')} Market cap: {mc or '—'}\n"
-                f"{_icon('ROUTE', 5, '🛣')} {dex or '—'}\n\n"
-                f"<i>See it. Ape it. Send it.</i>",
-                parse_mode="HTML",
-                reply_markup=kb,
-                disable_web_page_preview=True,
+            cap = (
+                f"<b>{_esc(tag)}</b> entered the Raid Leaderboard.\n\n"
+                + (f"Group: <a href=\"{_esc(invite)}\">Open group</a>\n" if invite else "")
+                + f"Points: {pts}\n"
+                + f"Market cap: {mc or '—'}\n"
+                + f"Dex: {dex or '—'}\n\n"
+                + f"<i>See it. Ape it. Send it.</i>"
             )
+            ban = _banner()
+            if ban:
+                with ban.open("rb") as fh:
+                    await bot.send_photo(
+                        RAID_CH, fh, caption=cap, parse_mode="HTML", reply_markup=kb
+                    )
+            else:
+                await bot.send_message(
+                    RAID_CH, cap, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True
+                )
             con3 = _db()
             con3.execute("UPDATE raid_tokens SET announced=1 WHERE cashtag=?", (tag,))
             con3.commit()
@@ -1653,44 +1670,42 @@ async def _post_board(bot) -> str:
     con.close()
     if not rows:
         return "no tokens on the board yet"
-    medals = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
-    lines = [f"{_icon('TITLE', 0, '⚡')} <b>FERZAN RAID LEADERBOARD</b>\n"]
+    medals = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"]
+    lines = ["<b>FERZAN RAID LEADERBOARD</b>\n"]
     btn_rows = []
     for i, (tag, pts, invite, mc, ca, dex) in enumerate(rows):
         name = _esc(tag)
         buy = f"https://t.me/{TRADE}?start={ca}" if ca else HUB
         grp = f"<a href=\"{_esc(invite)}\">{name}</a>" if invite else name
-        lines.append(f"{medals[i]}  <b>{grp}</b>  {_icon('USD', 1, '⚡')} {pts}")
-        lines.append(
-            f"     {_icon('MC', 3, '🧢')} {mc or '—'}   "
-            f"{_icon('ROUTE', 5, '🛣')} {_esc(dex or '—')}   "
-            f"{_icon('BAG', 2, '🛒')} <a href=\"{_esc(buy)}\">Buy</a>"
-        )
+        lines.append(f"{medals[i]}. <b>{grp}</b>   {pts} pts")
+        lines.append(f"     {mc or '—'}  ·  {_esc(dex or '—')}  ·  <a href=\"{_esc(buy)}\">Buy</a>")
         btn_rows.append([InlineKeyboardButton(f"Buy {tag[:16]}", url=buy)])
     lines.append("\n<i>See it. Ape it. Send it.</i>")
     kb = InlineKeyboardMarkup(btn_rows[:8])
     text = "\n".join(lines)
     try:
         if mid:
-            await bot.edit_message_text(
+            await bot.edit_message_caption(
                 chat_id=RAID_CH,
                 message_id=int(mid[0]),
-                text=text,
+                caption=text,
                 parse_mode="HTML",
                 reply_markup=kb,
-                disable_web_page_preview=True,
             )
             return ""
     except Exception as exc:
         log.warning("lb edit %s", exc)
     try:
-        msg = await bot.send_message(
-            RAID_CH,
-            text,
-            parse_mode="HTML",
-            reply_markup=kb,
-            disable_web_page_preview=True,
-        )
+        ban = _banner()
+        if ban:
+            with ban.open("rb") as fh:
+                msg = await bot.send_photo(
+                    RAID_CH, fh, caption=text, parse_mode="HTML", reply_markup=kb
+                )
+        else:
+            msg = await bot.send_message(
+                RAID_CH, text, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True
+            )
         con = _db()
         con.execute(
             "INSERT OR REPLACE INTO kv(k,v) VALUES('raid_board_msg',?)",
