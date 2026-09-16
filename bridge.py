@@ -229,22 +229,14 @@ def _exec_dln_sol(uid: int, pack: dict, data: dict) -> str:
     blockhash = ((bh.get("result") or {}).get("value") or {}).get("blockhash")
     if not blockhash:
         raise RuntimeError("No Solana blockhash from RPC.")
-    from solders.hash import Hash
-    from solders.message import MessageV0
-
-    fresh = Hash.from_string(blockhash)
-    msg = tx.message
-    try:
-        rebuilt = MessageV0(
-            header=msg.header,
-            account_keys=msg.account_keys,
-            recent_blockhash=fresh,
-            instructions=msg.instructions,
-            address_table_lookups=getattr(msg, "address_table_lookups", []),
-        )
-    except Exception:
-        rebuilt = msg
-    signed = VersionedTransaction(rebuilt, [kp])
+    payload = json.loads(tx.to_json())
+    msg_j = payload.get("message") or payload
+    if isinstance(msg_j, dict):
+        msg_j["recentBlockhash"] = blockhash
+        msg_j["recent_blockhash"] = blockhash
+    payload["signatures"] = []
+    tx = VersionedTransaction.from_json(json.dumps(payload))
+    signed = VersionedTransaction(tx.message, [kp])
     body = requests.post(
         rpc,
         json={
