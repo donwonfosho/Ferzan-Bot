@@ -1,11 +1,10 @@
 #!/usr/bin/env node
-/**
- * Stamp a fresh blockhash, sign with the desk key, broadcast.
- * argv: <rpc> <txBase64>
- * env: FERZAN_SOL_KEY  base58 secret
- */
 const { Connection, VersionedTransaction, Keypair } = require("@solana/web3.js");
 const bs58 = require("bs58");
+
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
 
 async function main() {
   const rpc = process.argv[2];
@@ -18,20 +17,43 @@ async function main() {
   try {
     kp = Keypair.fromSecretKey(bs58.decode(secret));
   } catch (e) {
-    const raw = Buffer.from(secret, "base64");
-    kp = Keypair.fromSecretKey(raw);
+    kp = Keypair.fromSecretKey(Buffer.from(secret, "base64"));
   }
   const conn = new Connection(rpc, "confirmed");
-  const raw = Buffer.from(b64, "base64");
-  const tx = VersionedTransaction.deserialize(raw);
+  const tx = VersionedTransaction.deserialize(Buffer.from(b64, "base64"));
   const latest = await conn.getLatestBlockhash("confirmed");
   tx.message.recentBlockhash = latest.blockhash;
   tx.sign([kp]);
-  const sig = await conn.sendRawTransaction(tx.serialize(), {
-    skipPreflight: false,
-    maxRetries: 3,
-  });
-  process.stdout.write(sig);
+  let sig;
+  try {
+    sig = await conn.sendRawTransaction(tx.serialize(), {
+      skipPreflight: false,
+      maxRetries: 3,
+    });
+  } catch (e) {
+    const m = String(e && e.message ? e.message : e);
+    if (m.includes("0x7dc") || m.includes("custom program error")) {
+      throw new Error("Quote rejected on-chain. Get a new quote and send within 20s. Keep ~0.02 SOL extra for fees.");
+    }
+    throw e;
+  }
+  for (let i = 0; i < 30; i++) {
+    const st = await conn.getSignatureStatuses([sig], { searchTransactionHistory: true });
+    const row = (st && st.value && st.value[0]) || null;
+    if (row && row.err) {
+      throw new Error("On-chain fail: " + JSON.stringify(row.err));
+    }
+    if (row && (row.confirmationStatus === "confirmed" || row.confirmationStatus === "finalized")) {
+      process.stdout.write(sig);
+      return;
+    }
+    const height = await conn.getBlockHeight("confirmed");
+    if (height > latest.lastValidBlockHeight) {
+      throw new Error("Tx dropped (blockhash expired). Get a new quote and send immediately.");
+    }
+    await sleep(400);
+  }
+  throw new Error("No confirmation in 12s. Tx did not land. Get a new quote.");
 }
 
 main().catch((err) => {
