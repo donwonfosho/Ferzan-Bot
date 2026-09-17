@@ -241,14 +241,65 @@ def _exec_dln_sol(uid: int, pack: dict, data: dict) -> str:
     )
     if proc.returncode != 0:
         raise RuntimeError((proc.stderr or proc.stdout or "node sender failed").strip()[:400])
-    sig = (proc.stdout or "").strip()
+    sig = (proc.stdout or "").strip().split()[-1]
     if not sig:
         raise RuntimeError("Node sender returned no signature.")
-    return (
-        f"Bridge submitted.\nhttps://solscan.io/tx/{sig}\n"
-        "Watch https://app.debridge.finance/orders\n"
-        "Credit on destination usually 1–3 min."
-    )
+    order_id = (data.get("orderId") or (data.get("order") or {}).get("orderId") or "").strip()
+    if not order_id:
+        order_id = _dln_order_from_sig(sig)
+    dln = f"https://app.debridge.finance/order?orderId={order_id}" if order_id else "https://app.debridge.finance/orders"
+    return {
+        "text": (
+            "Bridge submitted on Solana.\n"
+            f"Solscan: https://solscan.io/tx/{sig}\n"
+            f"deBridge order: {dln}\n"
+            "Watching destination credit…"
+        ),
+        "sig": sig,
+        "order_id": order_id,
+        "dst": pack.get("dst") or "",
+    }
+
+
+def _dln_order_from_sig(sig: str) -> str:
+    for url in (
+        f"https://stats-api.dln.trade/api/Transaction/{sig}/orderIds",
+        f"https://dln-api.debridge.finance/api/Transaction/{sig}/orderIds",
+    ):
+        try:
+            body = requests.get(url, timeout=12).json() or {}
+            ids = body.get("orderIds") or []
+            if ids and isinstance(ids[0], dict):
+                return str(ids[0].get("stringValue") or "")
+            if ids:
+                return str(ids[0])
+        except Exception:
+            continue
+    return ""
+
+
+def dln_status(order_id: str) -> dict:
+    if not order_id:
+        return {}
+    try:
+        st = requests.get(
+            f"https://dln.debridge.finance/v1.0/dln/order/{order_id}/status",
+            timeout=12,
+        ).json() or {}
+    except Exception:
+        st = {}
+    try:
+        full = requests.get(
+            f"https://stats-api.dln.trade/api/Orders/{order_id}",
+            timeout=12,
+        ).json() or {}
+    except Exception:
+        full = {}
+    return {
+        "status": st.get("status") or full.get("orderState") or "",
+        "dest_tx": full.get("fulfillTransactionHash") or full.get("fulfilledTx") or "",
+        "order_id": order_id,
+    }
 
 
 def _exec_evm(uid: int, pack: dict, data: dict) -> str:

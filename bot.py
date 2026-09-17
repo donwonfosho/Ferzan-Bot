@@ -2527,6 +2527,34 @@ def _bridge_text(uid: int, st: dict) -> str:
     )
 
 
+async def _watch_dln(bot, uid: int, order_id: str, dst: str) -> None:
+    import asyncio
+    import bridge as ferzan_bridge
+
+    link = f"https://app.debridge.finance/order?orderId={order_id}"
+    done = {"Fulfilled", "SentUnlock", "ClaimedUnlock"}
+    dead = {"OrderCancelled", "ClaimedOrderCancel", "SentOrderCancel"}
+    for _ in range(24):
+        await asyncio.sleep(12)
+        try:
+            info = await asyncio.to_thread(ferzan_bridge.dln_status, order_id)
+        except Exception:
+            continue
+        st = (info.get("status") or "").strip()
+        if st in done:
+            extra = f"\nDest tx: {info['dest_tx']}" if info.get("dest_tx") else ""
+            chain = (BRIDGE.get(dst) or {}).get("name") or dst or "destination"
+            await bot.send_message(
+                uid,
+                f"✅ Bridge complete on {chain}.\n{link}{extra}",
+            )
+            return
+        if st in dead:
+            await bot.send_message(uid, f"Bridge did not complete.\n{link}\nStatus: {st}")
+            return
+    await bot.send_message(uid, f"Still settling. Track the order:\n{link}")
+
+
 def _bridge_kb(st: dict, uid: int) -> InlineKeyboardMarkup:
     src, dst = BRIDGE[st["from"]], BRIDGE[st["to"]]
     return InlineKeyboardMarkup(
@@ -2609,10 +2637,20 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
                 msg = await asyncio.wait_for(
                     asyncio.to_thread(ferzan_bridge.execute, uid, pack),
-                    timeout=35,
+                    timeout=45,
                 )
                 context.user_data.pop("bridge_pack", None)
-                await context.bot.send_message(uid, "✅ " + msg)
+                order_id = ""
+                dst = pack.get("dst") or ""
+                if isinstance(msg, dict):
+                    order_id = msg.get("order_id") or ""
+                    dst = msg.get("dst") or dst
+                    text = msg.get("text") or str(msg)
+                else:
+                    text = str(msg)
+                await context.bot.send_message(uid, "✅ " + text)
+                if order_id:
+                    asyncio.create_task(_watch_dln(context.bot, uid, order_id, dst))
             except asyncio.TimeoutError:
                 await context.bot.send_message(
                     uid,
