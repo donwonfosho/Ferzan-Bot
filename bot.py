@@ -255,19 +255,44 @@ def _pump_curve(ca: str) -> str:
     return _pump_meta(ca).get("curve") or ""
 
 
+def _erc20_amt(rpc: str, token: str, owner: str) -> float:
+    try:
+        raw = evm_signer._erc20_balance(rpc, token, owner)
+        dec_body = evm_signer._rpc(rpc, "eth_call", [{"to": token, "data": "0x313ce567"}, "latest"])
+        dec_hex = dec_body.get("result") or "0x12"
+        decimals = int(dec_hex, 16) if str(dec_hex).startswith("0x") else int(dec_hex)
+        decimals = max(0, min(36, decimals or 18))
+        return raw / (10 ** decimals)
+    except Exception:
+        return 0.0
+
+
 def _card_wallet(uid: int | None, ca: str, chain: str) -> str:
     if not uid:
         return "<blockquote>💰 <b>Balance</b>\nFund /wallet</blockquote>"
-    cid = resolve_chain(chain) or ("sol" if ca and not str(ca).startswith("0x") else "eth")
+    cid = resolve_chain(chain)
+    if not cid and ca:
+        try:
+            meta = _token_meta(ca)
+            cid = resolve_chain(meta.get("chain") or "")
+        except Exception:
+            cid = None
+    cid = cid or ("sol" if ca and not str(ca).startswith("0x") else "eth")
+    label = "Hood" if cid == "hood" else (CHAINS.get(cid) or {}).get("label") or cid.upper()
+    native_sym = (CHAINS.get(cid) or {}).get("native") or "?"
     tok = 0.0
     native = 0.0
-    unit = "SOL"
+    ticker = ""
+    try:
+        ticker = ((_token_meta(ca).get("symbol") or "") if ca else "").upper()
+    except Exception:
+        ticker = ""
     try:
         sol_secret, evm_secret = user_wallets.secrets(uid)
         if cid == "sol":
             kp = signer.keypair_from_secret(sol_secret)
             native = signer.sol_balance_lamports(str(kp.pubkey())) / 1e9
-            unit = "SOL"
+            native_sym = "SOL"
             if ca:
                 for row in signer.holdings(sol_secret):
                     if row.get("mint") == ca:
@@ -276,12 +301,21 @@ def _card_wallet(uid: int | None, ca: str, chain: str) -> str:
         else:
             from eth_account import Account
             addr = Account.from_key(evm_secret).address
-            native, unit = evm_signer.native_balance(cid, addr)
+            native, native_sym = evm_signer.native_balance(cid, addr)
+            rpc = (CHAINS.get(cid) or {}).get("rpc") or ""
+            if ca and rpc and str(ca).startswith("0x"):
+                tok = _erc20_amt(rpc, ca, addr)
     except Exception:
-        return "<blockquote>💰 <b>Balance</b>\nFund /wallet</blockquote>"
+        return (
+            "<blockquote>"
+            f"💰 <b>{html.escape(label)}</b>\nFund /wallet"
+            "</blockquote>"
+        )
+    bag = ticker or "token"
     return (
         "<blockquote>"
-        f"💰 <b>{unit}</b> {native:.4f}   ·   token {tok:.4g}"
+        f"💰 <b>{html.escape(label)}</b>  {native:.4f} {html.escape(native_sym)}\n"
+        f"🪙 {html.escape(bag)} {tok:.4g}"
         "</blockquote>"
     )
 
