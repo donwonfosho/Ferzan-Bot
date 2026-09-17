@@ -2496,6 +2496,25 @@ def _bridge_addr(uid: int, key: str) -> str:
     return w.get("evm_pub") or ""
 
 
+def _bridge_bal(uid: int, key: str) -> str:
+    addr = _bridge_addr(uid, key)
+    unit = (BRIDGE.get(key) or {}).get("unit") or ""
+    if not addr:
+        return f"Available · open /wallet"
+    try:
+        if key == "sol":
+            import signer
+
+            amt = signer.sol_balance_lamports(addr) / 1e9
+            return f"Available · <b>{amt:.6f}</b> SOL"
+        import evm_signer
+
+        amt, sym = evm_signer.native_balance(key, addr)
+        return f"Available · <b>{float(amt):.6f}</b> {sym or unit}"
+    except Exception:
+        return f"Available · tap Wallets to refresh {unit}"
+
+
 def _bridge_url(st: dict, uid: int) -> str:
     src, dst = BRIDGE.get(st["from"]), BRIDGE.get(st["to"])
     if not src or not dst:
@@ -2518,11 +2537,14 @@ def _bridge_text(uid: int, st: dict) -> str:
         "2. Set size\n"
         "3. Get Quote inside Ferzan. Confirm. We sign with YOUR desk wallet.\n\n"
         f"From ⛓ <b>{src['name']}</b> · {src['unit']}\n"
+        f"{_bridge_bal(uid, st['from'])}\n"
         f"To ⛓ <b>{dst['name']}</b> · {dst['unit']}\n"
-        f"Size · <b>{st['amt']}</b> {src['unit']}\n\n"
+        f"{_bridge_bal(uid, st['to'])}\n"
+        f"Size · <b>{st['amt']}</b> {src['unit']}\n"
+        "<i>Leave ~0.02 of the From token for fees.</i>\n\n"
         f"📤 Send from\n<code>{send}</code>\n"
         f"📥 Receive to\n<code>{recv}</code>\n\n"
-        "Powered by Relay. Signed on this box — no Telegram Wallet, no seed prompt.\n"
+        "Signed on this box — no Telegram Wallet, no seed prompt.\n"
         "<i>Confirm the receive line is your Ferzan wallet before you tap Send.</i>"
     )
 
