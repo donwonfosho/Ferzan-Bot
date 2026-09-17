@@ -1073,24 +1073,59 @@ async def positions_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     )
 
 
-def _token_mark_usd(mint: str) -> float:
+def _token_meta(mint: str) -> dict:
+    out = {"px": 0.0, "symbol": "", "name": "", "chain": ""}
     try:
         r = requests.get(
             f"https://api.dexscreener.com/latest/dex/tokens/{mint}",
             timeout=8,
         )
         pairs = (r.json() or {}).get("pairs") or []
-        if pairs:
-            return float(pairs[0].get("priceUsd") or 0)
+        if not pairs:
+            return out
+        p = pairs[0]
+        base = p.get("baseToken") or {}
+        out["px"] = float(p.get("priceUsd") or 0)
+        out["symbol"] = str(base.get("symbol") or "").strip()
+        out["name"] = str(base.get("name") or "").strip()
+        out["chain"] = str(p.get("chainId") or "").strip()
     except Exception:
-        return 0.0
-    return 0.0
+        return out
+    return out
+
+
+def _token_mark_usd(mint: str) -> float:
+    return float(_token_meta(mint).get("px") or 0)
 
 
 def _bag_panel(mint: str, amount: float, addr: str, uid: int) -> tuple[str, InlineKeyboardMarkup]:
     short = mint[:44]
-    href = f"https://solscan.io/token/{mint}"
-    px = _token_mark_usd(mint)
+    meta = _token_meta(mint)
+    px = float(meta.get("px") or 0)
+    symbol = (meta.get("symbol") or "").upper()
+    name = meta.get("name") or ""
+    chain = (meta.get("chain") or "").lower()
+    if mint.startswith("0x"):
+        if chain in ("base",):
+            href = f"https://basescan.org/token/{mint}"
+            venue = "BASE"
+        elif chain in ("bsc", "bnb"):
+            href = f"https://bscscan.com/token/{mint}"
+            venue = "BNB"
+        elif chain in ("arbitrum", "arb"):
+            href = f"https://arbiscan.io/token/{mint}"
+            venue = "ARB"
+        else:
+            href = f"https://etherscan.io/token/{mint}"
+            venue = chain.upper() or "EVM"
+    else:
+        href = f"https://solscan.io/token/{mint}"
+        venue = "SOL"
+    title = symbol or name or "TOKEN"
+    if name and symbol and name.upper() != symbol:
+        title = f"{html.escape(name)} (${html.escape(symbol)})"
+    else:
+        title = html.escape(title)
     worth = float(amount or 0) * px
     cost = db.live_cost(uid, mint)
     if cost > 0 and worth > 0:
@@ -1106,9 +1141,9 @@ def _bag_panel(mint: str, amount: float, addr: str, uid: int) -> tuple[str, Inli
     else:
         pnl_line = "💰 Mark unavailable"
     text = (
-        f"🎒 <b>Position</b> · SOL\n"
-        f"<a href=\"https://solscan.io/account/{html.escape(addr)}\">Wallet</a>\n"
-        f"🪙 <a href=\"{href}\">token</a>\n"
+        f"🎒 <b>Position</b> · {html.escape(venue)}\n"
+        f"<b>{title}</b>\n"
+        f"<a href=\"{href}\">Chart / scan</a>\n"
         f"<code>{html.escape(mint)}</code>\n"
         f"Tokens: <b>{amount:g}</b>\n"
         f"{pnl_line}\n"
