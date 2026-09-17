@@ -222,9 +222,12 @@ def _exec_dln_sol(uid: int, pack: dict, data: dict) -> str:
         except ValueError:
             raw = base64.b64decode(blob)
     rpc = sol_signer._rpc()
-    helper = Path(__file__).resolve().parent / "sol_bridge_send.js"
+    root = Path(__file__).resolve().parent
+    helper = root / "sol_bridge_send.mjs"
     if not helper.exists():
-        raise RuntimeError("sol_bridge_send.js is missing next to bridge.py.")
+        helper = root / "sol_bridge_send.js"
+    if not helper.exists():
+        raise RuntimeError("sol_bridge_send.mjs is missing next to bridge.py.")
     env = os.environ.copy()
     env["FERZAN_SOL_KEY"] = sol_key
     env["NODE_PATH"] = str(helper.parent / "node_modules")
