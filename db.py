@@ -243,6 +243,19 @@ def init_db() -> None:
             conn.execute("ALTER TABLE users ADD COLUMN referred_by INTEGER")
         if "discount_until" not in cols:
             conn.execute("ALTER TABLE users ADD COLUMN discount_until INTEGER DEFAULT 0")
+        if "trail_pct" not in cols:
+            conn.execute("ALTER TABLE users ADD COLUMN trail_pct REAL DEFAULT 0")
+        if "lp_drop_pct" not in cols:
+            conn.execute("ALTER TABLE users ADD COLUMN lp_drop_pct REAL DEFAULT 50")
+        if "lp_floor_usd" not in cols:
+            conn.execute("ALTER TABLE users ADD COLUMN lp_floor_usd REAL DEFAULT 500")
+        if "stake_units" not in cols:
+            conn.execute("ALTER TABLE users ADD COLUMN stake_units REAL DEFAULT 0")
+        exit_cols = {r[1] for r in conn.execute("PRAGMA table_info(live_exits)").fetchall()}
+        if "trail_pct" not in exit_cols:
+            conn.execute("ALTER TABLE live_exits ADD COLUMN trail_pct REAL")
+        if "peak_pct" not in exit_cols:
+            conn.execute("ALTER TABLE live_exits ADD COLUMN peak_pct REAL DEFAULT 0")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS referral_ledger (
@@ -838,6 +851,24 @@ def live_mints(user_id: int) -> list[str]:
         return [str(r["mint"]) for r in rows]
 
 
+def user_volume_usd(user_id: int, days: int = 30) -> float:
+    since = int(time.time()) - int(days) * 86400
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT COALESCE(SUM(volume_usd),0) FROM referral_ledger WHERE from_user = ? AND created_at >= ?",
+            (int(user_id), since),
+        ).fetchone()
+        live = conn.execute(
+            "SELECT COALESCE(SUM(cost_usd),0) FROM live_basis WHERE user_id = ?",
+            (int(user_id),),
+        ).fetchone()
+    return float(row[0] or 0) + float(live[0] or 0)
+
+
+def set_stake_units(user_id: int, units: float) -> None:
+    update_user(int(user_id), stake_units=max(0.0, float(units)))
+
+
 def live_cost(user_id: int, mint: str) -> float:
     with get_conn() as conn:
         row = conn.execute(
@@ -847,21 +878,34 @@ def live_cost(user_id: int, mint: str) -> float:
         return float(row["cost_usd"]) if row else 0.0
 
 
-def set_live_exit(user_id: int, mint: str, tp_pct: float | None = None, sl_pct: float | None = None) -> None:
+def set_live_exit(
+    user_id: int,
+    mint: str,
+    tp_pct: float | None = None,
+    sl_pct: float | None = None,
+    trail_pct: float | None = None,
+    peak_pct: float | None = None,
+) -> None:
     with get_conn() as conn:
         row = conn.execute(
-            "SELECT tp_pct, sl_pct FROM live_exits WHERE user_id = ? AND mint = ?",
+            "SELECT tp_pct, sl_pct, trail_pct, peak_pct FROM live_exits WHERE user_id = ? AND mint = ?",
             (user_id, mint),
         ).fetchone()
         tp = tp_pct if tp_pct is not None else (float(row["tp_pct"]) if row and row["tp_pct"] is not None else None)
         sl = sl_pct if sl_pct is not None else (float(row["sl_pct"]) if row and row["sl_pct"] is not None else None)
+        tr = trail_pct if trail_pct is not None else (float(row["trail_pct"]) if row and row.get("trail_pct") is not None else None)
+        pk = peak_pct if peak_pct is not None else (float(row["peak_pct"]) if row and row.get("peak_pct") is not None else 0)
         conn.execute(
             """
-            INSERT INTO live_exits (user_id, mint, tp_pct, sl_pct)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(user_id, mint) DO UPDATE SET tp_pct = excluded.tp_pct, sl_pct = excluded.sl_pct
+            INSERT INTO live_exits (user_id, mint, tp_pct, sl_pct, trail_pct, peak_pct)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id, mint) DO UPDATE SET
+                tp_pct = excluded.tp_pct,
+                sl_pct = excluded.sl_pct,
+                trail_pct = excluded.trail_pct,
+                peak_pct = excluded.peak_pct
             """,
-            (user_id, mint, tp, sl),
+            (user_id, mint, tp, sl, tr, pk),
         )
         conn.commit()
 
@@ -1113,6 +1157,25 @@ def credit_desk_share(trader_id: int, volume_usd: float) -> str:
         return ""
     trader = get_user(int(trader_id)) or {}
     parent = trader.get("referred_by")
+    if not parent:
+        try:
+            import requests
+            base = (os.getenv("LAUNCH_API_URL") or "http://127.0.0.1:8000").rstrip("/")
+            token = (os.getenv("INTERNAL_API_TOKEN") or "").strip()
+            headers = {"X-Ferzan-Internal": token} if token else {}
+            r = requests.get(f"{base}/internal/referrer-wallet/{int(trader_id)}", headers=headers, timeout=8)
+            if r.status_code >= 400:
+                raise RuntimeError(r.text[:180])
+            data = r.json() if r.content else {}
+            # This endpoint returns payout wallet; referrer id lives on launch referrals table.
+            # Keep referred_by if Desk already has it. Wallet-only lookup is enough for curve buys.
+            if data.get("referrer_id"):
+                parent = int(data["referrer_id"])
+                update_user(int(trader_id), referred_by=parent)
+        except Exception as exc:
+            import logging
+            logging.getLogger("db").warning("launch referrer lookup failed user=%s: %s", trader_id, exc)
+            parent = None
     now = int(time.time())
     if not trader.get("discount_until"):
         update_user(int(trader_id), discount_until=now + 30 * 86400)

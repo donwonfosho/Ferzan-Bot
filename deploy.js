@@ -48,10 +48,12 @@ async function main() {
   console.log("Deploying with account:", deployer.address);
   console.log("Network:", hre.network.name);
 
+  const launchFeeWei = process.env.LAUNCH_FEE_WEI || "0";
   const LaunchTokenFactory = await hre.ethers.getContractFactory("LaunchTokenFactory");
-  const plainFactory = await LaunchTokenFactory.deploy();
+  const plainFactory = await LaunchTokenFactory.deploy(platformTreasury, launchFeeWei);
   await plainFactory.waitForDeployment();
   console.log("LaunchTokenFactory deployed:", await plainFactory.getAddress());
+  console.log("Plain launch fee (wei):", launchFeeWei);
 
   const BondingCurveFactory = await hre.ethers.getContractFactory("BondingCurveFactory");
   const curveFactory = await BondingCurveFactory.deploy(routerAddress, platformTreasury);

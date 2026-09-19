@@ -16,6 +16,7 @@ hosting guarantee later.
 """
 
 import json
+import os
 import sqlite3
 import uuid
 from contextlib import contextmanager
@@ -23,7 +24,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional, List
 
-DB_PATH = "launch_bot.db"
+DB_PATH = os.environ.get("LAUNCH_DB_PATH") or "/opt/ferzan/app/launch/launch_bot.db"
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS launch_requests (
@@ -47,6 +48,18 @@ CREATE TABLE IF NOT EXISTS launch_requests (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS referrals (
+    user_id INTEGER PRIMARY KEY,
+    referrer_id INTEGER NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS referral_wallets (
+    user_id INTEGER PRIMARY KEY,
+    evm_wallet TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 """
 
 
@@ -62,6 +75,9 @@ def _get_conn():
 
 
 def init_db():
+    parent = os.path.dirname(DB_PATH)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
     with _get_conn() as conn:
         conn.executescript(SCHEMA)
 
@@ -169,3 +185,85 @@ def get_user_launch_history(telegram_user_id: int, limit: int = 20) -> List[Laun
             (telegram_user_id, limit),
         ).fetchall()
     return [LaunchRequest._from_row(r) for r in rows]
+
+
+def set_referrer(user_id: int, referrer_id: int) -> bool:
+    if not user_id or not referrer_id or int(user_id) == int(referrer_id):
+        return False
+    now = datetime.now(timezone.utc).isoformat()
+    with _get_conn() as conn:
+        row = conn.execute("SELECT user_id FROM referrals WHERE user_id = ?", (int(user_id),)).fetchone()
+        if row:
+            return False
+        conn.execute(
+            "INSERT INTO referrals (user_id, referrer_id, created_at) VALUES (?, ?, ?)",
+            (int(user_id), int(referrer_id), now),
+        )
+    return True
+
+
+def get_referrer(user_id: int) -> Optional[int]:
+    with _get_conn() as conn:
+        row = conn.execute(
+            "SELECT referrer_id FROM referrals WHERE user_id = ?", (int(user_id),)
+        ).fetchone()
+    return int(row["referrer_id"]) if row else None
+
+
+def set_payout_wallet(user_id: int, wallet: str) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    with _get_conn() as conn:
+        conn.execute(
+            """INSERT INTO referral_wallets (user_id, evm_wallet, updated_at)
+               VALUES (?, ?, ?)
+               ON CONFLICT(user_id) DO UPDATE SET evm_wallet=excluded.evm_wallet, updated_at=excluded.updated_at""",
+            (int(user_id), wallet, now),
+        )
+
+
+def get_payout_wallet(user_id: int) -> Optional[str]:
+    with _get_conn() as conn:
+        row = conn.execute(
+            "SELECT evm_wallet FROM referral_wallets WHERE user_id = ?", (int(user_id),)
+        ).fetchone()
+    return row["evm_wallet"] if row else None
+
+
+def get_referrer_wallet(user_id: int) -> Optional[str]:
+    ref = get_referrer(user_id)
+    if not ref:
+        return None
+    return get_payout_wallet(ref)
+
+
+def set_curve_address(request_id: str, curve: str) -> None:
+    req = get_launch_request(request_id)
+    if not req:
+        return
+    merged = dict(req.extra_params or {})
+    merged["curve_address"] = curve
+    now = datetime.now(timezone.utc).isoformat()
+    with _get_conn() as conn:
+        conn.execute(
+            "UPDATE launch_requests SET extra_params = ?, updated_at = ? WHERE id = ?",
+            (json.dumps(merged), now, request_id),
+        )
+
+
+def get_curve_for_token(token: str) -> Optional[str]:
+    token = (token or "").strip().lower()
+    if not token:
+        return None
+    with _get_conn() as conn:
+        rows = conn.execute(
+            "SELECT extra_params, result_token_address FROM launch_requests WHERE status = 'confirmed'"
+        ).fetchall()
+    for row in rows:
+        ca = (row["result_token_address"] or "").strip().lower()
+        extra = json.loads(row["extra_params"] or "{}")
+        curve = (extra.get("curve_address") or extra.get("curve") or "").strip()
+        if not curve:
+            continue
+        if ca == token or curve.lower() == token:
+            return curve
+    return None

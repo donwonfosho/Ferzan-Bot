@@ -22,6 +22,7 @@
   <div id="details">Loading launch details...</div>
   <div id="status" style="display:none"></div>
   <button id="connectBtn" class="primary" style="display:none">Connect Wallet</button>
+  <div id="kitWrap" style="display:none;margin-top:12px"><appkit-button></appkit-button></div>
   <button id="signBtn" class="primary" style="display:none">Review & Sign Transaction</button>
 
 <script type="module">
@@ -48,7 +49,7 @@
 
   import { createAppKit } from 'https://esm.sh/@reown/appkit@1?bundle';
   import { WagmiAdapter } from 'https://esm.sh/@reown/appkit-adapter-wagmi@1?bundle';
-  import { sepolia, bscTestnet, baseSepolia } from 'https://esm.sh/@reown/appkit/networks@1?bundle';
+  import { mainnet, bsc, base } from 'https://esm.sh/@reown/appkit/networks@1?bundle';
   import { defineChain } from 'https://esm.sh/viem@2?bundle';
   import { getAccount, sendTransaction } from 'https://esm.sh/@wagmi/core@2?bundle';
 
@@ -58,34 +59,35 @@
 
   const params = new URLSearchParams(window.location.search);
   const requestId = params.get('request_id');
-  const API_BASE = 'https://yourdomain.com/api'; // set to your deployed backend
+  const API_BASE = 'https://launch.ferzaneco.com/api';
 
   const detailsEl = document.getElementById('details');
   const statusEl = document.getElementById('status');
   const connectBtn = document.getElementById('connectBtn');
   const signBtn = document.getElementById('signBtn');
 
-  const PROJECT_ID = 'YOUR_REOWN_PROJECT_ID'; // free from dashboard.reown.com
+  const PROJECT_ID = 'b38b9588c0f613335d830056007e771e';
 
   // Custom network definition for Robinhood Chain testnet -- verified
   // chain ID (46630) during project research; confirm RPC URL is still
   // current before use.
-  const robinhoodTestnet = defineChain({
-    id: 46630,
-    name: 'Robinhood Chain Testnet',
+  const robinhoodMainnet = defineChain({
+    id: 4663,
+    name: 'Robinhood Chain',
     nativeCurrency: { name: 'ETH', symbol: 'ETH', decimals: 18 },
-    rpcUrls: { default: { http: ['https://rpc.testnet.chain.robinhood.com'] } },
+    rpcUrls: { default: { http: ['https://rpc.mainnet.chain.robinhood.com'] } },
   });
 
   const CHAIN_NETWORK_MAP = {
-    ethereum: sepolia,       // TESTNET stand-in for mainnet Ethereum during live testing
-    bsc: bscTestnet,
-    base: baseSepolia,
-    robinhood: robinhoodTestnet,
+    ethereum: mainnet,
+    bsc: bsc,
+    base: base,
+    robinhood: robinhoodMainnet,
   };
 
   let launchRequest = null;
   let wagmiAdapter = null;
+  let appKitModal = null;
 
   function showStatus(text, kind) {
     statusEl.style.display = 'block';
@@ -104,30 +106,41 @@
       return;
     }
     launchRequest = await res.json();
-    detailsEl.innerHTML = `
-      <div class="detail-row"><span>Name</span><b>${launchRequest.name}</b></div>
-      <div class="detail-row"><span>Symbol</span><b>${launchRequest.symbol}</b></div>
-      <div class="detail-row"><span>Chain</span><b>${launchRequest.chain} (testnet)</b></div>
-      <div class="detail-row"><span>Mode</span><b>${launchRequest.mode}</b></div>
-    `;
+    const extra = launchRequest.extra_params || {};
+    const rows = [
+      ['Name', launchRequest.name],
+      ['Symbol', launchRequest.symbol],
+      ['Chain', launchRequest.chain],
+      ['Mode', launchRequest.mode],
+      ['Supply', launchRequest.supply_display || launchRequest.total_supply],
+    ];
+    if (extra.allocs) rows.push(['Team wallets', extra.allocs]);
+    if (extra.dev_buy && extra.dev_buy !== '0') rows.push(['Dev buy', extra.dev_buy]);
+    if (extra.start_minutes && extra.start_minutes !== '0') rows.push(['Opens in', extra.start_minutes + ' min']);
+    if (extra.max_buy && extra.max_buy !== '0') rows.push(['Max buy / wallet', extra.max_buy]);
+    if (extra.graduation_eth_threshold) rows.push(['Graduate at', extra.graduation_eth_threshold]);
+    rows.push(['Fee', extra.dev_buy && extra.dev_buy !== '0' ? 'launch fee + dev buy in tx value' : 'platform launch fee in tx value']);
+    detailsEl.innerHTML = rows.map(([k,v]) =>
+      `<div class="detail-row"><span>${k}</span><b>${String(v ?? '').slice(0,80)}</b></div>`
+    ).join('');
     connectBtn.style.display = 'block';
   }
 
   function initAppKit() {
     const network = CHAIN_NETWORK_MAP[launchRequest.chain];
-    if (!network) throw new Error(`No testnet configured for chain: ${launchRequest.chain}`);
+    if (!network) throw new Error(`No network configured for chain: ${launchRequest.chain}`);
 
     wagmiAdapter = new WagmiAdapter({
       projectId: PROJECT_ID,
       networks: [network],
     });
 
-    createAppKit({
+    appKitModal = createAppKit({
       adapters: [wagmiAdapter],
       networks: [network],
       projectId: PROJECT_ID,
       metadata: {
-        name: 'Launch Bot',
+        name: 'Ferzan Launch',
         description: 'Launch a token',
         url: window.location.origin,
         icons: [],
@@ -138,11 +151,12 @@
   connectBtn.addEventListener('click', async () => {
     try {
       initAppKit();
-      // AppKit renders its own connect modal automatically once
-      // initialized in most setups -- if it doesn't auto-open, the
-      // documented trigger is a <appkit-button> web component or
-      // `modal.open()` on the object createAppKit returns. Verify
-      // which applies to the version you install.
+      document.getElementById('kitWrap').style.display = 'block';
+      try {
+        if (appKitModal && typeof appKitModal.open === 'function') {
+          await appKitModal.open({ view: 'Connect' });
+        }
+      } catch (e) {}
       showStatus('Opening wallet connection...');
 
       // Poll for connection via @wagmi/core -- this is the documented
@@ -173,6 +187,49 @@
     });
   }
 
+  const CURVE_TOPIC = '0x188ae4cd8aa7c0376e9501e76fb7a19dd1454add5c88bffbf75f391807a14475';
+  const TOKEN_TOPIC = '0x1a8ab442384acdb09c73bc5f71549c099dad32203f07e1655e0ebce05831f749';
+
+  function topicAddr(topic) {
+    const raw = String(topic || '').replace(/^0x/i, '');
+    if (raw.length < 40) return '';
+    return '0x' + raw.slice(-40);
+  }
+
+  async function waitForLaunchReceipt(rpcUrl, hash, tries = 24) {
+    const out = { token: '', curve: '' };
+    if (!rpcUrl || !hash) return out;
+    for (let i = 0; i < tries; i++) {
+      try {
+        const r = await fetch(rpcUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            jsonrpc: '2.0', id: 1,
+            method: 'eth_getTransactionReceipt',
+            params: [hash],
+          }),
+        });
+        const body = await r.json();
+        const receipt = body.result;
+        if (receipt && receipt.logs) {
+          for (const log of receipt.logs) {
+            const sig = String((log.topics || [])[0] || '').toLowerCase();
+            if (sig === CURVE_TOPIC && log.topics.length >= 3) {
+              out.curve = topicAddr(log.topics[1]);
+              out.token = topicAddr(log.topics[2]);
+            } else if (sig === TOKEN_TOPIC && log.topics.length >= 2) {
+              out.token = out.token || topicAddr(log.topics[1]);
+            }
+          }
+          if (out.token || out.curve || receipt.status) return out;
+        }
+      } catch (e) {}
+      await new Promise((res) => setTimeout(res, 2500));
+    }
+    return out;
+  }
+
   signBtn.addEventListener('click', async () => {
     try {
       const account = getAccount(wagmiAdapter.wagmiConfig);
@@ -186,15 +243,11 @@
         const err = await buildRes.json();
         throw new Error(err.detail || 'Failed to build transaction');
       }
-      const { unsigned_transaction } = await buildRes.json();
+      const built = await buildRes.json();
+      const unsigned_transaction = built.unsigned_transaction;
+      const rpcUrl = built.rpc_url || '';
 
       showStatus('Please review and approve in your wallet...');
-      // Field-name mapping: web3.py's build_transaction dict uses `gas`
-      // and `gasPrice` -- confirm this against a real built transaction
-      // before trusting it; `chainId` in particular may need handling
-      // as a separate top-level option depending on the exact
-      // @wagmi/core version, since the connected network already
-      // implies it in most setups.
       const hash = await sendTransaction(wagmiAdapter.wagmiConfig, {
         to: unsigned_transaction.to,
         value: BigInt(unsigned_transaction.value || 0),
@@ -203,11 +256,16 @@
       });
 
       showStatus('Transaction submitted, waiting for confirmation...');
+      const parsed = await waitForLaunchReceipt(rpcUrl, hash);
 
       await fetch(`${API_BASE}/launch-requests/${requestId}/complete`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ tx_hash: hash, result_token_address: '' }),
+        body: JSON.stringify({
+          tx_hash: hash,
+          result_token_address: parsed.token || '',
+          curve_address: parsed.curve || '',
+        }),
       });
 
       showStatus(`✅ Launched! Tx: ${hash}`, 'success');

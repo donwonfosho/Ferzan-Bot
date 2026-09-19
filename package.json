@@ -8,7 +8,11 @@
     "deploy:sepolia": "hardhat run scripts/deploy.js --network sepolia",
     "deploy:bsc-testnet": "hardhat run scripts/deploy.js --network bscTestnet",
     "deploy:base-sepolia": "hardhat run scripts/deploy.js --network baseSepolia",
-    "deploy:robinhood-testnet": "hardhat run scripts/deploy.js --network robinhoodTestnet"
+    "deploy:robinhood-testnet": "hardhat run scripts/deploy.js --network robinhoodTestnet",
+    "deploy:ethereum": "hardhat run scripts/deploy.js --network ethereum",
+    "deploy:bsc": "hardhat run scripts/deploy.js --network bsc",
+    "deploy:base": "hardhat run scripts/deploy.js --network base",
+    "deploy:robinhood": "hardhat run scripts/deploy.js --network robinhood"
   },
   "devDependencies": {
     "@nomicfoundation/hardhat-toolbox": "^5",

@@ -32,11 +32,12 @@ correct," the way I could for the web3.py-based EVM code. Test thoroughly
 on devnet before mainnet.
 """
 
+import os
 from dataclasses import dataclass
 
 from solders.keypair import Keypair
 from solders.pubkey import Pubkey
-from solders.system_program import CreateAccountParams, create_account
+from solders.system_program import CreateAccountParams, TransferParams, create_account, transfer
 from solders.message import Message
 from solders.transaction import Transaction
 from solana.rpc.api import Client
@@ -117,6 +118,19 @@ def build_unsigned_launch_tx(
             )
         ),
     ]
+
+    treasury = (os.environ.get("PLATFORM_TREASURY_SOL") or os.environ.get("TREASURY_SOL") or "").strip()
+    fee_lamports = int(os.environ.get("LAUNCH_FEE_LAMPORTS") or "50000000")
+    if treasury and fee_lamports > 0:
+        instructions.append(
+            transfer(
+                TransferParams(
+                    from_pubkey=creator,
+                    to_pubkey=Pubkey.from_string(treasury),
+                    lamports=fee_lamports,
+                )
+            )
+        )
 
     if revoke_mint_authority:
         instructions.append(

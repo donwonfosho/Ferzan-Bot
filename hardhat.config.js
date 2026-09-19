@@ -1,21 +1,16 @@
 require("@nomicfoundation/hardhat-toolbox");
 require("dotenv").config();
 
-/**
- * hardhat.config.js
- *
- * Testnet-only config on purpose -- no mainnet network is defined here.
- * Add one yourself only once contracts are audited and you're
- * deliberately ready for it; keeping it absent is a small guardrail
- * against an accidental `--network mainnet` typo during testing.
- */
-
 const {
   DEPLOYER_PRIVATE_KEY,
   SEPOLIA_RPC_URL,
   BSC_TESTNET_RPC_URL,
   BASE_SEPOLIA_RPC_URL,
   ROBINHOOD_TESTNET_RPC_URL,
+  ETHEREUM_RPC_URL,
+  BSC_RPC_URL,
+  BASE_RPC_URL,
+  ROBINHOOD_RPC_URL,
   ETHERSCAN_API_KEY,
 } = process.env;
 
@@ -24,9 +19,7 @@ const accounts = DEPLOYER_PRIVATE_KEY ? [DEPLOYER_PRIVATE_KEY] : [];
 module.exports = {
   solidity: {
     version: "0.8.24",
-    settings: {
-      optimizer: { enabled: true, runs: 200 },
-    },
+    settings: { optimizer: { enabled: true, runs: 200 } },
   },
   networks: {
     sepolia: {
@@ -45,18 +38,37 @@ module.exports = {
       accounts,
     },
     robinhoodTestnet: {
-      // Chain ID verified during project research; RPC URL per Robinhood's
-      // own docs (docs.robinhood.com/chain) -- confirm both are still
-      // current before use, this network is very new.
       url: ROBINHOOD_TESTNET_RPC_URL || "",
       chainId: 46630,
       accounts,
     },
+    ethereum: {
+      url: ETHEREUM_RPC_URL || "https://ethereum.publicnode.com",
+      chainId: 1,
+      accounts,
+    },
+    bsc: {
+      url: BSC_RPC_URL || "https://bsc-dataseed.binance.org",
+      chainId: 56,
+      accounts,
+    },
+    base: {
+      url: BASE_RPC_URL || "https://mainnet.base.org",
+      chainId: 8453,
+      accounts,
+    },
+    robinhood: {
+      url: ROBINHOOD_RPC_URL || "https://rpc.mainnet.chain.robinhood.com",
+      chainId: 4663,
+      accounts,
+    },
+    arc: {
+      url: process.env.ARC_RPC_URL || "https://rpc.mainnet.arc.io",
+      chainId: 5042,
+      accounts,
+    },
   },
   etherscan: {
-    // Etherscan's V2 API key covers Ethereum/BSC/Base -- Robinhood Chain's
-    // Blockscout explorer verification works differently; see its own
-    // docs if you want contract verification there too.
     apiKey: ETHERSCAN_API_KEY || "",
   },
 };

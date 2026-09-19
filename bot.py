@@ -677,7 +677,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "⏱ Limits: buy / sell limits.\n"
             "👯 Copy: watch a wallet.\n"
             "🌉 Bridge: SOL · ETH · BASE · BSC inside Ferzan.\n\n"
-            "⚡ Paste a token CA to trade now.\n\n"
+            "⚡ Paste a token CA to trade now.\n"
+            "Chain follows the CA. Session and wallet stay put.\n\n"
             f'<a href="{html.escape(os.getenv("FERZAN_HUB_URL") or "https://t.me/Ferzan_Trade_Ecosystem", quote=True)}">Hub</a> · '
             f'<a href="{html.escape(os.getenv("FERZAN_CHAT_URL") or "https://t.me/Ferzan_Chat", quote=True)}">Chat</a> · '
             f'<a href="{html.escape(os.getenv("FERZAN_X_URL") or "https://x.com/ferzaneco", quote=True)}">X</a>'
@@ -984,7 +985,7 @@ def _live_buy_followup(
         if not (os.getenv("ZEROX_API_KEY") or "").strip():
             return "Live: EVM needs ZEROX_API_KEY on the droplet."
         _ok, msg = evm_signer.buy_evm(
-            chain or "base", mint, usd, key_hex=evm_secret, slip_bps=_slip_bps(uid, "buy")
+            chain or "base", mint, usd, key_hex=evm_secret, slip_bps=_slip_bps(uid, "buy"), user_id=uid
         )
         if _ok:
             db.add_live_cost(uid, mint, usd)
@@ -1257,6 +1258,79 @@ async def sl_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     db.set_live_exit(update.effective_user.id, mint, sl_pct=pct)
     await update.effective_message.reply_text(f"🛑 SL -{pct:.0f}% armed.")
+
+
+async def trail_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard(update):
+        return
+    if not context.args:
+        await update.effective_message.reply_text("Usage: /trail 20   or /trail 20 <mint>")
+        return
+    try:
+        pct = float(context.args[0])
+    except ValueError:
+        await update.effective_message.reply_text("Use a number. /trail 20")
+        return
+    mint = context.args[1] if len(context.args) > 1 else ""
+    if not mint:
+        found = db.live_mints(update.effective_user.id)
+        mint = found[0] if found else ""
+    if not mint:
+        await update.effective_message.reply_text("Buy live first, or pass a mint.")
+        return
+    db.set_live_exit(update.effective_user.id, mint, trail_pct=pct)
+    await update.effective_message.reply_text(
+        f"📉 Trailing stop {pct:.0f}% under peak PnL. It only ratchets up."
+    )
+
+
+async def stake_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard(update):
+        return
+    uid = update.effective_user.id
+    user = db.get_user(uid) or {}
+    held = float(user.get("stake_units") or 0)
+    mint = (os.getenv("FERZAN_TOKEN_MINT") or "").strip()
+    if not context.args:
+        await update.effective_message.reply_text(
+            f"Stake ledger: {held:,.2f} units\n"
+            f"Token mint: `{mint or 'not set — FERZAN_TOKEN_MINT'}`\n\n"
+            "This is a rebate ledger until the Ferzan token is live.\n"
+            "/stake 1000  records units for a fee cut.\n"
+            "100 → −5 bps · 1,000 → −10 · 10,000 → −15 (floor 0.10%).",
+            parse_mode="Markdown",
+        )
+        return
+    try:
+        units = float(context.args[0])
+    except ValueError:
+        await update.effective_message.reply_text("Usage: /stake 1000")
+        return
+    db.set_stake_units(uid, units)
+    await update.effective_message.reply_text(
+        f"Stake set to {units:,.2f}. Your next quotes use the rebate tier."
+    )
+
+
+async def lpguard_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard(update):
+        return
+    uid = update.effective_user.id
+    user = db.get_user(uid) or {}
+    if len(context.args or []) >= 2:
+        try:
+            drop = float(context.args[0])
+            floor = float(context.args[1])
+        except ValueError:
+            await update.effective_message.reply_text("Usage: /lpguard 50 500")
+            return
+        db.update_user(uid, lp_drop_pct=drop, lp_floor_usd=floor)
+        user = db.get_user(uid) or {}
+    await update.effective_message.reply_text(
+        f"LP yank: sell if liquidity falls {float(user.get('lp_drop_pct') or 50):.0f}% "
+        f"and marked LP was at least ${float(user.get('lp_floor_usd') or 500):.0f}.\n"
+        "Change with /lpguard 50 500"
+    )
 
 
 async def buylimit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3412,6 +3486,7 @@ async def wallet_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                         usd,
                         key_hex=evm_secret,
                         slip_bps=_slip_bps(uid, "buy", chain),
+                        user_id=uid,
                     )
                 else:
                     _ok, live = signer.buy_sol(
@@ -3496,7 +3571,11 @@ async def lp_watch_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             if liq >= prev * 0.80:
                 db.set_lp_mark(uid, mint, liq)
                 continue
-            yanked = prev >= 200 and liq <= prev * 0.25
+            user = db.get_user(uid) or {}
+            drop_pct = float(user.get("lp_drop_pct") or 50)
+            floor = float(user.get("lp_floor_usd") or 500)
+            trigger = max(0.05, min(0.90, drop_pct / 100.0))
+            yanked = prev >= floor and liq <= prev * (1.0 - trigger)
             if not yanked:
                 db.set_lp_mark(uid, mint, liq)
                 continue
@@ -3571,10 +3650,17 @@ async def live_exit_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             continue
         pnl_pct = ((worth - cost) / cost) * 100
         hit = None
+        trail = float(row.get("trail_pct") or 0)
+        peak = float(row.get("peak_pct") or 0)
+        if pnl_pct > peak:
+            peak = pnl_pct
+            db.set_live_exit(uid, mint, peak_pct=peak)
         if row.get("tp_pct") and pnl_pct >= float(row["tp_pct"]):
             hit = "tp"
         if row.get("sl_pct") and pnl_pct <= -float(row["sl_pct"]):
             hit = "sl"
+        if trail > 0 and peak > 0 and pnl_pct <= peak - trail:
+            hit = "trail"
         if not hit:
             continue
         try:
@@ -3591,7 +3677,7 @@ async def live_exit_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         try:
             await context.bot.send_message(
                 uid,
-                f"{'🎯 TP' if hit == 'tp' else '🛑 SL'} hit ({pnl_pct:+.1f}%)\n{msg}",
+                f"{'🎯 TP' if hit == 'tp' else '📉 Trail' if hit == 'trail' else '🛑 SL'} hit ({pnl_pct:+.1f}%)\n{msg}",
             )
         except Exception:
             logger.exception("live exit notify failed")
@@ -3874,6 +3960,9 @@ def main() -> None:
     app.add_handler(CommandHandler("bag", bag_cmd))
     app.add_handler(CommandHandler("tp", tp_cmd))
     app.add_handler(CommandHandler("sl", sl_cmd))
+    app.add_handler(CommandHandler("trail", trail_cmd))
+    app.add_handler(CommandHandler("stake", stake_cmd))
+    app.add_handler(CommandHandler("lpguard", lpguard_cmd))
     app.add_handler(CommandHandler("buylimit", buylimit_cmd))
     app.add_handler(CommandHandler("limits", limits_cmd))
     app.add_handler(CommandHandler("cancellimit", cancellimit_cmd))

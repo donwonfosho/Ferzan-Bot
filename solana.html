@@ -22,33 +22,14 @@
   <div id="details">Loading launch details...</div>
   <div id="status" style="display:none"></div>
   <button id="connectBtn" class="primary" style="display:none">Connect Wallet</button>
+  <div id="kitWrap" style="display:none;margin-top:12px"><appkit-button></appkit-button></div>
   <button id="signBtn" class="primary" style="display:none">Review & Sign Transaction</button>
 
 <script type="module">
-  /*
-    ============================================================
-    CONFIDENCE NOTE -- same as evm.html, please read before deploying
-    ============================================================
-    Untested against any real browser, wallet, or RPC endpoint. The
-    flow is correct; the exact Reown AppKit Solana adapter API surface
-    below needs verification against current docs (docs.reown.com ->
-    Solana adapter) before production use.
-
-    Separate page from evm.html on purpose -- a single Mini App page
-    that initializes both an EVM and a Solana AppKit adapter in one
-    session has a documented bug in some AppKit versions. Keeping them
-    fully separate sidesteps it entirely.
-
-    FOR TESTNET/LIVE TESTING: set the backend's SOLANA_RPC_URL to
-    https://api.devnet.solana.com (see TESTNET_SETUP.md), and make sure
-    your wallet app (Phantom/Solflare) is itself switched to Devnet in
-    its own settings -- a wallet set to Mainnet cannot sign against a
-    devnet transaction correctly.
-  */
-
   import { createAppKit } from 'https://esm.sh/@reown/appkit@1?bundle';
   import { SolanaAdapter } from 'https://esm.sh/@reown/appkit-adapter-solana@1?bundle';
-  import { Transaction } from 'https://esm.sh/@solana/web3.js@1?bundle';
+  import { solana } from 'https://esm.sh/@reown/appkit/networks@1?bundle';
+  import { Transaction, VersionedTransaction } from 'https://esm.sh/@solana/web3.js@1?bundle';
 
   const tg = window.Telegram?.WebApp;
   tg?.ready();
@@ -56,7 +37,8 @@
 
   const params = new URLSearchParams(window.location.search);
   const requestId = params.get('request_id');
-  const API_BASE = 'https://yourdomain.com/api'; // set to your deployed backend
+  const API_BASE = 'https://launch.ferzaneco.com/api';
+  const PROJECT_ID = 'b38b9588c0f613335d830056007e771e';
 
   const detailsEl = document.getElementById('details');
   const statusEl = document.getElementById('status');
@@ -72,6 +54,13 @@
     statusEl.className = kind || '';
   }
 
+  function hexToBytes(hex) {
+    const raw = String(hex || '').replace(/^0x/i, '');
+    const out = new Uint8Array(raw.length / 2);
+    for (let i = 0; i < out.length; i++) out[i] = parseInt(raw.substr(i * 2, 2), 16);
+    return out;
+  }
+
   async function loadRequest() {
     if (!requestId) {
       detailsEl.textContent = 'Missing request ID -- open this from the bot, not directly.';
@@ -83,33 +72,77 @@
       return;
     }
     const req = await res.json();
-    detailsEl.innerHTML = `
-      <div class="detail-row"><span>Name</span><b>${req.name}</b></div>
-      <div class="detail-row"><span>Symbol</span><b>${req.symbol}</b></div>
-      <div class="detail-row"><span>Mode</span><b>${req.mode}</b></div>
-    `;
+    const extra = req.extra_params || {};
+    const rows = [
+      ['Name', req.name],
+      ['Symbol', req.symbol],
+      ['Chain', 'Solana'],
+      ['Mode', req.mode],
+      ['Supply', req.supply_display || req.total_supply],
+    ];
+    if (req.mode === 'meteora') rows.push(['Pool', 'Meteora DBC coming soon — mint + fee today']);
+    if (extra.allocs) rows.push(['Team wallets', extra.allocs]);
+    rows.push(['Fee', 'SOL launch fee bundled in the tx']);
+    detailsEl.innerHTML = rows.map(([k,v]) =>
+      `<div class="detail-row"><span>${k}</span><b>${String(v ?? '').slice(0,80)}</b></div>`
+    ).join('');
     connectBtn.style.display = 'block';
   }
 
   function initAppKit() {
     appKit = createAppKit({
       adapters: [new SolanaAdapter()],
-      networks: [], // TODO: Solana mainnet network config per current AppKit docs
-      projectId: 'YOUR_REOWN_PROJECT_ID',
+      networks: [solana],
+      projectId: PROJECT_ID,
       metadata: {
-        name: 'Launch Bot',
+        name: 'Ferzan Launch',
         description: 'Launch a token',
         url: window.location.origin,
         icons: [],
       },
     });
+    if (typeof appKit.subscribeProviders === 'function') {
+      appKit.subscribeProviders((providers) => {
+        const p = providers?.solana;
+        const addr = p?.publicKey?.toString?.() || p?.address || '';
+        if (addr) connectedAddress = addr;
+      });
+    }
+  }
+
+  function solanaProvider() {
+    const providers = (typeof appKit.getProviders === 'function' && appKit.getProviders()) || {};
+    return providers.solana || providers['solana:'] || null;
+  }
+
+  function readSolanaAddress() {
+    const p = solanaProvider();
+    return (
+      p?.publicKey?.toString?.() ||
+      p?.address ||
+      (typeof appKit.getAddress === 'function' ? appKit.getAddress() : '') ||
+      connectedAddress ||
+      ''
+    );
   }
 
   connectBtn.addEventListener('click', async () => {
     try {
       initAppKit();
-      await appKit.open();
-      connectedAddress = await appKit.getAddress(); // verify exact accessor against current docs
+      document.getElementById('kitWrap').style.display = 'block';
+      try {
+        if (appKit && typeof appKit.open === 'function') {
+          await appKit.open({ view: 'Connect' });
+        }
+      } catch (e) {}
+      showStatus('Opening wallet connection...');
+      const started = Date.now();
+      while (Date.now() - started < 120000) {
+        connectedAddress = readSolanaAddress();
+        if (connectedAddress) break;
+        await new Promise((r) => setTimeout(r, 500));
+      }
+      if (!connectedAddress) throw new Error('Wallet connection timed out. Use Connect in the kit button.');
       showStatus(`Connected: ${connectedAddress}`, 'success');
       connectBtn.style.display = 'none';
       signBtn.style.display = 'block';
@@ -130,19 +163,33 @@
         const err = await buildRes.json();
         throw new Error(err.detail || 'Failed to build transaction');
       }
-      const { unsigned_transaction, mint_address } = await buildRes.json();
+      const built = await buildRes.json();
+      const unsigned_transaction = built.unsigned_transaction;
+      const mint_address = built.mint_address || '';
 
-      // Backend sends the solders-serialized tx as a hex string --
-      // reconstruct it as a web3.js Transaction. Verify this
-      // deserializes correctly; legacy vs versioned transaction
-      // handling differs and should be confirmed against exactly what
-      // solana_launch.py produces.
-      const txBytes = Uint8Array.from(Buffer.from(unsigned_transaction, 'hex'));
-      const tx = Transaction.from(txBytes);
+      const txBytes = hexToBytes(unsigned_transaction);
+      let tx;
+      try {
+        tx = VersionedTransaction.deserialize(txBytes);
+      } catch (e) {
+        tx = Transaction.from(txBytes);
+      }
 
       showStatus('Please review and approve in your wallet...');
-      const walletProvider = appKit.getWalletProvider();
-      const signature = await walletProvider.signAndSendTransaction(tx);
+      const walletProvider = solanaProvider();
+      if (!walletProvider) {
+        throw new Error('No Solana provider. Reconnect Phantom/Solflare.');
+      }
+      let sent;
+      if (typeof walletProvider.signAndSendTransaction === 'function') {
+        sent = await walletProvider.signAndSendTransaction(tx);
+      } else if (typeof walletProvider.signTransaction === 'function') {
+        const signed = await walletProvider.signTransaction(tx);
+        throw new Error('Provider signed but has no send. Use a wallet that supports signAndSendTransaction.');
+      } else {
+        throw new Error('Solana provider has no signAndSendTransaction.');
+      }
+      const signature = typeof sent === 'string' ? sent : (sent?.signature || sent?.txid || sent);
 
       await fetch(`${API_BASE}/launch-requests/${requestId}/complete`, {
         method: 'POST',
@@ -150,10 +197,9 @@
         body: JSON.stringify({ tx_hash: signature, result_token_address: mint_address || '' }),
       });
 
-      showStatus(`✅ Launched! Tx: ${signature}`, 'success');
+      showStatus(`Launched. Tx: ${signature}`, 'success');
       signBtn.style.display = 'none';
       setTimeout(() => tg?.close(), 2500);
-
     } catch (e) {
       showStatus(`Failed: ${e.message}`, 'error');
       await fetch(`${API_BASE}/launch-requests/${requestId}/fail`, {

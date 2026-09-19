@@ -43,16 +43,25 @@ CHAINS = {
     "bsc": "BNB Chain",
     "base": "Base",
     "robinhood": "Robinhood Chain (HOOD)",
+    "arc": "Arc",
     "solana": "Solana",
+    "tron": "Tron",
+    "ton": "TON",
 }
 
-EVM_CHAINS = {"ethereum", "bsc", "base", "robinhood"}
+EVM_CHAINS = {"ethereum", "bsc", "base", "robinhood", "arc"}
 
-# Conversation states
-CHOOSING_CHAIN, CHOOSING_MODE, ENTERING_NAME, ENTERING_SYMBOL, ENTERING_SUPPLY, CONFIRMING = range(6)
+CHOOSING_CHAIN, CHOOSING_MODE, ENTERING_NAME, ENTERING_SYMBOL, ENTERING_SUPPLY, ENTERING_GRAD, ENTERING_VETH, ENTERING_VTOKEN, ENTERING_ALLOCS, ENTERING_DEVBUY, ENTERING_WINDOW, CONFIRMING = range(12)
+CURVE_MODES = {"bonding_curve", "meteora"}
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    if context.args:
+        raw = (context.args[0] or "").replace("ref_", "").replace("ref", "")
+        if raw.isdigit():
+            if db.set_referrer(uid, int(raw)):
+                await update.effective_message.reply_text("Referral locked. You launch, they earn a cut of curve fees.")
     kb = InlineKeyboardMarkup(
         [
             [InlineKeyboardButton("🚀 Launch a token", callback_data="go:launch")],
@@ -69,10 +78,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🚀 <b>Ferzan Launch</b>\n\n"
         "Create a token from Telegram. You sign in your own wallet — "
         "this bot never holds keys.\n\n"
-        "Chains: Solana · ETH · BNB · Base · Hood\n"
-        "Modes: plain mint, or bonding curve / pump.fun where live.\n\n"
-        "Tap Launch. Review the tx in the wallet before you approve.\n"
-        "Platform fee is disclosed in the review screen when that path is live.",
+        "Live now: ETH · BNB · Base · Hood · Solana\n"
+        "Plain mint or EVM bonding curve. Fees go to Ferzan treasury.\n"
+        "Next: Arc · Tron · TON · Meteora pool.\n\n"
+        "Tap Launch. Review the tx in your wallet before you approve.\n"
+        "Platform fee is shown on the review screen.",
         parse_mode="HTML",
         reply_markup=kb,
     )
@@ -111,9 +121,24 @@ async def chain_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["launch"] = {"chain": chain}
 
     if chain == "solana":
-        modes = [("plain", "Plain token launch"), ("pumpfun", "pump.fun (bonding curve + trading)")]
+        modes = [
+            ("plain", "Plain SPL — fixed supply"),
+            ("meteora", "Meteora pool — coming soon (plain + fee today)"),
+        ]
+    elif chain == "tron":
+        modes = [("plain", "TRC-20 — coming soon (no signable tx yet)")]
+    elif chain == "ton":
+        modes = [("plain", "TON — fee memo only, jetton minter coming soon")]
+    elif chain == "arc":
+        modes = [
+            ("plain", "Arc plain — held (6-dec USDC gas, verify RPC first)"),
+            ("bonding_curve", "Arc curve — held (no V2 router / Uniswap v4)"),
+        ]
     else:
-        modes = [("plain", "Plain token launch"), ("bonding_curve", "Bonding curve (pump.fun-style, on your own chain)")]
+        modes = [
+            ("plain", "Plain ERC-20 — fixed supply"),
+            ("bonding_curve", "Bonding curve — Ferzan fee on every trade"),
+        ]
 
     buttons = [[InlineKeyboardButton(label, callback_data=f"mode:{key}")] for key, label in modes]
     await query.edit_message_text(
@@ -156,26 +181,154 @@ async def supply_entered(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ENTERING_SUPPLY
 
     launch = context.user_data["launch"]
-    decimals = 18 if launch["chain"] != "solana" else 6  # Solana tokens conventionally use 6, but this is a choice, not a rule
+    decimals = {"solana": 6, "ton": 9, "tron": 6}.get(launch["chain"], 18)
     launch["total_supply_raw"] = str(int(text) * (10 ** decimals))
     launch["decimals"] = decimals
+    launch["supply_display"] = text
+    launch.setdefault("extra_params", {})
 
-    summary = (
-        f"*Review your launch:*\n"
-        f"Chain: {CHAINS[launch['chain']]}\n"
-        f"Mode: {launch['mode']}\n"
-        f"Name: {launch['name']}\n"
-        f"Symbol: {launch['symbol']}\n"
-        f"Supply: {text}\n\n"
-        "Confirm to open the wallet-connect screen and review the exact "
-        "transaction before signing anything."
+    if launch["mode"] in CURVE_MODES:
+        unit = "SOL" if launch["chain"] == "solana" else CHAINS[launch["chain"]]
+        await update.message.reply_text(
+            f"Graduation threshold in native units for {unit}?\n"
+            "Example: 5   or type default"
+        )
+        return ENTERING_GRAD
+    await update.message.reply_text(
+        "Team wallets? Format `0xabc...:500` (500 = 5%). Multiple comma-separated. Or skip"
     )
+    return ENTERING_ALLOCS
+
+
+def _to_wei(text: str, decimals: int) -> int:
+    raw = text.strip().lower().replace(",", "")
+    if raw in {"default", "d", ""}:
+        return 0
+    if not raw.replace(".", "", 1).isdigit():
+        raise ValueError("number")
+    if "." in raw:
+        whole, frac = raw.split(".", 1)
+        frac = (frac + "0" * decimals)[:decimals]
+        return int(whole or "0") * (10 ** decimals) + int(frac or "0")
+    return int(raw) * (10 ** decimals)
+
+
+async def _show_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    launch = context.user_data["launch"]
+    extra = launch.get("extra_params") or {}
+    lines = [
+        "*Review your launch:*",
+        f"Chain: {CHAINS[launch['chain']]}",
+        f"Mode: {launch['mode']}",
+        f"Name: {launch['name']}",
+        f"Symbol: {launch['symbol']}",
+        f"Supply: {launch.get('supply_display', launch['total_supply_raw'])}",
+    ]
+    if extra.get("graduation_eth_threshold"):
+        lines.append(f"Graduation: {extra['graduation_eth_threshold']}")
+    if extra.get("virtual_eth_reserve"):
+        lines.append(f"Virtual reserve: {extra['virtual_eth_reserve']}")
+    if extra.get("dev_buy"):
+        lines.append(f"Dev buy: {extra['dev_buy']}")
+    if extra.get("start_minutes"):
+        lines.append(f"Delay min: {extra['start_minutes']}  max buy: {extra.get('max_buy', '0')}")
+    if extra.get("allocs"):
+        lines.append(f"Allocs: {extra['allocs']}")
+    lines.append("")
+    lines.append("Confirm to open the wallet screen. You sign. Ferzan never holds the key.")
     buttons = [[
         InlineKeyboardButton("✅ Confirm", callback_data="confirm:yes"),
         InlineKeyboardButton("❌ Cancel", callback_data="confirm:no"),
     ]]
-    await update.message.reply_text(summary, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
+    await update.effective_message.reply_text(
+        "\n".join(lines),
+        reply_markup=InlineKeyboardMarkup(buttons),
+        parse_mode="Markdown",
+    )
     return CONFIRMING
+
+
+async def grad_entered(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    launch = context.user_data["launch"]
+    decimals = 9 if launch["chain"] == "solana" else 18
+    try:
+        val = _to_wei(update.message.text, decimals)
+    except ValueError:
+        await update.message.reply_text("Number or default.")
+        return ENTERING_GRAD
+    if val == 0:
+        val = (50 * 10 ** 9) if launch["chain"] == "solana" else (5 * 10 ** 18)
+    launch.setdefault("extra_params", {})["graduation_eth_threshold"] = str(val)
+    await update.message.reply_text("Virtual native reserve? Example: 1   or default")
+    return ENTERING_VETH
+
+
+async def veth_entered(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    launch = context.user_data["launch"]
+    decimals = 9 if launch["chain"] == "solana" else 18
+    try:
+        val = _to_wei(update.message.text, decimals)
+    except ValueError:
+        await update.message.reply_text("Number or default.")
+        return ENTERING_VETH
+    if val == 0:
+        val = (1 * 10 ** 9) if launch["chain"] == "solana" else (1 * 10 ** 18)
+    launch.setdefault("extra_params", {})["virtual_eth_reserve"] = str(val)
+    await update.message.reply_text("Virtual token reserve (whole tokens)? Example: 800000000   or default")
+    return ENTERING_VTOKEN
+
+
+async def vtoken_entered(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    launch = context.user_data["launch"]
+    try:
+        val = _to_wei(update.message.text, launch["decimals"])
+    except ValueError:
+        await update.message.reply_text("Number or default.")
+        return ENTERING_VTOKEN
+    if val == 0:
+        val = int(int(launch["total_supply_raw"]) * 80 / 100)
+    launch.setdefault("extra_params", {})["virtual_token_reserve"] = str(val)
+    await update.message.reply_text(
+        "Team wallets? Format `0xabc...:500` (500 = 5%). Multiple comma-separated. Or skip"
+    )
+    return ENTERING_ALLOCS
+
+
+async def allocs_entered(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    launch = context.user_data["launch"]
+    text = (update.message.text or "").strip().lower()
+    extra = launch.setdefault("extra_params", {})
+    extra["allocs"] = "" if text in {"skip", "none", "no", "0"} else update.message.text.strip()
+    ref = db.get_referrer(update.effective_user.id)
+    if ref:
+        extra["referrer_id"] = str(ref)
+    if launch["mode"] in CURVE_MODES:
+        await update.message.reply_text("Dev buy in native at launch? Example 0.05 or 0")
+        return ENTERING_DEVBUY
+    return await _show_confirm(update, context)
+
+
+async def devbuy_entered(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    launch = context.user_data["launch"]
+    raw = (update.message.text or "0").strip().replace(",", "")
+    launch.setdefault("extra_params", {})["dev_buy"] = raw
+    await update.message.reply_text(
+        "Open delay minutes and max buy per wallet?\n"
+        "Example: `10 0.2`  (opens in 10m, max 0.2 native)\n"
+        "Or `0 0` for instant / no cap"
+    )
+    return ENTERING_WINDOW
+
+
+async def window_entered(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    launch = context.user_data["launch"]
+    parts = (update.message.text or "0 0").replace(",", "").split()
+    mins = parts[0] if parts else "0"
+    cap = parts[1] if len(parts) > 1 else "0"
+    extra = launch.setdefault("extra_params", {})
+    extra["start_minutes"] = mins
+    extra["max_buy"] = cap
+    return await _show_confirm(update, context)
 
 
 async def confirmed(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -216,7 +369,11 @@ async def confirmed(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown",
         )
     else:
-        page = "evm.html" if launch["chain"] != "solana" else "solana.html"
+        page = {
+            "solana": "solana.html",
+            "tron": "evm.html",
+            "ton": "evm.html",
+        }.get(launch["chain"], "evm.html")
         mini_app_url = f"{MINI_APP_BASE_URL}/{page}?request_id={req.id}"
         buttons = [[InlineKeyboardButton("🔗 Connect Wallet & Launch", web_app=WebAppInfo(url=mini_app_url))]]
         await query.edit_message_text(
@@ -253,6 +410,43 @@ async def go_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await history(update, context)
 
 
+async def refer_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    me = (os.environ.get("LAUNCHBOT_USERNAME") or "FerzanLaunchBot").lstrip("@")
+    uid = update.effective_user.id
+    await update.effective_message.reply_text(
+        f"Your Ferzan launch referral:\n"
+        f"https://t.me/{me}?start=ref_{uid}\n\n"
+        "Share that link. When they tap Start we store you as their referrer.\n\n"
+        "On-chain payout needs your EVM wallet:\n"
+        "`/referwallet 0xYourAddress`\n\n"
+        "Curve buys can then send 10% of the 1% fee to that address. "
+        "The trade bot has to pass it into buy() — until that ships, "
+        "the link only tracks who referred whom."
+    )
+
+
+async def referwallet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    raw = " ".join(context.args or []).strip()
+    if not (raw.startswith("0x") and len(raw) == 42):
+        await update.effective_message.reply_text("Usage: /referwallet 0xYourEvmAddress")
+        return
+    db.set_payout_wallet(update.effective_user.id, raw)
+    await update.effective_message.reply_text(f"Payout wallet set:\n`{raw}`", parse_mode="Markdown")
+
+
+async def lplock_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.effective_message.reply_text(
+        "🔒 *LP lock helper (plain launches)*\n\n"
+        "Ferzan curve mode already burns LP to `0xdead` on graduation.\n"
+        "Plain mode: after you add liquidity on Uniswap / Pancake / Raydium:\n"
+        "1. Find the LP token in your wallet\n"
+        "2. Send the LP tokens to `0x000000000000000000000000000000000000dead`\n"
+        "3. Post the burn tx in your group — buyers can verify\n\n"
+        "Do not send the *project* token. Only the LP pair token.",
+        parse_mode="Markdown",
+    )
+
+
 def main():
     token = (
         os.environ.get("LAUNCHBOT_TOKEN")
@@ -276,6 +470,12 @@ def main():
             ENTERING_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, name_entered)],
             ENTERING_SYMBOL: [MessageHandler(filters.TEXT & ~filters.COMMAND, symbol_entered)],
             ENTERING_SUPPLY: [MessageHandler(filters.TEXT & ~filters.COMMAND, supply_entered)],
+            ENTERING_GRAD: [MessageHandler(filters.TEXT & ~filters.COMMAND, grad_entered)],
+            ENTERING_VETH: [MessageHandler(filters.TEXT & ~filters.COMMAND, veth_entered)],
+            ENTERING_VTOKEN: [MessageHandler(filters.TEXT & ~filters.COMMAND, vtoken_entered)],
+            ENTERING_ALLOCS: [MessageHandler(filters.TEXT & ~filters.COMMAND, allocs_entered)],
+            ENTERING_DEVBUY: [MessageHandler(filters.TEXT & ~filters.COMMAND, devbuy_entered)],
+            ENTERING_WINDOW: [MessageHandler(filters.TEXT & ~filters.COMMAND, window_entered)],
             CONFIRMING: [CallbackQueryHandler(confirmed, pattern="^confirm:")],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
@@ -284,6 +484,9 @@ def main():
     app.add_handler(CommandHandler("help", start))
     app.add_handler(conv)
     app.add_handler(CommandHandler("history", history))
+    app.add_handler(CommandHandler("refer", refer_cmd))
+    app.add_handler(CommandHandler("referwallet", referwallet_cmd))
+    app.add_handler(CommandHandler("lplock", lplock_cmd))
     app.add_handler(CallbackQueryHandler(go_history, pattern="^go:history$"))
 
     async def _post(application):
@@ -292,6 +495,9 @@ def main():
                 BotCommand("start", "Ferzan Launch home"),
                 BotCommand("launch", "Launch a token"),
                 BotCommand("history", "Your launches"),
+                BotCommand("refer", "Your referral link"),
+                BotCommand("referwallet", "Set referral payout wallet"),
+                BotCommand("lplock", "Burn / lock LP helper"),
                 BotCommand("cancel", "Cancel launch"),
             ]
         )

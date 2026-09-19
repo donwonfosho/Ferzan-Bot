@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 import os
 
 import requests
+
+log = logging.getLogger("evm_signer")
 
 from chains import CHAINS, ZEROX_LIVE, resolve_chain
 
@@ -123,12 +126,131 @@ def _native_decimals(chain: str) -> int:
     return 18
 
 
+def _launch_get(path: str) -> dict:
+    base = (os.getenv("LAUNCH_API_URL") or "http://127.0.0.1:8000").rstrip("/")
+    token = (os.getenv("INTERNAL_API_TOKEN") or "").strip()
+    headers = {"X-Ferzan-Internal": token} if token else {}
+    r = requests.get(base + path, headers=headers, timeout=8)
+    if r.status_code >= 400:
+        log.warning("launch api %s -> %s %s", path, r.status_code, r.text[:180])
+        return {}
+    return r.json() if r.content else {}
+
+
+def _referrer_wallet(user_id: int | None) -> str:
+    if not user_id:
+        return ""
+    try:
+        data = _launch_get(f"/internal/referrer-wallet/{int(user_id)}")
+        return str(data.get("wallet") or "").strip()
+    except Exception as exc:
+        log.warning("referrer wallet lookup failed user=%s: %s", user_id, exc)
+        return ""
+
+
+def _curve_for_token(token: str) -> str:
+    try:
+        data = _launch_get(f"/internal/curve-for-token/{token}")
+        return str(data.get("curve") or "").strip()
+    except Exception as exc:
+        log.warning("curve lookup failed token=%s: %s", token, exc)
+        return ""
+
+
+def _encode_curve_buy(min_out: int, referrer: str) -> str:
+    from eth_hash.auto import keccak
+
+    sel = keccak(b"buy(uint256,address)")[:4]
+    ref = (referrer or "").replace("0x", "").replace("0X", "").zfill(40)
+    if len(ref) != 40:
+        ref = "0" * 40
+    return "0x" + sel.hex() + int(min_out).to_bytes(32, "big").hex() + ref.rjust(64, "0")
+
+
+def _quote_curve_tokens(rpc: str, curve: str, wei: int) -> int:
+    from eth_hash.auto import keccak
+
+    sel = keccak(b"quoteBuy(uint256)")[:4]
+    data = "0x" + sel.hex() + int(wei).to_bytes(32, "big").hex()
+    try:
+        body = _rpc(rpc, "eth_call", [{"to": curve, "data": data}, "latest"])
+        raw = str((body or {}).get("result") or "0x0")
+        return int(raw, 16)
+    except Exception:
+        return 0
+
+
+def buy_curve(
+    chain: str,
+    curve: str,
+    usd: float,
+    key_hex: str | None = None,
+    referrer: str = "",
+    slip_bps: int | None = None,
+) -> tuple[bool, str]:
+    if not live_enabled():
+        return False, "Live buys OFF. LIVE_BUYS=1"
+    cid = resolve_chain(chain)
+    if cid not in SUPPORTED:
+        return False, f"Curve buy is EVM only. Not {chain}."
+    curve = _addr(curve)
+    raw = (key_hex or _key_hex()).replace("0x", "").replace("0X", "")
+    from eth_account import Account
+    from price_fetcher import get_price_usd
+
+    meta = CHAINS[cid]
+    try:
+        px = float(get_price_usd(NATIVE_CG.get(cid, "ethereum")) or 0)
+    except Exception:
+        px = 0.0
+    if px <= 0:
+        px = 600.0 if cid == "bsc" else 3000.0
+    wei = max(10**12, int((usd / max(px, 1e-9)) * 10 ** _native_decimals(cid)))
+    acct = Account.from_key("0x" + raw)
+    quoted = _quote_curve_tokens(meta["rpc"], curve, wei)
+    slip = int(slip_bps if slip_bps is not None else 1000)
+    min_out = 0 if quoted <= 0 else max(1, quoted * (10_000 - max(1, min(slip, 4900))) // 10_000)
+    data = _encode_curve_buy(min_out, referrer)
+    raw_tx = {
+        "to": curve,
+        "data": data,
+        "value": wei,
+        "chainId": int(meta["chain_id"]),
+        "gas": 350000,
+        "gasPrice": _gas_price(meta["rpc"]),
+        "nonce": _nonce(meta["rpc"], acct.address),
+    }
+    try:
+        signed = acct.sign_transaction(raw_tx)
+        raw_hex = "0x" + signed.raw_transaction.hex() if hasattr(signed, "raw_transaction") else signed.rawTransaction.hex()
+        if not raw_hex.startswith("0x"):
+            raw_hex = "0x" + raw_hex
+        rr = requests.post(
+            meta["rpc"],
+            json={"jsonrpc": "2.0", "id": 1, "method": "eth_sendRawTransaction", "params": [raw_hex]},
+            timeout=20,
+        )
+        body = rr.json() if rr.content else {}
+    except Exception as exc:
+        return False, f"Curve buy failed: {exc}"
+    if body.get("error"):
+        err = body["error"]
+        return False, str(err.get("message") if isinstance(err, dict) else err)
+    txh = body.get("result") or ""
+    if not txh:
+        return False, "Curve RPC accepted nothing."
+    exp = (meta.get("explorer_tx") or "https://basescan.org/tx/{txid}").format(txid=txh)
+    tag = f" ref {referrer[:8]}…" if referrer else ""
+    return True, f"Live curve buy ~${usd:.2f}{tag}\n{exp}"
+
+
 def buy_evm(
     chain: str,
     buy_token: str,
     usd: float,
     key_hex: str | None = None,
     slip_bps: int | None = None,
+    user_id: int | None = None,
 ) -> tuple[bool, str]:
     if not live_enabled():
         return False, "Live buys OFF. LIVE_BUYS=1"
@@ -144,6 +266,16 @@ def buy_evm(
     token = (buy_token or "").strip()
     if not token.startswith("0x") or len(token) != 42:
         return False, "Need a 0x contract."
+    curve = _curve_for_token(token)
+    if curve:
+        return buy_curve(
+            cid,
+            curve,
+            usd,
+            key_hex=key_hex,
+            referrer=_referrer_wallet(user_id),
+            slip_bps=slip_bps,
+        )
     usd = min(max(1.0, float(usd)), max_usd())
     try:
         from eth_account import Account
