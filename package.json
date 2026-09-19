@@ -16,10 +16,13 @@
   },
   "devDependencies": {
     "@nomicfoundation/hardhat-toolbox": "^5",
-    "hardhat": "^2.22",
-    "dotenv": "^16"
+    "dotenv": "^16",
+    "hardhat": "^2.22"
   },
   "dependencies": {
-    "@openzeppelin/contracts": "^5"
+    "@openzeppelin/contracts": "^5",
+    "@solana/web3.js": "^1.78.5",
+    "bs58": "^4.0.1",
+    "rpc-websockets": "^7.5.1"
   }
 }
