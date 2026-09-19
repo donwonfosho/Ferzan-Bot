@@ -1,0 +1,14 @@
+[Unit]
+Description=Ferzan Liq bot
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/ferzan/app
+EnvironmentFile=/opt/ferzan/.env
+ExecStart=/opt/ferzan/.venv/bin/python /opt/ferzan/app/liq_bot.py
+Restart=always
+RestartSec=4
+
+[Install]
+WantedBy=multi-user.target

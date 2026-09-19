@@ -1,0 +1,25 @@
+{
+  "name": "launch-bot-contracts",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "compile": "hardhat compile",
+    "test": "hardhat test",
+    "deploy:sepolia": "hardhat run scripts/deploy.js --network sepolia",
+    "deploy:bsc-testnet": "hardhat run scripts/deploy.js --network bscTestnet",
+    "deploy:base-sepolia": "hardhat run scripts/deploy.js --network baseSepolia",
+    "deploy:robinhood-testnet": "hardhat run scripts/deploy.js --network robinhoodTestnet",
+    "deploy:ethereum": "hardhat run scripts/deploy.js --network ethereum",
+    "deploy:bsc": "hardhat run scripts/deploy.js --network bsc",
+    "deploy:base": "hardhat run scripts/deploy.js --network base",
+    "deploy:robinhood": "hardhat run scripts/deploy.js --network robinhood"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^5",
+    "hardhat": "^2.22",
+    "dotenv": "^16"
+  },
+  "dependencies": {
+    "@openzeppelin/contracts": "^5"
+  }
+}
