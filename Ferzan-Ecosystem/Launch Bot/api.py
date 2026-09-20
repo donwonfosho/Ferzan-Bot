@@ -169,7 +169,7 @@ def build_tx(request_id: str, body: BuildTxRequest):
     req = db.get_launch_request(request_id)
     if not req:
         raise HTTPException(404, "Launch request not found")
-    if req.status not in ("pending", "built"):
+    if req.status not in ("pending", "built", "failed"):
         raise HTTPException(400, f"Request is already {req.status}, cannot rebuild")
 
     total_supply = int(req.total_supply)
@@ -439,3 +439,8 @@ def _notify_telegram(chat_id: int, text: str):
 @app.on_event("startup")
 def startup():
     db.init_db()
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
