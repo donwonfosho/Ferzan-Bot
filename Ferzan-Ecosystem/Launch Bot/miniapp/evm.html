@@ -23,6 +23,7 @@
   <div id="status" style="display:none"></div>
   <button id="connectBtn" class="primary" style="display:none">Connect Wallet</button>
   <div id="kitWrap" style="display:none;margin-top:12px"><appkit-button></appkit-button></div>
+  <button id="browserBtn" class="primary" style="display:none;background:#111">Open in Safari / Chrome</button>
   <button id="signBtn" class="primary" style="display:none">Review & Sign Transaction</button>
 
 <script type="module">
@@ -124,9 +125,18 @@
       `<div class="detail-row"><span>${k}</span><b>${String(v ?? '').slice(0,80)}</b></div>`
     ).join('');
     connectBtn.style.display = 'block';
+    document.getElementById('browserBtn').style.display = 'block';
+    try { initAppKit(); document.getElementById('kitWrap').style.display = 'block'; } catch (e) {
+      showStatus('Wallet kit failed to start: ' + e.message, 'error');
+    }
+  }
+
+  function wagmiConfig() {
+    return wagmiAdapter?.wagmiConfig || wagmiAdapter?.config || wagmiAdapter?.adapter?.wagmiConfig;
   }
 
   function initAppKit() {
+    if (appKitModal) return;
     const network = CHAIN_NETWORK_MAP[launchRequest.chain];
     if (!network) throw new Error(`No network configured for chain: ${launchRequest.chain}`);
 
@@ -139,6 +149,8 @@
       adapters: [wagmiAdapter],
       networks: [network],
       projectId: PROJECT_ID,
+      allWallets: 'SHOW',
+      enableWalletConnect: true,
       metadata: {
         name: 'Ferzan Launch',
         description: 'Launch a token',
@@ -148,42 +160,64 @@
     });
   }
 
+  function markConnected(address) {
+    showStatus('Connected: ' + address, 'success');
+    connectBtn.style.display = 'none';
+    signBtn.style.display = 'block';
+  }
+
   connectBtn.addEventListener('click', async () => {
     try {
       initAppKit();
       document.getElementById('kitWrap').style.display = 'block';
+      document.getElementById('browserBtn').style.display = 'block';
+      showStatus('Opening wallet picker. If nothing pops up, tap Open in Safari / Chrome.');
       try {
         if (appKitModal && typeof appKitModal.open === 'function') {
           await appKitModal.open({ view: 'Connect' });
         }
-      } catch (e) {}
-      showStatus('Opening wallet connection...');
-
-      // Poll for connection via @wagmi/core -- this is the documented
-      // way to read connection state (not a method on the appkit
-      // instance itself, per Reown's own contract-interaction example).
-      const account = await waitForConnection();
-      showStatus(`Connected: ${account.address}`, 'success');
-      connectBtn.style.display = 'none';
-      signBtn.style.display = 'block';
+      } catch (e) {
+        showStatus('Modal blocked in Telegram. Use Open in Safari / Chrome.', 'error');
+      }
+      const account = await waitForConnection(25000);
+      markConnected(account.address);
     } catch (e) {
-      showStatus(`Wallet connection failed: ${e.message}`, 'error');
+      showStatus(
+        (e.message || 'Wallet connection failed') +
+        ' Telegram often blocks the wallet modal. Tap Open in Safari / Chrome, then Connect again.',
+        'error'
+      );
     }
   });
 
-  function waitForConnection(timeoutMs = 120000) {
+  document.getElementById('browserBtn').addEventListener('click', () => {
+    const url = window.location.href;
+    if (tg?.openLink) tg.openLink(url);
+    else window.open(url, '_blank');
+  });
+
+  function waitForConnection(timeoutMs = 25000) {
     return new Promise((resolve, reject) => {
       const start = Date.now();
       const interval = setInterval(() => {
-        const account = getAccount(wagmiAdapter.wagmiConfig);
-        if (account.isConnected) {
-          clearInterval(interval);
-          resolve(account);
-        } else if (Date.now() - start > timeoutMs) {
-          clearInterval(interval);
-          reject(new Error('Wallet connection timed out'));
+        try {
+          const cfg = wagmiConfig();
+          const account = cfg ? getAccount(cfg) : {};
+          const addr = account.address || (typeof appKitModal?.getAddress === 'function' && appKitModal.getAddress());
+          if (account.isConnected || addr) {
+            clearInterval(interval);
+            resolve({ address: account.address || addr, isConnected: true });
+          } else if (Date.now() - start > timeoutMs) {
+            clearInterval(interval);
+            reject(new Error('No wallet connected after 25s.'));
+          }
+        } catch (e) {
+          if (Date.now() - start > timeoutMs) {
+            clearInterval(interval);
+            reject(e);
+          }
         }
-      }, 500);
+      }, 400);
     });
   }
 
@@ -232,7 +266,7 @@
 
   signBtn.addEventListener('click', async () => {
     try {
-      const account = getAccount(wagmiAdapter.wagmiConfig);
+      const account = getAccount(wagmiConfig());
       showStatus('Building transaction...');
       const buildRes = await fetch(`${API_BASE}/launch-requests/${requestId}/build-tx`, {
         method: 'POST',
@@ -248,7 +282,7 @@
       const rpcUrl = built.rpc_url || '';
 
       showStatus('Please review and approve in your wallet...');
-      const hash = await sendTransaction(wagmiAdapter.wagmiConfig, {
+      const hash = await sendTransaction(wagmiConfig(), {
         to: unsigned_transaction.to,
         value: BigInt(unsigned_transaction.value || 0),
         data: unsigned_transaction.data,

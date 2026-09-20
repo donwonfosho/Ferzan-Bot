@@ -23,6 +23,7 @@
   <div id="status" style="display:none"></div>
   <button id="connectBtn" class="primary" style="display:none">Connect Wallet</button>
   <div id="kitWrap" style="display:none;margin-top:12px"><appkit-button></appkit-button></div>
+  <button id="browserBtn" class="primary" style="display:none;background:#111">Open in Safari / Chrome</button>
   <button id="signBtn" class="primary" style="display:none">Review & Sign Transaction</button>
 
 <script type="module">
@@ -87,6 +88,7 @@
       `<div class="detail-row"><span>${k}</span><b>${String(v ?? '').slice(0,80)}</b></div>`
     ).join('');
     connectBtn.style.display = 'block';
+    document.getElementById('browserBtn').style.display = 'block';
   }
 
   function initAppKit() {
@@ -208,6 +210,13 @@
         body: JSON.stringify({ tx_hash: e.message }),
       }).catch(() => {});
     }
+  });
+
+  
+  document.getElementById('browserBtn')?.addEventListener('click', () => {
+    const url = window.location.href;
+    if (tg?.openLink) tg.openLink(url);
+    else window.open(url, '_blank');
   });
 
   loadRequest();
