@@ -11,18 +11,28 @@
   button { width: 100%; padding: 14px; font-size: 16px; border-radius: 10px; border: none;
     margin-top: 12px; cursor: pointer; background: var(--tg-theme-button-color, #2481cc); color: var(--tg-theme-button-text-color, #fff); }
   .primary { background: #f5f5f5; color: #111; border-radius: 8px; font-size: 14px; }
-  #status { margin-top: 16px; padding: 12px; border-radius: 8px; }
+  .wallet-btn { display:flex; align-items:center; justify-content:center; gap:10px; background:#111; color:#fff; font-weight:600; }
+  .wallet-btn img { width:22px; height:22px; border-radius:6px; }
+  #status { margin-top: 16px; padding: 12px; border-radius: 8px; display:none; }
   .error { background: #fde8e8 !important; color: #a00; }
   .success { background: #e6f7e6 !important; color: #060; }
+  .hint { background:#eef4fb !important; color:#1a5591; }
   .detail-row { display: flex; justify-content: space-between; padding: 6px 0; font-size: 14px; border-bottom: 1px solid #eee; }
+  #walletChoices { display:none; margin-top:8px; }
 </style>
 </head>
 <body>
 <h2>Review Your Launch</h2>
 <div id="details">Loading launch details...</div>
-<div id="status" style="display:none"></div>
+<div id="status"></div>
+
 <button id="connectBtn" class="primary" style="display:none">Connect Wallet</button>
-<button id="browserBtn" class="primary" style="display:none;background:#111">Open in Safari / Chrome</button>
+
+<div id="walletChoices">
+  <button id="phantomBtn" class="wallet-btn">Continue with Phantom</button>
+  <button id="solflareBtn" class="wallet-btn">Continue with Solflare</button>
+</div>
+
 <button id="signBtn" class="primary" style="display:none">Review & Sign Transaction</button>
 
 <script type="module">
@@ -40,7 +50,9 @@
   const statusEl = document.getElementById('status');
   const connectBtn = document.getElementById('connectBtn');
   const signBtn = document.getElementById('signBtn');
-  const browserBtn = document.getElementById('browserBtn');
+  const walletChoices = document.getElementById('walletChoices');
+  const phantomBtn = document.getElementById('phantomBtn');
+  const solflareBtn = document.getElementById('solflareBtn');
 
   let connectedAddress = null;
   let walletProvider = null;
@@ -63,6 +75,24 @@
     if (window.solflare?.isSolflare) return window.solflare;
     if (window.solana) return window.solana;
     return null;
+  }
+
+  function currentUrl() {
+    return window.location.href;
+  }
+
+  function openInPhantom() {
+    const url = currentUrl();
+    const link = `https://phantom.app/ul/browse/${encodeURIComponent(url)}?ref=${encodeURIComponent(window.location.origin)}`;
+    if (tg?.openLink) tg.openLink(link);
+    else window.open(link, '_blank');
+  }
+
+  function openInSolflare() {
+    const url = currentUrl();
+    const link = `https://solflare.com/ul/v1/browse/${encodeURIComponent(url)}?ref=${encodeURIComponent(window.location.origin)}`;
+    if (tg?.openLink) tg.openLink(link);
+    else window.open(link, '_blank');
   }
 
   async function loadRequest() {
@@ -90,20 +120,32 @@
     detailsEl.innerHTML = rows.map(([k, v]) =>
       `<div class="detail-row"><span>${k}</span><b>${String(v ?? '').slice(0, 80)}</b></div>`
     ).join('');
-    connectBtn.style.display = 'block';
+
+    const existing = getSolanaProvider();
+    if (existing) {
+      connectBtn.style.display = 'block';
+    } else {
+      showStatus('Choose your wallet to continue — it will open in the wallet\u2019s own browser.', 'hint');
+      walletChoices.style.display = 'block';
+    }
   }
+
+  phantomBtn.addEventListener('click', openInPhantom);
+  solflareBtn.addEventListener('click', openInSolflare);
 
   connectBtn.addEventListener('click', async () => {
     try {
       walletProvider = getSolanaProvider();
       if (!walletProvider) {
-        browserBtn.style.display = 'block';
-        throw new Error('No Solana wallet found in this view. Tap "Open in Safari / Chrome" and connect there.');
+        showStatus('Choose your wallet to continue — it will open in the wallet\u2019s own browser.', 'hint');
+        walletChoices.style.display = 'block';
+        return;
       }
       const resp = await walletProvider.connect();
       connectedAddress = resp?.publicKey?.toString() || walletProvider.publicKey?.toString() || '';
       showStatus(`Connected: ${connectedAddress}`, 'success');
       connectBtn.style.display = 'none';
+      walletChoices.style.display = 'none';
       signBtn.style.display = 'block';
     } catch (e) {
       showStatus(`Wallet connection failed: ${e.message}`, 'error');
@@ -112,7 +154,7 @@
 
   signBtn.addEventListener('click', async () => {
     try {
-      showStatus('Building transaction...');
+      showStatus('Building transaction...', 'hint');
       const buildRes = await fetch(`${API_BASE}/launch-requests/${requestId}/build-tx`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -134,17 +176,17 @@
         tx = Transaction.from(txBytes);
       }
 
-      showStatus('Please review and approve in your wallet...');
-      if (!walletProvider) throw new Error('No Solana provider. Reconnect Phantom/Solflare.');
+      showStatus('Please review and approve in your wallet...', 'hint');
+      if (!walletProvider) throw new Error('No Solana provider. Reconnect your wallet.');
 
       let sent;
       if (typeof walletProvider.signAndSendTransaction === 'function') {
         sent = await walletProvider.signAndSendTransaction(tx);
       } else if (typeof walletProvider.signTransaction === 'function') {
         await walletProvider.signTransaction(tx);
-        throw new Error('Provider signed but has no send. Use a wallet that supports signAndSendTransaction.');
+        throw new Error('Wallet signed but cannot send. Try Phantom or Solflare.');
       } else {
-        throw new Error('Solana provider has no signAndSendTransaction.');
+        throw new Error('This wallet does not support signAndSendTransaction.');
       }
       const signature = typeof sent === 'string' ? sent : (sent?.signature || sent?.txid || sent);
 
@@ -165,12 +207,6 @@
         body: JSON.stringify({ tx_hash: e.message }),
       }).catch(() => {});
     }
-  });
-
-  browserBtn?.addEventListener('click', () => {
-    const url = window.location.href;
-    if (tg?.openLink) tg.openLink(url);
-    else window.open(url, '_blank');
   });
 
   loadRequest();
