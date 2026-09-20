@@ -33,6 +33,8 @@ logger = logging.getLogger(__name__)
 # Your Mini App's public HTTPS URL (see DEPLOYMENT notes -- this must be
 # HTTPS, Telegram will refuse a plain-http web_app URL).
 MINI_APP_BASE_URL = os.environ.get("MINI_APP_BASE_URL", "https://yourdomain.com/miniapp")
+LAUNCH_BANNER_FILE_ID = "AgACAgEAAxkBAAICkWqv9toLFcZR-OCvzlhSEVuNwf4MAAIPDWsbZJaARUPhbF_grfmtAQADAgADeQADPQQ"
+LAUNCH_BANNER_FILE_ID = "AgACAgEAAxkBAAICkWqv9toLFcZR-OCvzlhSEVuNwf4MAAIPDWsbZJaARUPhbF_grfmtAQADAgADeQADPQQ"
 TRADE = (os.environ.get("FERZAN_BOT_USERNAME") or "Ferzan_Trade_Bot").lstrip("@")
 LIQ = (os.environ.get("FERZAN_LIQ_BOT") or "FerzanLiqBot").lstrip("@")
 BUY = (os.environ.get("FERZAN_BUY_BOT") or "Ferzan_Buy_Bot").lstrip("@")
@@ -74,7 +76,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("💬 Community", url=CHAT)],
         ]
     )
-    await update.effective_message.reply_text(
+    await update.effective_message.reply_photo(
+        photo=LAUNCH_BANNER_FILE_ID,
+        caption=(
+
         "🚀 <b>Ferzan Launch</b>\n\n"
         "Create a token from Telegram. You sign in your own wallet — "
         "this bot never holds keys.\n\n"
@@ -82,7 +87,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Plain mint or EVM bonding curve. Fees go to Ferzan treasury.\n"
         "Next: Arc · Tron · TON · Meteora pool.\n\n"
         "Tap Launch. Review the tx in your wallet before you approve.\n"
-        "Platform fee is shown on the review screen.",
+        "Platform fee is shown on the review screen."
+        ),
         parse_mode="HTML",
         reply_markup=kb,
     )
@@ -95,8 +101,13 @@ async def go_launch(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton(label, callback_data=f"chain:{key}")]
         for key, label in CHAINS.items()
     ]
-    await q.edit_message_text(
-        "Which chain do you want to launch on?",
+    try:
+        await q.message.delete()
+    except Exception:
+        pass
+    await context.bot.send_message(
+        chat_id=q.message.chat_id,
+        text="Which chain do you want to launch on?",
         reply_markup=InlineKeyboardMarkup(buttons),
     )
     return CHOOSING_CHAIN
@@ -122,8 +133,8 @@ async def chain_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if chain == "solana":
         modes = [
-            ("plain", "Plain SPL — fixed supply"),
-            ("meteora", "Meteora pool — coming soon (plain + fee today)"),
+            ("plain", "🔸 Plain SPL — fixed supply, no fees"),
+            ("meteora", "🚀 Meteora pool — bonding curve, fee on every trade"),
         ]
     elif chain == "tron":
         modes = [("plain", "TRC-20 — coming soon (no signable tx yet)")]
@@ -142,7 +153,9 @@ async def chain_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     buttons = [[InlineKeyboardButton(label, callback_data=f"mode:{key}")] for key, label in modes]
     await query.edit_message_text(
-        f"Launching on *{CHAINS[chain]}*. Pick a launch type:",
+        f"*Step 1/9 — Launch type*\n\nLaunching on *{CHAINS[chain]}*. Choose how your token works:\n\n"
+        "🔸 *Plain SPL* — you mint a fixed supply once, no trading fee, no bonding curve.\n"
+        "🚀 *Meteora pool* — launches on a bonding curve with a built-in trading fee that pays you as it trades.",
         reply_markup=InlineKeyboardMarkup(buttons),
         parse_mode="Markdown",
     )
@@ -155,22 +168,31 @@ async def mode_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
     mode = query.data.split(":", 1)[1]
     context.user_data["launch"]["mode"] = mode
 
-    await query.edit_message_text("What's the token's name? (e.g. \"My Cool Token\")")
+    await query.edit_message_text("*Step 2/9 — Name*\n\nWhat should your token be called?\n"
+        "This is the full display name people will see in wallets and explorers.\n"
+        "Example: `My Cool Token`",
+        parse_mode="Markdown")
     return ENTERING_NAME
 
 
 async def name_entered(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["launch"]["name"] = update.message.text.strip()
-    await update.message.reply_text("What's the ticker symbol? (e.g. \"MCT\")")
+    await update.message.reply_text("*Step 3/9 — Ticker symbol*\n\nWhat's the short ticker for your token?\n"
+        "Usually 3–5 capital letters, no spaces.\n"
+        "Example: `MCT`",
+        parse_mode="Markdown")
     return ENTERING_SYMBOL
 
 
 async def symbol_entered(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["launch"]["symbol"] = update.message.text.strip().upper()
     await update.message.reply_text(
-        "Total supply? Enter a plain number (e.g. \"1000000000\" for 1 billion). "
-        "This is the whole-token amount -- decimal scaling is handled for you."
-    )
+        "*Step 4/9 — Total supply*\n\nHow many tokens should exist in total?\n"
+        "Enter a plain whole number — no commas, no decimals. Most launches use 1,000,000,000 (1 billion).\n"
+        "Decimal scaling is handled for you automatically.\n"
+        "Example: `1000000000`"
+    ,
+        parse_mode="Markdown")
     return ENTERING_SUPPLY
 
 
@@ -190,13 +212,21 @@ async def supply_entered(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if launch["mode"] in CURVE_MODES:
         unit = "SOL" if launch["chain"] == "solana" else CHAINS[launch["chain"]]
         await update.message.reply_text(
-            f"Graduation threshold in native units for {unit}?\n"
-            "Example: 5   or type default"
-        )
+            f"*Step 5/9 — Graduation threshold*\n\n"
+            f"How much {unit} should the bonding curve collect before it \"graduates\" to a full liquidity pool?\n"
+            "Typical range: 5–85 depending on how big you want the curve phase to be.\n"
+            f"Example: `5` (in {unit})  —  or type `default` for a standard threshold"
+        ,
+        parse_mode="Markdown")
         return ENTERING_GRAD
     await update.message.reply_text(
-        "Team wallets? Format `0xabc...:500` (500 = 5%). Multiple comma-separated. Or skip"
-    )
+        "*Step 8/9 — Team allocation*\n\n"
+        "Want to set aside a % of supply for team wallets? This mints directly to those addresses at launch.\n"
+        "Format: `address:500` where 500 = 5% (out of a 10000 total). Separate multiple with commas.\n"
+        "Example: `0xabc...:500, 0xdef...:250`\n\n"
+        "Type `skip` for no team allocation."
+    ,
+        parse_mode="Markdown")
     return ENTERING_ALLOCS
 
 
@@ -259,7 +289,11 @@ async def grad_entered(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if val == 0:
         val = (50 * 10 ** 9) if launch["chain"] == "solana" else (5 * 10 ** 18)
     launch.setdefault("extra_params", {})["graduation_eth_threshold"] = str(val)
-    await update.message.reply_text("Virtual native reserve? Example: 1   or default")
+    await update.message.reply_text("*Step 6/9 — Starting price*\n\n"
+        "Virtual native reserve sets the bonding curve's starting price — higher means a higher price at launch.\n"
+        "Most launches leave this at default.\n"
+        "Example: `1`  —  or type `default`",
+        parse_mode="Markdown")
     return ENTERING_VETH
 
 
@@ -274,7 +308,11 @@ async def veth_entered(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if val == 0:
         val = (1 * 10 ** 9) if launch["chain"] == "solana" else (1 * 10 ** 18)
     launch.setdefault("extra_params", {})["virtual_eth_reserve"] = str(val)
-    await update.message.reply_text("Virtual token reserve (whole tokens)? Example: 800000000   or default")
+    await update.message.reply_text("*Step 7/9 — Curve depth*\n\n"
+        "Virtual token reserve controls how much supply the curve trades through before graduating.\n"
+        "Most launches leave this at default (80% of total supply).\n"
+        "Example: `800000000`  —  or type `default`",
+        parse_mode="Markdown")
     return ENTERING_VTOKEN
 
 
@@ -303,7 +341,11 @@ async def allocs_entered(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if ref:
         extra["referrer_id"] = str(ref)
     if launch["mode"] in CURVE_MODES:
-        await update.message.reply_text("Dev buy in native at launch? Example 0.05 or 0")
+        await update.message.reply_text("*Step 9/9 — Dev buy*\n\n"
+        "Want to buy some of your own token the instant it launches, before anyone else can?\n"
+        "This is optional and denominated in the chain's native currency (e.g. SOL, ETH).\n"
+        "Example: `0.05`  —  or `0` to skip",
+        parse_mode="Markdown")
         return ENTERING_DEVBUY
     return await _show_confirm(update, context)
 
@@ -313,10 +355,16 @@ async def devbuy_entered(update: Update, context: ContextTypes.DEFAULT_TYPE):
     raw = (update.message.text or "0").strip().replace(",", "")
     launch.setdefault("extra_params", {})["dev_buy"] = raw
     await update.message.reply_text(
-        "Open delay minutes and max buy per wallet?\n"
+        "*Final step — Trading window*\n\n"
+        "Two settings, space-separated:\n"
+        "• Delay in minutes before trading opens (gives you time to prep)\n"
+        "• Max buy per wallet in native currency (limits early whales)\n"
+        "Example: `10 0.2` = opens in 10 minutes, 0.2 max per wallet\n"
+        "Type `0 0` for instant open with no cap\n"
         "Example: `10 0.2`  (opens in 10m, max 0.2 native)\n"
         "Or `0 0` for instant / no cap"
-    )
+    ,
+        parse_mode="Markdown")
     return ENTERING_WINDOW
 
 

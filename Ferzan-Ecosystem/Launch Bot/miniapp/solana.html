@@ -12,16 +12,22 @@
     margin-top: 12px; cursor: pointer; background: var(--tg-theme-button-color, #2481cc); color: var(--tg-theme-button-text-color, #fff); }
   .primary { background: #f5f5f5; color: #111; border-radius: 8px; font-size: 14px; }
   .wallet-btn { display:flex; align-items:center; justify-content:center; gap:10px; background:#111; color:#fff; font-weight:600; }
-  .wallet-btn img { width:22px; height:22px; border-radius:6px; }
   #status { margin-top: 16px; padding: 12px; border-radius: 8px; display:none; }
   .error { background: #fde8e8 !important; color: #a00; }
   .success { background: #e6f7e6 !important; color: #060; }
   .hint { background:#eef4fb !important; color:#1a5591; }
   .detail-row { display: flex; justify-content: space-between; padding: 6px 0; font-size: 14px; border-bottom: 1px solid #eee; }
   #walletChoices { display:none; margin-top:8px; }
+  #successScreen { display:none; text-align:center; padding: 40px 16px; }
+  #successScreen .check { font-size: 64px; line-height: 1; margin-bottom: 16px; }
+  #successScreen h2 { margin: 0 0 12px; }
+  #successScreen p { color: #555; font-size: 15px; line-height: 1.5; margin: 0 0 8px; }
+  #successScreen .txlink { word-break: break-all; font-size: 12px; color: #888; margin-top: 12px; display:block; }
+  #mainContent.hidden { display:none; }
 </style>
 </head>
 <body>
+<div id="mainContent">
 <h2>Review Your Launch</h2>
 <div id="details">Loading launch details...</div>
 <div id="status"></div>
@@ -34,6 +40,16 @@
 </div>
 
 <button id="signBtn" class="primary" style="display:none">Review & Sign Transaction</button>
+</div>
+
+<div id="successScreen">
+  <div class="check">✅</div>
+  <h2>Launch complete!</h2>
+  <p>Your token was created and the transaction was confirmed on-chain.</p>
+  <p><strong>You're all done here — you can close this page and go back to Telegram.</strong></p>
+  <button id="closeBtn" class="primary">Close this window</button>
+  <span class="txlink" id="txlinkText"></span>
+</div>
 
 <script type="module">
   import { Transaction, VersionedTransaction } from 'https://esm.sh/@solana/web3.js@1?bundle';
@@ -46,6 +62,10 @@
   const requestId = params.get('request_id');
   const API_BASE = 'https://launch.ferzaneco.com/api';
 
+  const mainContent = document.getElementById('mainContent');
+  const successScreen = document.getElementById('successScreen');
+  const closeBtn = document.getElementById('closeBtn');
+  const txlinkText = document.getElementById('txlinkText');
   const detailsEl = document.getElementById('details');
   const statusEl = document.getElementById('status');
   const connectBtn = document.getElementById('connectBtn');
@@ -62,6 +82,20 @@
     statusEl.textContent = text;
     statusEl.className = kind || '';
   }
+
+  function showSuccess(signature) {
+    mainContent.classList.add('hidden');
+    successScreen.style.display = 'block';
+    txlinkText.textContent = signature ? `Tx: ${signature}` : '';
+  }
+
+  closeBtn.addEventListener('click', () => {
+    if (tg?.close) {
+      tg.close();
+    } else {
+      try { window.close(); } catch (e) {}
+    }
+  });
 
   function hexToBytes(hex) {
     const raw = String(hex || '').replace(/^0x/i, '');
@@ -114,7 +148,7 @@
       ['Mode', req.mode],
       ['Supply', req.supply_display || req.total_supply],
     ];
-    if (req.mode === 'meteora') rows.push(['Pool', 'Meteora DBC coming soon — mint + fee today']);
+    if (req.mode === 'meteora') rows.push(['Pool', 'Meteora bonding curve — fee on every trade']);
     if (extra.allocs) rows.push(['Team wallets', extra.allocs]);
     rows.push(['Fee', 'SOL launch fee bundled in the tx']);
     detailsEl.innerHTML = rows.map(([k, v]) =>
@@ -196,9 +230,7 @@
         body: JSON.stringify({ tx_hash: signature, result_token_address: mint_address || '' }),
       });
 
-      showStatus(`Launched. Tx: ${signature}`, 'success');
-      signBtn.style.display = 'none';
-      setTimeout(() => tg?.close(), 2500);
+      showSuccess(signature);
     } catch (e) {
       showStatus(`Failed: ${e.message}`, 'error');
       await fetch(`${API_BASE}/launch-requests/${requestId}/fail`, {
