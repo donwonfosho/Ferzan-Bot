@@ -40,17 +40,20 @@ from solders.pubkey import Pubkey
 from solders.system_program import CreateAccountParams, TransferParams, create_account, transfer
 from solders.message import Message
 from solders.transaction import Transaction
-from solana.rpc.api import Client
+import asyncio
+from solana.rpc.async_api import AsyncClient
 
 from spl.token.constants import TOKEN_PROGRAM_ID
 from spl.token.instructions import (
     initialize_mint,
-    InitializeMintParams,
     create_associated_token_account,
     get_associated_token_address,
     mint_to,
-    MintToParams,
     set_authority,
+)
+from spl.token.models import (
+    InitializeMintParams,
+    MintToParams,
     SetAuthorityParams,
     AuthorityType,
 )
@@ -73,18 +76,21 @@ def build_unsigned_launch_tx(
     revoke_mint_authority: bool = True,
     revoke_freeze_authority: bool = True,
 ) -> SolanaLaunchResult:
-    client = Client(rpc_url)
     creator = Pubkey.from_string(creator_pubkey)
 
     mint_keypair = Keypair()  # fresh, one-time, controls nothing but this new mint
     mint_pubkey = mint_keypair.pubkey()
 
+    async def _fetch_rpc_data():
+        async with AsyncClient(rpc_url) as client:
+            rent_resp = await client.get_minimum_balance_for_rent_exemption(MINT_ACCOUNT_SPACE)
+            blockhash_resp = await client.get_latest_blockhash()
+        return rent_resp.value, blockhash_resp.value.blockhash
+
     try:
-        rent_lamports = client.get_minimum_balance_for_rent_exemption(
-            MINT_ACCOUNT_SPACE
-        ).value
+        rent_lamports, latest_blockhash = asyncio.run(_fetch_rpc_data())
     except Exception as e:
-        raise ConnectionError(f"Could not reach Solana RPC for rent calculation: {e}") from e
+        raise ConnectionError(f"Could not reach Solana RPC: {e}") from e
 
     ata = get_associated_token_address(creator, mint_pubkey)
 
@@ -138,7 +144,7 @@ def build_unsigned_launch_tx(
                 SetAuthorityParams(
                     program_id=TOKEN_PROGRAM_ID,
                     account=mint_pubkey,
-                    authority=AuthorityType.MintTokens,
+                    authority=AuthorityType.MINT_TOKENS,
                     current_authority=creator,
                     new_authority=None,
                 )
@@ -150,17 +156,14 @@ def build_unsigned_launch_tx(
                 SetAuthorityParams(
                     program_id=TOKEN_PROGRAM_ID,
                     account=mint_pubkey,
-                    authority=AuthorityType.FreezeAccount,
+                    authority=AuthorityType.FREEZE_ACCOUNT,
                     current_authority=creator,
                     new_authority=None,
                 )
             )
         )
 
-    try:
-        latest_blockhash = client.get_latest_blockhash().value.blockhash
-    except Exception as e:
-        raise ConnectionError(f"Could not fetch latest blockhash from Solana RPC: {e}") from e
+    # latest_blockhash already fetched above
 
     message = Message.new_with_blockhash(instructions, creator, latest_blockhash)
     tx = Transaction.new_unsigned(message)
