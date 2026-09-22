@@ -61,6 +61,10 @@ def _is_admin(uid: int) -> bool:
 
 CHAT = os.getenv("FERZAN_CHAT_URL") or "https://t.me/Ferzan_Chat"
 DS = "https://api.dexscreener.com/latest/dex/tokens/{}"
+# Trade Desk's internal_api.py -- same droplet, loopback only. Shared
+# secret must match Trade Desk's INTERNAL_API_TOKEN env var exactly.
+TRADE_API_URL = (os.getenv("TRADE_API_URL") or "http://127.0.0.1:8011").rstrip("/")
+INTERNAL_API_TOKEN = (os.getenv("INTERNAL_API_TOKEN") or "").strip()
 EVM = re.compile(r"^0x[a-fA-F0-9]{40}$")
 CHAINS = ["solana", "ethereum", "bsc", "base", "hood"]
 CHAIN_LABEL = {"solana": "Solana · SOL", "ethereum": "Ethereum · ETH", "bsc": "BNB Chain · BNB", "base": "Base · ETH", "hood": "Robinhood · ETH"}
@@ -68,9 +72,64 @@ CHAIN_PREF: dict[int, str] = {}
 SET_TOKEN: set[int] = set()
 SOL = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
 
+# Real holder counts. Neither DexScreener nor most chain explorers give this
+# away free, so each chain needs its own provider + API key. "hood" has no
+# established explorer API at all -- left unsupported rather than faking it.
+SOLSCAN_API_KEY = (os.getenv("SOLSCAN_API_KEY") or "").strip()
+COVALENT_API_KEY = (os.getenv("COVALENT_API_KEY") or "").strip()
+COVALENT_CHAIN_ID = {"ethereum": "1", "bsc": "56", "base": "8453"}
+
 
 def _esc(s) -> str:
     return html.escape(str(s or ""), quote=False)
+
+
+def _holder_count(chain_id: str, ca: str) -> int | None:
+    """Real holder count for one token, or None if we can't get one.
+
+    None covers every "can't answer honestly" case on purpose: no key set
+    for this chain's provider, the provider errored, or the chain (e.g.
+    Robinhood/"hood") has no supported provider at all. Callers must not
+    turn None into 0 -- 0 holders and "couldn't check" are different facts.
+    """
+    try:
+        if chain_id == "solana":
+            if not SOLSCAN_API_KEY:
+                return None
+            r = requests.get(
+                "https://pro-api.solscan.io/v2.0/token/meta",
+                params={"address": ca},
+                headers={"token": SOLSCAN_API_KEY},
+                timeout=8,
+            )
+            if r.status_code != 200:
+                log.warning("solscan holder lookup failed ca=%s status=%s", ca, r.status_code)
+                return None
+            data = (r.json() or {}).get("data") or {}
+            holders = data.get("holder")
+            return int(holders) if holders is not None else None
+
+        covalent_chain = COVALENT_CHAIN_ID.get(chain_id)
+        if covalent_chain:
+            if not COVALENT_API_KEY:
+                return None
+            r = requests.get(
+                f"https://api.covalenthq.com/v1/{covalent_chain}/tokens/{ca}/token_holders_v2/",
+                params={"key": COVALENT_API_KEY, "page-size": 1},
+                timeout=8,
+            )
+            if r.status_code != 200:
+                log.warning("covalent holder lookup failed chain=%s ca=%s status=%s", chain_id, ca, r.status_code)
+                return None
+            pagination = ((r.json() or {}).get("data") or {}).get("pagination") or {}
+            total = pagination.get("total_count")
+            return int(total) if total is not None else None
+
+        # No provider wired up for this chain (e.g. "hood") -- be honest.
+        return None
+    except Exception as exc:
+        log.warning("holder lookup errored chain=%s ca=%s: %s", chain_id, ca, exc)
+        return None
 
 
 def _pools(ca: str) -> list[dict]:
@@ -182,16 +241,53 @@ def _nav_kb(*extra):
     return InlineKeyboardMarkup(rows)
 
 
+def _fetch_referral_stats(uid: int) -> dict | None:
+    """Real numbers from Trade Desk's referral_ledger, over its internal API.
+
+    Returns None on any failure (API down, token mismatch, etc.) so callers
+    can fall back to an honest "can't reach it right now" message instead of
+    silently showing zeros as if that were the real balance.
+    """
+    try:
+        headers = {"x-ferzan-internal": INTERNAL_API_TOKEN} if INTERNAL_API_TOKEN else {}
+        r = requests.get(f"{TRADE_API_URL}/internal/referral-stats/{uid}", headers=headers, timeout=6)
+        if r.status_code != 200:
+            log.warning("referral-stats lookup failed uid=%s status=%s", uid, r.status_code)
+            return None
+        return r.json()
+    except Exception as exc:
+        log.warning("referral-stats lookup errored uid=%s: %s", uid, exc)
+        return None
+
+
 def _earn_text(uid: int) -> str:
-    link = f"https://t.me/{TRADE}?start=r-{uid}"
+    # NOTE: must match the "ref_" prefix Trade Desk's bot.py actually parses
+    # on /start (see bot.py's deep-link handling) -- the old "r-{uid}" prefix
+    # here didn't match anything, so shared links silently attributed to no one.
+    link = f"https://t.me/{TRADE}?start=ref_{uid}"
+    stats = _fetch_referral_stats(uid)
+    if stats is None:
+        return (
+            "🎁 <b>Earn with Ferzan</b>\n\n"
+            "Share your link. When someone you referred <b>actually swaps on Ferzan Trade</b>, "
+            "a cut of the real fee lands for you — not a fake-volume rebate.\n\n"
+            f"🔗 <b>Your link</b>\n<code>{link}</code>\n\n"
+            "⚠️ Couldn't reach the Trade Desk referral ledger just now, so live numbers "
+            "aren't shown here. Try again shortly, or check <code>/ref</code> on "
+            f"@{TRADE} directly.\n\n"
+            "Payout is on real trades only."
+        )
     return (
         "🎁 <b>Earn with Ferzan</b>\n\n"
         "Share your link. When someone you referred <b>actually swaps on Ferzan Trade</b>, "
-        "a cut of the real fee can land for you — not a fake-volume rebate.\n\n"
+        "a cut of the real fee lands for you — not a fake-volume rebate.\n\n"
         f"🔗 <b>Your link</b>\n<code>{link}</code>\n\n"
-        "👥 Referrals — tracked when Trade referral desk is live\n"
-        "💰 Earned — 0 until a referred live swap pays a fee\n\n"
-        "<i>Nothing yet — share the link. Payout is on real trades only.</i>"
+        f"🏅 Tier — {_esc(stats.get('tier'))}\n"
+        f"👥 Referrals — {int(stats.get('invites') or 0):,}\n"
+        f"📈 Their volume — ${float(stats.get('volume') or 0):,.2f}\n"
+        f"💰 Earned (lifetime) — ${float(stats.get('earned') or 0):.4f}\n"
+        f"💸 Claimable now — ${float(stats.get('open') or 0):.4f}\n\n"
+        "<i>Claim with /claim on Ferzan Trade once claimable ≥ $5.</i>"
     )
 
 
@@ -211,8 +307,10 @@ def _rank_text() -> str:
         "🏆 <b>Rank</b>\n\n"
         "Odin-style unique-buyer farms are <b>off</b>.\n"
         "We do not spin a fresh wallet per tiny buy to juice maker count.\n\n"
-        "What you get instead: paste a CA and read <b>real</b> DexScreener "
-        "volume / makers on that pool.\n\n"
+        "What you get instead: paste a CA and the card shows <b>real</b> DexScreener "
+        "24h volume plus the actual buy/sell order count on that pool — not a "
+        "unique-wallet number (Dex doesn't expose that), just real order flow, "
+        "unpadded.\n\n"
         "📄 Set token → paste CA."
     )
 
@@ -221,7 +319,9 @@ def _hold_text() -> str:
     return (
         "👥 <b>Holders</b>\n\n"
         "No batch airdrop to 100 or 1,000 empty wallets.\n"
-        "Holder count on the card is whatever DexScreener / the explorer shows.\n\n"
+        "Holder count on the card is pulled live from Solscan (Solana) or "
+        "Covalent (Ethereum / BSC / Base) — a real per-wallet count, not a Dex "
+        "estimate. Not available yet on Robinhood chain, or if the lookup fails.\n\n"
         "📄 Set token → paste CA."
     )
 
@@ -268,13 +368,20 @@ async def token_card(update: Update, ca: str) -> None:
     base = p.get("baseToken") or {}
     liq = float((p.get("liquidity") or {}).get("usd") or 0)
     vol = float((p.get("volume") or {}).get("h24") or 0)
+    txns24 = (p.get("txns") or {}).get("h24") or {}
+    buys = int(txns24.get("buys") or 0)
+    sells = int(txns24.get("sells") or 0)
+    holders = _holder_count(p.get("chainId") or "", ca)
+    holders_line = f"👥 Holders {holders:,}" if holders is not None else "👥 Holders — not available"
     lines = [
         f"💧 <b>{_esc(base.get('name'))}</b> ${_esc(base.get('symbol'))}",
         f"<code>{_esc(ca)}</code>",
         f"⛓ {_esc(p.get('chainId'))} · {_esc(p.get('dexId'))}",
         f"💵 ${_esc(p.get('priceUsd'))}",
+        holders_line,
         f"💧 Liq ${liq:,.0f}",
         f"📈 24h vol ${vol:,.0f}",
+        f"🔁 24h orders {buys+sells:,} ({buys:,} buys / {sells:,} sells)",
         f"🎯 Score {_score(liq, vol)}/100",
         "",
         "Impact (ballpark AMM):",

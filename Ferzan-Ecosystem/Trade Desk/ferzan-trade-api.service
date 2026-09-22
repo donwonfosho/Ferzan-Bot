@@ -1,0 +1,14 @@
+[Unit]
+Description=Ferzan Trade Desk internal API (referral stats etc.)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/ferzan/app
+EnvironmentFile=/opt/ferzan/.env
+ExecStart=/opt/ferzan/.venv/bin/uvicorn internal_api:app --host 127.0.0.1 --port 8011
+Restart=always
+RestartSec=4
+
+[Install]
+WantedBy=multi-user.target

@@ -87,7 +87,11 @@ class TestnetMarketMaker:
         # Use the exchange's actual tick size rather than guessing --
         # falls back to a conservative default if precision isn't reported.
         precision = market.get("precision", {}).get("price")
-        self._tick_size = (10 ** -precision) if precision else 1e-8
+        # `if precision else 1e-8` used to treat a real precision of 0 (a
+        # legitimate whole-number tick size on some markets) as falsy, same
+        # as "not reported" -- silently using a 1e-8 tick instead of 1.0 and
+        # under-clamping quotes on those markets. `is not None` is the fix.
+        self._tick_size = (10 ** -precision) if precision is not None else 1e-8
 
         self._running = True
         try:
