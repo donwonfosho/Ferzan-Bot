@@ -115,7 +115,7 @@ def _holder_count(chain_id: str, ca: str) -> int | None:
                 return None
             r = requests.get(
                 f"https://api.covalenthq.com/v1/{covalent_chain}/tokens/{ca}/token_holders_v2/",
-                params={"key": COVALENT_API_KEY, "page-size": 1},
+                params={"key": COVALENT_API_KEY},
                 timeout=8,
             )
             if r.status_code != 200:
