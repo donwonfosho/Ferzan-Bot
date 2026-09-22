@@ -32,6 +32,33 @@ except Exception as _exc:
     start_liquidity = stop_liquidity = None
     log.warning("testnet MM modules not loaded: %s", _exc)
 
+try:
+    import subscription
+    import basestonk_mm
+    HAS_BSTONK_MM = True
+except Exception as _exc:
+    HAS_BSTONK_MM = False
+    subscription = None
+    basestonk_mm = None
+    log.warning("basestonk MM modules not loaded: %s", _exc)
+
+MM_PRICE_USD = float(os.getenv("FERZAN_MM_PRICE_USD", "49"))
+MM_PLAN_DAYS = int(os.getenv("FERZAN_MM_PLAN_DAYS", "30"))
+# One treasury address across the whole ecosystem -- same var Launch Bot
+# already pays its platform fees to. FERZAN_TREASURY_EVM stays as a
+# fallback only for anyone who already set that name.
+MM_TREASURY = (
+    os.getenv("PLATFORM_TREASURY_EVM") or os.getenv("TREASURY_EVM") or os.getenv("FERZAN_TREASURY_EVM") or ""
+).strip().lower()
+MM_RPC = os.getenv("BASE_RPC", "https://mainnet.base.org")
+ADMIN_IDS = {
+    int(x) for x in re.split(r"[,\s]+", (os.getenv("FERZAN_ADMIN_IDS") or "").strip()) if x.strip().isdigit()
+}
+
+
+def _is_admin(uid: int) -> bool:
+    return uid in ADMIN_IDS
+
 CHAT = os.getenv("FERZAN_CHAT_URL") or "https://t.me/Ferzan_Chat"
 DS = "https://api.dexscreener.com/latest/dex/tokens/{}"
 EVM = re.compile(r"^0x[a-fA-F0-9]{40}$")
@@ -87,6 +114,7 @@ def _menu(uid: int = 0) -> InlineKeyboardMarkup:
                 InlineKeyboardButton("🏧 Withdraw", callback_data="liq:wd"),
             ],
             [InlineKeyboardButton(f"⛓ Chain: {lab}", callback_data="liq:chain")],
+            [InlineKeyboardButton("💧 Run MM (paste-a-CA volume)", callback_data="mmw:start")],
             [
                 InlineKeyboardButton("💬 Support", url=CHAT),
                 InlineKeyboardButton("⚡ Ferzan Trade", url=f"https://t.me/{TRADE}"),
@@ -276,6 +304,19 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         else:
             await update.effective_message.reply_text("That is not a CA. Tap Set token and paste the address.")
         return
+    wiz = MM_WIZ.get(uid) if HAS_BSTONK_MM else None
+    if wiz and wiz.get("step") == "ca":
+        if EVM.match(text):
+            wiz["token"] = text
+            wiz["step"] = "round"
+            await update.effective_message.reply_text(
+                "💧 <b>Run MM — step 2 of 5</b>\n\nHow much per buy/sell round?",
+                parse_mode="HTML",
+                reply_markup=_mm_picks_kb("round", MM_ROUNDS),
+            )
+        else:
+            await update.effective_message.reply_text("That's not a 0x contract address. Paste the token CA (BaseStonk is EVM-only right now).")
+        return
     if EVM.match(text) or SOL.match(text):
         await token_card(update, text)
 
@@ -292,6 +333,9 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await q.answer()
     data = q.data or ""
     uid = q.from_user.id
+    if data.startswith("mmw:"):
+        await _mm_wizard_button(update, context, uid, data)
+        return
     if data == "liq:chain":
         await q.edit_message_text(
             "⛓ <b>Choose a chain</b>\n\n"
@@ -412,6 +456,321 @@ async def setkeys(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.effective_message.reply_text("Keys stored encrypted. /start_liquidity to quote on testnet.")
 
 
+# --- guided /mm wizard: chain -> CA -> round size -> budget -> duration -> confirm ---
+
+MM_WIZ: dict[int, dict] = {}
+MM_ROUNDS = [2, 5, 10]
+MM_BUDGETS = [10, 25, 50]
+MM_DURATIONS = [15, 30, 60]
+
+
+def _mm_run_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("📊 Status", callback_data="mmw:status"),
+                InlineKeyboardButton("⏹ Stop", callback_data="mmw:stopnow"),
+            ]
+        ]
+    )
+
+
+def _mm_chain_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("Base", callback_data="mmw:chain:base")],
+            [InlineKeyboardButton("Robinhood Chain", callback_data="mmw:chain:robinhood")],
+            [InlineKeyboardButton("✖️ Cancel", callback_data="mmw:cancel")],
+        ]
+    )
+
+
+def _mm_picks_kb(prefix: str, values: list, suffix: str = "") -> InlineKeyboardMarkup:
+    row = [InlineKeyboardButton(f"${v}{suffix}", callback_data=f"mmw:{prefix}:{v}") for v in values]
+    return InlineKeyboardMarkup([row, [InlineKeyboardButton("✖️ Cancel", callback_data="mmw:cancel")]])
+
+
+def _mm_duration_kb() -> InlineKeyboardMarkup:
+    row = [InlineKeyboardButton(f"{m}m", callback_data=f"mmw:dur:{m}") for m in MM_DURATIONS]
+    return InlineKeyboardMarkup([row, [InlineKeyboardButton("✖️ Cancel", callback_data="mmw:cancel")]])
+
+
+async def _mm_wizard_start(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: int) -> None:
+    if not HAS_BSTONK_MM:
+        await update.effective_message.reply_text("MM module is not installed on this host.")
+        return
+    if not (subscription.is_premium(uid) or _is_admin(uid)):
+        await update.effective_message.reply_text(
+            f"🔒 MM (paste-a-CA volume) is a paid feature — ${MM_PRICE_USD:.0f}/{MM_PLAN_DAYS}d.\n\n"
+            f"Send that amount of ETH on Base to:\n<code>{MM_TREASURY or 'set PLATFORM_TREASURY_EVM'}</code>\n"
+            "then run /paid followed by the transaction hash.",
+            parse_mode="HTML",
+        )
+        return
+    existing = basestonk_mm.status(uid) if HAS_BSTONK_MM else None
+    if existing and uid in basestonk_mm._active:
+        await update.effective_message.reply_text("You already have an MM session running.", reply_markup=_mm_run_kb())
+        return
+    MM_WIZ[uid] = {"step": "chain"}
+    await update.effective_message.reply_text(
+        "💧 <b>Run MM — step 1 of 5</b>\n\nWhich chain is the token on?",
+        parse_mode="HTML",
+        reply_markup=_mm_chain_kb(),
+    )
+
+
+async def _mm_wizard_button(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: int, data: str) -> None:
+    q = update.callback_query
+    parts = data.split(":")  # mmw:<action>[:<value>]
+    action = parts[1] if len(parts) > 1 else ""
+
+    if action == "start":
+        await _mm_wizard_start(update, context, uid)
+        return
+
+    if action == "status":
+        row = basestonk_mm.status(uid) if HAS_BSTONK_MM else None
+        if not row:
+            await q.message.reply_text("No MM session on record yet.")
+            return
+        state = "running" if row["status"] == "running" and uid in basestonk_mm._active else row["status"]
+        await q.message.reply_text(
+            f"MM ({row['chain']}, {row['token'][:10]}…): {state}\n"
+            f"Trades: {row['trades']} · Spent ~${row['spent_usd']:.2f} of ${row['budget_usd']:.2f} budget",
+            reply_markup=_mm_run_kb() if state == "running" else None,
+        )
+        return
+
+    if action == "stopnow":
+        ok = basestonk_mm.stop(uid) if HAS_BSTONK_MM else False
+        await q.message.reply_text("Stopping after the current leg…" if ok else "No MM session running.")
+        return
+
+    if action == "cancel":
+        MM_WIZ.pop(uid, None)
+        await q.edit_message_text("Cancelled.")
+        return
+
+    wiz = MM_WIZ.get(uid)
+    if not wiz:
+        await q.edit_message_text("That setup expired — tap 💧 Run MM to start again.")
+        return
+
+    if action == "chain":
+        wiz["chain"] = parts[2]
+        wiz["step"] = "ca"
+        await q.edit_message_text(
+            "💧 <b>Run MM — step 2 of 5</b>\n\nPaste the token's contract address (CA) now.",
+            parse_mode="HTML",
+        )
+        return
+
+    if action == "round":
+        wiz["trade_usd"] = float(parts[2])
+        wiz["step"] = "budget"
+        await q.edit_message_text(
+            "💧 <b>Run MM — step 3 of 5</b>\n\nTotal budget for this session?",
+            parse_mode="HTML",
+            reply_markup=_mm_picks_kb("budget", MM_BUDGETS),
+        )
+        return
+
+    if action == "budget":
+        wiz["budget_usd"] = float(parts[2])
+        wiz["step"] = "duration"
+        await q.edit_message_text(
+            "💧 <b>Run MM — step 4 of 5</b>\n\nHow long should it run?",
+            parse_mode="HTML",
+            reply_markup=_mm_duration_kb(),
+        )
+        return
+
+    if action == "dur":
+        wiz["minutes"] = int(parts[2])
+        wiz["step"] = "confirm"
+        await q.edit_message_text(
+            "💧 <b>Run MM — step 5 of 5</b>\n\n"
+            f"Chain: {wiz['chain']}\n"
+            f"Token: <code>{wiz['token']}</code>\n"
+            f"${wiz['trade_usd']:.0f} per round · ${wiz['budget_usd']:.0f} budget · {wiz['minutes']}m\n\n"
+            "Confirm to start — this spends from your linked Ferzan wallet.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [InlineKeyboardButton("▶️ Start MM", callback_data="mmw:confirm")],
+                    [InlineKeyboardButton("✖️ Cancel", callback_data="mmw:cancel")],
+                ]
+            ),
+        )
+        return
+
+    if action == "confirm":
+        err = await _mm_begin(context, uid, wiz["chain"], wiz["token"], wiz["trade_usd"], wiz["budget_usd"], wiz["minutes"])
+        MM_WIZ.pop(uid, None)
+        if err:
+            await q.edit_message_text(err)
+            return
+        await q.edit_message_text("Starting MM — I'll DM you here as it runs.", reply_markup=_mm_run_kb())
+        return
+
+
+async def whoami_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    uid = update.effective_user.id
+    tag = " (admin)" if _is_admin(uid) else ""
+    await update.effective_message.reply_text(f"Your Telegram user id: {uid}{tag}")
+
+
+async def grantmm_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not HAS_BSTONK_MM:
+        return
+    if not _is_admin(update.effective_user.id):
+        await update.effective_message.reply_text("Admins only.")
+        return
+    args = context.args or []
+    if not args:
+        await update.effective_message.reply_text("Usage: /grantmm <user_id> [days]")
+        return
+    try:
+        target = int(args[0])
+        days = int(args[1]) if len(args) > 1 else MM_PLAN_DAYS
+    except ValueError:
+        await update.effective_message.reply_text("user_id and days must be numbers.")
+        return
+    expiry = subscription.grant_premium(target, days)
+    await update.effective_message.reply_text(f"Granted MM to {target} until {expiry.strftime('%Y-%m-%d')}.")
+
+
+async def mm_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not HAS_BSTONK_MM:
+        await update.effective_message.reply_text("MM module is not installed on this host.")
+        return
+    uid = update.effective_user.id
+    if not (subscription.is_premium(uid) or _is_admin(uid)):
+        await update.effective_message.reply_text(
+            f"🔒 MM (paste-a-CA volume) is a paid feature — ${MM_PRICE_USD:.0f}/{MM_PLAN_DAYS}d.\n\n"
+            f"Send that amount of ETH on Base to:\n<code>{MM_TREASURY or 'set PLATFORM_TREASURY_EVM'}</code>\n"
+            "then run /paid followed by the transaction hash.",
+            parse_mode="HTML",
+        )
+        return
+    args = context.args or []
+    if not args:
+        # no args typed -- walk them through it with buttons instead of dumping raw usage
+        await _mm_wizard_start(update, context, uid)
+        return
+    if len(args) < 5:
+        await update.effective_message.reply_text(
+            "Usage: /mm <CA> <base|robinhood> <usd_per_round> <budget_usd> <minutes>\n"
+            "Example: /mm 0xabc... base 5 50 60\n"
+            "Or just send /mm with no arguments for a guided, button-driven setup."
+        )
+        return
+    token, chain, usd_s, budget_s, min_s = args[0], args[1], args[2], args[3], args[4]
+    try:
+        trade_usd, budget_usd, minutes = float(usd_s), float(budget_s), int(min_s)
+    except ValueError:
+        await update.effective_message.reply_text("usd_per_round, budget_usd must be numbers; minutes an integer.")
+        return
+
+    err = await _mm_begin(context, uid, chain, token, trade_usd, budget_usd, minutes)
+    if err:
+        await update.effective_message.reply_text(err)
+        return
+    await update.effective_message.reply_text(
+        "Starting MM — I'll DM you here as it runs.", reply_markup=_mm_run_kb()
+    )
+
+
+async def _mm_begin(context: ContextTypes.DEFAULT_TYPE, uid: int, chain: str, token: str, trade_usd: float, budget_usd: float, minutes: int) -> str | None:
+    async def _notify(text: str):
+        try:
+            await context.bot.send_message(chat_id=uid, text=text)
+        except Exception:
+            pass
+
+    return basestonk_mm.start(uid, chain, token, trade_usd, budget_usd, minutes, _notify)
+
+
+async def mmstop_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not HAS_BSTONK_MM:
+        return
+    ok = basestonk_mm.stop(update.effective_user.id)
+    await update.effective_message.reply_text("Stopping after the current leg…" if ok else "No MM session running.")
+
+
+async def mmstatus_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not HAS_BSTONK_MM:
+        return
+    row = basestonk_mm.status(update.effective_user.id)
+    if not row:
+        await update.effective_message.reply_text("No MM session on record yet.")
+        return
+    state = "running" if row["status"] == "running" and update.effective_user.id in basestonk_mm._active else row["status"]
+    await update.effective_message.reply_text(
+        f"Last MM session ({row['chain']}, {row['token'][:10]}…): {state}\n"
+        f"Trades: {row['trades']} · Spent ~${row['spent_usd']:.2f} of ${row['budget_usd']:.2f} budget"
+    )
+
+
+async def paid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not HAS_BSTONK_MM:
+        return
+    if not context.args:
+        await update.effective_message.reply_text("Usage: /paid <tx hash>")
+        return
+    if not MM_TREASURY:
+        await update.effective_message.reply_text("Payments aren't configured yet — ask an admin to set PLATFORM_TREASURY_EVM.")
+        return
+    txh = context.args[0].strip()
+    uid = update.effective_user.id
+    subscription.init_db()
+    with subscription._get_conn() as conn:
+        conn.execute("CREATE TABLE IF NOT EXISTS redeemed_tx (tx_hash TEXT PRIMARY KEY, user_id INTEGER)")
+        used = conn.execute("SELECT 1 FROM redeemed_tx WHERE tx_hash=?", (txh,)).fetchone()
+    if used:
+        await update.effective_message.reply_text("That transaction was already redeemed.")
+        return
+    try:
+        r = requests.post(
+            MM_RPC,
+            json={"jsonrpc": "2.0", "id": 1, "method": "eth_getTransactionReceipt", "params": [txh]},
+            timeout=15,
+        )
+        receipt = (r.json() or {}).get("result")
+        r2 = requests.post(
+            MM_RPC,
+            json={"jsonrpc": "2.0", "id": 1, "method": "eth_getTransactionByHash", "params": [txh]},
+            timeout=15,
+        )
+        txinfo = (r2.json() or {}).get("result")
+    except Exception as exc:
+        await update.effective_message.reply_text(f"Couldn't reach Base RPC: {exc}")
+        return
+    if not receipt or receipt.get("status") not in ("0x1", 1):
+        await update.effective_message.reply_text("That transaction isn't confirmed (or failed). Wait a minute and try again.")
+        return
+    if not txinfo or str(txinfo.get("to") or "").lower() != MM_TREASURY:
+        await update.effective_message.reply_text("That transaction doesn't pay the Ferzan treasury address.")
+        return
+    value_wei = int(txinfo.get("value") or "0x0", 16)
+    px = 3000.0
+    try:
+        pr = requests.get(
+            "https://api.coingecko.com/api/v3/simple/price", params={"ids": "ethereum", "vs_currencies": "usd"}, timeout=10
+        )
+        px = float((pr.json() or {}).get("ethereum", {}).get("usd") or px)
+    except Exception:
+        pass
+    paid_usd = (value_wei / 1e18) * px
+    if paid_usd < MM_PRICE_USD * 0.9:
+        await update.effective_message.reply_text(f"That payment (~${paid_usd:.2f}) is short of the ${MM_PRICE_USD:.0f} price.")
+        return
+    with subscription._get_conn() as conn:
+        conn.execute("INSERT INTO redeemed_tx (tx_hash, user_id) VALUES (?,?)", (txh, uid))
+    expiry = subscription.grant_premium(uid, MM_PLAN_DAYS)
+    await update.effective_message.reply_text(f"✅ MM unlocked until {expiry.strftime('%Y-%m-%d')}. Run /mm to start.")
+
+
 def main() -> None:
     token = (os.getenv("LIQBOT_TOKEN") or os.getenv("FERZAN_LIQ_TOKEN") or "").strip()
     if not token:
@@ -435,6 +794,14 @@ def main() -> None:
         app.add_handler(CommandHandler("setkeys", setkeys))
         app.add_handler(CommandHandler("start_liquidity", start_liquidity))
         app.add_handler(CommandHandler("stop_liquidity", stop_liquidity))
+    if HAS_BSTONK_MM:
+        subscription.init_db()
+        app.add_handler(CommandHandler("mm", mm_cmd))
+        app.add_handler(CommandHandler("mmstop", mmstop_cmd))
+        app.add_handler(CommandHandler("mmstatus", mmstatus_cmd))
+        app.add_handler(CommandHandler("paid", paid_cmd))
+        app.add_handler(CommandHandler("whoami", whoami_cmd))
+        app.add_handler(CommandHandler("grantmm", grantmm_cmd))
     app.add_handler(CallbackQueryHandler(buttons, pattern=r"^liq:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     async def _post(app):
@@ -449,6 +816,11 @@ def main() -> None:
                 BotCommand("referral", "Earn with Ferzan"),
                 BotCommand("withdraw", "Withdraw"),
                 BotCommand("token", "Lookup a CA"),
+                BotCommand("mm", "Run volume MM on a CA (paid)"),
+                BotCommand("mmstop", "Stop your MM session"),
+                BotCommand("mmstatus", "Check your MM session"),
+                BotCommand("paid", "Redeem a payment tx"),
+                BotCommand("whoami", "Show your Telegram user id"),
                 BotCommand("help", "Help"),
             ]
         )
