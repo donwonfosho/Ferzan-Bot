@@ -761,6 +761,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 "Buy desk. Tap 0.01 / 0.05 / $ on the card. Spends YOUR Ferzan wallet."
             )
         return
+    first_time = not db.flag_on(update.effective_user.id, "onboarded", 0) and not db.get_user_wallet(
+        update.effective_user.id
+    )
     try:
         user = db.ensure_user(update.effective_user.id, update.effective_user.username)
         ready, _fee_note = fees.live_ready()
@@ -807,6 +810,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             user_wallets.ensure(update.effective_user.id)
         except Exception:
             logger.exception("wallet ensure on start failed")
+        if first_time:
+            await _tour_step1(context.bot, update.effective_user.id)
     except Exception:
         logger.exception("start failed")
         try:
@@ -816,6 +821,108 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 )
         except Exception:
             logger.exception("start fallback failed")
+
+
+# ---- first-run tour (/start for new users, /tour any time) ------------------
+TOUR_DEMO_MINT = os.getenv("FERZAN_TOUR_DEMO_MINT", "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263")  # BONK
+
+
+async def _tour_step1(bot, uid: int) -> None:
+    row = await asyncio.to_thread(user_wallets.ensure, uid)
+    text = (
+        "👋 <b>Quick tour · 1/3 — your wallet is ready</b>\n\n"
+        "Ferzan made you a trading wallet. Keys stay encrypted on the desk; export any time in /wallet.\n\n"
+        f"🟣 <b>Solana</b> (send SOL)\n<code>{html.escape(row.get('sol_pub', ''))}</code>\n\n"
+        f"🔵 <b>EVM</b> — ETH · Base · BNB · Arb… (send that chain's gas coin)\n"
+        f"<code>{html.escape(row.get('evm_pub', ''))}</code>\n\n"
+        "Tap an address to copy it, send a little from your exchange or wallet, then tap below."
+    )
+    kb = InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("✅ I sent funds — check", callback_data="tour:bal")],
+            [InlineKeyboardButton("⏭ Skip — show me how to trade", callback_data="tour:trade")],
+        ]
+    )
+    await bot.send_message(uid, text, parse_mode="HTML", reply_markup=kb)
+
+
+def _tour_balances(uid: int) -> tuple[float, float]:
+    row = db.get_user_wallet(uid) or {}
+    sol = eth = 0.0
+    try:
+        sol = signer.sol_balance_lamports(row.get("sol_pub", "")) / 1e9
+    except Exception:
+        pass
+    try:
+        eth, _sym = evm_signer.native_balance("base", row.get("evm_pub", ""))
+    except Exception:
+        pass
+    return sol, float(eth or 0)
+
+
+async def _tour_step2(query, uid: int) -> None:
+    sol, eth = await asyncio.to_thread(_tour_balances, uid)
+    if sol <= 0 and eth <= 0:
+        text = (
+            "👋 <b>Quick tour · 2/3 — waiting for your deposit</b>\n\n"
+            "Nothing has landed yet. Transfers usually arrive in under a minute "
+            "(exchange withdrawals can take longer).\n"
+            "Tap again once it's sent."
+        )
+        kb = InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("🔄 Check again", callback_data="tour:bal")],
+                [InlineKeyboardButton("⏭ Skip — show me how to trade", callback_data="tour:trade")],
+            ]
+        )
+    else:
+        text = (
+            "👋 <b>Quick tour · 2/3 — funded ✅</b>\n\n"
+            f"🟣 {sol:.4f} SOL   🔵 {eth:.5f} ETH (Base)\n\n"
+            "You're ready to trade."
+        )
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("➡️ Show me how to trade", callback_data="tour:trade")]])
+    try:
+        await query.edit_message_text(text, parse_mode="HTML", reply_markup=kb)
+    except Exception:
+        await query.message.reply_text(text, parse_mode="HTML", reply_markup=kb)
+
+
+async def _tour_step3(query, uid: int) -> None:
+    user = db.get_user(uid) or {}
+    size = float(user.get("buy_usd") or 25)
+    text = (
+        "👋 <b>Quick tour · 3/3 — your first trade</b>\n\n"
+        "1️⃣ <b>Paste any token address (CA)</b> in this chat — Solana, EVM, TON, TRON.\n"
+        "2️⃣ Ferzan scores it and shows a buy card. Tap a size to buy.\n"
+        "3️⃣ Sell from 📊 Bag: 25 / 50 / 100% in one tap.\n\n"
+        "🛡 <b>Protection is on by default</b>\n"
+        "• Blocks buys when liquidity is thin or the token is a honeypot\n"
+        "• Anti-MEV: Solana buys go private via Jito (no sandwiches, no fee if it fails)\n"
+        "• A trade only says ✅ once it's confirmed on-chain\n\n"
+        f"💵 Default buy size: <b>${size:.0f}</b> — change it in ⚙️ Desk.\n\n"
+        "Try it now 👇"
+    )
+    kb = InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("🔍 Score a real token (BONK)", callback_data=f"sig:{TOUR_DEMO_MINT}")],
+            [
+                InlineKeyboardButton("⚙️ Desk settings", callback_data="go:settings"),
+                InlineKeyboardButton("🏠 Home", callback_data="go:home"),
+            ],
+        ]
+    )
+    db.set_flag(uid, "onboarded", True)
+    try:
+        await query.edit_message_text(text, parse_mode="HTML", reply_markup=kb)
+    except Exception:
+        await query.message.reply_text(text, parse_mode="HTML", reply_markup=kb)
+
+
+async def tour_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard(update):
+        return
+    await _tour_step1(context.bot, update.effective_user.id)
 
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -4208,8 +4315,14 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         except Exception as exc:
             await context.bot.send_message(uid, str(exc))
         return
+    if data.startswith("tour:"):
+        if data == "tour:bal":
+            await _tour_step2(query, uid)
+        else:
+            await _tour_step3(query, uid)
+        return
     if data.startswith("sig:"):
-        await _send_signal(update, data[4:], edit=True)
+        await _send_signal(update, data[4:], edit=data[4:] != TOUR_DEMO_MINT)
         return
     if data.startswith("fd:"):
         cid = data[3:]
@@ -5225,6 +5338,7 @@ def main() -> None:
             await application.bot.set_my_commands(
                 [
                     BotCommand("start", "Home"),
+                    BotCommand("tour", "Quick 3-step tour"),
                     BotCommand("signal", "Score a market"),
                     BotCommand("buy", "Live buy a CA"),
                     BotCommand("quote", "Quote + cut"),
@@ -5256,6 +5370,7 @@ def main() -> None:
     )
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("tour", tour_cmd))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("price", price_cmd))
     app.add_handler(CommandHandler("alert", alert_cmd))
