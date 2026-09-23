@@ -256,6 +256,40 @@ def init_db() -> None:
             conn.execute("ALTER TABLE live_exits ADD COLUMN trail_pct REAL")
         if "peak_pct" not in exit_cols:
             conn.execute("ALTER TABLE live_exits ADD COLUMN peak_pct REAL DEFAULT 0")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS wallet_slots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                label TEXT NOT NULL,
+                sol_pub TEXT NOT NULL,
+                sol_key TEXT NOT NULL,
+                evm_pub TEXT NOT NULL,
+                evm_key TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_wallet_slots_user ON wallet_slots(user_id)")
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS wallet_active (user_id INTEGER PRIMARY KEY, slot_id INTEGER NOT NULL)"
+        )
+        # Every pre-multi-wallet user becomes slot "Main" (keys copied as-is,
+        # still encrypted). Runs once per user: skipped when they have slots.
+        conn.execute(
+            """
+            INSERT INTO wallet_slots (user_id, label, sol_pub, sol_key, evm_pub, evm_key, created_at)
+            SELECT uw.user_id, 'Main', uw.sol_pub, uw.sol_key, uw.evm_pub, uw.evm_key, uw.created_at
+            FROM user_wallets uw
+            WHERE NOT EXISTS (SELECT 1 FROM wallet_slots ws WHERE ws.user_id = uw.user_id)
+            """
+        )
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO wallet_active (user_id, slot_id)
+            SELECT ws.user_id, MIN(ws.id) FROM wallet_slots ws GROUP BY ws.user_id
+            """
+        )
         ww_cols = {r[1] for r in conn.execute("PRAGMA table_info(watched_wallets)").fetchall()}
         if "copy_on" not in ww_cols:
             # Every watch — old and new — starts alert-only. Copy is opt-in per
@@ -957,6 +991,40 @@ def get_user_wallet(user_id: int) -> dict[str, Any] | None:
 
 
 def save_user_wallet(user_id: int, sol_pub: str, sol_key: str, evm_pub: str, evm_key: str) -> None:
+    """Legacy single-wallet write (first wallet creation). Also records it as
+    a slot so multi-wallet sees it; keys already in a slot are never dropped."""
+    with get_conn() as conn:
+        exists = conn.execute(
+            "SELECT id FROM wallet_slots WHERE user_id = ? AND sol_pub = ? AND evm_pub = ?",
+            (user_id, sol_pub, evm_pub),
+        ).fetchone()
+        if not exists:
+            n = conn.execute("SELECT COUNT(*) FROM wallet_slots WHERE user_id = ?", (user_id,)).fetchone()[0]
+            cur = conn.execute(
+                """
+                INSERT INTO wallet_slots (user_id, label, sol_pub, sol_key, evm_pub, evm_key, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (user_id, "Main" if n == 0 else f"Wallet {n + 1}", sol_pub, sol_key, evm_pub, evm_key, int(time.time())),
+            )
+            sid = cur.lastrowid
+        else:
+            sid = exists[0]
+        conn.execute(
+            "INSERT INTO wallet_active (user_id, slot_id) VALUES (?, ?) "
+            "ON CONFLICT(user_id) DO UPDATE SET slot_id = excluded.slot_id",
+            (user_id, sid),
+        )
+        conn.commit()
+    _mirror_active(user_id, sol_pub, sol_key, evm_pub, evm_key)
+
+
+MAX_WALLETS = 10
+
+
+def _mirror_active(user_id: int, sol_pub: str, sol_key: str, evm_pub: str, evm_key: str) -> None:
+    """user_wallets always holds the ACTIVE slot, so every existing reader
+    (get_user_wallet / user_wallets.secrets) transparently uses it."""
     with get_conn() as conn:
         conn.execute(
             """
@@ -971,6 +1039,67 @@ def save_user_wallet(user_id: int, sol_pub: str, sol_key: str, evm_pub: str, evm
             (user_id, sol_pub, sol_key, evm_pub, evm_key, int(time.time())),
         )
         conn.commit()
+
+
+def list_wallet_slots(user_id: int) -> list[dict[str, Any]]:
+    with get_conn() as conn:
+        active = conn.execute("SELECT slot_id FROM wallet_active WHERE user_id = ?", (user_id,)).fetchone()
+        rows = conn.execute(
+            "SELECT * FROM wallet_slots WHERE user_id = ? ORDER BY id", (user_id,)
+        ).fetchall()
+    aid = active[0] if active else None
+    return [dict(r) | {"active": r["id"] == aid} for r in rows]
+
+
+def get_wallet_slot(user_id: int, slot_id: int) -> dict[str, Any] | None:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM wallet_slots WHERE id = ? AND user_id = ?", (slot_id, user_id)
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def add_wallet_slot(user_id: int, label: str, sol_pub: str, sol_key: str, evm_pub: str, evm_key: str) -> int:
+    with get_conn() as conn:
+        n = conn.execute("SELECT COUNT(*) FROM wallet_slots WHERE user_id = ?", (user_id,)).fetchone()[0]
+        if n >= MAX_WALLETS:
+            raise ValueError(f"Wallet limit reached ({MAX_WALLETS}).")
+        cur = conn.execute(
+            """
+            INSERT INTO wallet_slots (user_id, label, sol_pub, sol_key, evm_pub, evm_key, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (user_id, (label or f"Wallet {n + 1}")[:24], sol_pub, sol_key, evm_pub, evm_key, int(time.time())),
+        )
+        conn.commit()
+        return int(cur.lastrowid)
+
+
+def set_active_wallet(user_id: int, slot_id: int) -> dict[str, Any] | None:
+    slot = get_wallet_slot(user_id, slot_id)
+    if not slot:
+        return None
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO wallet_active (user_id, slot_id) VALUES (?, ?) "
+            "ON CONFLICT(user_id) DO UPDATE SET slot_id = excluded.slot_id",
+            (user_id, slot_id),
+        )
+        conn.commit()
+    _mirror_active(user_id, slot["sol_pub"], slot["sol_key"], slot["evm_pub"], slot["evm_key"])
+    return slot
+
+
+def rename_wallet_slot(user_id: int, slot_id: int, label: str) -> bool:
+    label = (label or "").strip()[:24]
+    if not label:
+        return False
+    with get_conn() as conn:
+        cur = conn.execute(
+            "UPDATE wallet_slots SET label = ? WHERE id = ? AND user_id = ?", (label, slot_id, user_id)
+        )
+        conn.commit()
+        return cur.rowcount > 0
 
 
 def add_live_cost(user_id: int, mint: str, usd: float) -> None:

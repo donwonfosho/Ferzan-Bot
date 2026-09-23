@@ -1172,14 +1172,14 @@ def _mint_from_position(pos: dict) -> str:
 _EVM_SCAN = ("eth", "base", "bsc", "hood", "arb", "avax")
 
 
-def _chain_of_mint(uid: int, mint: str) -> str:
+def _chain_of_mint(uid: int, mint: str, evm_addr: str | None = None) -> str:
     """Best-effort chain id for a token address (blocking — call via _off)."""
     if mint.startswith("T") and 30 <= len(mint) <= 36:
         return "trx"
     if mint.startswith(("EQ", "UQ", "kQ")):
         return "ton"
     if mint.startswith("0x"):
-        evm_addr = (db.get_user_wallet(uid) or {}).get("evm_pub") or ""
+        evm_addr = evm_addr or (db.get_user_wallet(uid) or {}).get("evm_pub") or ""
         for cid in _EVM_SCAN:
             try:
                 raw = evm_signer._erc20_balance(CHAINS[cid]["rpc"], mint, evm_addr)
@@ -1191,13 +1191,48 @@ def _chain_of_mint(uid: int, mint: str) -> str:
     return "sol"
 
 
+def _holder_wallet(uid: int, mint: str) -> tuple[str, str, str, str]:
+    """(sol_secret, evm_secret, wallet_label, chain_id) for the wallet that
+    actually holds `mint`: the ACTIVE wallet first, then the user's others.
+    So a stop-loss / TP / manual sell still works after the user switches
+    wallets. TRON/TON only check the active wallet. Blocking."""
+    wallets = user_wallets.all_secrets(uid)
+    act_sol, act_evm = wallets[0][2], wallets[0][3]
+    act_label = wallets[0][1]
+    if mint.startswith("0x"):
+        from eth_account import Account
+
+        for _sid, lab, sol, evm in wallets:
+            try:
+                addr = Account.from_key(evm if evm.startswith("0x") else "0x" + evm).address
+            except Exception:
+                continue
+            for cid in _EVM_SCAN:
+                try:
+                    if evm_signer._erc20_balance(CHAINS[cid]["rpc"], mint, addr) > 0:
+                        return sol, evm, lab, cid
+                except Exception:
+                    continue
+        return act_sol, act_evm, act_label, "base"
+    cid = _chain_of_mint(uid, mint)
+    if cid == "sol" and len(wallets) > 1:
+        for _sid, lab, sol, evm in wallets:
+            try:
+                if signer._token_raw_balance(mint, signer.keypair_from_secret(sol)) > 0:
+                    return sol, evm, lab, "sol"
+            except Exception:
+                continue
+    return act_sol, act_evm, act_label, cid
+
+
 def _sell_any(uid: int, mint: str, pct: int = 100) -> tuple[bool, str, str]:
     """One sell path for every chain. Blocking — call via _off().
     Returns (ok, message, chain_label)."""
     pct = max(1, min(100, int(pct)))
-    sol_secret, evm_secret = user_wallets.secrets(uid)
-    cid = _chain_of_mint(uid, mint)
+    sol_secret, evm_secret, wlabel, cid = _holder_wallet(uid, mint)
     label = cid.upper()
+    if len(user_wallets.all_secrets(uid)) > 1:
+        label = f"{label} · {wlabel}"
     if cid == "trx":
         if pct < 100:
             return False, "TRON sells are full-bag only right now — tap 100%.", label
@@ -2526,7 +2561,7 @@ def wallet_menu_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton("ℹ️ Help", callback_data="go:help"),
                 InlineKeyboardButton("↩️ Return", callback_data="go:home"),
             ],
-            [InlineKeyboardButton("📂 Rearrange wallets", callback_data="wi:rearr")],
+            [InlineKeyboardButton("👛 My wallets", callback_data="wsl:list")],
             [
                 InlineKeyboardButton("📥 Import wallet", callback_data="wi:imp"),
                 InlineKeyboardButton("✨ Generate wallet", callback_data="wi:gen"),
@@ -2560,6 +2595,8 @@ def chain_board_keyboard(user_id: int | None = None) -> InlineKeyboardMarkup:
     if row:
         rows.append(row)
     rows.append([InlineKeyboardButton("🍎 Buy gas", callback_data="go:buy")])
+    if has:
+        rows.append([InlineKeyboardButton("👛 My wallets · switch / new", callback_data="wsl:list")])
     rows.append(
         [
             InlineKeyboardButton("📥 Import", callback_data="wi:imp"),
@@ -2579,13 +2616,54 @@ async def wallet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
     row = db.get_user_wallet(update.effective_user.id)
     if row:
-        text = "Tap a chain for the deposit address and balance."
+        n = len(db.list_wallet_slots(update.effective_user.id))
+        text = (
+            f"👛 Active wallet: <b>{html.escape(user_wallets.active_label(update.effective_user.id))}</b>"
+            + (f" ({n} total)" if n > 1 else "")
+            + "\nTap a chain for the deposit address and balance."
+        )
     else:
         text = "ℹ️ Wallet not found. Generate or import, then every chain lights up."
     await update.effective_message.reply_text(
         text,
+        parse_mode="HTML",
         reply_markup=chain_board_keyboard(update.effective_user.id),
     )
+
+
+def _mywallets_panel(uid: int) -> tuple[str, InlineKeyboardMarkup]:
+    slots = db.list_wallet_slots(uid)
+    lines = ["👛 <b>Your wallets</b>", "Buys use the ✅ active wallet. Sells find whichever wallet holds the token.\n"]
+    rows = []
+    for r in slots:
+        mark = "✅" if r["active"] else "▫️"
+        sol = r["sol_pub"]
+        lines.append(f"{mark} <b>{html.escape(r['label'])}</b>  <code>{sol[:4]}…{sol[-4:]}</code>")
+        if not r["active"]:
+            rows.append([InlineKeyboardButton(f"Use {r['label'][:20]}", callback_data=f"wsl:use:{r['id']}")])
+    if len(slots) < db.MAX_WALLETS:
+        rows.append([InlineKeyboardButton("➕ New wallet", callback_data="wsl:new")])
+    rows.append([InlineKeyboardButton("📥 Import into new wallet", callback_data="wi:imp")])
+    rows.append([InlineKeyboardButton("↩️ Chains", callback_data="wi:chains")])
+    lines.append(f"\n{len(slots)}/{db.MAX_WALLETS} · rename the active one: /walletname Sniper")
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+async def walletname_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard(update):
+        return
+    uid = update.effective_user.id
+    name = " ".join(context.args or []).strip()
+    if not name:
+        await update.effective_message.reply_text("Usage: /walletname <name>  (renames your active wallet)")
+        return
+    user_wallets.ensure(uid)
+    active = next((r for r in db.list_wallet_slots(uid) if r["active"]), None)
+    if active and db.rename_wallet_slot(uid, int(active["id"]), name):
+        text, kb = _mywallets_panel(uid)
+        await update.effective_message.reply_text(text, parse_mode="HTML", reply_markup=kb)
+    else:
+        await update.effective_message.reply_text("Couldn't rename — try a shorter name.")
 
 
 async def importsol_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2604,7 +2682,7 @@ async def importsol_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     except Exception:
         pass
     await update.effective_message.reply_text(
-        f"Solana imported.\n`{row['sol_pub']}`",
+        f"Solana imported into a new wallet (now active — your other wallets are untouched).\n`{row['sol_pub']}`",
         parse_mode="Markdown",
         reply_markup=wallet_keyboard(update.effective_user.id),
     )
@@ -2626,7 +2704,7 @@ async def importevm_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     except Exception:
         pass
     await update.effective_message.reply_text(
-        f"EVM imported.\n`{row['evm_pub']}`",
+        f"EVM imported into a new wallet (now active — your other wallets are untouched).\n`{row['evm_pub']}`",
         parse_mode="Markdown",
         reply_markup=wallet_keyboard(update.effective_user.id),
     )
@@ -3771,28 +3849,60 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 uid, _bridge_text(uid, st), parse_mode="HTML", reply_markup=_bridge_kb(st, uid)
             )
         return
+    if data.startswith("wsl:"):
+        parts = data.split(":")
+        op = parts[1] if len(parts) > 1 else "list"
+        if op == "use" and len(parts) > 2:
+            try:
+                slot = user_wallets.switch_wallet(uid, int(parts[2]))
+            except ValueError:
+                slot = None
+            if slot:
+                await context.bot.send_message(uid, f"✅ Now trading from <b>{html.escape(slot['label'])}</b>.", parse_mode="HTML")
+        elif op == "new":
+            try:
+                row = user_wallets.new_wallet(uid)
+                await context.bot.send_message(
+                    uid,
+                    "✨ New wallet created and set active. Fund it from /wallet → a chain.\n"
+                    f"SOL <code>{html.escape(row.get('sol_pub', ''))}</code>",
+                    parse_mode="HTML",
+                )
+            except Exception as exc:
+                await context.bot.send_message(uid, str(exc))
+        text, kb = _mywallets_panel(uid)
+        try:
+            await query.edit_message_text(text, parse_mode="HTML", reply_markup=kb)
+        except Exception:
+            await context.bot.send_message(uid, text, parse_mode="HTML", reply_markup=kb)
+        return
     if data.startswith("wi:"):
         kind = data[3:]
         if kind == "gen":
             try:
-                user_wallets.ensure(uid)
+                had = bool(db.get_user_wallet(uid))
+                if had:
+                    user_wallets.new_wallet(uid)
+                else:
+                    user_wallets.ensure(uid)
             except Exception as exc:
                 await context.bot.send_message(uid, str(exc))
                 return
             await context.bot.send_message(
                 uid,
-                "✨ Wallet generated. Keys stay on the server — not posted in chat.\n"
-                "Tap a chain for the deposit address.",
+                ("✨ Another wallet generated and set active — your other wallets are kept (👛 My wallets to switch).\n"
+                 if had else "✨ Wallet generated. ")
+                + "Keys stay on the server — not posted in chat.\nTap a chain for the deposit address.",
                 reply_markup=wallet_keyboard(update.effective_user.id),
             )
             return
         if kind == "imp":
             await context.bot.send_message(
                 uid,
-                "📥 Import\n"
+                "📥 Import — creates a NEW wallet (nothing you have is replaced)\n"
                 "/importsol <solana-private-key>\n"
                 "/importevm <0x-private-key>\n"
-                "Only in this private chat. Then delete your message.",
+                "Only in this private chat. The bot deletes your message.",
             )
             return
         if kind == "col":
@@ -3814,7 +3924,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             )
             return
         if kind == "rearr":
-            await context.bot.send_message(uid, "📂 One trading pair per user for now.")
+            text, kb = _mywallets_panel(uid)
+            await context.bot.send_message(uid, text, parse_mode="HTML", reply_markup=kb)
             return
         if kind == "exp":
             if update.effective_chat and update.effective_chat.type != "private":
@@ -5171,6 +5282,7 @@ def main() -> None:
     app.add_handler(CommandHandler("removesmartwallet", removesmartwallet_cmd))
     app.add_handler(CommandHandler("killswitch", killswitch_cmd))
     app.add_handler(CommandHandler("wallet", wallet_cmd))
+    app.add_handler(CommandHandler("walletname", walletname_cmd))
     app.add_handler(CommandHandler("buy", buy_cmd))
     app.add_handler(CommandHandler("onramp", buy_cmd))
     app.add_handler(CommandHandler("cashout", buy_cmd))
