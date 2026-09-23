@@ -708,7 +708,7 @@ async def resolve_symbol_or_reply(update: Update, symbol: str):
     return candidates[0]
 
 
-def home_keyboard() -> InlineKeyboardMarkup:
+def home_keyboard(private: bool = True) -> InlineKeyboardMarkup:
     chat = (os.getenv("FERZAN_CHAT_URL") or "https://t.me/Ferzan_Chat").strip()
     xurl = (os.getenv("FERZAN_X_URL") or "https://x.com/ferzaneco").strip()
     rows = [
@@ -736,7 +736,7 @@ def home_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("𝕏 @FerzanEco", url=xurl)],
     ]
     app_url = _webapp_url()
-    if app_url:
+    if app_url and private:  # Telegram rejects web_app buttons outside private chats
         rows.insert(0, [InlineKeyboardButton("📱 Open Ferzan app", web_app=WebAppInfo(url=app_url))])
     return InlineKeyboardMarkup(rows)
 
@@ -823,14 +823,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     photo=photo,
                     caption=text,
                     parse_mode="HTML",
-                    reply_markup=home_keyboard(),
+                    reply_markup=home_keyboard(private=bool(update.effective_chat and update.effective_chat.type == "private")),
                 )
         else:
             await target.reply_text(
                 text,
                 parse_mode="HTML",
                 disable_web_page_preview=True,
-                reply_markup=home_keyboard(),
+                reply_markup=home_keyboard(private=bool(update.effective_chat and update.effective_chat.type == "private")),
             )
         try:
             user_wallets.ensure(update.effective_user.id)
@@ -1940,13 +1940,12 @@ def _bag_position_amount(uid: int, mint: str) -> tuple[float, str, str]:
         return amount, owner, "TON"
     if mint.startswith("0x"):
         evm_addr = (db.get_user_wallet(uid) or {}).get("evm_pub") or ""
-        for cid in _EVM_SCAN:
-            try:
-                raw = evm_signer._erc20_balance(CHAINS[cid]["rpc"], mint, evm_addr)
-            except Exception:
-                raw = 0
-            if raw > 0:
-                return raw / 10**18, evm_addr, cid.upper()
+        try:
+            held = _exit_holdings(uid, mint)  # real decimals, every wallet
+        except Exception:
+            held = []
+        if held:
+            return sum(h[3] for h in held), evm_addr, held[0][2].upper()
         return 0.0, evm_addr, "EVM"
     addr = str(signer.keypair_from_secret(sol_secret).pubkey())
     for row in signer.holdings(sol_secret):
@@ -1978,7 +1977,11 @@ def _bag_build(uid: int) -> tuple[str, list[tuple[str, InlineKeyboardMarkup]]]:
                 except Exception:
                     raw = 0
                 if raw > 0:
-                    positions.append((mint, raw / 10**18, evm_addr, cid.upper()))
+                    try:
+                        amt = raw / 10 ** _erc20_decimals(cid, mint)
+                    except Exception:
+                        break  # unknown decimals: skip rather than show a wrong value
+                    positions.append((mint, amt, evm_addr, cid.upper()))
                     break
     for mint in db.live_mints(uid):
         if not str(mint).startswith(("EQ", "UQ", "kQ")):
@@ -4012,20 +4015,22 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if data.startswith("wi:"):
         kind = data[3:]
         if kind == "gen":
+            if db.get_user_wallet(uid):
+                # Already has one: don't silently create + switch (exits/buys
+                # would follow the new empty wallet). Show the panel with an
+                # explicit ➕ New wallet button instead.
+                text, kb = _mywallets_panel(uid)
+                await context.bot.send_message(uid, text, parse_mode="HTML", reply_markup=kb)
+                return
             try:
-                had = bool(db.get_user_wallet(uid))
-                if had:
-                    user_wallets.new_wallet(uid)
-                else:
-                    user_wallets.ensure(uid)
+                user_wallets.ensure(uid)
             except Exception as exc:
                 await context.bot.send_message(uid, str(exc))
                 return
             await context.bot.send_message(
                 uid,
-                ("✨ Another wallet generated and set active — your other wallets are kept (👛 My wallets to switch).\n"
-                 if had else "✨ Wallet generated. ")
-                + "Keys stay on the server — not posted in chat.\nTap a chain for the deposit address.",
+                "✨ Wallet generated. Keys stay on the server — not posted in chat.\n"
+                "Tap a chain for the deposit address.",
                 reply_markup=wallet_keyboard(update.effective_user.id),
             )
             return
@@ -4870,140 +4875,185 @@ async def live_exit_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         )
 
 
-async def _live_exit_job(context: ContextTypes.DEFAULT_TYPE) -> None:
-    for row in db.list_live_exits():
-        uid = int(row["user_id"])
-        mint = row["mint"]
-        try:
-            await _live_exit_one(context, row, uid, mint)
-        except Exception:
-            logger.exception("live exit job: row failed for user=%s mint=%s", uid, mint)
-            await _notify_admins(
-                context.bot,
-                f"⚠️ live_exit_job: exit check failed for user {uid}, mint {mint} "
-                "(see journalctl). Other users' positions were unaffected.",
-            )
+EXIT_CONCURRENCY = int(os.getenv("EXIT_CONCURRENCY", "8"))
+EXIT_MAX_FAILS = 5
+_EXIT_FAILS: dict[tuple[int, str], int] = {}
+_ERC20_DEC: dict[tuple[str, str], int] = {}
 
 
-async def _live_exit_one(context: ContextTypes.DEFAULT_TYPE, row, uid: int, mint: str) -> None:
-        cost = db.live_cost(uid, mint)
-        if cost <= 0:
-            return
-        px = await asyncio.to_thread(_token_mark_usd, mint)
-        if px <= 0:
-            return
-        # worth unknown without qty; compare mark vs implied entry from last cost only if we have holdings
-        try:
-            sol_secret, evm_secret = user_wallets.secrets(uid)
-        except Exception:
-            return
+def _erc20_decimals(cid: str, token: str) -> int:
+    """Real token decimals (cached). Never assume 18: a 6-decimal token
+    valued as 18 reads as ~-100% and would trip a stop-loss instantly."""
+    key = (cid, token.lower())
+    if key not in _ERC20_DEC:
+        body = evm_signer._rpc(CHAINS[cid]["rpc"], "eth_call", [{"to": token, "data": "0x313ce567"}, "latest"])
+        raw = body.get("result") or ""
+        if not raw or raw == "0x":
+            raise RuntimeError(f"no decimals() for {token} on {cid}")
+        _ERC20_DEC[key] = min(max(int(raw, 16), 0), 36)
+    return _ERC20_DEC[key]
 
-        def _measure() -> tuple[float, str]:
-            if mint.startswith("0x"):
-                evm_addr = (db.get_user_wallet(uid) or {}).get("evm_pub") or ""
-                for cid in _EVM_SCAN:
-                    try:
-                        raw = evm_signer._erc20_balance(CHAINS[cid]["rpc"], mint, evm_addr)
-                    except Exception:
-                        raw = 0
-                    if raw > 0:
-                        return (raw / 10**18) * px, cid
-                return 0.0, "base"
-            held = next((h for h in signer.holdings(sol_secret) if h["mint"] == mint), None)
-            return (float(held["amount"]) * px if held else 0.0), "base"
 
-        try:
-            worth, evm_chain = await asyncio.to_thread(_measure)
-        except Exception:
-            return
-        if worth <= 0:
-            return
-        pnl_pct = ((worth - cost) / cost) * 100
-        if _auto_trading_killed():
-            rungs = []
+def _exit_holdings(uid: int, mint: str) -> list[tuple[str, str, str, float]]:
+    """Every wallet of this user holding `mint`: [(sol_secret, evm_secret,
+    chain_id, token_amount)]. Blocking. Exits act on the whole position, in
+    whichever wallets it sits, so switching wallets never strands a stop."""
+    out = []
+    for _sid, _lab, sol, evm in user_wallets.all_secrets(uid):
+        if mint.startswith("0x"):
+            from eth_account import Account
+
+            addr = Account.from_key(evm if evm.startswith("0x") else "0x" + evm).address
+            for cid in _EVM_SCAN:
+                try:
+                    raw = evm_signer._erc20_balance(CHAINS[cid]["rpc"], mint, addr)
+                except Exception:
+                    continue
+                if raw > 0:
+                    out.append((sol, evm, cid, raw / 10 ** _erc20_decimals(cid, mint)))
         else:
-            rungs = db.list_tp_rungs(uid, mint)
-        for rung in rungs:
-            if rung.get("hit") or pnl_pct < float(rung["pct"]):
-                continue
-            sell_pct = float(rung["sell_pct"])
-            try:
-                if mint.startswith("0x"):
-                    _rok, rmsg = await _off(
-                        uid, evm_signer.sell_evm, evm_chain, mint, key_hex=evm_secret, pct=int(sell_pct)
-                    )
-                else:
-                    _rok, rmsg = await _off(
-                        uid, signer.sell_sol, mint,
-                        secret=sol_secret, pct=int(sell_pct), slip_bps=_slip_bps(uid, "sell"), user_id=uid,
-                    )
-            except Exception as exc:
-                _rok, rmsg = False, str(exc)
-            db.mark_tp_rung_hit(uid, mint, rung["pct"])
-            if _rok:
-                db.reduce_live_cost_pct(uid, mint, sell_pct)
-            else:
-                await _notify_admins(
-                    context.bot,
-                    f"⚠️ TP-ladder sell FAILED for user {uid}, mint {mint} "
-                    f"(rung +{float(rung['pct']):.0f}%, wanted to sell {sell_pct:.0f}%): {rmsg}",
-                )
-            try:
-                await context.bot.send_message(
-                    uid,
-                    f"🎯 TP rung +{float(rung['pct']):.0f}% hit — sold {sell_pct:.0f}% of bag\n{rmsg}",
-                )
-            except Exception:
-                logger.exception("tp ladder notify failed")
-            # Re-read cost/worth so the full-exit check below sees the shrunk position.
-            cost = db.live_cost(uid, mint)
-            if cost <= 0:
-                worth = 0.0
-                break
-            worth = worth * (1 - sell_pct / 100.0)
-            pnl_pct = ((worth - cost) / cost) * 100
-        if worth <= 0:
-            return
-        hit = None
-        trail = float(row.get("trail_pct") or 0)
-        peak = float(row.get("peak_pct") or 0)
-        if pnl_pct > peak:
-            peak = pnl_pct
-            db.set_live_exit(uid, mint, peak_pct=peak)
-        if row.get("tp_pct") and pnl_pct >= float(row["tp_pct"]):
-            hit = "tp"
-        if row.get("sl_pct") and pnl_pct <= -float(row["sl_pct"]):
-            hit = "sl"
-        if trail > 0 and peak > 0 and pnl_pct <= peak - trail:
-            hit = "trail"
-        if not hit:
-            return
+            held = next((h for h in signer.holdings(sol) if h["mint"] == mint), None)
+            if held and float(held.get("amount") or 0) > 0:
+                out.append((sol, evm, "sol", float(held["amount"])))
+    return out
+
+
+def _exit_sell_all(uid: int, mint: str, holdings: list, pct: int) -> tuple[bool, str]:
+    """Sell `pct`% in every holding wallet. Blocking — call via _off (one
+    per-user lock around the whole exit). ok only if every wallet sold."""
+    oks, msgs = [], []
+    for sol, evm, cid, _amt in holdings:
         try:
             if mint.startswith("0x"):
-                _ok, msg = await _off(uid, evm_signer.sell_evm, evm_chain, mint, key_hex=evm_secret)
+                ok, msg = evm_signer.sell_evm(cid, mint, key_hex=evm, pct=pct)
             else:
-                _ok, msg = await _off(
-                    uid, signer.sell_sol, mint, secret=sol_secret, pct=100, slip_bps=_slip_bps(uid, "sell"), user_id=uid
+                ok, msg = signer.sell_sol(
+                    mint, secret=sol, pct=pct, slip_bps=_slip_bps(uid, "sell"), user_id=uid
                 )
         except Exception as exc:
-            msg = str(exc)
-            _ok = False
-        db.clear_live_exit(uid, mint)
-        if _ok:
-            db.clear_live_cost(uid, mint)
-        else:
-            await _notify_admins(
-                context.bot,
-                f"⚠️ {hit.upper()} exit sell FAILED for user {uid}, mint {mint} "
-                f"({pnl_pct:+.1f}%): {msg}\nPosition is still open on-chain for this user.",
-            )
+            ok, msg = False, str(exc)
+        oks.append(bool(ok))
+        msgs.append(msg)
+    return (bool(oks) and all(oks)), "\n".join(msgs)
+
+
+async def _live_exit_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Parallel across users (bounded); each user's own sells still serialize
+    # on their trade lock. A crash can't make one user's stop wait on others.
+    sem = asyncio.Semaphore(EXIT_CONCURRENCY)
+
+    async def run(row) -> None:
+        uid = int(row["user_id"])
+        mint = row["mint"]
+        async with sem:
+            try:
+                await _live_exit_one(context, row, uid, mint)
+            except Exception:
+                logger.exception("live exit job: row failed for user=%s mint=%s", uid, mint)
+                await _notify_admins(
+                    context.bot,
+                    f"⚠️ live_exit_job: exit check failed for user {uid}, mint {mint} "
+                    "(see journalctl). Other users' positions were unaffected.",
+                )
+
+    await asyncio.gather(*(run(r) for r in db.list_live_exits()))
+
+
+async def _exit_failed(context, uid: int, mint: str, what: str, msg: str) -> bool:
+    """Count a failed exit sell. Returns True when we should give up (rule
+    cleared after EXIT_MAX_FAILS in a row); otherwise the rule stays armed
+    and retries next cycle."""
+    key = (uid, mint)
+    _EXIT_FAILS[key] = _EXIT_FAILS.get(key, 0) + 1
+    n = _EXIT_FAILS[key]
+    give_up = n >= EXIT_MAX_FAILS
+    await _notify_admins(
+        context.bot,
+        f"⚠️ {what} sell FAILED ({n}/{EXIT_MAX_FAILS}) for user {uid}, mint {mint}: {msg}"
+        + ("\nGiving up — rule cleared, position still open." if give_up else "\nRule kept; retrying next cycle."),
+    )
+    if n == 1 or give_up:
         try:
             await context.bot.send_message(
                 uid,
-                f"{'🎯 TP' if hit == 'tp' else '📉 Trail' if hit == 'trail' else '🛑 SL'} hit ({pnl_pct:+.1f}%)\n{msg}",
+                f"⚠️ {what} sell didn't go through: {msg[:300]}\n"
+                + ("I've stopped retrying — check the token and sell manually from 📊 Bag."
+                   if give_up else "Your rule stays armed and I'll retry automatically."),
             )
         except Exception:
-            logger.exception("live exit notify failed")
+            pass
+    if give_up:
+        _EXIT_FAILS.pop(key, None)
+    return give_up
+
+
+async def _live_exit_one(context: ContextTypes.DEFAULT_TYPE, row, uid: int, mint: str) -> None:
+    cost = db.live_cost(uid, mint)
+    if cost <= 0:
+        return
+    px = await asyncio.to_thread(_token_mark_usd, mint)
+    if px <= 0:
+        return
+    try:
+        holdings = await asyncio.to_thread(_exit_holdings, uid, mint)
+    except Exception:
+        logger.exception("exit holdings read failed for %s %s", uid, mint)
+        return  # never act on a guessed position size
+    worth = sum(h[3] for h in holdings) * px
+    if worth <= 0:
+        return
+    pnl_pct = ((worth - cost) / cost) * 100
+    rungs = [] if _auto_trading_killed() else db.list_tp_rungs(uid, mint)
+    for rung in rungs:
+        if rung.get("hit") or pnl_pct < float(rung["pct"]):
+            continue
+        sell_pct = float(rung["sell_pct"])
+        _rok, rmsg = await _off(uid, _exit_sell_all, uid, mint, holdings, int(sell_pct))
+        label = f"TP rung +{float(rung['pct']):.0f}%"
+        if not _rok:
+            if await _exit_failed(context, uid, mint, label, rmsg):
+                db.mark_tp_rung_hit(uid, mint, rung["pct"])
+            return  # re-measure next cycle before doing anything else
+        _EXIT_FAILS.pop((uid, mint), None)
+        db.mark_tp_rung_hit(uid, mint, rung["pct"])
+        db.reduce_live_cost_pct(uid, mint, sell_pct)
+        try:
+            await context.bot.send_message(uid, f"🎯 {label} hit — sold {sell_pct:.0f}% of bag\n{rmsg}")
+        except Exception:
+            logger.exception("tp ladder notify failed")
+        cost = db.live_cost(uid, mint)
+        if cost <= 0:
+            return
+        worth = worth * (1 - sell_pct / 100.0)
+        holdings = [(a, b, c, amt * (1 - sell_pct / 100.0)) for a, b, c, amt in holdings]
+        pnl_pct = ((worth - cost) / cost) * 100
+    hit = None
+    trail = float(row.get("trail_pct") or 0)
+    peak = float(row.get("peak_pct") or 0)
+    if pnl_pct > peak:
+        peak = pnl_pct
+        db.set_live_exit(uid, mint, peak_pct=peak)
+    if row.get("tp_pct") and pnl_pct >= float(row["tp_pct"]):
+        hit = "tp"
+    if row.get("sl_pct") and pnl_pct <= -float(row["sl_pct"]):
+        hit = "sl"
+    if trail > 0 and peak > 0 and pnl_pct <= peak - trail:
+        hit = "trail"
+    if not hit:
+        return
+    what = {"tp": "🎯 TP", "trail": "📉 Trail", "sl": "🛑 SL"}[hit]
+    _ok, msg = await _off(uid, _exit_sell_all, uid, mint, holdings, 100)
+    if not _ok:
+        if await _exit_failed(context, uid, mint, f"{what} exit ({pnl_pct:+.1f}%)", msg):
+            db.clear_live_exit(uid, mint)
+        return  # rule stays armed -> retried next cycle
+    _EXIT_FAILS.pop((uid, mint), None)
+    db.clear_live_exit(uid, mint)
+    db.clear_live_cost(uid, mint)
+    try:
+        await context.bot.send_message(uid, f"{what} hit ({pnl_pct:+.1f}%)\n{msg}")
+    except Exception:
+        logger.exception("live exit notify failed")
 
 
 async def snipe_job(context: ContextTypes.DEFAULT_TYPE) -> None:

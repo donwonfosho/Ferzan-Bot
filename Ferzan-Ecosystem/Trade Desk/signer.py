@@ -72,44 +72,81 @@ def sol_usd() -> float:
     raise RuntimeError("SOL price unavailable (CoinGecko + Jupiter) — nothing sent.")
 
 
+def _status(sig: str, history: bool = False) -> tuple[str, str]:
+    """One getSignatureStatuses call -> ("ok"|"err"|"none"|"unknown", detail).
+    "none" means the RPC answered and has NO record of the tx; "unknown"
+    means we couldn't get an answer (network error, 429, malformed)."""
+    try:
+        st = requests.post(
+            _rpc(),
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "getSignatureStatuses",
+                "params": [[sig], {"searchTransactionHistory": bool(history)}],
+            },
+            timeout=10,
+        ).json()
+    except Exception as exc:
+        return "unknown", str(exc)
+    res = st.get("result") if isinstance(st, dict) else None
+    if not isinstance(res, dict) or not isinstance(res.get("value"), list):
+        return "unknown", str((st or {}).get("error") if isinstance(st, dict) else st)[:120]
+    row = (res["value"] or [None])[0]
+    if row is None:
+        return "none", ""
+    if row.get("err"):
+        return "err", str(row["err"])
+    if row.get("confirmationStatus") in {"confirmed", "finalized"}:
+        return "ok", ""
+    return "none", ""  # seen but only "processed" -> keep waiting
+
+
+def _block_height() -> int | None:
+    try:
+        h = requests.post(
+            _rpc(),
+            json={"jsonrpc": "2.0", "id": 1, "method": "getBlockHeight", "params": [{"commitment": "confirmed"}]},
+            timeout=10,
+        ).json()
+        v = h.get("result")
+        return int(v) if v is not None else None
+    except Exception:
+        return None
+
+
 def _confirm(sig: str, last_valid_height: int | None, timeout_s: float = 90.0) -> tuple[bool | None, str]:
-    """Wait until `sig` lands (ok / failed on-chain) or provably can't land
-    any more (block height past the tx's lastValidBlockHeight).
-    Returns (True, ""), (False, reason) or (None, reason) if still unknown."""
+    """Wait until `sig` lands (ok / failed on-chain) or PROVABLY can't land.
+    "Expired" requires all of: the status call in the same round succeeded
+    and returned no record, block height is past lastValidBlockHeight, and a
+    final full-history lookup also finds nothing. Anything short of that
+    (rate limits, RPC errors) stays "unknown" -- never a false "expired",
+    because callers treat expired as "safe to resend".
+    Returns (True, ""), (False, reason) or (None, reason)."""
     import time as _t
 
     deadline = _t.monotonic() + timeout_s
     while _t.monotonic() < deadline:
         _t.sleep(2)
-        try:
-            st = requests.post(
-                _rpc(),
-                json={
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "method": "getSignatureStatuses",
-                    "params": [[sig], {"searchTransactionHistory": False}],
-                },
-                timeout=10,
-            ).json()
-            row = ((st.get("result") or {}).get("value") or [None])[0]
-        except Exception:
-            row = None
-        if row:
-            if row.get("err"):
-                return False, f"Failed on-chain: {row['err']}"
-            if row.get("confirmationStatus") in {"confirmed", "finalized"}:
-                return True, ""
-        if last_valid_height:
-            try:
-                h = requests.post(
-                    _rpc(), json={"jsonrpc": "2.0", "id": 1, "method": "getBlockHeight"}, timeout=10
-                ).json()
-                if int(h.get("result") or 0) > int(last_valid_height):
-                    return False, "Expired without landing (nothing spent)."
-            except Exception:
-                pass
+        state, detail = _status(sig)
+        if state == "ok":
+            return True, ""
+        if state == "err":
+            return False, f"Failed on-chain: {detail}"
+        if state != "none" or not last_valid_height:
+            continue
+        height = _block_height()
+        if height is None or height <= int(last_valid_height):
+            continue
+        final, detail = _status(sig, history=True)
+        if final == "ok":
+            return True, ""
+        if final == "err":
+            return False, f"Failed on-chain: {detail}"
+        if final == "none":
+            return False, "Expired without landing (nothing spent)."
     return None, "Not confirmed yet — check the link before retrying."
+
 
 # Error text meaning "resend with a bigger priority fee", not "this trade is
 # broken" (bad slippage, insufficient balance, etc. should NOT retry).
@@ -152,14 +189,20 @@ def _jupiter_swap_tx(quote: dict, kp, fee_field) -> dict:
     return sr.json() if sr.content else {}
 
 
-def _sign(raw_tx: str, kp) -> str:
+def _sign(raw_tx: str, kp) -> tuple[str, str]:
+    """(base64 wire tx, its signature). The signature is known BEFORE we
+    send, so a send that errors or times out can still be checked on-chain
+    instead of being blindly resent."""
     from solders.transaction import VersionedTransaction
 
     tx = VersionedTransaction.from_bytes(base64.b64decode(raw_tx))
-    return base64.b64encode(bytes(VersionedTransaction(tx.message, [kp]))).decode()
+    signed = VersionedTransaction(tx.message, [kp])
+    return base64.b64encode(bytes(signed)).decode(), str(signed.signatures[0])
 
 
 def _swap_send_jito(quote: dict, kp, tip: int) -> tuple[bool, str]:
+    import time as _t
+
     try:
         swap = _jupiter_swap_tx(quote, kp, {"jitoTipLamports": max(JITO_MIN_TIP, tip)})
     except requests.RequestException as exc:
@@ -168,20 +211,39 @@ def _swap_send_jito(quote: dict, kp, tip: int) -> tuple[bool, str]:
     if not raw_tx:
         return False, str(swap.get("error") or swap.get("message") or "Jupiter returned no transaction")
     try:
-        wire = _sign(raw_tx, kp)
-        body = requests.post(
-            JITO_TX,
-            json={"jsonrpc": "2.0", "id": 1, "method": "sendTransaction", "params": [wire, {"encoding": "base64"}]},
-            timeout=20,
-        ).json()
+        wire, sig = _sign(raw_tx, kp)
     except Exception as exc:
-        return False, f"Jito send failed: {exc}"
-    if body.get("error"):
-        err = body["error"]
-        return False, "Jito: " + str(err.get("message") if isinstance(err, dict) else err)
-    sig = body.get("result") or ""
-    if not sig:
-        return False, "Jito accepted nothing."
+        return False, f"Signing failed: {exc}"
+    # Jito's default limit is ~1 req/s per IP. Resending the IDENTICAL signed
+    # tx is always safe (one signature can only land once), so rate limits
+    # just back off and resend.
+    maybe_sent = False
+    last_err = ""
+    for attempt in range(5):
+        try:
+            resp = requests.post(
+                JITO_TX,
+                json={"jsonrpc": "2.0", "id": 1, "method": "sendTransaction", "params": [wire, {"encoding": "base64"}]},
+                timeout=20,
+            )
+            body = resp.json() if resp.content else {}
+        except Exception as exc:
+            maybe_sent, last_err = True, f"Jito send: {exc}"  # may have been accepted
+            break
+        err = body.get("error") if isinstance(body, dict) else None
+        msg = str(err.get("message") if isinstance(err, dict) else err or "")
+        if resp.status_code == 429 or "rate" in msg.lower() or "too many" in msg.lower():
+            last_err = "Jito rate-limited"
+            _t.sleep(1.2 * (attempt + 1))
+            continue
+        if err:
+            if not maybe_sent:
+                return False, "Jito: " + msg[:200]
+            break
+        maybe_sent = True
+        break
+    if not maybe_sent:
+        return False, (last_err or "Jito accepted nothing.") + " — nothing sent, safe to retry."
     landed, why = _confirm(sig, swap.get("lastValidBlockHeight"))
     if landed:
         return True, sig
@@ -203,7 +265,10 @@ def _swap_send_rpc(quote: dict, kp, base_fee: int) -> tuple[bool, str]:
         if not raw_tx:
             return False, str(swap.get("error") or swap.get("message") or "Jupiter returned no transaction")
         try:
-            wire = _sign(raw_tx, kp)
+            wire, sig = _sign(raw_tx, kp)
+        except Exception as exc:
+            return False, f"Signing failed: {exc}"
+        try:
             send = requests.post(
                 _rpc(),
                 json={
@@ -216,10 +281,15 @@ def _swap_send_rpc(quote: dict, kp, base_fee: int) -> tuple[bool, str]:
             )
             body = send.json() if send.content else {}
         except Exception as exc:
-            last_err = f"Broadcast failed: {exc}"
-            if attempt < len(bumps) - 1:
+            # The RPC may have forwarded it before failing/timing out: check
+            # the chain before ANY resend (a blind rebuild could double-trade).
+            landed, why = _confirm(sig, swap.get("lastValidBlockHeight"))
+            if landed:
+                return True, sig
+            if landed is False and "Expired" in why and attempt < len(bumps) - 1:
+                last_err = f"Broadcast failed ({exc}); tx expired unlanded"
                 continue
-            return False, last_err
+            return False, f"Broadcast error: {exc}. {why}\nhttps://solscan.io/tx/{sig}"
         if body.get("error"):
             err = body["error"]
             last_err = str(err.get("message") if isinstance(err, dict) else err)
@@ -227,11 +297,14 @@ def _swap_send_rpc(quote: dict, kp, base_fee: int) -> tuple[bool, str]:
                 log.warning("swap send retryable (attempt %s), bumping priority fee: %s", attempt + 1, last_err)
                 continue
             return False, last_err
-        sig = body.get("result") or ""
-        if not sig:
-            if attempt < len(bumps) - 1:
+        if not body.get("result"):
+            # No error but no signature: treat as "maybe sent" and verify.
+            landed, why = _confirm(sig, swap.get("lastValidBlockHeight"))
+            if landed:
+                return True, sig
+            if landed is False and "Expired" in why and attempt < len(bumps) - 1:
                 continue
-            return False, last_err
+            return False, f"{why}\nhttps://solscan.io/tx/{sig}"
         landed, why = _confirm(sig, swap.get("lastValidBlockHeight"))
         if landed:
             return True, sig
@@ -420,6 +493,11 @@ _TOKEN_PROGRAMS = (
 
 def holdings(secret: str | None = None) -> list[dict]:
     kp = keypair_from_secret(secret) if secret else _keypair()
+    return holdings_pub(str(kp.pubkey()))
+
+
+def holdings_pub(owner: str) -> list[dict]:
+    """SPL holdings for a PUBLIC address — no key needed."""
     out = []
     seen = set()
     for program in _TOKEN_PROGRAMS:
@@ -430,7 +508,7 @@ def holdings(secret: str | None = None) -> list[dict]:
                 "id": 1,
                 "method": "getTokenAccountsByOwner",
                 "params": [
-                    str(kp.pubkey()),
+                    owner,
                     {"programId": program},
                     {"encoding": "jsonParsed"},
                 ],

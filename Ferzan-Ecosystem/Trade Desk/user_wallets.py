@@ -118,8 +118,11 @@ def import_keys(user_id: int, sol_secret: str = "", evm_secret: str = "") -> dic
         evm_pub = acct.address
         evm_store = _lock(acct.key.hex())
     for r in db.list_wallet_slots(user_id):
-        # Same key imported again: just switch to that wallet.
-        if (sol_secret and r["sol_pub"] == sol_pub) or (evm_secret and r["evm_pub"].lower() == evm_pub.lower()):
+        # Same key(s) imported again: just switch to that wallet. Every key
+        # given must match, so a new key passed alongside is never dropped.
+        sol_match = (not sol_secret) or r["sol_pub"] == sol_pub
+        evm_match = (not evm_secret) or r["evm_pub"].lower() == evm_pub.lower()
+        if sol_match and evm_match:
             return db.set_active_wallet(user_id, int(r["id"])) or {}
     sid = db.add_wallet_slot(user_id, "Imported", sol_pub, sol_store, evm_pub, evm_store)
     return db.set_active_wallet(user_id, sid) or {}

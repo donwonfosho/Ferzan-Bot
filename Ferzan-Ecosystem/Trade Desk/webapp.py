@@ -36,13 +36,13 @@ load_dotenv(HERE / ".env")
 import db  # noqa: E402
 import evm_signer  # noqa: E402
 import signer  # noqa: E402
-import user_wallets  # noqa: E402
 from chains import CHAINS  # noqa: E402
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("ferzan_webapp")
 
 app = FastAPI(title="Ferzan Mini App", docs_url=None, redoc_url=None, openapi_url=None)
+db.init_db()  # schema/migrations present even if this starts before the bot
 
 INIT_DATA_MAX_AGE_S = 24 * 3600
 CACHE_TTL_S = 15
@@ -149,8 +149,11 @@ def _price(coin: str) -> float | None:
 
 
 def build_portfolio(uid: int) -> dict:
-    wallet = user_wallets.ensure(uid)
-    sol_secret, _evm_secret = user_wallets.secrets(uid)
+    # Public data only: this internet-facing process never decrypts a key
+    # and never creates wallets (that happens in the bot).
+    wallet = db.get_user_wallet(uid)
+    if not wallet:
+        raise LookupError("no wallet")
     slots = db.list_wallet_slots(uid)
     sol_pub, evm_pub = wallet.get("sol_pub", ""), wallet.get("evm_pub", "")
 
@@ -162,7 +165,7 @@ def build_portfolio(uid: int) -> dict:
     sol_px, eth_px = _price("solana"), _price("ethereum")
 
     try:
-        sol_holds = signer.holdings(sol_secret)
+        sol_holds = signer.holdings_pub(sol_pub)
     except Exception:
         sol_holds = []
     amounts = {h["mint"]: float(h.get("amount") or 0) for h in sol_holds[:25]}
@@ -267,6 +270,8 @@ async def portfolio(request: Request) -> JSONResponse:
         return JSONResponse(hit[1])
     try:
         data = await asyncio.to_thread(build_portfolio, uid)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="No wallet yet — open the bot and tap /start first.")
     except Exception:
         log.exception("portfolio build failed for %s", uid)
         raise HTTPException(status_code=502, detail="Couldn't load your desk right now — pull to retry.")
