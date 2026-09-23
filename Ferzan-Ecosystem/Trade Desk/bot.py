@@ -3672,7 +3672,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 return
             await query.edit_message_text("Signing on the desk… (35s cap)")
             try:
-                import asyncio
+                # NOTE: no local `import asyncio` here — a function-level import
+                # makes `asyncio` local to all of on_callback and breaks every
+                # other asyncio.to_thread() in it (UnboundLocalError).
                 import bridge as ferzan_bridge
 
                 msg = await asyncio.wait_for(
