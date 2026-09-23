@@ -377,7 +377,7 @@ def try_fill(order: dict[str, Any]) -> tuple[str, str]:
                     order.get("chain") or "base", mint, usd, key_hex=evm_secret, slip_bps=slip
                 )
             elif mint:
-                _ok, live_line = signer.buy_sol(mint, usd, secret=sol_secret, slip_bps=slip)
+                _ok, live_line = signer.buy_sol(mint, usd, secret=sol_secret, slip_bps=slip, user_id=uid)
             else:
                 live_line = "Snipe: no mint"
     except Exception as exc:

@@ -18,6 +18,98 @@ log = logging.getLogger("signer")
 SOL_MINT = "So11111111111111111111111111111111111111112"
 JUP_QUOTE = "https://lite-api.jup.ag/swap/v1/quote"
 JUP_SWAP = "https://lite-api.jup.ag/swap/v1/swap"
+USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+# Jito block engine (docs.jito.wtf "Low Latency Transaction Send").
+# bundleOnly=true = revert protection: the tx only lands if it succeeds, and
+# never touches the public path where it could be sandwiched.
+JITO_TX = os.getenv("JITO_BLOCK_ENGINE", "https://mainnet.block-engine.jito.wtf") + "/api/v1/transactions?bundleOnly=true"
+JITO_MIN_TIP = 1_000  # lamports, Jito's floor
+DEFAULT_FEE_LAMPORTS = 1_000_000  # 0.001 SOL — what the bot always spent
+
+
+def exec_opts(user_id: int | None) -> dict:
+    """Per-user execution settings from /settings + the buy panel:
+    anti_mev (default ON) -> Jito route; the panel's per-chain "⛽ Gas" SOL
+    value -> Jito tip (MEV route) or priority fee (normal route)."""
+    anti_mev, gas_sol = True, 0.0
+    if user_id:
+        try:
+            import db
+
+            anti_mev = db.flag_on(int(user_id), "anti_mev", 1)
+            gas_sol = float(db.get_chain_trade(int(user_id), "sol").get("gas") or 0)
+        except Exception:
+            pass
+    fee = int(gas_sol * 1_000_000_000) if gas_sol > 0 else int(
+        os.getenv("PRIORITY_FEE_LAMPORTS", str(DEFAULT_FEE_LAMPORTS))
+    )
+    return {"anti_mev": bool(anti_mev), "fee_lamports": max(JITO_MIN_TIP, fee)}
+
+
+def sol_usd() -> float:
+    """SOL price, never guessed: CoinGecko, then a live Jupiter quote
+    (1 SOL -> USDC). Raises if both fail so no buy is sized off a made-up
+    price."""
+    try:
+        from price_fetcher import get_price_usd
+
+        px = float(get_price_usd("solana") or 0)
+        if px > 0:
+            return px
+    except Exception:
+        pass
+    try:
+        r = requests.get(
+            JUP_QUOTE,
+            params={"inputMint": SOL_MINT, "outputMint": USDC_MINT, "amount": "1000000000", "slippageBps": "50"},
+            timeout=10,
+        )
+        out = int((r.json() or {}).get("outAmount") or 0)
+        if out > 0:
+            return out / 1e6
+    except Exception:
+        pass
+    raise RuntimeError("SOL price unavailable (CoinGecko + Jupiter) — nothing sent.")
+
+
+def _confirm(sig: str, last_valid_height: int | None, timeout_s: float = 90.0) -> tuple[bool | None, str]:
+    """Wait until `sig` lands (ok / failed on-chain) or provably can't land
+    any more (block height past the tx's lastValidBlockHeight).
+    Returns (True, ""), (False, reason) or (None, reason) if still unknown."""
+    import time as _t
+
+    deadline = _t.monotonic() + timeout_s
+    while _t.monotonic() < deadline:
+        _t.sleep(2)
+        try:
+            st = requests.post(
+                _rpc(),
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "getSignatureStatuses",
+                    "params": [[sig], {"searchTransactionHistory": False}],
+                },
+                timeout=10,
+            ).json()
+            row = ((st.get("result") or {}).get("value") or [None])[0]
+        except Exception:
+            row = None
+        if row:
+            if row.get("err"):
+                return False, f"Failed on-chain: {row['err']}"
+            if row.get("confirmationStatus") in {"confirmed", "finalized"}:
+                return True, ""
+        if last_valid_height:
+            try:
+                h = requests.post(
+                    _rpc(), json={"jsonrpc": "2.0", "id": 1, "method": "getBlockHeight"}, timeout=10
+                ).json()
+                if int(h.get("result") or 0) > int(last_valid_height):
+                    return False, "Expired without landing (nothing spent)."
+            except Exception:
+                pass
+    return None, "Not confirmed yet — check the link before retrying."
 
 # Error text meaning "resend with a bigger priority fee", not "this trade is
 # broken" (bad slippage, insufficient balance, etc. should NOT retry).
@@ -31,30 +123,77 @@ _RETRYABLE_HINTS = (
 )
 
 
-def _swap_send_with_retry(quote: dict, kp) -> tuple[bool, str]:
-    """Builds + signs + sends a Jupiter swap, retrying with a bumped
-    priority fee if the RPC rejects it for a reason that a higher fee (or
-    a fresher blockhash from Jupiter, since we rebuild each attempt) would
-    plausibly fix. Returns (ok, signature_or_error)."""
+def _swap_send_with_retry(quote: dict, kp, opts: dict | None = None) -> tuple[bool, str]:
+    """Builds + signs + sends a Jupiter swap, then waits for it to land.
+
+    anti_mev (default): Jupiter adds a Jito tip and we send to Jito's block
+    engine with bundleOnly (revert-protected, no public path). Otherwise the
+    normal RPC path with a priority fee, retried with a bumped fee if the
+    RPC rejects it for a reason a higher fee / fresh blockhash would fix.
+    Returns (ok, signature) — ok only once the swap is CONFIRMED on-chain."""
+    opts = opts or exec_opts(None)
+    if opts.get("anti_mev"):
+        return _swap_send_jito(quote, kp, int(opts["fee_lamports"]))
+    return _swap_send_rpc(quote, kp, int(opts["fee_lamports"]))
+
+
+def _jupiter_swap_tx(quote: dict, kp, fee_field) -> dict:
+    sr = requests.post(
+        JUP_SWAP,
+        json={
+            "quoteResponse": quote,
+            "userPublicKey": str(kp.pubkey()),
+            "wrapAndUnwrapSol": True,
+            "dynamicComputeUnitLimit": True,
+            "prioritizationFeeLamports": fee_field,
+        },
+        timeout=20,
+    )
+    return sr.json() if sr.content else {}
+
+
+def _sign(raw_tx: str, kp) -> str:
     from solders.transaction import VersionedTransaction
 
-    base_fee = int(os.getenv("PRIORITY_FEE_LAMPORTS", "1000000"))
+    tx = VersionedTransaction.from_bytes(base64.b64decode(raw_tx))
+    return base64.b64encode(bytes(VersionedTransaction(tx.message, [kp]))).decode()
+
+
+def _swap_send_jito(quote: dict, kp, tip: int) -> tuple[bool, str]:
+    try:
+        swap = _jupiter_swap_tx(quote, kp, {"jitoTipLamports": max(JITO_MIN_TIP, tip)})
+    except requests.RequestException as exc:
+        return False, f"Jupiter swap failed: {exc}"
+    raw_tx = swap.get("swapTransaction")
+    if not raw_tx:
+        return False, str(swap.get("error") or swap.get("message") or "Jupiter returned no transaction")
+    try:
+        wire = _sign(raw_tx, kp)
+        body = requests.post(
+            JITO_TX,
+            json={"jsonrpc": "2.0", "id": 1, "method": "sendTransaction", "params": [wire, {"encoding": "base64"}]},
+            timeout=20,
+        ).json()
+    except Exception as exc:
+        return False, f"Jito send failed: {exc}"
+    if body.get("error"):
+        err = body["error"]
+        return False, "Jito: " + str(err.get("message") if isinstance(err, dict) else err)
+    sig = body.get("result") or ""
+    if not sig:
+        return False, "Jito accepted nothing."
+    landed, why = _confirm(sig, swap.get("lastValidBlockHeight"))
+    if landed:
+        return True, sig
+    return False, f"{why}\nhttps://solscan.io/tx/{sig}"
+
+
+def _swap_send_rpc(quote: dict, kp, base_fee: int) -> tuple[bool, str]:
     bumps = (1.0, 2.0, 3.5)
     last_err = "RPC accepted nothing."
     for attempt, bump in enumerate(bumps):
         try:
-            sr = requests.post(
-                JUP_SWAP,
-                json={
-                    "quoteResponse": quote,
-                    "userPublicKey": str(kp.pubkey()),
-                    "wrapAndUnwrapSol": True,
-                    "dynamicComputeUnitLimit": True,
-                    "prioritizationFeeLamports": int(base_fee * bump),
-                },
-                timeout=20,
-            )
-            swap = sr.json() if sr.content else {}
+            swap = _jupiter_swap_tx(quote, kp, int(base_fee * bump))
         except requests.RequestException as exc:
             last_err = f"Jupiter swap failed: {exc}"
             if attempt < len(bumps) - 1:
@@ -64,9 +203,7 @@ def _swap_send_with_retry(quote: dict, kp) -> tuple[bool, str]:
         if not raw_tx:
             return False, str(swap.get("error") or swap.get("message") or "Jupiter returned no transaction")
         try:
-            tx = VersionedTransaction.from_bytes(base64.b64decode(raw_tx))
-            signed = VersionedTransaction(tx.message, [kp])
-            wire = base64.b64encode(bytes(signed)).decode()
+            wire = _sign(raw_tx, kp)
             send = requests.post(
                 _rpc(),
                 json={
@@ -95,7 +232,13 @@ def _swap_send_with_retry(quote: dict, kp) -> tuple[bool, str]:
             if attempt < len(bumps) - 1:
                 continue
             return False, last_err
-        return True, sig
+        landed, why = _confirm(sig, swap.get("lastValidBlockHeight"))
+        if landed:
+            return True, sig
+        if landed is False and "Expired" in why and attempt < len(bumps) - 1:
+            log.warning("swap expired unlanded (attempt %s), rebuilding with bumped fee", attempt + 1)
+            continue  # provably dropped -> safe to rebuild; a failed tx is NOT retried
+        return False, f"{why}\nhttps://solscan.io/tx/{sig}"
     return False, last_err
 
 
@@ -186,6 +329,7 @@ def buy_sol(
     usd: float,
     secret: str | None = None,
     slip_bps: int | None = None,
+    user_id: int | None = None,
 ) -> tuple[bool, str]:
     if not live_enabled():
         return False, "Live buys are OFF. Add LIVE_BUYS=1 on the droplet, then restart."
@@ -207,10 +351,10 @@ def buy_sol(
         return False, str(exc)
 
     try:
-        sol_px = float(get_price_usd("solana") or 100)
-    except Exception:
-        sol_px = 100.0
-    lamports = max(10_000, int((usd / max(sol_px, 1e-9)) * 1_000_000_000))
+        sol_px = sol_usd()
+    except Exception as exc:
+        return False, str(exc)
+    lamports = max(10_000, int((usd / sol_px) * 1_000_000_000))
 
     try:
         qr = requests.get(
@@ -229,10 +373,12 @@ def buy_sol(
     if qr.status_code >= 400 or quote.get("error"):
         return False, str(quote.get("error") or quote.get("message") or qr.text[:180])
 
-    ok, res = _swap_send_with_retry(quote, kp)
+    opts = exec_opts(user_id)
+    ok, res = _swap_send_with_retry(quote, kp, opts)
     if not ok:
         return False, res
-    return True, f"Live SOL buy ~${usd:.2f}\nhttps://solscan.io/tx/{res}"
+    route = "Jito · MEV-protected" if opts["anti_mev"] else "priority fee"
+    return True, f"Live SOL buy ~${usd:.2f} · confirmed · {route}\nhttps://solscan.io/tx/{res}"
 
 
 def _token_raw_balance(mint: str, kp=None) -> int:
@@ -393,6 +539,7 @@ def sell_sol(
     secret: str | None = None,
     pct: int = 100,
     slip_bps: int | None = None,
+    user_id: int | None = None,
 ) -> tuple[bool, str]:
     if not live_enabled():
         return False, "Live sells are OFF. Add LIVE_BUYS=1 and restart."
@@ -430,8 +577,10 @@ def sell_sol(
         return False, f"Jupiter quote failed: {exc}"
     if qr.status_code >= 400 or quote.get("error"):
         return False, str(quote.get("error") or quote.get("message") or qr.text[:180])
-    ok, res = _swap_send_with_retry(quote, kp)
+    opts = exec_opts(user_id)
+    ok, res = _swap_send_with_retry(quote, kp, opts)
     if not ok:
         return False, res
     bag_note = "full bag" if pct >= 100 else f"{pct}% of bag"
-    return True, f"Live SOL sell ({bag_note})\nhttps://solscan.io/tx/{res}"
+    route = "Jito · MEV-protected" if opts["anti_mev"] else "priority fee"
+    return True, f"Live SOL sell ({bag_note}) · confirmed · {route}\nhttps://solscan.io/tx/{res}"

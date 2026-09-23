@@ -413,6 +413,10 @@ def _card_wallet(uid: int | None, ca: str, chain: str) -> str:
 
 
 def render_card(card: SignalCard, uid: int | None = None) -> str:
+    return _fit_html(_render_card(card, uid))
+
+
+def _render_card(card: SignalCard, uid: int | None = None) -> str:
     s = card.snapshot
     ca = (s.token_address or "").strip()
     chain = (s.chain or "").upper()
@@ -475,7 +479,7 @@ def render_card(card: SignalCard, uid: int | None = None) -> str:
     if scan:
         links.append(f'<a href="{html.escape(scan, quote=True)}">Scan</a>')
     lines = [
-        f"⚡ <b>{_esc(s.name)}</b>  ${_esc(str(s.symbol).lstrip('$'))}  ·  {_esc(chain)}",
+        f"⚡ <b>{_esc(_clip_plain(s.name, 40))}</b>  ${_esc(_clip_plain(str(s.symbol).lstrip('$'), 24))}  ·  {_esc(chain)}",
         f"<code>{_esc(ca)}</code>" if ca else "",
         " · ".join([x for x in [venue, (f"age {html.escape(age)}" if age else ""), curve] if x]),
         " · ".join(social) if social else "",
@@ -1130,7 +1134,7 @@ def _live_buy(
         if "sol" not in chain and not (len(mint) >= 32 and not mint.startswith("0x")):
             return False, f"Live: {chain or 'unknown'} is not Solana."
         label = "SOL"
-        ok, msg = signer.buy_sol(mint, usd, secret=sol_secret, slip_bps=_slip_bps(uid, "buy"))
+        ok, msg = signer.buy_sol(mint, usd, secret=sol_secret, slip_bps=_slip_bps(uid, "buy"), user_id=uid)
     if ok:
         db.add_live_cost(uid, mint, usd)
         if liq_mark:
@@ -1206,7 +1210,7 @@ def _sell_any(uid: int, mint: str, pct: int = 100) -> tuple[bool, str, str]:
         slip = f"{max(1, _slip_bps(uid, 'sell', 'ton')) / 10000:.4f}"
         ok, msg = ton_signer.sell_ton(mint, secret=sol_secret, pct=pct, slip=slip)
     elif cid == "sol":
-        ok, msg = signer.sell_sol(mint, secret=sol_secret, pct=pct, slip_bps=_slip_bps(uid, "sell"))
+        ok, msg = signer.sell_sol(mint, secret=sol_secret, pct=pct, slip_bps=_slip_bps(uid, "sell"), user_id=uid)
     else:
         ok, msg = evm_signer.sell_evm(cid, mint, key_hex=evm_secret, pct=pct)
     if ok:
@@ -1961,6 +1965,7 @@ async def livesell_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         context.args[0].strip(),
         secret=sol_secret,
         slip_bps=_slip_bps(uid, "sell"),
+        user_id=uid,
         _busy=(False, BUSY_MSG),
     )
     if ok:
@@ -3107,12 +3112,38 @@ async def send_launch(bot, chat_id: int, text: str, markup, promo: bool = True) 
         raise
 
 
+TG_TEXT_MAX = 4096
+TG_CAPTION_MAX = 1024
+
+
+def _clip_plain(s: str, n: int) -> str:
+    s = str(s or "")
+    return s if len(s) <= n else s[: max(1, n - 1)] + "…"
+
+
+def _fit_html(text: str, limit: int = TG_TEXT_MAX - 96) -> str:
+    """Trim an HTML message to Telegram's limit on a LINE boundary so we
+    never cut through a tag (every card line opens and closes its own tags).
+    Measured on the raw HTML, which is always >= Telegram's visible count."""
+    if len(text) <= limit:
+        return text
+    out, used = [], 0
+    for line in text.split("\n"):
+        if used + len(line) + 1 > limit - 2:
+            break
+        out.append(line)
+        used += len(line) + 1
+    return "\n".join(out) + "\n…"
+
+
 async def _send_launch(bot, chat_id: int, text: str, markup, promo: bool = True) -> None:
+    text = _fit_html(text)
     clip = PROMO_PATH if promo and PROMO_PATH.exists() else None
     want_gif = (
         bool(clip)
         and os.getenv("FERZAN_PROMO_ON_SIGNALS", "0") == "1"
         and (time.time() - _PROMO_TS.get(int(chat_id), 0) > 3600)
+        and len(text) <= TG_CAPTION_MAX  # GIF captions are capped at 1024
     )
     try:
         if want_gif:
@@ -3159,8 +3190,10 @@ async def _send_launch(bot, chat_id: int, text: str, markup, promo: bool = True)
 
 
 def launch_card(ln) -> tuple[str, InlineKeyboardMarkup]:
-    ca = (ln.token or ln.query or "").strip()
-    name = html.escape((ln.symbol or "?").upper())
+    ca = (ln.token or ln.query or "").strip()[:64]
+    # Token symbols come straight from chain metadata; EVM tokens can set any
+    # length (spam tokens use thousands of chars). Never let them size the card.
+    name = html.escape(_clip_plain((ln.symbol or "?").upper(), 24))
     raw_chain = (ln.chain or "").lower()
     cid = resolve_chain(raw_chain) or raw_chain
     chain = html.escape((CHAINS.get(cid, {}).get("label") or raw_chain or "?").upper())
@@ -3227,11 +3260,11 @@ def launch_card(ln) -> tuple[str, InlineKeyboardMarkup]:
     ads = db.list_sponsored(cid or "*", "ad")
     trends = db.list_sponsored(cid or "*", "trend")
     if trends:
-        text += f"\n🔥 Trending <b>{html.escape(trends[0]['title'])}</b>"
+        text += f"\n🔥 Trending <b>{html.escape(_clip_plain(trends[0]['title'], 64))}</b>"
     if ads:
-        text += f"\n📣 {html.escape(ads[0]['title'])}"
+        text += f"\n📣 {html.escape(_clip_plain(ads[0]['title'], 120))}"
     elif os.getenv("FERZAN_AD_TITLE", "").strip():
-        text += f"\n📣 {html.escape(os.getenv('FERZAN_AD_TITLE', ''))}"
+        text += f"\n📣 {html.escape(_clip_plain(os.getenv('FERZAN_AD_TITLE', ''), 120))}"
     short = ca if len(ca) <= 48 else ca[:48]
     bot_user = (os.getenv("FERZAN_BOT_USERNAME") or "").lstrip("@")
     desk = f"https://t.me/{bot_user}?start=sig_{short}" if bot_user and short else ""
@@ -3293,7 +3326,7 @@ async def launches_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
     await update.effective_message.reply_text("🚀 Fresh launches")
     for ln in launches:
-        text, markup = launch_card(ln)
+        text, markup = await asyncio.to_thread(launch_card, ln)
         await send_launch(context.bot, update.effective_chat.id, text, markup)
 
 
@@ -4272,7 +4305,14 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         nxt = {0.0: 0.001, 0.001: 0.005, 0.005: 0.01, 0.01: 0.0}.get(round(now, 3), 0.005)
         db.set_chain_trade(uid, cid, gas=nxt)
         await _safe_answer(query, f"{cid.upper()} gas tip {nxt}")
-        await context.bot.send_message(uid, f"⛽ {cid.upper()} priority tip → {nxt}")
+        if cid == "sol":
+            route = "Jito tip (Anti-MEV on)" if db.flag_on(uid, "anti_mev", 1) else "priority fee (Anti-MEV off)"
+            shown = f"{nxt} SOL" if nxt else "default 0.001 SOL"
+            await context.bot.send_message(uid, f"⛽ SOL speed → {shown} per trade, paid as {route}.")
+        else:
+            await context.bot.send_message(
+                uid, f"⛽ {cid.upper()} tip → {nxt}. (Applies to Solana trades; EVM gas is priced automatically.)"
+            )
         return
     if data.startswith("slc:"):
         mint = data[4:].strip()
@@ -4645,7 +4685,7 @@ async def _live_exit_one(context: ContextTypes.DEFAULT_TYPE, row, uid: int, mint
                 else:
                     _rok, rmsg = await _off(
                         uid, signer.sell_sol, mint,
-                        secret=sol_secret, pct=int(sell_pct), slip_bps=_slip_bps(uid, "sell"),
+                        secret=sol_secret, pct=int(sell_pct), slip_bps=_slip_bps(uid, "sell"), user_id=uid,
                     )
             except Exception as exc:
                 _rok, rmsg = False, str(exc)
@@ -4693,7 +4733,7 @@ async def _live_exit_one(context: ContextTypes.DEFAULT_TYPE, row, uid: int, mint
                 _ok, msg = await _off(uid, evm_signer.sell_evm, evm_chain, mint, key_hex=evm_secret)
             else:
                 _ok, msg = await _off(
-                    uid, signer.sell_sol, mint, secret=sol_secret, pct=100, slip_bps=_slip_bps(uid, "sell")
+                    uid, signer.sell_sol, mint, secret=sol_secret, pct=100, slip_bps=_slip_bps(uid, "sell"), user_id=uid
                 )
         except Exception as exc:
             msg = str(exc)
@@ -4846,7 +4886,7 @@ async def _launch_feed_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             key = f"launch:{ln.chain}:{(ln.token or '')[:24]}"
             if not db.should_resend_signal(uid, key, 1, cooldown_s=45 * 60):
                 continue
-            text, markup = launch_card(ln)
+            text, markup = await asyncio.to_thread(launch_card, ln)
             try:
                 await send_launch(context.bot, uid, text, markup, promo=False)
             except DeadChat as exc:
@@ -4895,7 +4935,7 @@ async def _launch_feed_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             key = f"ch:{chat_id}:{ln.chain}:{(ln.token or '')[:20]}"
             if not db.should_resend_signal(int(chat_id), key, 1, cooldown_s=4 * 60):
                 continue
-            text, markup = launch_card(ln)
+            text, markup = await asyncio.to_thread(launch_card, ln)
             try:
                 await send_launch(context.bot, chat_id, text, markup, promo=False)
                 sent += 1
@@ -5034,7 +5074,7 @@ async def native_pulse_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             pulse_chg=pulse_chg,
             pulse_mins=pulse_mins,
         )
-        text, markup = launch_card(ln)
+        text, markup = await asyncio.to_thread(launch_card, ln)
         text += "\n<i>Chain pulse · every 10m · Buy opens the desk</i>"
         try:
             await send_launch(context.bot, chat_id, text, markup, promo=False)
