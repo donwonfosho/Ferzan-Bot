@@ -431,6 +431,11 @@ def card_keyboard(
             InlineKeyboardButton(f"1 {unit}", callback_data=f"bnv:1:{q}"),
         ],
         [
+            InlineKeyboardButton("$5", callback_data=f"buyz:5:{q}"),
+            InlineKeyboardButton("$25", callback_data=f"buyz:25:{q}"),
+            InlineKeyboardButton("$50", callback_data=f"buyz:50:{q}"),
+        ],
+        [
             InlineKeyboardButton(f"✏️ Buy X {unit}", callback_data=f"buyx:{q}"),
             InlineKeyboardButton("✏️ Buy X tokens", callback_data=f"buyx:{q}"),
         ],
@@ -2888,17 +2893,19 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if kind == "col":
             await context.bot.send_message(
                 uid,
-                "🧲 Collect — pull funds to one address you own.\n"
+                "🧲 Collect — sweep your native balance to an address you own.\n"
                 "/collectsol <your-sol-address>\n"
-                "/collectevm <your-0x-address>\n"
-                "Sends the bag off Ferzan to that address (coming as live send).",
+                "/collectevm [eth|base|bsc|hood] <your-0x-address>\n"
+                "Live send, signed with your Ferzan wallet key. Sends the full "
+                "balance minus network fee.",
             )
             return
         if kind == "dis":
             await context.bot.send_message(
                 uid,
-                "📤 Disperse — split from your Ferzan bag to several addresses.\n"
-                "Use /collect first until multi-send ships.",
+                "📤 Disperse — split your SOL balance equally across addresses.\n"
+                "/disperse <addr1> <addr2> [addr3 ...]\n"
+                "Live send, Solana only right now.",
             )
             return
         if kind == "rearr":
