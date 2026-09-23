@@ -4904,25 +4904,35 @@ def _exit_holdings(uid: int, mint: str) -> list[tuple[str, str, str, float]]:
             from eth_account import Account
 
             addr = Account.from_key(evm if evm.startswith("0x") else "0x" + evm).address
+            data = "0x70a08231" + addr[2:].lower().zfill(64)
             for cid in _EVM_SCAN:
-                try:
-                    raw = evm_signer._erc20_balance(CHAINS[cid]["rpc"], mint, addr)
-                except Exception:
-                    continue
+                # Strict read: an RPC error must abort this exit cycle, never
+                # count as 0 (a shrunken position = a false stop-loss).
+                body = evm_signer._rpc(CHAINS[cid]["rpc"], "eth_call", [{"to": mint, "data": data}, "latest"])
+                if body.get("error") or "result" not in body:
+                    raise RuntimeError(f"balance read failed on {cid}: {str(body.get('error'))[:80]}")
+                val = body.get("result") or "0x"
+                raw = int(val, 16) if val not in ("0x", "") else 0
                 if raw > 0:
                     out.append((sol, evm, cid, raw / 10 ** _erc20_decimals(cid, mint)))
         else:
-            held = next((h for h in signer.holdings(sol) if h["mint"] == mint), None)
+            kp = signer.keypair_from_secret(sol)
+            held = next((h for h in signer.holdings_pub(str(kp.pubkey()), strict=True) if h["mint"] == mint), None)
             if held and float(held.get("amount") or 0) > 0:
                 out.append((sol, evm, "sol", float(held["amount"])))
     return out
 
 
-def _exit_sell_all(uid: int, mint: str, holdings: list, pct: int) -> tuple[bool, str]:
+def _exit_sell_all(uid: int, mint: str, holdings: list, pct: int) -> tuple[bool, str, float]:
     """Sell `pct`% in every holding wallet. Blocking — call via _off (one
-    per-user lock around the whole exit). ok only if every wallet sold."""
+    per-user lock around the whole exit). Returns (all_ok, messages,
+    sold_share) where sold_share = fraction of the position (by amount) held
+    in wallets whose sell succeeded — so a partial success is accounted
+    exactly and never re-sold."""
     oks, msgs = [], []
-    for sol, evm, cid, _amt in holdings:
+    total = sum(h[3] for h in holdings) or 0.0
+    sold_amt = 0.0
+    for sol, evm, cid, amt in holdings:
         try:
             if mint.startswith("0x"):
                 ok, msg = evm_signer.sell_evm(cid, mint, key_hex=evm, pct=pct)
@@ -4934,7 +4944,10 @@ def _exit_sell_all(uid: int, mint: str, holdings: list, pct: int) -> tuple[bool,
             ok, msg = False, str(exc)
         oks.append(bool(ok))
         msgs.append(msg)
-    return (bool(oks) and all(oks)), "\n".join(msgs)
+        if ok:
+            sold_amt += amt
+    share = (sold_amt / total) if total > 0 else 0.0
+    return (bool(oks) and all(oks)), "\n".join(msgs), share
 
 
 async def _live_exit_job(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -4996,8 +5009,8 @@ async def _live_exit_one(context: ContextTypes.DEFAULT_TYPE, row, uid: int, mint
         return
     try:
         holdings = await asyncio.to_thread(_exit_holdings, uid, mint)
-    except Exception:
-        logger.exception("exit holdings read failed for %s %s", uid, mint)
+    except Exception as exc:
+        logger.warning("exit skipped this cycle for %s %s (balance read failed: %s)", uid, mint, exc)
         return  # never act on a guessed position size
     worth = sum(h[3] for h in holdings) * px
     if worth <= 0:
@@ -5008,15 +5021,20 @@ async def _live_exit_one(context: ContextTypes.DEFAULT_TYPE, row, uid: int, mint
         if rung.get("hit") or pnl_pct < float(rung["pct"]):
             continue
         sell_pct = float(rung["sell_pct"])
-        _rok, rmsg = await _off(uid, _exit_sell_all, uid, mint, holdings, int(sell_pct))
+        _rok, rmsg, share = await _off(uid, _exit_sell_all, uid, mint, holdings, int(sell_pct))
         label = f"TP rung +{float(rung['pct']):.0f}%"
-        if not _rok:
+        if share <= 0:
             if await _exit_failed(context, uid, mint, label, rmsg):
                 db.mark_tp_rung_hit(uid, mint, rung["pct"])
-            return  # re-measure next cycle before doing anything else
-        _EXIT_FAILS.pop((uid, mint), None)
+            return  # nothing sold: re-measure and retry next cycle
+        # Something sold: the rung is DONE (never re-sell a wallet that already
+        # sold this rung). A wallet that failed is under-sold, not over-sold.
         db.mark_tp_rung_hit(uid, mint, rung["pct"])
-        db.reduce_live_cost_pct(uid, mint, sell_pct)
+        db.reduce_live_cost_pct(uid, mint, sell_pct * share)
+        if _rok:
+            _EXIT_FAILS.pop((uid, mint), None)
+        else:
+            await _exit_failed(context, uid, mint, label + " (some wallets)", rmsg)
         try:
             await context.bot.send_message(uid, f"🎯 {label} hit — sold {sell_pct:.0f}% of bag\n{rmsg}")
         except Exception:
@@ -5024,9 +5042,8 @@ async def _live_exit_one(context: ContextTypes.DEFAULT_TYPE, row, uid: int, mint
         cost = db.live_cost(uid, mint)
         if cost <= 0:
             return
-        worth = worth * (1 - sell_pct / 100.0)
-        holdings = [(a, b, c, amt * (1 - sell_pct / 100.0)) for a, b, c, amt in holdings]
-        pnl_pct = ((worth - cost) / cost) * 100
+        # Re-measure rather than estimate what's left after a (partial) sell.
+        return
     hit = None
     trail = float(row.get("trail_pct") or 0)
     peak = float(row.get("peak_pct") or 0)
@@ -5042,11 +5059,15 @@ async def _live_exit_one(context: ContextTypes.DEFAULT_TYPE, row, uid: int, mint
     if not hit:
         return
     what = {"tp": "🎯 TP", "trail": "📉 Trail", "sl": "🛑 SL"}[hit]
-    _ok, msg = await _off(uid, _exit_sell_all, uid, mint, holdings, 100)
+    _ok, msg, share = await _off(uid, _exit_sell_all, uid, mint, holdings, 100)
     if not _ok:
+        if share > 0:
+            # Sold out of some wallets: drop exactly that share of the cost so
+            # the next cycle compares the REMAINING bag against its own cost.
+            db.reduce_live_cost_pct(uid, mint, 100.0 * share)
         if await _exit_failed(context, uid, mint, f"{what} exit ({pnl_pct:+.1f}%)", msg):
             db.clear_live_exit(uid, mint)
-        return  # rule stays armed -> retried next cycle
+        return  # rule stays armed for what's left -> retried next cycle
     _EXIT_FAILS.pop((uid, mint), None)
     db.clear_live_exit(uid, mint)
     db.clear_live_cost(uid, mint)

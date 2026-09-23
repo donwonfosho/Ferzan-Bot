@@ -136,7 +136,9 @@ def _confirm(sig: str, last_valid_height: int | None, timeout_s: float = 90.0) -
         if state != "none" or not last_valid_height:
             continue
         height = _block_height()
-        if height is None or height <= int(last_valid_height):
+        # +10 blocks of margin: height and status may come from different
+        # backend nodes behind a load-balanced RPC.
+        if height is None or height <= int(last_valid_height) + 10:
             continue
         final, detail = _status(sig, history=True)
         if final == "ok":
@@ -154,7 +156,11 @@ _RETRYABLE_HINTS = (
     "blockhash not found",
     "block height exceeded",
     "node is behind",
+)
+# Replies that don't prove the tx was NOT forwarded: confirm before resend.
+_AMBIGUOUS_HINTS = (
     "timed out",
+    "timeout",
     "too many requests",
     "rate limit",
 )
@@ -293,7 +299,18 @@ def _swap_send_rpc(quote: dict, kp, base_fee: int) -> tuple[bool, str]:
         if body.get("error"):
             err = body["error"]
             last_err = str(err.get("message") if isinstance(err, dict) else err)
-            if attempt < len(bumps) - 1 and any(h in last_err.lower() for h in _RETRYABLE_HINTS):
+            low = last_err.lower()
+            if any(h in low for h in _AMBIGUOUS_HINTS):
+                # A timeout / rate-limit reply can come AFTER the node already
+                # forwarded the tx: check the chain before any rebuild.
+                landed, why = _confirm(sig, swap.get("lastValidBlockHeight"))
+                if landed:
+                    return True, sig
+                if landed is False and "Expired" in why and attempt < len(bumps) - 1:
+                    continue
+                return False, f"{last_err}. {why}\nhttps://solscan.io/tx/{sig}"
+            if attempt < len(bumps) - 1 and any(h in low for h in _RETRYABLE_HINTS):
+                # Preflight rejections (stale blockhash etc.): never forwarded.
                 log.warning("swap send retryable (attempt %s), bumping priority fee: %s", attempt + 1, last_err)
                 continue
             return False, last_err
@@ -496,8 +513,10 @@ def holdings(secret: str | None = None) -> list[dict]:
     return holdings_pub(str(kp.pubkey()))
 
 
-def holdings_pub(owner: str) -> list[dict]:
-    """SPL holdings for a PUBLIC address — no key needed."""
+def holdings_pub(owner: str, strict: bool = False) -> list[dict]:
+    """SPL holdings for a PUBLIC address — no key needed. strict=True raises
+    on any RPC error response instead of returning a (falsely) empty list;
+    exits use it so a 429 can't shrink a position and fire a false stop."""
     out = []
     seen = set()
     for program in _TOKEN_PROGRAMS:
@@ -519,6 +538,8 @@ def holdings_pub(owner: str) -> list[dict]:
             data = r.json() if r.content else {}
         except Exception as exc:
             raise RuntimeError(f"RPC holdings failed: {exc}") from exc
+        if strict and (r.status_code >= 400 or data.get("error") or not isinstance(data.get("result"), dict)):
+            raise RuntimeError(f"RPC holdings error: {str(data.get('error') or r.status_code)[:120]}")
         for acc in (data.get("result") or {}).get("value") or []:
             info = (((acc.get("account") or {}).get("data") or {}).get("parsed") or {}).get("info") or {}
             tok = info.get("tokenAmount") or {}
