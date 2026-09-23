@@ -82,6 +82,14 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 LOGO_PATH = Path(__file__).parent / "logo.jpg"
 BANNER_PATH = Path(__file__).parent / "trade-desk.jpg"
+
+ADMIN_IDS = {
+    int(x) for x in re.split(r"[,\s]+", (os.getenv("FERZAN_ADMIN_IDS") or "").strip()) if x.strip().isdigit()
+}
+
+
+def _is_admin(uid: int) -> bool:
+    return uid in ADMIN_IDS
 PROMO_PATH = Path(os.getenv("FERZAN_PROMO_GIF", str(Path(__file__).parent / "promo.gif")))
 
 ALERT_INTERVAL_SECONDS = int(os.getenv("ALERT_INTERVAL_SECONDS", "60"))
@@ -1265,6 +1273,64 @@ async def sl_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.effective_message.reply_text(f"🛑 SL -{pct:.0f}% armed.")
 
 
+async def tpladder_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard(update):
+        return
+    args = list(context.args or [])
+    if not args:
+        await update.effective_message.reply_text(
+            "Usage: /tpladder 50:25 100:25 200:50 [mint]\n"
+            "Each rung is <gain%>:<sell% of remaining bag>. Sells that % of your "
+            "*current* holding when the gain is hit, then keeps watching the rest.\n"
+            "/tpladder off <mint>  clears the ladder for that token.\n"
+            "This stacks with /sl and /trail — they still close whatever's left.",
+        )
+        return
+    mint = ""
+    if args and (args[-1].startswith("0x") or len(args[-1]) >= 32) and ":" not in args[-1]:
+        mint = args.pop()
+    if not mint:
+        found = db.live_mints(update.effective_user.id)
+        mint = found[0] if found else ""
+    if not mint:
+        await update.effective_message.reply_text("Buy live first, or pass a mint.")
+        return
+    if args and args[0].lower() == "off":
+        db.clear_tp_ladder(update.effective_user.id, mint)
+        await update.effective_message.reply_text("🎯 TP ladder cleared for that token.")
+        return
+    rungs: list[tuple[float, float]] = []
+    for tok in args:
+        if ":" not in tok:
+            await update.effective_message.reply_text(f"Bad rung '{tok}'. Use gain:sell, e.g. 50:25")
+            return
+        gain_s, sell_s = tok.split(":", 1)
+        try:
+            gain, sell = float(gain_s), float(sell_s)
+        except ValueError:
+            await update.effective_message.reply_text(f"Bad rung '{tok}'. Use gain:sell, e.g. 50:25")
+            return
+        if gain <= 0 or not (0 < sell <= 100):
+            await update.effective_message.reply_text("Gain must be > 0, sell must be 1-100.")
+            return
+        rungs.append((gain, sell))
+    rungs.sort(key=lambda r: r[0])
+    total_sell = sum(r[1] for r in rungs)
+    if total_sell > 100.0001:
+        await update.effective_message.reply_text(
+            f"Rungs sell {total_sell:.0f}% of the bag total (as it shrinks after each rung, "
+            "that's fine as long as no single rung is > 100%) — armed anyway."
+        )
+    db.set_tp_ladder(update.effective_user.id, mint, rungs)
+    # Ladder rungs are only checked by the exit job for mints it's already
+    # tracking (i.e. rows in live_exits) -- make sure this one is, even if
+    # the user never ran /tp, /sl, or /trail on it.
+    if not db.get_live_exit(update.effective_user.id, mint):
+        db.set_live_exit(update.effective_user.id, mint)
+    lines = "\n".join(f"  +{g:.0f}% → sell {s:.0f}%" for g, s in rungs)
+    await update.effective_message.reply_text(f"🎯 TP ladder armed:\n{lines}")
+
+
 async def trail_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update):
         return
@@ -1404,21 +1470,63 @@ async def bag_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     except Exception as exc:
         await update.effective_message.reply_text(str(exc))
         return
-    await update.effective_message.reply_text(
-        f"🎒 <b>Wallet positions</b> · SOL\n"
-        f"💰 {lamports / 1e9:.6f} SOL\n"
-        f"<code>{html.escape(addr)}</code>",
-        parse_mode="HTML",
-    )
+    uid = update.effective_user.id
+    total_worth = 0.0
+    total_cost = 0.0
+    priced_positions = 0
+    for row in rows[:6]:
+        px = _token_mark_usd(row["mint"])
+        worth = float(row["amount"] or 0) * px
+        cost = db.live_cost(uid, row["mint"])
+        if worth > 0:
+            total_worth += worth
+            if cost > 0:
+                total_cost += cost
+                priced_positions += 1
+    evm_addr_for_totals = (db.get_user_wallet(uid) or {}).get("evm_pub") or ""
+    evm_worth_seen: set[str] = set()
+    if evm_addr_for_totals:
+        for mint in db.live_mints(uid):
+            if not str(mint).startswith("0x") or mint in evm_worth_seen:
+                continue
+            for cid in ("eth", "base", "bsc", "hood", "arb", "avax"):
+                try:
+                    raw = evm_signer._erc20_balance(CHAINS[cid]["rpc"], mint, evm_addr_for_totals)
+                except Exception:
+                    raw = 0
+                if raw <= 0:
+                    continue
+                evm_worth_seen.add(mint)
+                px = _token_mark_usd(mint)
+                worth = (raw / 10**18) * px
+                cost = db.live_cost(uid, mint)
+                if worth > 0:
+                    total_worth += worth
+                    if cost > 0:
+                        total_cost += cost
+                        priced_positions += 1
+                break
+    summary = f"🎒 <b>Wallet positions</b> · SOL\n💰 {lamports / 1e9:.6f} SOL\n<code>{html.escape(addr)}</code>"
+    if priced_positions > 0:
+        total_pnl = total_worth - total_cost
+        total_pct = (total_pnl / total_cost) * 100 if total_cost > 0 else 0.0
+        mark = "🟢" if total_pnl >= 0 else "🔴"
+        summary += (
+            f"\n\n{mark} <b>Portfolio PnL {total_pnl:+,.2f} USD ({total_pct:+.1f}%)</b>\n"
+            f"📥 Cost ${total_cost:,.2f}   💰 Worth ${total_worth:,.2f}"
+        )
+        if priced_positions < len(rows[:6]) + len(evm_worth_seen):
+            summary += "\n<i>Only counts positions bought live through Ferzan.</i>"
+    await update.effective_message.reply_text(summary, parse_mode="HTML")
     if not rows:
         await update.effective_message.reply_text("No SPL tokens yet.")
     for row in rows[:6]:
-        text, kb = _bag_panel(row["mint"], row["amount"], addr, update.effective_user.id)
+        text, kb = _bag_panel(row["mint"], row["amount"], addr, uid)
         await update.effective_message.reply_text(
             text, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True
         )
-    evm_addr = (db.get_user_wallet(update.effective_user.id) or {}).get("evm_pub") or ""
-    for mint in db.live_mints(update.effective_user.id):
+    evm_addr = (db.get_user_wallet(uid) or {}).get("evm_pub") or ""
+    for mint in db.live_mints(uid):
         if not str(mint).startswith("0x") or not evm_addr:
             continue
         for cid in ("eth", "base", "bsc", "hood", "arb", "avax"):
@@ -1428,7 +1536,7 @@ async def bag_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 raw = 0
             if raw <= 0:
                 continue
-            text, kb = _bag_panel(mint, raw / 10**18, evm_addr, update.effective_user.id)
+            text, kb = _bag_panel(mint, raw / 10**18, evm_addr, uid)
             text = text.replace("· SOL", f"· {cid.upper()}")
             await update.effective_message.reply_text(
                 text, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True
@@ -1776,6 +1884,83 @@ async def watchwallet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await update.effective_message.reply_text(
         f"Watching wallet #{wid} on {chain}\n{address}\n{preview}"
     )
+
+
+async def smartmoney_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard(update):
+        return
+    wallets = db.list_curated_wallets()
+    if not wallets:
+        await update.effective_message.reply_text(
+            "🐋 Smart money\n\nNo curated wallets yet — check back soon."
+        )
+        return
+    uid = update.effective_user.id
+    already = {
+        (w.get("chain"), (w.get("address") or "").lower())
+        for w in db.list_watched_wallets(uid)
+    }
+    lines = ["🐋 <b>Smart money — curated wallets</b>", "Tap Follow to get DM pings when one moves.\n"]
+    rows = []
+    for w in wallets:
+        tag = " · following" if (w["chain"], w["address"].lower()) in already else ""
+        note = f" — {html.escape(w['note'])}" if w.get("note") else ""
+        lines.append(f"👁 <b>{html.escape(w['label'])}</b> ({w['chain'].upper()}){note}{tag}")
+        lines.append(f"<code>{html.escape(w['address'])}</code>\n")
+        if (w["chain"], w["address"].lower()) not in already:
+            rows.append([InlineKeyboardButton(f"👁 Follow {w['label']}", callback_data=f"sw:follow:{w['id']}")])
+    await update.effective_message.reply_text(
+        "\n".join(lines),
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(rows) if rows else None,
+    )
+
+
+async def addsmartwallet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard(update):
+        return
+    uid = update.effective_user.id
+    if not _is_admin(uid):
+        await update.effective_message.reply_text("Admins only.")
+        return
+    if len(context.args) < 3:
+        await update.effective_message.reply_text(
+            "Usage: /addsmartwallet <chain> <address> <label...>\n"
+            "Example: /addsmartwallet sol 7xKX... \"early pump.fun sniper\""
+        )
+        return
+    chain_raw, address = context.args[0], context.args[1]
+    label = " ".join(context.args[2:])
+    try:
+        chain = onchain.normalize_chain(chain_raw)
+    except OnchainError as exc:
+        await update.effective_message.reply_text(str(exc))
+        return
+    ok = db.add_curated_wallet(chain, address, label, "", uid)
+    if not ok:
+        await update.effective_message.reply_text("Already on the curated list for that chain.")
+        return
+    await update.effective_message.reply_text(f"🐋 Added {label} ({chain}) to smart money.")
+
+
+async def removesmartwallet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard(update):
+        return
+    if not _is_admin(update.effective_user.id):
+        await update.effective_message.reply_text("Admins only.")
+        return
+    if not context.args:
+        wallets = db.list_curated_wallets()
+        listing = "\n".join(f"#{w['id']} {w['label']} ({w['chain']})" for w in wallets) or "None yet."
+        await update.effective_message.reply_text(f"Usage: /removesmartwallet <id>\n\n{listing}")
+        return
+    try:
+        wid = int(context.args[0])
+    except ValueError:
+        await update.effective_message.reply_text("Usage: /removesmartwallet <id>")
+        return
+    ok = db.remove_curated_wallet(wid)
+    await update.effective_message.reply_text("Removed." if ok else "No wallet with that id.")
 
 
 def _onramp_url(code: str, address: str) -> str:
@@ -3058,8 +3243,14 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 "/watchwallet sol <address>\n"
                 "/watchwallet eth 0x...\n\n"
                 "Ping when they move. Mirror is opt-in.\n"
-                "Never posts your key.",
+                "Never posts your key.\n\n"
+                "Don't have a wallet to follow yet? /smartmoney has a curated list.",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("🐋 Smart money", callback_data="go:smartmoney")]]
+                ),
             )
+        elif kind == "smartmoney":
+            await smartmoney_cmd(update, context)
         elif kind == "snipehelp":
             await context.bot.send_message(
                 uid,
@@ -3243,6 +3434,33 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         db.add_watch(uid, name)
         await query.edit_message_reply_markup(reply_markup=card_keyboard(name, 0))
         await context.bot.send_message(uid, f"Watching {name.upper()}.")
+        return
+    if data.startswith("sw:follow:"):
+        try:
+            wid = int(data.split(":", 2)[2])
+        except ValueError:
+            return
+        wallets = {w["id"]: w for w in db.list_curated_wallets()}
+        w = wallets.get(wid)
+        if not w:
+            await query.answer("Gone.")
+            return
+        already = any(
+            x["chain"] == w["chain"] and (x.get("address") or "").lower() == w["address"].lower()
+            for x in db.list_watched_wallets(uid)
+        )
+        if already:
+            await query.answer("Already following.")
+            return
+        new_id = db.add_watched_wallet(uid, w["chain"], w["address"], w["label"])
+        try:
+            events = onchain.recent_activity(w["chain"], w["address"], limit=1)
+            if events:
+                db.set_wallet_cursor(new_id, events[0].txid)
+        except Exception:
+            pass
+        await query.answer("Following")
+        await context.bot.send_message(uid, f"👁 Now following {w['label']} ({w['chain']}). DM ping when it moves.")
         return
     if data.startswith("bnv:"):
         _tag, amt_s, name = data.split(":", 2)
@@ -3656,6 +3874,38 @@ async def live_exit_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         if worth <= 0:
             continue
         pnl_pct = ((worth - cost) / cost) * 100
+        for rung in db.list_tp_rungs(uid, mint):
+            if rung.get("hit") or pnl_pct < float(rung["pct"]):
+                continue
+            sell_pct = float(rung["sell_pct"])
+            try:
+                if mint.startswith("0x"):
+                    _rok, rmsg = evm_signer.sell_evm(evm_chain, mint, key_hex=evm_secret, pct=int(sell_pct))
+                else:
+                    _rok, rmsg = signer.sell_sol(
+                        mint, secret=sol_secret, pct=int(sell_pct), slip_bps=_slip_bps(uid, "sell")
+                    )
+            except Exception as exc:
+                _rok, rmsg = False, str(exc)
+            db.mark_tp_rung_hit(uid, mint, rung["pct"])
+            if _rok:
+                db.reduce_live_cost_pct(uid, mint, sell_pct)
+            try:
+                await context.bot.send_message(
+                    uid,
+                    f"🎯 TP rung +{float(rung['pct']):.0f}% hit — sold {sell_pct:.0f}% of bag\n{rmsg}",
+                )
+            except Exception:
+                logger.exception("tp ladder notify failed")
+            # Re-read cost/worth so the full-exit check below sees the shrunk position.
+            cost = db.live_cost(uid, mint)
+            if cost <= 0:
+                worth = 0.0
+                break
+            worth = worth * (1 - sell_pct / 100.0)
+            pnl_pct = ((worth - cost) / cost) * 100
+        if worth <= 0:
+            continue
         hit = None
         trail = float(row.get("trail_pct") or 0)
         peak = float(row.get("peak_pct") or 0)
@@ -3763,6 +4013,23 @@ async def _launch_feed_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 await send_launch(context.bot, uid, text, markup, promo=False)
             except Exception:
                 logger.exception("launch feed failed for %s", uid)
+            if db.flag_on(uid, "auto_buy", 0):
+                auto_usd = float(user.get("auto_buy_usd") or 0)
+                if auto_usd > 0 and (ln.token or "").strip():
+                    try:
+                        auto_card = analyze(ln.token)
+                    except Exception:
+                        auto_card = None
+                    if auto_card is not None:
+                        # force=False -- this still goes through the same
+                        # score_gate / rug_buy / honeypot checks a manual
+                        # paste does. Nothing here bypasses the user's flags.
+                        auto_msg = _live_buy_followup(uid, auto_card, ln.token, True, False, usd_override=auto_usd)
+                        if auto_msg:
+                            try:
+                                await context.bot.send_message(uid, f"⚡️ Auto-buy ${auto_usd:.0f} (feed)\n{auto_msg}")
+                            except Exception:
+                                logger.exception("auto-buy notify failed for %s", uid)
 
     for chat_id, bind in binds:
         rows = _pool_for(bind)
@@ -3949,6 +4216,9 @@ def main() -> None:
     app.add_handler(CommandHandler("unsetfeed", unsetfeed_cmd, filters=filters.UpdateType.CHANNEL_POSTS))
     app.add_handler(CommandHandler("resetpaper", resetpaper_cmd))
     app.add_handler(CommandHandler("watchwallet", watchwallet_cmd))
+    app.add_handler(CommandHandler("smartmoney", smartmoney_cmd))
+    app.add_handler(CommandHandler("addsmartwallet", addsmartwallet_cmd))
+    app.add_handler(CommandHandler("removesmartwallet", removesmartwallet_cmd))
     app.add_handler(CommandHandler("wallet", wallet_cmd))
     app.add_handler(CommandHandler("buy", buy_cmd))
     app.add_handler(CommandHandler("onramp", buy_cmd))
@@ -3967,6 +4237,7 @@ def main() -> None:
     app.add_handler(CommandHandler("bag", bag_cmd))
     app.add_handler(CommandHandler("tp", tp_cmd))
     app.add_handler(CommandHandler("sl", sl_cmd))
+    app.add_handler(CommandHandler("tpladder", tpladder_cmd))
     app.add_handler(CommandHandler("trail", trail_cmd))
     app.add_handler(CommandHandler("stake", stake_cmd))
     app.add_handler(CommandHandler("lpguard", lpguard_cmd))

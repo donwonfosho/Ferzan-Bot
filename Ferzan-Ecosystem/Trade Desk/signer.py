@@ -8,13 +8,95 @@ Capped by SIGNER_MAX_USD (default 10).
 from __future__ import annotations
 
 import base64
+import logging
 import os
 
 import requests
 
+log = logging.getLogger("signer")
+
 SOL_MINT = "So11111111111111111111111111111111111111112"
 JUP_QUOTE = "https://lite-api.jup.ag/swap/v1/quote"
 JUP_SWAP = "https://lite-api.jup.ag/swap/v1/swap"
+
+# Error text meaning "resend with a bigger priority fee", not "this trade is
+# broken" (bad slippage, insufficient balance, etc. should NOT retry).
+_RETRYABLE_HINTS = (
+    "blockhash not found",
+    "block height exceeded",
+    "node is behind",
+    "timed out",
+    "too many requests",
+    "rate limit",
+)
+
+
+def _swap_send_with_retry(quote: dict, kp) -> tuple[bool, str]:
+    """Builds + signs + sends a Jupiter swap, retrying with a bumped
+    priority fee if the RPC rejects it for a reason that a higher fee (or
+    a fresher blockhash from Jupiter, since we rebuild each attempt) would
+    plausibly fix. Returns (ok, signature_or_error)."""
+    from solders.transaction import VersionedTransaction
+
+    base_fee = int(os.getenv("PRIORITY_FEE_LAMPORTS", "1000000"))
+    bumps = (1.0, 2.0, 3.5)
+    last_err = "RPC accepted nothing."
+    for attempt, bump in enumerate(bumps):
+        try:
+            sr = requests.post(
+                JUP_SWAP,
+                json={
+                    "quoteResponse": quote,
+                    "userPublicKey": str(kp.pubkey()),
+                    "wrapAndUnwrapSol": True,
+                    "dynamicComputeUnitLimit": True,
+                    "prioritizationFeeLamports": int(base_fee * bump),
+                },
+                timeout=20,
+            )
+            swap = sr.json() if sr.content else {}
+        except requests.RequestException as exc:
+            last_err = f"Jupiter swap failed: {exc}"
+            if attempt < len(bumps) - 1:
+                continue
+            return False, last_err
+        raw_tx = swap.get("swapTransaction")
+        if not raw_tx:
+            return False, str(swap.get("error") or swap.get("message") or "Jupiter returned no transaction")
+        try:
+            tx = VersionedTransaction.from_bytes(base64.b64decode(raw_tx))
+            signed = VersionedTransaction(tx.message, [kp])
+            wire = base64.b64encode(bytes(signed)).decode()
+            send = requests.post(
+                _rpc(),
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "sendTransaction",
+                    "params": [wire, {"encoding": "base64", "skipPreflight": False}],
+                },
+                timeout=20,
+            )
+            body = send.json() if send.content else {}
+        except Exception as exc:
+            last_err = f"Broadcast failed: {exc}"
+            if attempt < len(bumps) - 1:
+                continue
+            return False, last_err
+        if body.get("error"):
+            err = body["error"]
+            last_err = str(err.get("message") if isinstance(err, dict) else err)
+            if attempt < len(bumps) - 1 and any(h in last_err.lower() for h in _RETRYABLE_HINTS):
+                log.warning("swap send retryable (attempt %s), bumping priority fee: %s", attempt + 1, last_err)
+                continue
+            return False, last_err
+        sig = body.get("result") or ""
+        if not sig:
+            if attempt < len(bumps) - 1:
+                continue
+            return False, last_err
+        return True, sig
+    return False, last_err
 
 
 def _phrase() -> str:
@@ -147,49 +229,10 @@ def buy_sol(
     if qr.status_code >= 400 or quote.get("error"):
         return False, str(quote.get("error") or quote.get("message") or qr.text[:180])
 
-    try:
-        sr = requests.post(
-            JUP_SWAP,
-            json={
-                "quoteResponse": quote,
-                "userPublicKey": str(kp.pubkey()),
-                "wrapAndUnwrapSol": True,
-                "dynamicComputeUnitLimit": True,
-                "prioritizationFeeLamports": int(os.getenv("PRIORITY_FEE_LAMPORTS", "1000000")),
-            },
-            timeout=20,
-        )
-        swap = sr.json() if sr.content else {}
-    except requests.RequestException as exc:
-        return False, f"Jupiter swap failed: {exc}"
-    raw_tx = swap.get("swapTransaction")
-    if not raw_tx:
-        return False, str(swap.get("error") or swap.get("message") or "Jupiter returned no transaction")
-
-    try:
-        tx = VersionedTransaction.from_bytes(base64.b64decode(raw_tx))
-        signed = VersionedTransaction(tx.message, [kp])
-        wire = base64.b64encode(bytes(signed)).decode()
-        send = requests.post(
-            _rpc(),
-            json={
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "sendTransaction",
-                "params": [wire, {"encoding": "base64", "skipPreflight": False}],
-            },
-            timeout=20,
-        )
-        body = send.json() if send.content else {}
-    except Exception as exc:
-        return False, f"Broadcast failed: {exc}"
-    if body.get("error"):
-        err = body["error"]
-        return False, str(err.get("message") if isinstance(err, dict) else err)
-    sig = body.get("result") or ""
-    if not sig:
-        return False, "RPC accepted nothing."
-    return True, f"Live SOL buy ~${usd:.2f}\nhttps://solscan.io/tx/{sig}"
+    ok, res = _swap_send_with_retry(quote, kp)
+    if not ok:
+        return False, res
+    return True, f"Live SOL buy ~${usd:.2f}\nhttps://solscan.io/tx/{res}"
 
 
 def _token_raw_balance(mint: str, kp=None) -> int:
@@ -387,45 +430,8 @@ def sell_sol(
         return False, f"Jupiter quote failed: {exc}"
     if qr.status_code >= 400 or quote.get("error"):
         return False, str(quote.get("error") or quote.get("message") or qr.text[:180])
-    try:
-        sr = requests.post(
-            JUP_SWAP,
-            json={
-                "quoteResponse": quote,
-                "userPublicKey": str(kp.pubkey()),
-                "wrapAndUnwrapSol": True,
-                "dynamicComputeUnitLimit": True,
-                "prioritizationFeeLamports": int(os.getenv("PRIORITY_FEE_LAMPORTS", "1000000")),
-            },
-            timeout=20,
-        )
-        swap = sr.json() if sr.content else {}
-    except requests.RequestException as exc:
-        return False, f"Jupiter swap failed: {exc}"
-    raw_tx = swap.get("swapTransaction")
-    if not raw_tx:
-        return False, str(swap.get("error") or swap.get("message") or "Jupiter returned no transaction")
-    try:
-        tx = VersionedTransaction.from_bytes(base64.b64decode(raw_tx))
-        signed = VersionedTransaction(tx.message, [kp])
-        wire = base64.b64encode(bytes(signed)).decode()
-        send = requests.post(
-            _rpc(),
-            json={
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "sendTransaction",
-                "params": [wire, {"encoding": "base64", "skipPreflight": False}],
-            },
-            timeout=20,
-        )
-        body = send.json() if send.content else {}
-    except Exception as exc:
-        return False, f"Broadcast failed: {exc}"
-    if body.get("error"):
-        err = body["error"]
-        return False, str(err.get("message") if isinstance(err, dict) else err)
-    sig = body.get("result") or ""
-    if not sig:
-        return False, "RPC accepted nothing."
-    return True, f"Live SOL sell (full bag)\nhttps://solscan.io/tx/{sig}"
+    ok, res = _swap_send_with_retry(quote, kp)
+    if not ok:
+        return False, res
+    bag_note = "full bag" if pct >= 100 else f"{pct}% of bag"
+    return True, f"Live SOL sell ({bag_note})\nhttps://solscan.io/tx/{res}"

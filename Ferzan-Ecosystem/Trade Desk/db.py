@@ -305,6 +305,33 @@ def init_db() -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS live_tp_rungs (
+                user_id INTEGER NOT NULL,
+                mint TEXT NOT NULL,
+                pct REAL NOT NULL,
+                sell_pct REAL NOT NULL,
+                hit INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL,
+                PRIMARY KEY (user_id, mint, pct)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS curated_wallets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chain TEXT NOT NULL,
+                address TEXT NOT NULL,
+                label TEXT NOT NULL,
+                note TEXT,
+                added_by INTEGER,
+                added_at INTEGER NOT NULL,
+                UNIQUE(chain, address)
+            )
+            """
+        )
         conn.commit()
 
 
@@ -930,6 +957,88 @@ def clear_live_exit(user_id: int, mint: str) -> None:
         conn.commit()
 
 
+def set_tp_ladder(user_id: int, mint: str, rungs: list[tuple[float, float]]) -> None:
+    """Replaces this user+mint's whole ladder. rungs is [(pct_gain, sell_pct), ...]."""
+    with get_conn() as conn:
+        conn.execute("DELETE FROM live_tp_rungs WHERE user_id = ? AND mint = ?", (user_id, mint))
+        now = int(time.time())
+        for pct, sell_pct in rungs:
+            conn.execute(
+                """
+                INSERT INTO live_tp_rungs (user_id, mint, pct, sell_pct, hit, created_at)
+                VALUES (?, ?, ?, ?, 0, ?)
+                """,
+                (user_id, mint, float(pct), float(sell_pct), now),
+            )
+        conn.commit()
+
+
+def list_tp_rungs(user_id: int, mint: str) -> list[dict[str, Any]]:
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM live_tp_rungs WHERE user_id = ? AND mint = ? ORDER BY pct",
+            (user_id, mint),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def list_all_tp_rungs() -> list[dict[str, Any]]:
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM live_tp_rungs WHERE hit = 0 ORDER BY user_id, mint, pct"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def mark_tp_rung_hit(user_id: int, mint: str, pct: float) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE live_tp_rungs SET hit = 1 WHERE user_id = ? AND mint = ? AND pct = ?",
+            (user_id, mint, float(pct)),
+        )
+        conn.commit()
+
+
+def clear_tp_ladder(user_id: int, mint: str) -> None:
+    with get_conn() as conn:
+        conn.execute("DELETE FROM live_tp_rungs WHERE user_id = ? AND mint = ?", (user_id, mint))
+        conn.commit()
+
+
+def add_curated_wallet(chain: str, address: str, label: str, note: str, added_by: int) -> bool:
+    with get_conn() as conn:
+        try:
+            conn.execute(
+                """
+                INSERT INTO curated_wallets (chain, address, label, note, added_by, added_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (chain, address, label, note, added_by, int(time.time())),
+            )
+            conn.commit()
+            return True
+        except sqlite3.IntegrityError:
+            return False
+
+
+def list_curated_wallets(chain: str | None = None) -> list[dict[str, Any]]:
+    with get_conn() as conn:
+        if chain:
+            rows = conn.execute(
+                "SELECT * FROM curated_wallets WHERE chain = ? ORDER BY id", (chain,)
+            ).fetchall()
+        else:
+            rows = conn.execute("SELECT * FROM curated_wallets ORDER BY id").fetchall()
+        return [dict(r) for r in rows]
+
+
+def remove_curated_wallet(wallet_id: int) -> bool:
+    with get_conn() as conn:
+        cur = conn.execute("DELETE FROM curated_wallets WHERE id = ?", (wallet_id,))
+        conn.commit()
+        return cur.rowcount > 0
+
+
 def add_feed_chat(chat_id: int, title: str = "", chain: str = "*") -> None:
     chain = (chain or "*").lower()
     with get_conn() as conn:
@@ -1146,6 +1255,28 @@ def clear_live_cost(user_id: int, mint: str) -> None:
         conn.execute(
             "DELETE FROM live_basis WHERE user_id = ? AND mint = ?",
             (user_id, mint),
+        )
+        conn.commit()
+
+
+def reduce_live_cost_pct(user_id: int, mint: str, sold_pct: float) -> None:
+    """Shrinks recorded cost basis by sold_pct after a partial sell, so the
+    remaining position's PnL% still reflects only what's still held."""
+    sold_pct = max(0.0, min(100.0, float(sold_pct)))
+    if sold_pct <= 0:
+        return
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT cost_usd FROM live_basis WHERE user_id = ? AND mint = ?",
+            (user_id, mint),
+        ).fetchone()
+        if not row:
+            return
+        cost = float(row["cost_usd"] or 0)
+        delta = -(cost * sold_pct / 100.0)
+        conn.execute(
+            "UPDATE live_basis SET cost_usd = MAX(0, cost_usd + ?), updated_at = ? WHERE user_id = ? AND mint = ?",
+            (delta, int(time.time()), user_id, mint),
         )
         conn.commit()
 
