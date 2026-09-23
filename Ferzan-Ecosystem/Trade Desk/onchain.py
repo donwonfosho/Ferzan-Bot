@@ -65,6 +65,23 @@ class WalletEvent:
     summary: str
     direction: str
     value_hint: str
+    token: str = ""       # contract/mint address this event is about, if any
+    kind: str = "other"   # "buy" | "sell" | "other" — best-effort trade direction
+
+
+# Quote/base assets. A leg in one of these is "what they paid with / got
+# paid in", never the token being traded — so it must never become a copy
+# buy. EVM is matched by SYMBOL on purpose: a scam token that names itself
+# USDC can only be *ignored* by this, never bought.
+SOL_BASE_MINTS = {
+    "So11111111111111111111111111111111111111112",  # wSOL
+    "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",  # USDC
+    "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",  # USDT
+}
+EVM_BASE_SYMBOLS = {
+    "WETH", "ETH", "USDC", "USDC.E", "USDBC", "USDT", "USDT0", "DAI", "WBNB", "BNB",
+    "BUSD", "FDUSD", "USDE", "WAVAX", "WMATIC", "WPOL", "WS", "WMON", "WHYPE", "WPLS",
+}
 
 
 def _es(params: dict[str, Any]) -> Any:
@@ -144,6 +161,38 @@ def evm_recent(chain: str, address: str, limit: int = 8) -> list[WalletEvent]:
             "sort": "desc",
         }
     )
+    # Hashes this wallet SIGNED. A token arriving in a tx someone else sent is
+    # an airdrop / address-poisoning spam, not a buy.
+    signed = {
+        (r.get("hash") or "").lower()
+        for r in rows
+        if (r.get("from") or "").lower() == addr
+    }
+    # Hashes where value came BACK to the wallet: a base token in, or native
+    # coin in via an internal transfer (how DEX routers pay out ETH/BNB).
+    paid_back: set[str] = set()
+    try:
+        internal = _es(
+            {
+                "chainid": chain_id,
+                "module": "account",
+                "action": "txlistinternal",
+                "address": address,
+                "page": 1,
+                "offset": limit * 2,
+                "sort": "desc",
+            }
+        )
+        if isinstance(internal, list):
+            for r in internal:
+                if (r.get("to") or "").lower() == addr and int(r.get("value") or 0) > 0:
+                    paid_back.add((r.get("hash") or "").lower())
+    except Exception:
+        pass
+    if isinstance(tokens, list):
+        for r in tokens:
+            if (r.get("to") or "").lower() == addr and (r.get("tokenSymbol") or "").upper() in EVM_BASE_SYMBOLS:
+                paid_back.add((r.get("hash") or "").lower())
     if isinstance(tokens, list):
         for row in tokens[:limit]:
             to = (row.get("to") or "").lower()
@@ -152,6 +201,14 @@ def evm_recent(chain: str, address: str, limit: int = 8) -> list[WalletEvent]:
             raw = int(row.get("value") or 0)
             amt = raw / (10 ** decimals) if decimals <= 36 else 0
             sym = row.get("tokenSymbol") or "TOKEN"
+            contract = row.get("contractAddress") or ""
+            h = (row.get("hash") or "").lower()
+            kind = "other"
+            if sym.upper() not in EVM_BASE_SYMBOLS and h in signed:
+                if direction == "IN":
+                    kind = "buy"  # wallet-signed tx that landed a non-base token
+                elif h in paid_back:
+                    kind = "sell"  # token out AND value back in the same tx
             events.append(
                 WalletEvent(
                     chain=chain,
@@ -161,6 +218,8 @@ def evm_recent(chain: str, address: str, limit: int = 8) -> list[WalletEvent]:
                     summary=f"{direction} {amt:.6g} {sym}",
                     direction=direction,
                     value_hint=f"{amt:.6g} {sym}",
+                    token=contract,
+                    kind=kind,
                 )
             )
     events.sort(key=lambda e: e.when, reverse=True)
@@ -214,6 +273,30 @@ def sol_recent_helius(address: str, limit: int = 8) -> list[WalletEvent]:
         ts = int(row.get("timestamp") or 0)
         ttype = row.get("type") or row.get("transactionType") or "TX"
         source = row.get("source") or ""
+        kind = "other"
+        mint = ""
+        fee_payer = row.get("feePayer") or address
+        if str(ttype).upper() == "SWAP" and fee_payer == address:
+            transfers = row.get("tokenTransfers") or []
+            # Only the non-base legs say WHAT was traded; wSOL/USDC/USDT legs
+            # are just what it was paid with (buy) or paid out in (sell).
+            got = [
+                t for t in transfers
+                if (t.get("toUserAccount") or "") == address and (t.get("mint") or "") not in SOL_BASE_MINTS
+            ]
+            gave = [
+                t for t in transfers
+                if (t.get("fromUserAccount") or "") == address and (t.get("mint") or "") not in SOL_BASE_MINTS
+            ]
+            if got:
+                # Includes token->token rotations: the token they rotated INTO
+                # is the one to copy.
+                kind = "buy"
+                mint = got[0].get("mint") or ""
+            elif gave:
+                kind = "sell"
+                mint = gave[0].get("mint") or ""
+        direction = f"{kind.upper()} {mint[:6]}" if mint else str(ttype)
         events.append(
             WalletEvent(
                 chain="sol",
@@ -221,8 +304,10 @@ def sol_recent_helius(address: str, limit: int = 8) -> list[WalletEvent]:
                 txid=txid,
                 when=ts,
                 summary=f"{ttype} {source}".strip(),
-                direction=str(ttype),
+                direction=direction,
                 value_hint=source,
+                token=mint,
+                kind=kind,
             )
         )
     return events

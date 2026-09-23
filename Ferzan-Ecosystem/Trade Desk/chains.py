@@ -27,6 +27,9 @@ def _c(
     addr = f"{explorer}/address/{{addr}}" if explorer else "{addr}"
     if kind == "sol":
         addr = f"{explorer}/account/{{addr}}" if explorer else "{addr}"
+    elif kind == "ton":
+        tx = f"{explorer}/transaction/{{txid}}" if explorer else "{txid}"
+        addr = f"{explorer}/{{addr}}" if explorer else "{addr}"
     return {
         "id": cid,
         "label": label,
@@ -91,7 +94,7 @@ CHAINS = {
     "ton": _c("ton", "TON", "ton", "ton", "ton", "TON",
               explorer="https://tonviewer.com",
               router="STON.fi",
-              notes="Quotes live. Send after pytoniq on the droplet."),
+              notes="Buy + sell live via STON.fi v1 (WalletV4R2)."),
     "pol": _c("pol", "Polygon", "evm", "polygon", "polygon_pos", "POL",
               chain_id=137, rpc="https://polygon-rpc.com",
               explorer="https://polygonscan.com", router="0x / QuickSwap"),

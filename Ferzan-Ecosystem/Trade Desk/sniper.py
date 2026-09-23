@@ -367,14 +367,19 @@ def try_fill(order: dict[str, Any]) -> tuple[str, str]:
         usd = min(signer.max_usd(), float(order.get("usd") or signer.max_usd()))
         sol_secret, evm_secret = user_wallets.secrets(uid)
         slip = int(max(10, min(9900, float(order.get("slip") or 15) * 100)))
-        if mint.startswith("0x"):
-            _ok, live_line = evm_signer.buy_evm(
-                order.get("chain") or "base", mint, usd, key_hex=evm_secret, slip_bps=slip
-            )
-        elif mint:
-            _ok, live_line = signer.buy_sol(mint, usd, secret=sol_secret, slip_bps=slip)
-        else:
-            live_line = "Snipe: no mint"
+        from trade_locks import user_lock
+
+        # Same per-user lock as bot._off(): a snipe waits for any manual
+        # trade from this wallet to land instead of racing it.
+        with user_lock(uid):
+            if mint.startswith("0x"):
+                _ok, live_line = evm_signer.buy_evm(
+                    order.get("chain") or "base", mint, usd, key_hex=evm_secret, slip_bps=slip
+                )
+            elif mint:
+                _ok, live_line = signer.buy_sol(mint, usd, secret=sol_secret, slip_bps=slip)
+            else:
+                live_line = "Snipe: no mint"
     except Exception as exc:
         live_line = f"Live snipe failed: {exc}"
     if not _ok:

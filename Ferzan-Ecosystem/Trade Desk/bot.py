@@ -110,6 +110,70 @@ def _auto_trading_killed() -> bool:
     return db.flag_on(0, "kill_auto_trading", default=0)
 
 
+from trade_locks import user_lock as _user_lock
+
+
+_WAIT = object()
+BUSY_MSG = "⏳ You already have a trade running — wait for it to land, then tap again."
+
+
+async def _off(uid: int, fn, *args, _busy=_WAIT, **kwargs):
+    """Run a blocking trade call (quote + sign + broadcast) in a worker thread
+    so one user's buy never freezes the bot for everyone else. Trades for the
+    SAME user are serialized by a per-user lock (EVM nonce / Solana blockhash
+    races).
+
+    Background jobs (exits, TP ladder, copy, limits, DCA) leave _busy unset
+    and WAIT their turn — a stop-loss must never be dropped. User taps pass
+    _busy=<value to return>: if a trade is already running for this user the
+    tap is refused instantly instead of queueing, so a double-tap can't buy
+    twice (or sell 50% of the remainder) and a tap-spammer can't park dozens
+    of worker threads."""
+    lock = _user_lock(uid)
+    if _busy is not _WAIT:
+        if not lock.acquire(blocking=False):
+            return _busy
+
+        def run_held():
+            try:
+                return fn(*args, **kwargs)
+            finally:
+                lock.release()
+
+        return await asyncio.to_thread(run_held)
+
+    def run():
+        with lock:
+            return fn(*args, **kwargs)
+
+    return await asyncio.to_thread(run)
+
+
+async def _progress(bot, chat_id: int, text: str = "⏳ Sending…"):
+    """Post an instant placeholder so a tap never feels dead; the caller
+    edits it with the real result via _done()."""
+    try:
+        return await bot.send_message(chat_id, text)
+    except Exception:
+        return None
+
+
+async def _done(bot, chat_id: int, placeholder, text: str, **kwargs) -> None:
+    """Replace the placeholder with the result; fall back to a new message if
+    the edit fails (message too old, identical text, markup mismatch...)."""
+    text = text or "Done."
+    if placeholder is not None:
+        try:
+            await placeholder.edit_text(text, **kwargs)
+            return
+        except Exception:
+            pass
+    try:
+        await bot.send_message(chat_id, text, **kwargs)
+    except Exception:
+        logger.exception("result send failed for %s", chat_id)
+
+
 PROMO_PATH = Path(os.getenv("FERZAN_PROMO_GIF", str(Path(__file__).parent / "promo.gif")))
 
 ALERT_INTERVAL_SECONDS = int(os.getenv("ALERT_INTERVAL_SECONDS", "60"))
@@ -430,7 +494,7 @@ def render_card(card: SignalCard, uid: int | None = None) -> str:
 def card_keyboard(
     query: str, score: int, ca: str = "", chain: str = "", uid: int | None = None
 ) -> InlineKeyboardMarkup:
-    q = (ca or query)[:44]
+    q = (ca or query)[:48]  # TON addresses are 48 chars; longest prefix keeps this < 64 bytes
     cid = resolve_chain(chain) or ("sol" if q and not str(q).startswith("0x") else "eth")
     unit = {
         "sol": "SOL", "bsc": "BNB", "eth": "ETH", "base": "ETH",
@@ -514,7 +578,7 @@ def card_keyboard(
     if addr and CopyTextButton is not None:
         extra.append(InlineKeyboardButton("📋 Copy CA", copy_text=CopyTextButton(text=addr)))
     elif addr:
-        extra.append(InlineKeyboardButton("📋 CA", callback_data=f"sig:{addr[:44]}"))
+        extra.append(InlineKeyboardButton("📋 CA", callback_data=f"sig:{addr[:48]}"))
     if extra:
         rows.append(extra)
     return InlineKeyboardMarkup(rows)
@@ -523,7 +587,7 @@ def card_keyboard(
 def sell_keyboard(
     query: str, ca: str = "", chain: str = "", uid: int | None = None, token_amt: float = 0.0
 ) -> InlineKeyboardMarkup:
-    q = (ca or query)[:44]
+    q = (ca or query)[:48]  # TON addresses are 48 chars; longest prefix keeps this < 64 bytes
     cid = resolve_chain(chain) or ("sol" if q and not str(q).startswith("0x") else "eth")
     unit = {
         "sol": "SOL", "bsc": "BNB", "eth": "ETH", "base": "ETH",
@@ -569,7 +633,7 @@ def sell_keyboard(
     rows.append(
         [
             InlineKeyboardButton("🎯 Snipe", callback_data=f"snp:{q}"),
-            InlineKeyboardButton("⏳ Sell limit", callback_data=f"blm:{q}"),
+            InlineKeyboardButton("⏳ Buy dip −20%", callback_data=f"blm:{q}"),
         ]
     )
     return InlineKeyboardMarkup(rows)
@@ -593,8 +657,8 @@ def positions_keyboard(user_id: int) -> InlineKeyboardMarkup | None:
         )
         rows.append(
             [
-                InlineKeyboardButton("25%", callback_data=f"xsell:{p['id']}"),
-                InlineKeyboardButton("50%", callback_data=f"xsell:{p['id']}"),
+                InlineKeyboardButton("25%", callback_data=f"xsell:{p['id']}:25"),
+                InlineKeyboardButton("50%", callback_data=f"xsell:{p['id']}:50"),
                 InlineKeyboardButton("Bag", callback_data="go:bag"),
             ]
         )
@@ -908,17 +972,32 @@ async def remove_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 async def _send_signal(update: Update, query: str, edit: bool = False) -> None:
-    try:
-        card = analyze(query)
-    except PriceFetchError as exc:
-        text = f"Could not score {query}: {exc}"
+    placeholder = None
+    if not (edit and update.callback_query):
+        try:
+            placeholder = await update.effective_message.reply_text("🔎 Scanning…")
+        except Exception:
+            placeholder = None
+
+    async def _out(text: str, **kwargs) -> None:
         if edit and update.callback_query:
-            await update.callback_query.edit_message_text(text)
-        else:
-            await update.effective_message.reply_text(text)
+            await update.callback_query.edit_message_text(text, **kwargs)
+            return
+        if placeholder is not None:
+            try:
+                await placeholder.edit_text(text, **kwargs)
+                return
+            except Exception:
+                pass
+        await update.effective_message.reply_text(text, **kwargs)
+
+    try:
+        card = await asyncio.to_thread(analyze, query)
+    except PriceFetchError as exc:
+        await _out(f"Could not score {query}: {exc}")
         return
     uid = update.effective_user.id if update.effective_user else None
-    text = render_card(card, uid)
+    text = await asyncio.to_thread(render_card, card, uid)
     markup = card_keyboard(
         card.snapshot.query or query,
         card.score,
@@ -926,14 +1005,7 @@ async def _send_signal(update: Update, query: str, edit: bool = False) -> None:
         chain=card.snapshot.chain or "",
         uid=uid,
     )
-    if edit and update.callback_query:
-        await update.callback_query.edit_message_text(
-            text, parse_mode="HTML", disable_web_page_preview=True, reply_markup=markup
-        )
-    else:
-        await update.effective_message.reply_text(
-            text, parse_mode="HTML", disable_web_page_preview=True, reply_markup=markup
-        )
+    await _out(text, parse_mode="HTML", disable_web_page_preview=True, reply_markup=markup)
 
 
 async def signal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1002,15 +1074,18 @@ def _default_buy_usd(uid: int) -> float:
     return min(signer.max_usd(), max(1.0, usd))
 
 
-def _live_buy_followup(
-    uid: int, card, query: str, paper_ok: bool, force: bool, usd_override: float | None = None
-) -> str:
+def _live_buy(
+    uid: int, card, query: str, force: bool, usd_override: float | None = None
+) -> tuple[bool, str]:
+    """Blocking — call via _off(). Returns (ok, message). Guard refusals
+    return their original text (other code matches on those prefixes);
+    actual sends come back in the shared _trade_result layout."""
     if not signer.live_enabled():
-        return "Live buys are off. LIVE_BUYS=0 on the server."
+        return False, "Live buys are off. LIVE_BUYS=0 on the server."
     if db.flag_on(uid, "score_gate", 0) and not force:
         floor = int((db.get_user(uid) or {}).get("min_confluence") or 0)
         if getattr(card, "score", 100) < floor:
-            return f"Blocked by your score floor ({card.score} < {floor}). /settings floor or tap Override."
+            return False, f"Blocked by your score floor ({card.score} < {floor}). /settings floor or tap Override."
     snap = card.snapshot
     mint = (snap.token_address or "").strip()
     chain = (snap.chain or "").lower()
@@ -1022,60 +1097,54 @@ def _live_buy_followup(
         else:
             chain = chain or "solana"
     if not mint:
-        return "Live: no mint on this card. Paste the full CA, then Buy."
+        return False, "Live: no mint on this card. Paste the full CA, then Buy."
     blocked = _rug_block(uid, card, mint)
     if blocked:
-        return blocked
+        return False, blocked
     usd = _default_buy_usd(uid)
     if usd_override is not None:
         usd = min(signer.max_usd(), max(1.0, float(usd_override)))
     try:
         sol_secret, evm_secret = user_wallets.secrets(uid)
     except Exception as exc:
-        return f"Live: open /wallet first.\n{exc}"
+        return False, f"Live: open /wallet first.\n{exc}"
+    liq_mark = True
     if chain in {"trx", "tron"} or (mint.startswith("T") and 30 <= len(mint) <= 36):
         import tron_signer
 
-        _ok, msg = tron_signer.buy_tron(mint, usd, key_hex=evm_secret)
-        if _ok:
-            db.add_live_cost(uid, mint, usd)
-            extra = db.credit_desk_share(uid, usd)
-            if extra:
-                msg = f"{msg}\n{extra}"
-        return msg
-    if chain in {"ton"} or mint.startswith(("EQ", "UQ", "kQ")):
+        label, liq_mark = "TRX", False
+        ok, msg = tron_signer.buy_tron(mint, usd, key_hex=evm_secret)
+    elif chain in {"ton"} or mint.startswith(("EQ", "UQ", "kQ")):
         import ton_signer
 
-        _ok, msg = ton_signer.buy_ton(mint, usd, secret=sol_secret)
-        if _ok:
-            db.add_live_cost(uid, mint, usd)
-            extra = db.credit_desk_share(uid, usd)
-            if extra:
-                msg = f"{msg}\n{extra}"
-        return msg
-    if mint.startswith("0x"):
+        label, liq_mark = "TON", False
+        ok, msg = ton_signer.buy_ton(mint, usd, secret=sol_secret)
+    elif mint.startswith("0x"):
         if not (os.getenv("ZEROX_API_KEY") or "").strip():
-            return "Live: EVM needs ZEROX_API_KEY on the droplet."
-        _ok, msg = evm_signer.buy_evm(
+            return False, "Live: EVM needs ZEROX_API_KEY on the droplet."
+        label = (resolve_chain(chain) or chain or "base").upper()
+        ok, msg = evm_signer.buy_evm(
             chain or "base", mint, usd, key_hex=evm_secret, slip_bps=_slip_bps(uid, "buy"), user_id=uid
         )
-        if _ok:
-            db.add_live_cost(uid, mint, usd)
-            db.set_lp_mark(uid, mint, float(card.snapshot.liquidity_usd or 0))
-            extra = db.credit_desk_share(uid, usd)
-            if extra:
-                msg = f"{msg}\n{extra}"
-        return msg
-    if "sol" not in chain and not (len(mint) >= 32 and not mint.startswith("0x")):
-        return f"Live: {chain or 'unknown'} is not Solana."
-    _ok, msg = signer.buy_sol(mint, usd, secret=sol_secret, slip_bps=_slip_bps(uid, "buy"))
-    if _ok:
+    else:
+        if "sol" not in chain and not (len(mint) >= 32 and not mint.startswith("0x")):
+            return False, f"Live: {chain or 'unknown'} is not Solana."
+        label = "SOL"
+        ok, msg = signer.buy_sol(mint, usd, secret=sol_secret, slip_bps=_slip_bps(uid, "buy"))
+    if ok:
         db.add_live_cost(uid, mint, usd)
-        db.set_lp_mark(uid, mint, float(card.snapshot.liquidity_usd or 0))
+        if liq_mark:
+            db.set_lp_mark(uid, mint, float(card.snapshot.liquidity_usd or 0))
         extra = db.credit_desk_share(uid, usd)
         if extra:
             msg = f"{msg}\n{extra}"
-    return msg
+    return bool(ok), _trade_result("buy", bool(ok), label, msg, usd=usd)
+
+
+def _live_buy_followup(
+    uid: int, card, query: str, paper_ok: bool, force: bool, usd_override: float | None = None
+) -> str:
+    return _live_buy(uid, card, query, force, usd_override)[1]
 
 
 def _mint_from_position(pos: dict) -> str:
@@ -1096,15 +1165,91 @@ def _mint_from_position(pos: dict) -> str:
     return ""
 
 
-def _live_sell_position(uid: int, pos_id: int) -> str:
+_EVM_SCAN = ("eth", "base", "bsc", "hood", "arb", "avax")
+
+
+def _chain_of_mint(uid: int, mint: str) -> str:
+    """Best-effort chain id for a token address (blocking — call via _off)."""
+    if mint.startswith("T") and 30 <= len(mint) <= 36:
+        return "trx"
+    if mint.startswith(("EQ", "UQ", "kQ")):
+        return "ton"
+    if mint.startswith("0x"):
+        evm_addr = (db.get_user_wallet(uid) or {}).get("evm_pub") or ""
+        for cid in _EVM_SCAN:
+            try:
+                raw = evm_signer._erc20_balance(CHAINS[cid]["rpc"], mint, evm_addr)
+            except Exception:
+                raw = 0
+            if raw > 0:
+                return cid
+        return "base"
+    return "sol"
+
+
+def _sell_any(uid: int, mint: str, pct: int = 100) -> tuple[bool, str, str]:
+    """One sell path for every chain. Blocking — call via _off().
+    Returns (ok, message, chain_label)."""
+    pct = max(1, min(100, int(pct)))
+    sol_secret, evm_secret = user_wallets.secrets(uid)
+    cid = _chain_of_mint(uid, mint)
+    label = cid.upper()
+    if cid == "trx":
+        if pct < 100:
+            return False, "TRON sells are full-bag only right now — tap 100%.", label
+        import tron_signer
+
+        ok, msg = tron_signer.sell_tron(mint, key_hex=evm_secret)
+    elif cid == "ton":
+        import ton_signer
+
+        slip = f"{max(1, _slip_bps(uid, 'sell', 'ton')) / 10000:.4f}"
+        ok, msg = ton_signer.sell_ton(mint, secret=sol_secret, pct=pct, slip=slip)
+    elif cid == "sol":
+        ok, msg = signer.sell_sol(mint, secret=sol_secret, pct=pct, slip_bps=_slip_bps(uid, "sell"))
+    else:
+        ok, msg = evm_signer.sell_evm(cid, mint, key_hex=evm_secret, pct=pct)
+    if ok:
+        try:
+            if pct >= 100:
+                db.clear_live_cost(uid, mint)
+            else:
+                db.reduce_live_cost_pct(uid, mint, pct)
+        except Exception:
+            logger.exception("cost-basis update failed after sell")
+    return bool(ok), msg, label
+
+
+def _trade_result(side: str, ok: bool, chain_label: str, msg: str, *, usd: float | None = None, pct: int | None = None) -> str:
+    """Same confirmation layout for every chain and every entry point."""
+    icon = "🟢" if ok else "🔴"
+    if side == "buy":
+        verb = "Bought" if ok else "Buy failed"
+        size = f" ${usd:,.2f}" if usd else ""
+    else:
+        verb = "Sold" if ok else "Sell failed"
+        size = f" {pct}%" if pct else ""
+    head = f"{icon} {verb}{size} · {chain_label}"
+    body = (msg or "").strip()
+    return f"{head}\n{body}" if body else head
+
+
+def _live_sell_position(uid: int, pos_id: int, pct: int = 100, only_if_live: bool = False) -> str:
+    """Live-sell the token behind a position ticket from the USER's wallet.
+    (Previously called signer.sell_sol without secret=, which signs with the
+    server's SIGNER_KEY wallet — never do that for a user action.)
+    only_if_live: skip unless this bot actually bought the token live for
+    this user — so closing a PAPER trade never dumps a real bag by surprise."""
     pos = db.get_position(pos_id, uid)
     if not pos:
         return "Live sell: no position."
     mint = _mint_from_position(pos)
     if not mint:
         return "Live sell: no Solana mint on this ticket. Paste the CA and sell from the card."
-    _ok, msg = signer.sell_sol(mint, slip_bps=_slip_bps(uid, "sell"))
-    return msg
+    if only_if_live and db.live_cost(uid, mint) <= 0:
+        return ""
+    ok, msg, label = _sell_any(uid, mint, pct)
+    return _trade_result("sell", ok, label, msg, pct=pct)
 
 
 async def buy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1114,13 +1259,16 @@ async def buy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.effective_message.reply_text("Usage: /buy sol")
         return
     query = " ".join(context.args)
+    uid = update.effective_user.id
+    chat_id = update.effective_chat.id
+    status = await _progress(context.bot, chat_id, "⏳ Buying…")
     try:
-        card = analyze(query)
+        card = await asyncio.to_thread(analyze, query)
     except PriceFetchError as exc:
-        await update.effective_message.reply_text(str(exc))
+        await _done(context.bot, chat_id, status, str(exc))
         return
-    live_msg = _live_buy_followup(update.effective_user.id, card, query, True, False)
-    await update.effective_message.reply_text(live_msg or "Buy sent.")
+    live_msg = await _off(uid, _live_buy_followup, uid, card, query, True, False, _busy=BUSY_MSG)
+    await _done(context.bot, chat_id, status, live_msg or "Buy sent.")
 
 
 async def positions_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1205,9 +1353,11 @@ def _token_mark_usd(mint: str) -> float:
     return float(_token_meta(mint).get("px") or 0)
 
 
-def _bag_panel(mint: str, amount: float, addr: str, uid: int) -> tuple[str, InlineKeyboardMarkup]:
-    short = mint[:44]
-    meta = _token_meta(mint)
+def _bag_panel(
+    mint: str, amount: float, addr: str, uid: int, meta: dict | None = None, venue_override: str = ""
+) -> tuple[str, InlineKeyboardMarkup]:
+    short = mint[:48]  # TON addresses are 48 chars
+    meta = meta if meta is not None else _token_meta(mint)
     px = float(meta.get("px") or 0)
     symbol = (meta.get("symbol") or "").upper()
     name = meta.get("name") or ""
@@ -1225,9 +1375,14 @@ def _bag_panel(mint: str, amount: float, addr: str, uid: int) -> tuple[str, Inli
         else:
             href = f"https://etherscan.io/token/{mint}"
             venue = chain.upper() or "EVM"
+    elif mint.startswith(("EQ", "UQ", "kQ")):
+        href = f"https://tonviewer.com/{mint}"
+        venue = "TON"
     else:
         href = f"https://solscan.io/token/{mint}"
         venue = "SOL"
+    if venue_override:
+        venue = venue_override
     title = symbol or name or "TOKEN"
     if name and symbol and name.upper() != symbol:
         title = f"{html.escape(name)} (${html.escape(symbol)})"
@@ -1282,6 +1437,10 @@ def _bag_panel(mint: str, amount: float, addr: str, uid: int) -> tuple[str, Inli
             [
                 InlineKeyboardButton("📡 Score", callback_data=f"sig:{short}"),
                 InlineKeyboardButton("💵 Buy more", callback_data=f"buy:{short}"),
+            ],
+            [
+                InlineKeyboardButton("🔄 Refresh", callback_data=f"bagr:{short}"),
+                InlineKeyboardButton("📸 PnL card", callback_data=f"pnlc:{short}"),
             ],
         ]
     )
@@ -1599,56 +1758,81 @@ async def cancellimit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await update.effective_message.reply_text("Cancelled.")
 
 
-async def bag_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await guard(update):
-        return
-    sol_secret, _evm = user_wallets.secrets(update.effective_user.id)
-    try:
-        kp = signer.keypair_from_secret(sol_secret)
-        addr = str(kp.pubkey())
-        rows = signer.holdings(sol_secret)
-        lamports = signer.sol_balance_lamports(addr)
-    except Exception as exc:
-        await update.effective_message.reply_text(str(exc))
-        return
-    uid = update.effective_user.id
-    total_worth = 0.0
-    total_cost = 0.0
-    priced_positions = 0
-    for row in rows[:6]:
-        px = _token_mark_usd(row["mint"])
-        worth = float(row["amount"] or 0) * px
-        cost = db.live_cost(uid, row["mint"])
+def _bag_position_amount(uid: int, mint: str) -> tuple[float, str, str]:
+    """(token amount, wallet address, venue label) for one mint. Blocking."""
+    sol_secret, _evm = user_wallets.secrets(uid)
+    if mint.startswith(("EQ", "UQ", "kQ")):
+        import ton_signer
+
+        amount, owner = ton_signer.jetton_holding(sol_secret, mint)
+        return amount, owner, "TON"
+    if mint.startswith("0x"):
+        evm_addr = (db.get_user_wallet(uid) or {}).get("evm_pub") or ""
+        for cid in _EVM_SCAN:
+            try:
+                raw = evm_signer._erc20_balance(CHAINS[cid]["rpc"], mint, evm_addr)
+            except Exception:
+                raw = 0
+            if raw > 0:
+                return raw / 10**18, evm_addr, cid.upper()
+        return 0.0, evm_addr, "EVM"
+    addr = str(signer.keypair_from_secret(sol_secret).pubkey())
+    for row in signer.holdings(sol_secret):
+        if row.get("mint") == mint:
+            return float(row.get("amount") or 0), addr, "SOL"
+    return 0.0, addr, "SOL"
+
+
+def _bag_build(uid: int) -> tuple[str, list[tuple[str, InlineKeyboardMarkup]]]:
+    """Everything /bag needs, fetched in one blocking pass (run via to_thread).
+    Each token is priced once and the same mark feeds both the portfolio total
+    and its panel."""
+    sol_secret, _evm = user_wallets.secrets(uid)
+    kp = signer.keypair_from_secret(sol_secret)
+    addr = str(kp.pubkey())
+    rows = signer.holdings(sol_secret)
+    lamports = signer.sol_balance_lamports(addr)
+    positions: list[tuple[str, float, str, str]] = [
+        (r["mint"], float(r["amount"] or 0), addr, "") for r in rows[:6]
+    ]
+    evm_addr = (db.get_user_wallet(uid) or {}).get("evm_pub") or ""
+    if evm_addr:
+        for mint in db.live_mints(uid):
+            if not str(mint).startswith("0x"):
+                continue
+            for cid in _EVM_SCAN:
+                try:
+                    raw = evm_signer._erc20_balance(CHAINS[cid]["rpc"], mint, evm_addr)
+                except Exception:
+                    raw = 0
+                if raw > 0:
+                    positions.append((mint, raw / 10**18, evm_addr, cid.upper()))
+                    break
+    for mint in db.live_mints(uid):
+        if not str(mint).startswith(("EQ", "UQ", "kQ")):
+            continue
+        try:
+            amount, owner, venue = _bag_position_amount(uid, mint)
+        except Exception:
+            logger.exception("TON bag lookup failed for %s", mint)
+            continue
+        if amount > 0:
+            positions.append((mint, amount, owner, venue))
+    total_worth = total_cost = 0.0
+    priced = 0
+    panels: list[tuple[str, InlineKeyboardMarkup]] = []
+    for mint, amount, owner, venue in positions:
+        meta = _token_meta(mint)
+        worth = amount * float(meta.get("px") or 0)
+        cost = db.live_cost(uid, mint)
         if worth > 0:
             total_worth += worth
             if cost > 0:
                 total_cost += cost
-                priced_positions += 1
-    evm_addr_for_totals = (db.get_user_wallet(uid) or {}).get("evm_pub") or ""
-    evm_worth_seen: set[str] = set()
-    if evm_addr_for_totals:
-        for mint in db.live_mints(uid):
-            if not str(mint).startswith("0x") or mint in evm_worth_seen:
-                continue
-            for cid in ("eth", "base", "bsc", "hood", "arb", "avax"):
-                try:
-                    raw = evm_signer._erc20_balance(CHAINS[cid]["rpc"], mint, evm_addr_for_totals)
-                except Exception:
-                    raw = 0
-                if raw <= 0:
-                    continue
-                evm_worth_seen.add(mint)
-                px = _token_mark_usd(mint)
-                worth = (raw / 10**18) * px
-                cost = db.live_cost(uid, mint)
-                if worth > 0:
-                    total_worth += worth
-                    if cost > 0:
-                        total_cost += cost
-                        priced_positions += 1
-                break
+                priced += 1
+        panels.append(_bag_panel(mint, amount, owner, uid, meta=meta, venue_override=venue))
     summary = f"🎒 <b>Wallet positions</b> · SOL\n💰 {lamports / 1e9:.6f} SOL\n<code>{html.escape(addr)}</code>"
-    if priced_positions > 0:
+    if priced > 0:
         total_pnl = total_worth - total_cost
         total_pct = (total_pnl / total_cost) * 100 if total_cost > 0 else 0.0
         mark = "🟢" if total_pnl >= 0 else "🔴"
@@ -1656,33 +1840,109 @@ async def bag_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             f"\n\n{mark} <b>Portfolio PnL {total_pnl:+,.2f} USD ({total_pct:+.1f}%)</b>\n"
             f"📥 Cost ${total_cost:,.2f}   💰 Worth ${total_worth:,.2f}"
         )
-        if priced_positions < len(rows[:6]) + len(evm_worth_seen):
+        if priced < len(positions):
             summary += "\n<i>Only counts positions bought live through Ferzan.</i>"
-    await update.effective_message.reply_text(summary, parse_mode="HTML")
-    if not rows:
-        await update.effective_message.reply_text("No SPL tokens yet.")
-    for row in rows[:6]:
-        text, kb = _bag_panel(row["mint"], row["amount"], addr, uid)
+    if not positions:
+        summary += "\n\nNo tokens yet. Paste a CA to buy."
+    return summary, panels
+
+
+def _is_bag_panel(message) -> bool:
+    try:
+        rows = message.reply_markup.inline_keyboard
+    except Exception:
+        return False
+    return any(
+        str(getattr(b, "callback_data", "") or "").startswith("bagr:")
+        for row in rows
+        for b in row
+    )
+
+
+async def _refresh_bag_panel(query, uid: int, mint: str, quiet: bool = False) -> None:
+    """Re-render one /bag panel in place with fresh balance + mark."""
+    if quiet:
+        # Give the chain a moment to reflect the sell before re-reading balance.
+        await asyncio.sleep(4)
+    try:
+        amount, owner, venue = await asyncio.to_thread(_bag_position_amount, uid, mint)
+        text, kb = await asyncio.to_thread(_bag_panel, mint, amount, owner, uid, None, venue)
+        stamp = time.strftime("%H:%M:%S", time.gmtime())
+        await query.edit_message_text(
+            f"{text}\n<i>Updated {stamp} UTC</i>",
+            parse_mode="HTML",
+            reply_markup=kb,
+            disable_web_page_preview=True,
+        )
+    except Exception as exc:
+        if quiet or "not modified" in str(exc).lower():
+            return
+        try:
+            await query.message.reply_text(f"Refresh failed: {exc}")
+        except Exception:
+            pass
+
+
+def _pnl_card_bytes(uid: int, mint: str) -> tuple[bytes | None, str]:
+    """Blocking. Returns (png, caption) or (None, reason)."""
+    cost = db.live_cost(uid, mint)
+    if cost <= 0:
+        return None, "📸 PnL cards are for positions bought live through Ferzan (no cost basis on this one)."
+    amount, _owner, venue = _bag_position_amount(uid, mint)
+    meta = _token_meta(mint)
+    worth = amount * float(meta.get("px") or 0)
+    if worth <= 0:
+        return None, "📸 No live mark for this token right now — try again in a minute."
+    import pnl_card
+
+    bot_name = os.getenv("FERZAN_BOT_USERNAME", "").strip()
+    footer = f"Trade on Ferzan  ·  t.me/{bot_name}?start=ref_{uid}" if bot_name else "Trade on Ferzan"
+    symbol = meta.get("symbol") or ""
+    png = pnl_card.render(symbol=symbol, chain=venue, cost_usd=cost, worth_usd=worth, footer=footer)
+    pnl = worth - cost
+    caption = f"${symbol.upper() or 'TOKEN'} · {pnl:+,.2f} USD ({pnl / cost * 100:+.1f}%)"
+    if bot_name:
+        caption += f"\nTrade with me on Ferzan: https://t.me/{bot_name}?start=ref_{uid}"
+    return png, caption
+
+
+async def _send_pnl_card(bot, uid: int, mint: str) -> None:
+    status = await _progress(bot, uid, "📸 Rendering your PnL card…")
+    try:
+        png, caption = await asyncio.to_thread(_pnl_card_bytes, uid, mint)
+    except Exception as exc:
+        logger.exception("pnl card failed")
+        await _done(bot, uid, status, f"📸 Couldn't render the card: {exc}")
+        return
+    if png is None:
+        await _done(bot, uid, status, caption)
+        return
+    import io
+
+    try:
+        await bot.send_photo(uid, photo=io.BytesIO(png), caption=caption)
+        if status is not None:
+            await status.delete()
+    except Exception as exc:
+        await _done(bot, uid, status, f"📸 Couldn't send the card: {exc}")
+
+
+async def bag_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard(update):
+        return
+    uid = update.effective_user.id
+    chat_id = update.effective_chat.id
+    status = await _progress(context.bot, chat_id, "🎒 Loading your bag…")
+    try:
+        summary, panels = await asyncio.to_thread(_bag_build, uid)
+    except Exception as exc:
+        await _done(context.bot, chat_id, status, str(exc))
+        return
+    await _done(context.bot, chat_id, status, summary, parse_mode="HTML")
+    for text, kb in panels:
         await update.effective_message.reply_text(
             text, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True
         )
-    evm_addr = (db.get_user_wallet(uid) or {}).get("evm_pub") or ""
-    for mint in db.live_mints(uid):
-        if not str(mint).startswith("0x") or not evm_addr:
-            continue
-        for cid in ("eth", "base", "bsc", "hood", "arb", "avax"):
-            try:
-                raw = evm_signer._erc20_balance(CHAINS[cid]["rpc"], mint, evm_addr)
-            except Exception:
-                raw = 0
-            if raw <= 0:
-                continue
-            text, kb = _bag_panel(mint, raw / 10**18, evm_addr, uid)
-            text = text.replace("· SOL", f"· {cid.upper()}")
-            await update.effective_message.reply_text(
-                text, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True
-            )
-            break
 
 
 async def livesell_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1691,13 +1951,21 @@ async def livesell_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not context.args:
         await update.effective_message.reply_text("Usage: /livesell <solana-mint>\nSee /bag")
         return
-    sol_secret, _evm = user_wallets.secrets(update.effective_user.id)
-    _ok, msg = signer.sell_sol(
+    uid = update.effective_user.id
+    chat_id = update.effective_chat.id
+    status = await _progress(context.bot, chat_id, "⏳ Selling…")
+    sol_secret, _evm = user_wallets.secrets(uid)
+    ok, msg = await _off(
+        uid,
+        signer.sell_sol,
         context.args[0].strip(),
         secret=sol_secret,
-        slip_bps=_slip_bps(update.effective_user.id, "sell"),
+        slip_bps=_slip_bps(uid, "sell"),
+        _busy=(False, BUSY_MSG),
     )
-    await update.effective_message.reply_text(msg)
+    if ok:
+        db.clear_live_cost(uid, context.args[0].strip())
+    await _done(context.bot, chat_id, status, _trade_result("sell", ok, "SOL", msg, pct=100))
 
 
 async def livesellevm_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1710,9 +1978,17 @@ async def livesellevm_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         chain, token = "eth", context.args[0]
     else:
         chain, token = context.args[0], context.args[1]
-    _sol, evm_secret = user_wallets.secrets(update.effective_user.id)
-    _ok, msg = evm_signer.sell_evm(chain, token, key_hex=evm_secret)
-    await update.effective_message.reply_text(msg)
+    uid = update.effective_user.id
+    chat_id = update.effective_chat.id
+    status = await _progress(context.bot, chat_id, "⏳ Selling…")
+    _sol, evm_secret = user_wallets.secrets(uid)
+    ok, msg = await _off(uid, evm_signer.sell_evm, chain, token, key_hex=evm_secret, _busy=(False, BUSY_MSG))
+    if ok:
+        db.clear_live_cost(uid, token)
+    await _done(
+        context.bot, chat_id, status,
+        _trade_result("sell", ok, (resolve_chain(chain) or chain).upper(), msg, pct=100),
+    )
 
 
 async def sell_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1728,7 +2004,8 @@ async def sell_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     ok, msg = trading.paper_close(update.effective_user.id, pos_id, reason="manual")
     await update.effective_message.reply_text(msg)
-    live = _live_sell_position(update.effective_user.id, pos_id)
+    uid = update.effective_user.id
+    live = await _off(uid, _live_sell_position, uid, pos_id, 100, True, _busy=BUSY_MSG)
     if live:
         await update.effective_message.reply_text(live)
 
@@ -2011,7 +2288,7 @@ async def watchwallet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     label = " ".join(context.args[2:]) if len(context.args) > 2 else None
     try:
         chain = onchain.normalize_chain(chain_raw)
-        events = onchain.recent_activity(chain, address, limit=3)
+        events = await asyncio.to_thread(onchain.recent_activity, chain, address, 3)
     except OnchainError as exc:
         await update.effective_message.reply_text(str(exc))
         return
@@ -2023,7 +2300,8 @@ async def watchwallet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         db.set_wallet_cursor(wid, events[0].txid)
     preview = "\n".join(f"• {e.summary}" for e in events[:3]) or "No recent prints."
     await update.effective_message.reply_text(
-        f"Watching wallet #{wid} on {chain}\n{address}\n{preview}"
+        f"Watching wallet #{wid} on {chain}\n{address}\n{preview}\n\n"
+        f"👁 Alerts only. To copy its buys: /copy {wid} on  (or tap it in /wallets)"
     )
 
 
@@ -2375,7 +2653,7 @@ async def disperse_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     sol_secret, _evm = user_wallets.secrets(update.effective_user.id)
     try:
         kp = signer.keypair_from_secret(sol_secret)
-        bag = signer.sol_balance_lamports(str(kp.pubkey()))
+        bag = await asyncio.to_thread(signer.sol_balance_lamports, str(kp.pubkey()))
     except Exception as exc:
         await update.effective_message.reply_text(str(exc))
         return
@@ -2410,15 +2688,118 @@ async def collectevm_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 async def wallets_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update):
         return
-    rows = db.list_watched_wallets(update.effective_user.id)
+    text, kb = _wallets_panel(update.effective_user.id)
+    await update.effective_message.reply_text(
+        text, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True
+    )
+
+
+_COPY_SIZES = [0, 10, 25, 50, 100, 250]  # 0 = your default buy size
+
+# Defaults for db.flag_on — must match what settings_cmd displays.
+_FLAG_DEFAULTS = {
+    "rug_buy": 1,
+    "honeypot": 1,
+    "anti_mev": 1,
+    "lp_watch": 0,
+    "score_gate": 0,
+    "auto_buy": 0,
+    "copy_live": 0,
+}
+
+
+def _is_wallets_panel(message) -> bool:
+    try:
+        rows = message.reply_markup.inline_keyboard
+    except Exception:
+        return False
+    return any(str(getattr(b, "callback_data", "") or "").startswith("cpy:") for row in rows for b in row)
+
+
+def _wallets_panel(uid: int) -> tuple[str, InlineKeyboardMarkup | None]:
+    rows = db.list_watched_wallets(uid)
+    master = db.flag_on(uid, "copy_live", 0)
+    default_usd = _default_buy_usd(uid)
     if not rows:
-        await update.effective_message.reply_text("No watched wallets. /watchwallet sol <addr>")
-        return
+        return (
+            "👁 <b>Watched wallets</b>\n\nNone yet.\n"
+            "/watchwallet sol &lt;address&gt; [label] — or browse /smartmoney",
+            None,
+        )
     lines = [
-        f"#{r['id']} {r['chain']} {r['address'][:10]}… {r['label'] or ''}".strip()
-        for r in rows
+        "👯 <b>Copy trading</b>",
+        f"Master switch: {'🟢 ON' if master else '🔴 OFF'}  (applies to wallets marked Copy ON)",
+        "",
     ]
-    await update.effective_message.reply_text("Watched wallets:\n" + "\n".join(lines))
+    kb_rows = [[InlineKeyboardButton(
+        f"{'🟢' if master else '🔴'} Master copy switch", callback_data="flg:copy_live"
+    )]]
+    for r in rows:
+        wid = int(r["id"])
+        on = int(r.get("copy_on") or 0)
+        sells = int(r.get("copy_sells") or 0)
+        size = float(r.get("copy_usd") or 0)
+        size_txt = f"${size:g}" if size > 0 else f"default ${default_usd:g}"
+        label = html.escape(r.get("label") or r["address"][:8])
+        lines.append(
+            f"<b>#{wid} {label}</b> · {html.escape(r['chain'].upper())} · "
+            f"<code>{html.escape(r['address'][:6])}…{html.escape(r['address'][-4:])}</code>\n"
+            f"   {'👯 Copy ON' if on else '👁 Watch only'} · size {size_txt}"
+            f"{' · mirrors sells' if sells else ''}"
+        )
+        kb_rows.append([
+            InlineKeyboardButton(f"#{wid} {'🟢 Copy' if on else '⚪️ Copy'}", callback_data=f"cpy:t:{wid}"),
+            InlineKeyboardButton(f"💵 {size_txt if size > 0 else 'Default'}", callback_data=f"cpy:z:{wid}"),
+            InlineKeyboardButton(f"{'🟢' if sells else '⚪️'} Sells", callback_data=f"cpy:s:{wid}"),
+            InlineKeyboardButton("🗑", callback_data=f"cpy:d:{wid}"),
+        ])
+    lines += [
+        "",
+        "<i>Copy buys go through your rug / honeypot guards. A token is copied once "
+        "per wallet. Mirrored sells only touch tokens bought by copying that wallet.</i>",
+        "<i>Exact size: /copy &lt;id&gt; &lt;usd&gt;</i>",
+    ]
+    return "\n".join(lines), InlineKeyboardMarkup(kb_rows)
+
+
+async def copy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard(update):
+        return
+    uid = update.effective_user.id
+    args = context.args or []
+    if len(args) < 2:
+        await update.effective_message.reply_text(
+            "Usage:\n/copy <id> <usd>   — copy size for that wallet (0 = your default)\n"
+            "/copy <id> on|off  — copy that wallet\n"
+            "/copy <id> sells on|off\nSee /wallets for ids."
+        )
+        return
+    try:
+        wid = int(args[0].lstrip("#"))
+    except ValueError:
+        await update.effective_message.reply_text("Wallet id must be a number. See /wallets.")
+        return
+    if not db.get_watched_wallet(wid, uid):
+        await update.effective_message.reply_text("No such wallet id. See /wallets.")
+        return
+    a1 = args[1].lower()
+    if a1 in {"on", "off"}:
+        db.set_wallet_copy(wid, uid, copy_on=1 if a1 == "on" else 0)
+    elif a1 == "sells" and len(args) > 2 and args[2].lower() in {"on", "off"}:
+        db.set_wallet_copy(wid, uid, copy_sells=1 if args[2].lower() == "on" else 0)
+    else:
+        try:
+            usd = float(a1.replace("$", ""))
+        except ValueError:
+            await update.effective_message.reply_text("Send a dollar amount, on/off, or sells on/off.")
+            return
+        cap = signer.max_usd()
+        if usd < 0 or usd > cap:
+            await update.effective_message.reply_text(f"Size must be between 0 and ${cap:g}.")
+            return
+        db.set_wallet_copy(wid, uid, copy_usd=usd)
+    text, kb = _wallets_panel(uid)
+    await update.effective_message.reply_text(text, parse_mode="HTML", reply_markup=kb)
 
 
 async def unwatchwallet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2549,7 +2930,7 @@ async def snipe_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "This is not a private-mempool first-block snipe."
     )
     armed = next((r for r in db.active_snipes(update.effective_user.id) if r["id"] == sid), None)
-    status, msg = sniper.try_fill(armed) if armed else ("armed", "")
+    status, msg = await asyncio.to_thread(sniper.try_fill, armed) if armed else ("armed", "")
     if status == "filled":
         await update.effective_message.reply_text("Immediate fill\n" + msg)
     elif status == "miss":
@@ -2654,7 +3035,79 @@ async def chains_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 _PROMO_TS: dict[int, float] = {}
 
 
+class DeadChat(Exception):
+    """Telegram refused this chat. `permanent` = the chat is gone (deleted,
+    bot kicked/blocked) and retrying won't help; otherwise the bot is only
+    restricted there (no send rights) and an admin can fix it."""
+
+    def __init__(self, msg: str, permanent: bool = True):
+        super().__init__(msg)
+        self.permanent = permanent
+
+
+class ChatMoved(Exception):
+    """Group was upgraded to a supergroup; Telegram gave us the new id."""
+
+    def __init__(self, new_chat_id: int):
+        super().__init__(f"migrated to {new_chat_id}")
+        self.new_chat_id = int(new_chat_id)
+
+
+_GONE_MARKERS = (
+    "chat not found",
+    "bot was kicked",
+    "bot was blocked",
+    "bot is not a member",
+    "user is deactivated",
+    "chat was deleted",
+)
+_RESTRICTED_MARKERS = (
+    "have no rights to send",
+    "not enough rights",
+    "chat_write_forbidden",
+    "need administrator rights",
+)
+
+# Launch + pulse jobs can each count a failure in one cycle, so 5 ≈ 3 cycles.
+FEED_MUTE_AFTER = int(os.getenv("FEED_MUTE_AFTER", "5"))
+FEED_RETRY_MUTED_S = 3600  # restricted (not gone) chats get one retry per hour
+
+
+def _dead_chat_kind(exc: Exception) -> str | None:
+    """'gone' | 'restricted' | None (transient: flood-wait, network, too long…)."""
+    text = str(exc).lower()
+    if any(m in text for m in _RESTRICTED_MARKERS):
+        return "restricted"
+    if any(m in text for m in _GONE_MARKERS):
+        return "gone"
+    if type(exc).__name__ == "Forbidden":
+        return "gone"  # kicked / blocked surface as Forbidden
+    return None
+
+
+def _is_dead_chat_error(exc: Exception) -> bool:
+    return _dead_chat_kind(exc) is not None
+
+
+def _feed_muted(chat_id: int) -> bool:
+    fails, last = db.feed_fail_info(int(chat_id))
+    return fails >= FEED_MUTE_AFTER and (time.time() - last) < FEED_RETRY_MUTED_S
+
+
 async def send_launch(bot, chat_id: int, text: str, markup, promo: bool = True) -> None:
+    try:
+        await _send_launch(bot, chat_id, text, markup, promo)
+    except Exception as exc:
+        new_id = getattr(exc, "new_chat_id", None)
+        if new_id:  # telegram.error.ChatMigrated
+            raise ChatMoved(int(new_id)) from exc
+        kind = _dead_chat_kind(exc)
+        if kind:
+            raise DeadChat(str(exc), permanent=(kind == "gone")) from exc
+        raise
+
+
+async def _send_launch(bot, chat_id: int, text: str, markup, promo: bool = True) -> None:
     clip = PROMO_PATH if promo and PROMO_PATH.exists() else None
     want_gif = (
         bool(clip)
@@ -2681,6 +3134,10 @@ async def send_launch(bot, chat_id: int, text: str, markup, promo: bool = True) 
             disable_web_page_preview=True,
         )
     except Exception as exc:
+        if _is_dead_chat_error(exc) or getattr(exc, "new_chat_id", None):
+            # Let the caller count it / migrate the chat instead of logging a
+            # full traceback on every single card.
+            raise
         name = type(exc).__name__
         wait = float(getattr(exc, "retry_after", 0) or 0)
         if wait > 0:
@@ -2925,6 +3382,42 @@ async def treasury_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await fees_cmd(update, context)
 
 
+async def health_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard(update):
+        return
+    uid = update.effective_user.id
+    if not (_is_admin(uid) or _is_operator(uid)):
+        await update.effective_message.reply_text("Operator only.")
+        return
+    import health
+
+    status = await _progress(context.bot, update.effective_chat.id, "🩺 Checking every service…")
+    checks = await asyncio.to_thread(health.run_checks)
+    extra = [
+        f"Live buys: {'ON' if signer.live_enabled() else 'OFF (LIVE_BUYS=0)'}",
+        f"Auto-trading kill switch: {'ENGAGED' if _auto_trading_killed() else 'off'}",
+    ]
+    try:
+        with db.get_conn() as conn:
+            muted = conn.execute(
+                "SELECT chat_id, last_error FROM feed_failures WHERE fails >= ?", (FEED_MUTE_AFTER,)
+            ).fetchall()
+        if muted:
+            extra.append(f"Muted feed chats: {len(muted)}")
+            for r in muted[:5]:
+                extra.append(f"  · {r['chat_id']}: {html.escape(str(r['last_error'] or ''))[:60]}")
+    except Exception:
+        pass
+    await _done(
+        context.bot,
+        update.effective_chat.id,
+        status,
+        health.render(checks, extra),
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+    )
+
+
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update):
         return
@@ -2939,22 +3432,23 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         except ValueError:
             await update.effective_message.reply_text("Send a number. Example: 0.05")
             return
+        uid = update.effective_user.id
+        chat_id = update.effective_chat.id
+        status = await _progress(context.bot, chat_id, "⏳ Buying…")
         try:
-            card = analyze(pending)
+            card = await asyncio.to_thread(analyze, pending)
         except Exception as exc:
-            await update.effective_message.reply_text(str(exc))
+            await _done(context.bot, chat_id, status, str(exc))
             return
         cid = resolve_chain(card.snapshot.chain) or "sol"
         gecko = {"sol": "solana", "bsc": "binancecoin", "avax": "avalanche-2"}.get(cid, "ethereum")
         try:
-            px = get_price_usd(gecko)
+            px = await asyncio.to_thread(get_price_usd, gecko)
         except Exception:
             px = 0
-        usd_o = amt * px if px > 0 else _default_buy_usd(update.effective_user.id)
-        live_msg = _live_buy_followup(
-            update.effective_user.id, card, pending, True, True, usd_override=usd_o
-        )
-        await update.effective_message.reply_text(f"{amt:g} native ≈ ${usd_o:.2f}\n{live_msg}")
+        usd_o = amt * px if px > 0 else _default_buy_usd(uid)
+        live_msg = await _off(uid, _live_buy_followup, uid, card, pending, True, True, usd_override=usd_o, _busy=BUSY_MSG)
+        await _done(context.bot, chat_id, status, f"{amt:g} native ≈ ${usd_o:.2f}\n{live_msg}")
         return
     if len(text) > 80:
         return
@@ -2971,12 +3465,15 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     looks = (text.startswith("0x") and len(text) == 42) or (len(text) >= 32 and " " not in text)
     if not looks:
         return
+    chat_id = update.effective_chat.id
+    status = await _progress(context.bot, chat_id, f"⏳ Auto-buy ${usd:.0f}…")
     try:
-        card = analyze(text)
-    except Exception:
+        card = await asyncio.to_thread(analyze, text)
+    except Exception as exc:
+        await _done(context.bot, chat_id, status, f"⚡️ Auto-buy skipped: {exc}")
         return
-    live_msg = _live_buy_followup(uid, card, text, True, True, usd_override=usd)
-    await update.effective_message.reply_text(f"⚡️ Auto-buy ${usd:.0f}\n{live_msg}")
+    live_msg = await _off(uid, _live_buy_followup, uid, card, text, True, True, usd_override=usd, _busy=BUSY_MSG)
+    await _done(context.bot, chat_id, status, f"⚡️ Auto-buy ${usd:.0f}\n{live_msg}")
 
 
 BRIDGE = {
@@ -3120,6 +3617,17 @@ async def bridge_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await update.effective_message.reply_text(
         _bridge_text(uid, st), parse_mode="HTML", reply_markup=_bridge_kb(st, uid)
     )
+
+
+
+async def _safe_answer(query, text: str | None = None) -> None:
+    """on_callback already answered the query up front; Telegram rejects a
+    second answer, so turn follow-up answers into best-effort no-ops that
+    can't abort the handler before its real work/confirmation runs."""
+    try:
+        await query.answer(text)
+    except Exception:
+        pass
 
 
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3313,7 +3821,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if cid == "sol":
             addr = row["sol_pub"]
             try:
-                lamports = signer.sol_balance_lamports(addr)
+                lamports = await asyncio.to_thread(signer.sol_balance_lamports, addr)
                 bal_line = f"{lamports / 1_000_000_000:.6f} SOL"
             except Exception:
                 bal_line = "—"
@@ -3327,31 +3835,36 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 addr = row["evm_pub"]
             bal_line = "Fund TRX + energy"
         elif cid == "ton":
-            addr = "STON.fi quotes live · send after pytoniq"
-            bal_line = "TON wallet next"
+            try:
+                import ton_signer
+
+                sol_secret, _ = user_wallets.secrets(uid)
+                addr, ton_bal = await asyncio.to_thread(ton_signer.address_and_balance, sol_secret)
+                bal_line = f"{ton_bal:.6f} TON"
+            except Exception as exc:
+                logger.info("ton wallet lookup failed for %s: %s", uid, exc)
+                # Never fall back to another chain's address here — someone
+                # would send TON to it.
+                await context.bot.send_message(
+                    uid, "💠 TON wallet lookup failed (liteserver busy). Tap TON again in a few seconds."
+                )
+                return
         else:
             addr = row["evm_pub"]
             try:
-                amt, sym = evm_signer.native_balance(cid, addr)
+                amt, sym = await asyncio.to_thread(evm_signer.native_balance, cid, addr)
                 bal_line = f"{amt:.6f} {sym}"
             except Exception:
                 bal_line = f"— {native}"
-        if cid == "ton":
-            text = (
-                f"{mark} <b>TON</b>\n"
-                "STON.fi quotes are live. Paste an EQ… jetton to buy.\n"
-                "Send path: pytoniq is on the droplet.\n"
-                "Dedicated TON deposit address ships next."
-            )
-        else:
-            href = (meta.get("explorer_addr") or "{addr}").format(addr=addr)
-            text = (
-                f"{mark} <a href=\"{_esc(href)}\"><b>{_esc(label)}</b></a>\n"
-                f"<code>{_esc(addr)}</code>\n"
-                f"🟢 Balance {_esc(bal_line)}\n\n"
-                f"<i>Blue name opens the explorer. Tap the address to copy.</i>\n"
-                f"Gas in {_esc(native)}. Paste a {_esc(label)} CA to buy."
-            )
+        href = (meta.get("explorer_addr") or "{addr}").format(addr=addr)
+        text = (
+            f"{mark} <a href=\"{_esc(href)}\"><b>{_esc(label)}</b></a>\n"
+            f"<code>{_esc(addr)}</code>\n"
+            f"🟢 Balance {_esc(bal_line)}\n\n"
+            f"<i>Blue name opens the explorer. Tap the address to copy.</i>\n"
+            f"Gas in {_esc(native)}. Paste a {_esc(label)} CA to buy."
+        )
+
         await context.bot.send_message(
             uid,
             text,
@@ -3483,37 +3996,22 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             pct = int(pct_s)
         except ValueError:
             pct = 100
-        sol_secret, evm_secret = user_wallets.secrets(uid)
-        if mint.startswith("T") and 30 <= len(mint) <= 36:
-            import tron_signer
-
-            _ok, msg = tron_signer.sell_tron(mint, key_hex=evm_secret)
-        elif mint.startswith(("EQ", "UQ", "kQ")):
-            import ton_signer
-
-            _ok, msg = ton_signer.sell_ton(mint, secret=sol_secret)
-        elif mint.startswith("0x"):
-            chain = "base"
-            evm_addr = (db.get_user_wallet(uid) or {}).get("evm_pub") or ""
-            for cid in ("eth", "base", "bsc", "hood", "arb", "avax"):
-                try:
-                    raw = evm_signer._erc20_balance(CHAINS[cid]["rpc"], mint, evm_addr)
-                except Exception:
-                    raw = 0
-                if raw > 0:
-                    chain = cid
-                    break
-            _ok, msg = evm_signer.sell_evm(chain, mint, key_hex=evm_secret, pct=pct)
-        else:
-            _ok, msg = signer.sell_sol(
-                mint, secret=sol_secret, pct=pct, slip_bps=_slip_bps(uid, "sell")
-            )
-        await context.bot.send_message(uid, f"{'🟢' if _ok else '🔴'} Sell {pct}% · {chain if mint.startswith('0x') else 'SOL'}\n{msg}")
+        status = await _progress(context.bot, uid, f"⏳ Selling {pct}%…")
+        ok, msg, label = await _off(uid, _sell_any, uid, mint, pct, _busy=(False, BUSY_MSG, ""))
+        await _done(context.bot, uid, status, _trade_result("sell", ok, label, msg, pct=pct))
+        if ok and _is_bag_panel(query.message):
+            await _refresh_bag_panel(query, uid, mint, quiet=True)
+        return
+    if data.startswith("bagr:"):
+        await _refresh_bag_panel(query, uid, data[5:])
+        return
+    if data.startswith("pnlc:"):
+        await _send_pnl_card(context.bot, uid, data[5:])
         return
     if data.startswith("blm:"):
         mint = data[4:]
         try:
-            card = analyze(mint)
+            card = await asyncio.to_thread(analyze, mint)
             px = float(card.snapshot.price_usd or 0)
         except Exception as exc:
             await context.bot.send_message(uid, str(exc))
@@ -3573,7 +4071,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             return
         now = not db.flag_on(uid, f"feed_{cid}", 1)
         db.set_flag(uid, f"feed_{cid}", now)
-        await query.answer("Saved")
+        await _safe_answer(query, "Saved")
         try:
             await query.edit_message_reply_markup(reply_markup=_feeds_keyboard(uid))
         except Exception:
@@ -3585,7 +4083,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             user = db.get_user(uid) or {}
             on = not bool(user.get("alerts_on"))
             db.update_user(uid, alerts_on=1 if on else 0)
-            await query.answer("Saved")
+            await _safe_answer(query, "Saved")
             await context.bot.send_message(uid, f"{'🟢' if on else '🔴'} DM launch alerts")
             return
         if flag not in {
@@ -3598,13 +4096,59 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             "copy_live",
         }:
             return
-        now = not db.flag_on(uid, flag, 1)
+        # Read with the SAME default the rest of the bot uses for this flag,
+        # otherwise the first tap on a never-set default-OFF flag writes OFF.
+        now = not db.flag_on(uid, flag, _FLAG_DEFAULTS.get(flag, 0))
         db.set_flag(uid, flag, now)
-        await query.answer("Saved")
+        if flag == "copy_live" and _is_wallets_panel(query.message):
+            text, kb = _wallets_panel(uid)
+            try:
+                await query.edit_message_text(text, parse_mode="HTML", reply_markup=kb)
+            except Exception:
+                pass
+            return
         await context.bot.send_message(
             uid,
             f"{'🟢 ON' if now else '🔴 OFF'} {flag.replace('_', ' ')}",
         )
+        return
+    if data.startswith("cpy:"):
+        _tag, op, wid_s = (data.split(":", 2) + ["", ""])[:3]
+        try:
+            wid = int(wid_s)
+        except ValueError:
+            return
+        w = db.get_watched_wallet(wid, uid)
+        if not w:
+            return
+        if op == "t":
+            db.set_wallet_copy(wid, uid, copy_on=0 if int(w.get("copy_on") or 0) else 1)
+        elif op == "s":
+            db.set_wallet_copy(wid, uid, copy_sells=0 if int(w.get("copy_sells") or 0) else 1)
+        elif op == "z":
+            cur = float(w.get("copy_usd") or 0)
+            cap = signer.max_usd()
+            sizes = [s for s in _COPY_SIZES if s <= cap]
+            nxt = next((s for s in sizes if s > cur), sizes[0])
+            db.set_wallet_copy(wid, uid, copy_usd=nxt)
+        elif op == "d":
+            # Two-tap delete: first tap arms, second tap within 15s removes.
+            import time as _t
+
+            armed = context.user_data.get("cpy_del")
+            if not armed or armed[0] != wid or _t.monotonic() - armed[1] > 15:
+                context.user_data["cpy_del"] = (wid, _t.monotonic())
+                who = w.get("label") or (w.get("address") or "")[:8]
+                await context.bot.send_message(uid, f"🗑 Tap 🗑 again within 15s to stop watching {who}.")
+                return
+            context.user_data.pop("cpy_del", None)
+            db.delete_watched_wallet(wid, uid)
+            db.clear_copy_fills_for_wallet(uid, wid)
+        text, kb = _wallets_panel(uid)
+        try:
+            await query.edit_message_text(text, parse_mode="HTML", reply_markup=kb)
+        except Exception:
+            pass
         return
     if data.startswith("watch:"):
         name = data[6:]
@@ -3620,23 +4164,23 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         wallets = {w["id"]: w for w in db.list_curated_wallets()}
         w = wallets.get(wid)
         if not w:
-            await query.answer("Gone.")
+            await _safe_answer(query, "Gone.")
             return
         already = any(
             x["chain"] == w["chain"] and (x.get("address") or "").lower() == w["address"].lower()
             for x in db.list_watched_wallets(uid)
         )
         if already:
-            await query.answer("Already following.")
+            await _safe_answer(query, "Already following.")
             return
         new_id = db.add_watched_wallet(uid, w["chain"], w["address"], w["label"])
         try:
-            events = onchain.recent_activity(w["chain"], w["address"], limit=1)
+            events = await asyncio.to_thread(onchain.recent_activity, w["chain"], w["address"], 1)
             if events:
                 db.set_wallet_cursor(new_id, events[0].txid)
         except Exception:
             pass
-        await query.answer("Following")
+        await _safe_answer(query, "Following")
         await context.bot.send_message(uid, f"👁 Now following {w['label']} ({w['chain']}). DM ping when it moves.")
         return
     if data.startswith("bnv:"):
@@ -3645,10 +4189,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             amt = float(amt_s)
         except ValueError:
             amt = 0.05
+        status = await _progress(context.bot, uid, f"⏳ Buying {amt:g}…")
         try:
-            card = analyze(name)
+            card = await asyncio.to_thread(analyze, name)
         except PriceFetchError as exc:
-            await context.bot.send_message(uid, str(exc))
+            await _done(context.bot, uid, status, str(exc))
             return
         cid = resolve_chain(card.snapshot.chain) or "sol"
         gecko = {
@@ -3660,14 +4205,13 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             "avax": "avalanche-2",
         }.get(cid, "ethereum")
         try:
-            px = get_price_usd(gecko)
+            px = await asyncio.to_thread(get_price_usd, gecko)
         except Exception:
             px = 0
         usd_o = amt * px if px > 0 else _default_buy_usd(uid)
         usd_o = min(signer.max_usd(), max(1.0, usd_o))
-        live_msg = _live_buy_followup(uid, card, name, True, True, usd_override=usd_o)
-        if live_msg:
-            await context.bot.send_message(uid, f"{amt:g} native ≈ ${usd_o:.2f}\n{live_msg}")
+        live_msg = await _off(uid, _live_buy_followup, uid, card, name, True, True, usd_override=usd_o, _busy=BUSY_MSG)
+        await _done(context.bot, uid, status, f"{amt:g} native ≈ ${usd_o:.2f}\n{live_msg or ''}")
         return
     if data.startswith("buyz:"):
         _tag, usd_s, name = data.split(":", 2)
@@ -3675,26 +4219,26 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             usd_o = float(usd_s)
         except ValueError:
             usd_o = _default_buy_usd(uid)
+        status = await _progress(context.bot, uid, f"⏳ Buying ${usd_o:g}…")
         try:
-            card = analyze(name)
+            card = await asyncio.to_thread(analyze, name)
         except PriceFetchError as exc:
-            await context.bot.send_message(uid, str(exc))
+            await _done(context.bot, uid, status, str(exc))
             return
-        live_msg = _live_buy_followup(uid, card, name, True, True, usd_override=usd_o)
-        if live_msg:
-            await context.bot.send_message(uid, live_msg)
+        live_msg = await _off(uid, _live_buy_followup, uid, card, name, True, True, usd_override=usd_o, _busy=BUSY_MSG)
+        await _done(context.bot, uid, status, live_msg or "Buy sent.")
         return
     if data.startswith("buy:") or data.startswith("force:"):
         force = data.startswith("force:")
         name = data.split(":", 1)[1]
+        status = await _progress(context.bot, uid, "⏳ Buying…")
         try:
-            card = analyze(name)
+            card = await asyncio.to_thread(analyze, name)
         except PriceFetchError as exc:
-            await context.bot.send_message(uid, str(exc))
+            await _done(context.bot, uid, status, str(exc))
             return
-        live_msg = _live_buy_followup(uid, card, name, True, force)
-        if live_msg:
-            await context.bot.send_message(uid, live_msg)
+        live_msg = await _off(uid, _live_buy_followup, uid, card, name, True, force, _busy=BUSY_MSG)
+        await _done(context.bot, uid, status, live_msg or "Buy sent.")
         return
     if data.startswith("close:"):
         try:
@@ -3716,7 +4260,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         cur = db.get_chain_trade(uid, cid)
         nxt = {5: 10, 10: 15, 15: 25, 25: 50, 50: 5}.get(int(cur["buy_slip"]), 10)
         db.set_chain_trade(uid, cid, buy_slip=nxt, sell_slip=nxt)
-        await query.answer(f"{cid.upper()} slip {nxt}%")
+        await _safe_answer(query, f"{cid.upper()} slip {nxt}%")
         await context.bot.send_message(uid, f"🎚 {cid.upper()} buy/sell slip → {nxt}%")
         return
     if data.startswith("xgas:"):
@@ -3725,7 +4269,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         now = float(cur.get("gas") or 0)
         nxt = {0.0: 0.001, 0.001: 0.005, 0.005: 0.01, 0.01: 0.0}.get(round(now, 3), 0.005)
         db.set_chain_trade(uid, cid, gas=nxt)
-        await query.answer(f"{cid.upper()} gas tip {nxt}")
+        await _safe_answer(query, f"{cid.upper()} gas tip {nxt}")
         await context.bot.send_message(uid, f"⛽ {cid.upper()} priority tip → {nxt}")
         return
     if data.startswith("slc:"):
@@ -3742,28 +4286,35 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         try:
             kp = signer.keypair_from_secret(sol_secret)
             addr = str(kp.pubkey())
-            for row in signer.holdings(sol_secret):
+            for row in await asyncio.to_thread(signer.holdings, sol_secret):
                 if row.get("mint") == mint:
                     amount = float(row.get("amount") or 0)
                     break
         except Exception:
             pass
         try:
-            card = analyze(mint)
+            card = await asyncio.to_thread(analyze, mint)
             text = render_card(card, uid)
             chain = card.snapshot.chain or ""
         except Exception:
-            text = _bag_panel(mint, amount, addr, uid)[0]
+            text = (await asyncio.to_thread(_bag_panel, mint, amount, addr, uid))[0]
             chain = "sol"
         kb = sell_keyboard(mint, mint, chain, uid, amount)
         await context.bot.send_message(uid, text, reply_markup=kb, parse_mode="HTML")
         return
     if data.startswith("xsell:"):
+        # xsell:<pos_id>[:<pct>] — old buttons without a pct mean 100%.
+        parts = data.split(":")
         try:
-            pos_id = int(data.split(":", 1)[1])
-        except ValueError:
+            pos_id = int(parts[1])
+            pct = int(parts[2]) if len(parts) > 2 else 100
+        except (ValueError, IndexError):
             return
-        await context.bot.send_message(uid, _live_sell_position(uid, pos_id))
+        pct = max(1, min(100, pct))
+        status = await _progress(context.bot, uid, f"⏳ Selling {pct}%…")
+        await _done(
+            context.bot, uid, status, await _off(uid, _live_sell_position, uid, pos_id, pct, _busy=BUSY_MSG)
+        )
 
 
 async def check_alerts_job(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3772,7 +4323,7 @@ async def check_alerts_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     coin_ids = [a["coin_id"] for a in alerts]
     try:
-        prices = get_prices_usd(coin_ids)
+        prices = await asyncio.to_thread(get_prices_usd, coin_ids)
     except PriceFetchError as exc:
         logger.warning("Price poll failed: %s", exc)
         return
@@ -3802,7 +4353,7 @@ async def check_alerts_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
-    for notice in trading.mark_open_positions():
+    for notice in await asyncio.to_thread(trading.mark_open_positions):
         user_id, _pos_id, msg = notice
         try:
             await context.bot.send_message(user_id, "Auto-exit\n" + msg)
@@ -3816,7 +4367,7 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         floor = int(user["min_confluence"])
         for name in db.watchlist_of(user_id):
             try:
-                card = analyze(name)
+                card = await asyncio.to_thread(analyze, name)
             except PriceFetchError:
                 continue
             if card.bias != "LONG" or card.score < floor:
@@ -3838,7 +4389,7 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 async def wallet_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     for row in db.list_watched_wallets():
         try:
-            events = onchain.recent_activity(row["chain"], row["address"], limit=6)
+            events = await asyncio.to_thread(onchain.recent_activity, row["chain"], row["address"], 6)
         except Exception as exc:
             logger.info("wallet poll skip #%s: %s", row["id"], exc)
             continue
@@ -3867,36 +4418,50 @@ async def wallet_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             await context.bot.send_message(row["user_id"], "\n".join(lines)[:3500])
         except Exception:
             logger.exception("wallet notify failed for %s", row["user_id"])
-        blob = "\n".join(ev.summary for ev in fresh)
-        mint = ""
-        chain = (row.get("chain") or "").lower()
-        if "sol" in chain:
-            found = re.findall(r"[1-9A-HJ-NP-Za-km-z]{32,44}", blob)
-            mint = next((x for x in found if len(x) >= 32 and not x.startswith("0x")), "")
-        else:
-            found = re.findall(r"0x[a-fA-F0-9]{40}", blob)
-            mint = found[0] if found else ""
-        if mint and db.flag_on(int(row["user_id"]), "copy_live", 0):
-            try:
-                uid = int(row["user_id"])
-                sol_secret, evm_secret = user_wallets.secrets(uid)
-                usd = _default_buy_usd(uid)
-                if mint.startswith("0x"):
-                    _ok, live = evm_signer.buy_evm(
-                        chain or "base",
-                        mint,
-                        usd,
-                        key_hex=evm_secret,
-                        slip_bps=_slip_bps(uid, "buy", chain),
-                        user_id=uid,
-                    )
-                else:
-                    _ok, live = signer.buy_sol(
-                        mint, usd, secret=sol_secret, slip_bps=_slip_bps(uid, "buy", "sol")
-                    )
-                await context.bot.send_message(uid, f"👯 Live copy ${usd:.0f}\n{live}")
-            except Exception as exc:
-                logger.info("copy live skip: %s", exc)
+        try:
+            await _copy_wallet_moves(context, row, fresh)
+        except Exception:
+            logger.exception("copy-trade failed for wallet #%s", row.get("id"))
+
+
+async def _copy_wallet_moves(context: ContextTypes.DEFAULT_TYPE, row: dict, fresh: list) -> None:
+    """Copy-trade v2. Master switch = the user's global copy_live flag;
+    each watched wallet must also have copy_on. Buys go through the normal
+    live-buy path (rug / honeypot gates apply). A token already copied from
+    this wallet isn't re-bought. Sells are mirrored only when copy_sells is
+    on, and only for tokens this bot bought by copying THIS wallet."""
+    uid = int(row["user_id"])
+    wid = int(row["id"])
+    if not db.flag_on(uid, "copy_live", 0) or not int(row.get("copy_on") or 0):
+        return
+    if _auto_trading_killed():
+        return
+    who = row.get("label") or (row.get("address") or "")[:8]
+    # fresh is newest-first; act on at most one buy and one sell per poll
+    buy_ev = next((ev for ev in fresh if ev.kind == "buy" and ev.token), None)
+    sell_ev = next((ev for ev in fresh if ev.kind == "sell" and ev.token), None)
+    if buy_ev and not db.has_copy_fill(uid, wid, buy_ev.token):
+        mint = buy_ev.token
+        usd = float(row.get("copy_usd") or 0) or _default_buy_usd(uid)
+        usd = min(signer.max_usd(), max(1.0, usd))
+        status = await _progress(context.bot, uid, f"👯 Copying {who}: buying ${usd:.0f}…")
+        try:
+            card = await asyncio.to_thread(analyze, mint)
+            # force=False: copy buys respect the user's score floor like any
+            # other automated buy (rug/honeypot gates apply either way).
+            ok, msg = await _off(uid, _live_buy, uid, card, mint, False, usd)
+        except Exception as exc:
+            ok, msg = False, f"Copy buy skipped: {exc}"
+        if ok:
+            db.record_copy_fill(uid, wid, mint)
+        await _done(context.bot, uid, status, f"👯 Copy {who}\n{msg}")
+    if sell_ev and int(row.get("copy_sells") or 0) and db.has_copy_fill(uid, wid, sell_ev.token):
+        mint = sell_ev.token
+        status = await _progress(context.bot, uid, f"👯 {who} sold — mirroring…")
+        ok, msg, label = await _off(uid, _sell_any, uid, mint, 100)
+        if ok:
+            db.clear_copy_fill(uid, wid, mint)
+        await _done(context.bot, uid, status, f"👯 Copy {who}\n" + _trade_result("sell", ok, label, msg, pct=100))
 
 
 async def drawdown_job(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3925,19 +4490,19 @@ async def drawdown_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def buy_limit_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     for row in db.list_buy_limits():
-        px = _token_mark_usd(row["mint"])
+        px = await asyncio.to_thread(_token_mark_usd, row["mint"])
         if px <= 0 or px > float(row["target_px"]):
             continue
         uid = int(row["user_id"])
         try:
-            card = analyze(row["mint"])
-            msg = _live_buy_followup(
-                uid, card, row["mint"], True, True, usd_override=float(row["usd"])
-            )
+            card = await asyncio.to_thread(analyze, row["mint"])
+            ok, msg = await _off(uid, _live_buy, uid, card, row["mint"], True, float(row["usd"]))
         except Exception as exc:
-            msg = str(exc)
-        blocked = str(msg).startswith(("🛡", "Live: skipped", "Live: OFF", "Could not"))
-        if not blocked:
+            ok, msg = False, str(exc)
+        # Only a real fill closes the limit; refusals and send failures leave
+        # it armed so it retries on the next dip (previous prefix-matching
+        # marked failed sends as filled).
+        if ok:
             db.fill_buy_limit(int(row["id"]))
         try:
             await context.bot.send_message(
@@ -3962,7 +4527,7 @@ async def lp_watch_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         except Exception:
             continue
         for mint in db.live_mints(uid):
-            liq = _token_liq_usd(mint)
+            liq = await asyncio.to_thread(_token_liq_usd, mint)
             if liq < 0:
                 continue
             prev = db.lp_mark(uid, mint)
@@ -3982,20 +4547,7 @@ async def lp_watch_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 db.set_lp_mark(uid, mint, liq)
                 continue
             try:
-                if mint.startswith("0x"):
-                    chain = "base"
-                    evm_addr = (db.get_user_wallet(uid) or {}).get("evm_pub") or ""
-                    for cid in ("eth", "base", "bsc", "hood", "arb", "avax"):
-                        try:
-                            raw = evm_signer._erc20_balance(CHAINS[cid]["rpc"], mint, evm_addr)
-                        except Exception:
-                            raw = 0
-                        if raw > 0:
-                            chain = cid
-                            break
-                    _ok, msg = evm_signer.sell_evm(chain, mint, key_hex=evm_secret)
-                else:
-                    _ok, msg = signer.sell_sol(mint, secret=sol_secret, pct=100, slip_bps=_slip_bps(uid, "sell"))
+                _ok, msg, _label = await _off(uid, _sell_any, uid, mint, 100)
             except Exception as exc:
                 _ok, msg = False, str(exc)
             db.set_lp_mark(uid, mint, liq)
@@ -4045,7 +4597,7 @@ async def _live_exit_one(context: ContextTypes.DEFAULT_TYPE, row, uid: int, mint
         cost = db.live_cost(uid, mint)
         if cost <= 0:
             return
-        px = _token_mark_usd(mint)
+        px = await asyncio.to_thread(_token_mark_usd, mint)
         if px <= 0:
             return
         # worth unknown without qty; compare mark vs implied entry from last cost only if we have holdings
@@ -4053,24 +4605,23 @@ async def _live_exit_one(context: ContextTypes.DEFAULT_TYPE, row, uid: int, mint
             sol_secret, evm_secret = user_wallets.secrets(uid)
         except Exception:
             return
-        worth = 0.0
-        evm_chain = "base"
-        try:
+
+        def _measure() -> tuple[float, str]:
             if mint.startswith("0x"):
                 evm_addr = (db.get_user_wallet(uid) or {}).get("evm_pub") or ""
-                for cid in ("eth", "base", "bsc", "hood", "arb", "avax"):
+                for cid in _EVM_SCAN:
                     try:
                         raw = evm_signer._erc20_balance(CHAINS[cid]["rpc"], mint, evm_addr)
                     except Exception:
                         raw = 0
                     if raw > 0:
-                        worth = (raw / 10**18) * px
-                        evm_chain = cid
-                        break
-            else:
-                held = next((h for h in signer.holdings(sol_secret) if h["mint"] == mint), None)
-                if held:
-                    worth = float(held["amount"]) * px
+                        return (raw / 10**18) * px, cid
+                return 0.0, "base"
+            held = next((h for h in signer.holdings(sol_secret) if h["mint"] == mint), None)
+            return (float(held["amount"]) * px if held else 0.0), "base"
+
+        try:
+            worth, evm_chain = await asyncio.to_thread(_measure)
         except Exception:
             return
         if worth <= 0:
@@ -4086,10 +4637,13 @@ async def _live_exit_one(context: ContextTypes.DEFAULT_TYPE, row, uid: int, mint
             sell_pct = float(rung["sell_pct"])
             try:
                 if mint.startswith("0x"):
-                    _rok, rmsg = evm_signer.sell_evm(evm_chain, mint, key_hex=evm_secret, pct=int(sell_pct))
+                    _rok, rmsg = await _off(
+                        uid, evm_signer.sell_evm, evm_chain, mint, key_hex=evm_secret, pct=int(sell_pct)
+                    )
                 else:
-                    _rok, rmsg = signer.sell_sol(
-                        mint, secret=sol_secret, pct=int(sell_pct), slip_bps=_slip_bps(uid, "sell")
+                    _rok, rmsg = await _off(
+                        uid, signer.sell_sol, mint,
+                        secret=sol_secret, pct=int(sell_pct), slip_bps=_slip_bps(uid, "sell"),
                     )
             except Exception as exc:
                 _rok, rmsg = False, str(exc)
@@ -4134,9 +4688,11 @@ async def _live_exit_one(context: ContextTypes.DEFAULT_TYPE, row, uid: int, mint
             return
         try:
             if mint.startswith("0x"):
-                _ok, msg = evm_signer.sell_evm(evm_chain, mint, key_hex=evm_secret)
+                _ok, msg = await _off(uid, evm_signer.sell_evm, evm_chain, mint, key_hex=evm_secret)
             else:
-                _ok, msg = signer.sell_sol(mint, secret=sol_secret, pct=100, slip_bps=_slip_bps(uid, "sell"))
+                _ok, msg = await _off(
+                    uid, signer.sell_sol, mint, secret=sol_secret, pct=100, slip_bps=_slip_bps(uid, "sell")
+                )
         except Exception as exc:
             msg = str(exc)
             _ok = False
@@ -4159,7 +4715,7 @@ async def _live_exit_one(context: ContextTypes.DEFAULT_TYPE, row, uid: int, mint
 
 
 async def snipe_job(context: ContextTypes.DEFAULT_TYPE) -> None:
-    for user_id, sid, status, msg in sniper.scan_armed():
+    for user_id, sid, status, msg in await asyncio.to_thread(sniper.scan_armed):
         if status != "filled":
             continue
         try:
@@ -4205,7 +4761,7 @@ async def _dca_run_one(context: ContextTypes.DEFAULT_TYPE, plan: dict) -> None:
     mint = plan["mint"]
     usd = float(plan["usd_per_buy"])
     try:
-        card = analyze(mint)
+        card = await asyncio.to_thread(analyze, mint)
     except Exception as exc:
         try:
             await context.bot.send_message(
@@ -4218,7 +4774,7 @@ async def _dca_run_one(context: ContextTypes.DEFAULT_TYPE, plan: dict) -> None:
     # buy goes through. If the wallet is short on funds, the signer's own
     # error message (e.g. "insufficient balance") comes back here and gets
     # sent straight to the user below, same as any other failed live buy.
-    msg = _live_buy_followup(uid, card, mint, True, False, usd_override=usd)
+    msg = await _off(uid, _live_buy_followup, uid, card, mint, True, False, usd_override=usd)
     try:
         await context.bot.send_message(uid, f"📅 DCA buy ${usd:.0f}\n{msg}")
     except Exception:
@@ -4280,7 +4836,7 @@ async def _launch_feed_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         if not user.get("alerts_on"):
             continue
         uid = int(user["user_id"])
-        diverse = _interesting(_pool_for("*"), False)
+        diverse = _interesting(await asyncio.to_thread(_pool_for, "*"), False)
         for ln in diverse[:8]:
             cid = resolve_chain(ln.chain) or (ln.chain or "").lower()
             if cid and not db.flag_on(uid, f"feed_{cid}", 1):
@@ -4291,20 +4847,28 @@ async def _launch_feed_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             text, markup = launch_card(ln)
             try:
                 await send_launch(context.bot, uid, text, markup, promo=False)
+            except DeadChat as exc:
+                # User blocked the bot / deleted their account: stop DMing them.
+                # They get alerts back the moment they toggle them on again.
+                logger.warning("launch DM to %s unreachable, turning alerts off: %s", uid, exc)
+                db.update_user(uid, alerts_on=0)
+                break
             except Exception:
                 logger.exception("launch feed failed for %s", uid)
             if db.flag_on(uid, "auto_buy", 0) and not _auto_trading_killed():
                 auto_usd = float(user.get("auto_buy_usd") or 0)
                 if auto_usd > 0 and (ln.token or "").strip():
                     try:
-                        auto_card = analyze(ln.token)
+                        auto_card = await asyncio.to_thread(analyze, ln.token)
                     except Exception:
                         auto_card = None
                     if auto_card is not None:
                         # force=False -- this still goes through the same
                         # score_gate / rug_buy / honeypot checks a manual
                         # paste does. Nothing here bypasses the user's flags.
-                        auto_msg = _live_buy_followup(uid, auto_card, ln.token, True, False, usd_override=auto_usd)
+                        auto_msg = await _off(
+                            uid, _live_buy_followup, uid, auto_card, ln.token, True, False, usd_override=auto_usd
+                        )
                         if auto_msg:
                             try:
                                 await context.bot.send_message(uid, f"⚡️ Auto-buy ${auto_usd:.0f} (feed)\n{auto_msg}")
@@ -4312,7 +4876,9 @@ async def _launch_feed_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                                 logger.exception("auto-buy notify failed for %s", uid)
 
     for chat_id, bind in binds:
-        rows = _pool_for(bind)
+        if _feed_muted(int(chat_id)):
+            continue  # restricted chat, retried hourly; /setfeed there re-enables now
+        rows = await asyncio.to_thread(_pool_for, bind)
         pool = _interesting(rows, loose=True)
         if bind not in {"*", ""}:
             want = resolve_chain(bind) or bind
@@ -4331,9 +4897,45 @@ async def _launch_feed_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             try:
                 await send_launch(context.bot, chat_id, text, markup, promo=False)
                 sent += 1
+            except ChatMoved as moved:
+                await _feed_chat_moved(context.bot, int(chat_id), moved.new_chat_id)
+                break
+            except DeadChat as exc:
+                await _feed_chat_dead(context.bot, int(chat_id), bind, str(exc), exc.permanent)
+                break  # don't hammer the rest of this chat's cards
             except Exception:
                 logger.exception("channel feed failed for %s", chat_id)
+        if sent and db.feed_fail_count(int(chat_id)):
+            db.clear_feed_failure(int(chat_id))
         logger.info("feed chat=%s bind=%s rows=%s sent=%s", chat_id, bind, len(rows), sent)
+
+
+async def _feed_chat_dead(bot, chat_id: int, bind: str, err: str, permanent: bool = True) -> None:
+    fails = db.note_feed_failure(chat_id, err)
+    logger.warning("feed chat %s unreachable (%s/%s): %s", chat_id, fails, FEED_MUTE_AFTER, err)
+    if permanent and fails >= FEED_MUTE_AFTER:
+        pass  # gone for good (even if it was only "restricted" earlier) — drop below
+    elif fails != FEED_MUTE_AFTER:
+        return  # restricted: admins get told once, at the threshold
+    if permanent:
+        db.drop_feed_chat(chat_id)
+        await _notify_admins(
+            bot,
+            f"🔇 Feed chat {chat_id} (bind {bind}) removed after {fails} failures: {err}\n"
+            "The chat is gone or the bot was removed. Add the bot back and run /setfeed there to restore it.",
+        )
+    else:
+        await _notify_admins(
+            bot,
+            f"⏸ Feed chat {chat_id} (bind {bind}) paused: {err}\n"
+            "The bot lost send rights there. Bind kept — it retries hourly, or run /setfeed there once fixed.",
+        )
+
+
+async def _feed_chat_moved(bot, old_id: int, new_id: int) -> None:
+    db.migrate_feed_chat(old_id, new_id)
+    logger.warning("feed chat %s upgraded to supergroup %s — binds moved", old_id, new_id)
+    await _notify_admins(bot, f"🔁 Feed chat {old_id} became supergroup {new_id}; feed moved automatically.")
 
 
 CG_NATIVE = {
@@ -4395,11 +4997,13 @@ NATIVE_CA = {
 
 
 async def native_pulse_job(context: ContextTypes.DEFAULT_TYPE) -> None:
-    prices = _native_prices()
+    prices = await asyncio.to_thread(_native_prices)
     if not prices:
         return
     for chat_id, bind in db.list_feed_binds():
         if bind in {"*", ""}:
+            continue
+        if _feed_muted(int(chat_id)):
             continue
         cid = resolve_chain(bind) or bind
         px = prices.get(cid)
@@ -4432,6 +5036,10 @@ async def native_pulse_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         text += "\n<i>Chain pulse · every 10m · Buy opens the desk</i>"
         try:
             await send_launch(context.bot, chat_id, text, markup, promo=False)
+        except ChatMoved as moved:
+            await _feed_chat_moved(context.bot, int(chat_id), moved.new_chat_id)
+        except DeadChat as exc:
+            await _feed_chat_dead(context.bot, int(chat_id), bind, str(exc), exc.permanent)
         except Exception:
             logger.exception("native pulse failed for %s", chat_id)
 
@@ -4444,6 +5052,16 @@ def main() -> None:
     db.init_db()
 
     async def _post_init(application: Application) -> None:
+        # Network-bound trade/quote calls run in this pool (asyncio.to_thread).
+        # The stdlib default is cpu_count+4 — ~5 threads on a small droplet.
+        from concurrent.futures import ThreadPoolExecutor
+
+        asyncio.get_running_loop().set_default_executor(
+            ThreadPoolExecutor(
+                max_workers=int(os.getenv("FERZAN_WORKER_THREADS", "32")),
+                thread_name_prefix="ferzan-io",
+            )
+        )
         try:
             me = await application.bot.get_me()
             if me.username:
@@ -4465,6 +5083,7 @@ def main() -> None:
                     BotCommand("signer", "Signer pubkey"),
                     BotCommand("wallet", "Your deposit wallets"),
                     BotCommand("bag", "Live wallet tokens"),
+                    BotCommand("wallets", "Copy trading"),
                     BotCommand("livesell", "Sell a live Solana mint"),
                     BotCommand("settings", "Risk vault"),
                 ]
@@ -4472,7 +5091,16 @@ def main() -> None:
         except Exception:
             logger.exception("set_my_commands failed")
 
-    app = Application.builder().token(token).post_init(_post_init).build()
+    # concurrent_updates: without it PTB handles ONE update at a time, so a
+    # user waiting on a buy blocks every other user's taps. Same-user trade
+    # sends are still serialized by _user_lock() inside _off().
+    app = (
+        Application.builder()
+        .token(token)
+        .post_init(_post_init)
+        .concurrent_updates(int(os.getenv("FERZAN_CONCURRENT_UPDATES", "32")))
+        .build()
+    )
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
@@ -4511,6 +5139,7 @@ def main() -> None:
     app.add_handler(CommandHandler("collectevm", collectevm_cmd))
     app.add_handler(CommandHandler("disperse", disperse_cmd))
     app.add_handler(CommandHandler("wallets", wallets_cmd))
+    app.add_handler(CommandHandler("copy", copy_cmd))
     app.add_handler(CommandHandler("unwatchwallet", unwatchwallet_cmd))
     app.add_handler(CommandHandler("drawdown", drawdown_cmd))
     app.add_handler(CommandHandler("fees", fees_cmd))
@@ -4529,6 +5158,7 @@ def main() -> None:
     app.add_handler(CommandHandler("livesell", livesell_cmd))
     app.add_handler(CommandHandler("livesellevm", livesellevm_cmd))
     app.add_handler(CommandHandler("treasury", treasury_cmd))
+    app.add_handler(CommandHandler("health", health_cmd))
     app.add_handler(CommandHandler("status", status_cmd))
     app.add_handler(CommandHandler("ref", ref_cmd))
     app.add_handler(CommandHandler("referral", ref_cmd))

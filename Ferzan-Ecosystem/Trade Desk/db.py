@@ -256,6 +256,38 @@ def init_db() -> None:
             conn.execute("ALTER TABLE live_exits ADD COLUMN trail_pct REAL")
         if "peak_pct" not in exit_cols:
             conn.execute("ALTER TABLE live_exits ADD COLUMN peak_pct REAL DEFAULT 0")
+        ww_cols = {r[1] for r in conn.execute("PRAGMA table_info(watched_wallets)").fetchall()}
+        if "copy_on" not in ww_cols:
+            # Every watch — old and new — starts alert-only. Copy is opt-in per
+            # wallet: the pre-v2 copy path never actually fired (it couldn't
+            # extract a mint), so nobody was "already copying" and silently
+            # arming live buys on existing watches would spend real money.
+            conn.execute("ALTER TABLE watched_wallets ADD COLUMN copy_on INTEGER DEFAULT 0")
+        if "copy_usd" not in ww_cols:
+            conn.execute("ALTER TABLE watched_wallets ADD COLUMN copy_usd REAL DEFAULT 0")
+        if "copy_sells" not in ww_cols:
+            conn.execute("ALTER TABLE watched_wallets ADD COLUMN copy_sells INTEGER DEFAULT 0")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS copy_fills (
+                user_id INTEGER NOT NULL,
+                wallet_id INTEGER NOT NULL,
+                mint TEXT NOT NULL,
+                bought_at INTEGER NOT NULL,
+                PRIMARY KEY (user_id, wallet_id, mint)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS feed_failures (
+                chat_id INTEGER PRIMARY KEY,
+                fails INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT,
+                updated_at INTEGER NOT NULL
+            )
+            """
+        )
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS referral_ledger (
@@ -669,6 +701,79 @@ def set_wallet_cursor(wallet_id: int, cursor: str) -> None:
             "UPDATE watched_wallets SET cursor = ? WHERE id = ?",
             (cursor, wallet_id),
         )
+        conn.commit()
+
+
+_COPY_FIELDS = {"copy_on", "copy_usd", "copy_sells"}
+
+
+def set_wallet_copy(wallet_id: int, user_id: int, **fields: Any) -> bool:
+    fields = {k: v for k, v in fields.items() if k in _COPY_FIELDS}
+    if not fields:
+        return False
+    sets = ", ".join(f"{k} = ?" for k in fields)
+    with get_conn() as conn:
+        cur = conn.execute(
+            f"UPDATE watched_wallets SET {sets} WHERE id = ? AND user_id = ?",
+            (*fields.values(), wallet_id, user_id),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def record_copy_fill(user_id: int, wallet_id: int, mint: str) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO copy_fills (user_id, wallet_id, mint, bought_at) VALUES (?, ?, ?, ?)",
+            (user_id, wallet_id, mint, int(time.time())),
+        )
+        conn.commit()
+
+
+def has_copy_fill(user_id: int, wallet_id: int, mint: str) -> bool:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM copy_fills WHERE user_id = ? AND wallet_id = ? AND mint = ?",
+            (user_id, wallet_id, mint),
+        ).fetchone()
+        return row is not None
+
+
+def clear_copy_fill(user_id: int, wallet_id: int, mint: str) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            "DELETE FROM copy_fills WHERE user_id = ? AND wallet_id = ? AND mint = ?",
+            (user_id, wallet_id, mint),
+        )
+        conn.commit()
+
+
+def clear_copy_fills_for_wallet(user_id: int, wallet_id: int) -> None:
+    with get_conn() as conn:
+        conn.execute("DELETE FROM copy_fills WHERE user_id = ? AND wallet_id = ?", (user_id, wallet_id))
+        conn.commit()
+
+
+def note_feed_failure(chat_id: int, error: str) -> int:
+    """Bump the consecutive-failure count for a feed chat; returns the new count."""
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO feed_failures (chat_id, fails, last_error, updated_at)
+            VALUES (?, 1, ?, ?)
+            ON CONFLICT(chat_id) DO UPDATE SET
+                fails = fails + 1, last_error = excluded.last_error, updated_at = excluded.updated_at
+            """,
+            (chat_id, (error or "")[:200], int(time.time())),
+        )
+        conn.commit()
+        row = conn.execute("SELECT fails FROM feed_failures WHERE chat_id = ?", (chat_id,)).fetchone()
+        return int(row[0]) if row else 1
+
+
+def clear_feed_failure(chat_id: int) -> None:
+    with get_conn() as conn:
+        conn.execute("DELETE FROM feed_failures WHERE chat_id = ?", (chat_id,))
         conn.commit()
 
 
@@ -1125,6 +1230,38 @@ def add_feed_chat(chat_id: int, title: str = "", chain: str = "*") -> None:
             """,
             (int(chat_id), chain, title or "", int(time.time())),
         )
+        # Re-binding a chat is an explicit "this works now" — un-mute it.
+        conn.execute("DELETE FROM feed_failures WHERE chat_id = ?", (int(chat_id),))
+        conn.commit()
+
+
+def feed_fail_count(chat_id: int) -> int:
+    with get_conn() as conn:
+        row = conn.execute("SELECT fails FROM feed_failures WHERE chat_id = ?", (int(chat_id),)).fetchone()
+        return int(row[0]) if row else 0
+
+
+def feed_fail_info(chat_id: int) -> tuple[int, int]:
+    """(consecutive failures, unix time of the last one)."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT fails, updated_at FROM feed_failures WHERE chat_id = ?", (int(chat_id),)
+        ).fetchone()
+        return (int(row[0]), int(row[1])) if row else (0, 0)
+
+
+def migrate_feed_chat(old_chat_id: int, new_chat_id: int) -> None:
+    """A group was upgraded to a supergroup: carry its feed binds to the new id."""
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO feed_binds (chat_id, chain, title, added_at)
+            SELECT ?, chain, title, added_at FROM feed_binds WHERE chat_id = ?
+            """,
+            (int(new_chat_id), int(old_chat_id)),
+        )
+        conn.execute("DELETE FROM feed_binds WHERE chat_id = ?", (int(old_chat_id),))
+        conn.execute("DELETE FROM feed_failures WHERE chat_id IN (?, ?)", (int(old_chat_id), int(new_chat_id)))
         conn.commit()
 
 

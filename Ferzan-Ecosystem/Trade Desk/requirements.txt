@@ -7,6 +7,8 @@ cryptography==43.0.3
 # internal_api.py -- referral-stats endpoint for Liq Bot's Earn screen
 fastapi==0.115.0
 uvicorn==0.30.6
-# optional: TON send
-# pytoniq
-# pytoniq-core
+# PnL share cards (pnl_card.py)
+Pillow>=10.1
+# TON send (ton_signer.py)
+pytoniq
+pytoniq-core
