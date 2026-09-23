@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Ferzan Desk</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  :root {
+    --bg: var(--tg-theme-bg-color, #ffffff);
+    --card: var(--tg-theme-section-bg-color, var(--tg-theme-secondary-bg-color, #f3f4f6));
+    --sunk: var(--tg-theme-secondary-bg-color, #eef0f3);
+    --ink: var(--tg-theme-text-color, #111827);
+    --muted: var(--tg-theme-hint-color, #6b7280);
+    --link: var(--tg-theme-link-color, #2563eb);
+    --btn: var(--tg-theme-button-color, #2563eb);
+    --btn-ink: var(--tg-theme-button-text-color, #ffffff);
+    --gain: #15803d;
+    --loss: #c2410c;
+    --line: color-mix(in srgb, var(--ink) 10%, transparent);
+  }
+  /* Dark fallbacks mirror the light ones; inside Telegram the --tg-theme-*
+     values win anyway, but the page must stay legible without them. */
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: var(--tg-theme-bg-color, #111418);
+      --card: var(--tg-theme-section-bg-color, var(--tg-theme-secondary-bg-color, #1c2127));
+      --sunk: var(--tg-theme-secondary-bg-color, #232a31);
+      --ink: var(--tg-theme-text-color, #eef1f4);
+      --muted: var(--tg-theme-hint-color, #98a2ad);
+      --link: var(--tg-theme-link-color, #6ab3f3);
+      --gain: #4ade80; --loss: #fb923c;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: var(--tg-theme-bg-color, #111418);
+    --card: var(--tg-theme-section-bg-color, var(--tg-theme-secondary-bg-color, #1c2127));
+    --sunk: var(--tg-theme-secondary-bg-color, #232a31);
+    --ink: var(--tg-theme-text-color, #eef1f4);
+    --muted: var(--tg-theme-hint-color, #98a2ad);
+    --link: var(--tg-theme-link-color, #6ab3f3);
+    --gain: #4ade80; --loss: #fb923c;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--ink); }
+  body {
+    font: 15px/1.4 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, sans-serif;
+    padding: 16px 16px calc(24px + env(safe-area-inset-bottom));
+    -webkit-font-smoothing: antialiased;
+  }
+  .num { font-variant-numeric: tabular-nums; }
+  header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 18px; }
+  .wallet-chip {
+    display: inline-flex; gap: 6px; align-items: center; padding: 6px 12px; border-radius: 999px;
+    background: var(--sunk); color: var(--ink); font-weight: 600; font-size: 13px; border: 0;
+  }
+  .refresh { background: none; border: 0; color: var(--link); font-size: 14px; font-weight: 600; padding: 6px 0; }
+  .hero-label { color: var(--muted); font-size: 13px; margin: 0 0 2px; }
+  .hero { font-size: 38px; font-weight: 700; letter-spacing: -0.02em; margin: 0; }
+  .pnl { display: inline-flex; gap: 4px; align-items: center; font-weight: 600; font-size: 14px; margin-top: 4px; }
+  .up { color: var(--gain); } .down { color: var(--loss); } .flat { color: var(--muted); }
+  .tiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 20px 0 24px; }
+  .tile { background: var(--card); border-radius: 14px; padding: 12px; min-width: 0; }
+  .tile .k { color: var(--muted); font-size: 12px; }
+  .tile .v { font-weight: 700; font-size: 16px; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tile .s { color: var(--muted); font-size: 12px; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 8px; font-weight: 600; }
+  .list { background: var(--card); border-radius: 14px; overflow: hidden; }
+  .pos { width: 100%; text-align: left; background: none; border: 0; color: inherit; font: inherit;
+         display: grid; grid-template-columns: 1fr auto; gap: 2px 12px; padding: 12px 14px; border-top: 1px solid var(--line); }
+  .pos:first-child { border-top: 0; }
+  .pos .sym { font-weight: 700; }
+  .pos .chain { font-size: 11px; font-weight: 600; color: var(--muted); background: var(--sunk); border-radius: 6px; padding: 1px 6px; margin-left: 6px; }
+  .pos .val { font-weight: 700; text-align: right; }
+  .pos .sub { color: var(--muted); font-size: 12px; }
+  .pos .right-sub { font-size: 12px; text-align: right; font-weight: 600; }
+  .actions { display: none; grid-column: 1 / -1; gap: 8px; margin-top: 10px; }
+  .pos.open .actions { display: flex; }
+  .act { flex: 1; border: 0; border-radius: 10px; padding: 10px; font-weight: 700; font-size: 14px; }
+  .act.primary { background: var(--btn); color: var(--btn-ink); }
+  .act.ghost { background: var(--sunk); color: var(--ink); }
+  .empty, .error { background: var(--card); border-radius: 14px; padding: 20px; text-align: center; color: var(--muted); }
+  .error { color: var(--loss); }
+  .wallets { margin-top: 24px; }
+  .w { display: flex; justify-content: space-between; padding: 10px 14px; border-top: 1px solid var(--line); font-size: 14px; }
+  .w:first-child { border-top: 0; }
+  .w code { color: var(--muted); font-size: 12px; }
+  .foot { color: var(--muted); font-size: 12px; text-align: center; margin-top: 18px; }
+  .skeleton { background: var(--sunk); border-radius: 8px; height: 1em; animation: pulse 1.2s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity: .5; } }
+  @media (prefers-reduced-motion: reduce) { .skeleton { animation: none; } }
+</style>
+</head>
+<body>
+<header>
+  <button class="wallet-chip" id="walletChip" aria-label="Active wallet">👛 <span id="walletName">…</span></button>
+  <button class="refresh" id="refresh">↻ Refresh</button>
+</header>
+
+<p class="hero-label">Desk value</p>
+<p class="hero num" id="total"><span class="skeleton" style="display:inline-block;width:160px;height:36px"></span></p>
+<div class="pnl num" id="pnl"></div>
+
+<div class="tiles">
+  <div class="tile"><div class="k">🟣 SOL</div><div class="v num" id="sol">–</div><div class="s num" id="solUsd"></div></div>
+  <div class="tile"><div class="k">🔵 ETH · Base</div><div class="v num" id="eth">–</div><div class="s num" id="ethUsd"></div></div>
+  <div class="tile"><div class="k">📊 Positions</div><div class="v num" id="npos">–</div><div class="s">open bags</div></div>
+</div>
+
+<h2>Positions</h2>
+<div id="positions" class="list" role="list"></div>
+
+<div class="wallets">
+  <h2>Wallets</h2>
+  <div id="wallets" class="list"></div>
+</div>
+
+<p class="foot" id="foot">Trades run in the bot — every sell goes through your safety checks.</p>
+
+<script>
+(() => {
+  const tg = window.Telegram && window.Telegram.WebApp;
+  const $ = (id) => document.getElementById(id);
+  let data = null, bot = "";
+
+  if (tg) {
+    tg.ready(); tg.expand();
+    document.documentElement.dataset.theme = tg.colorScheme === "dark" ? "dark" : "light";
+    tg.onEvent("themeChanged", () => { document.documentElement.dataset.theme = tg.colorScheme; });
+  }
+
+  const usd = (v) => v == null ? "—" : (Math.abs(v) >= 1000
+      ? "$" + v.toLocaleString(undefined, { maximumFractionDigits: 0 })
+      : "$" + v.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
+  const amt = (v) => v >= 1e6 ? (v / 1e6).toFixed(2) + "M" : v >= 1e3 ? (v / 1e3).toFixed(2) + "K"
+      : v >= 1 ? v.toFixed(2) : v.toPrecision(3);
+  const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  // Gain/loss never relies on color alone: sign + arrow + color.
+  const delta = (v, pct) => {
+    if (v == null) return `<span class="flat">no cost basis</span>`;
+    const cls = v > 0 ? "up" : v < 0 ? "down" : "flat";
+    const arrow = v > 0 ? "▲" : v < 0 ? "▼" : "•";
+    const p = pct == null ? "" : ` (${pct > 0 ? "+" : ""}${pct.toFixed(1)}%)`;
+    return `<span class="${cls}">${arrow} ${v > 0 ? "+" : v < 0 ? "−" : ""}${usd(Math.abs(v))}${p}</span>`;
+  };
+  const chg = (v) => v == null ? "" : `<span class="${v > 0 ? "up" : v < 0 ? "down" : "flat"}">${v > 0 ? "▲ +" : v < 0 ? "▼ " : ""}${v.toFixed(1)}% 24h</span>`;
+
+  function openBot(param) {
+    const url = `https://t.me/${bot}?start=${encodeURIComponent(param)}`;
+    if (tg && tg.openTelegramLink) { tg.openTelegramLink(url); tg.close(); } else { location.href = url; }
+  }
+  function openLink(url) { if (tg && tg.openLink) tg.openLink(url); else window.open(url, "_blank"); }
+
+  function render(d) {
+    data = d; bot = d.bot || "";
+    const active = (d.wallets || []).find((w) => w.active);
+    $("walletName").textContent = active ? active.label : "Wallet";
+    $("total").textContent = usd(d.total_usd);
+    $("pnl").innerHTML = d.pnl_usd == null ? "" : delta(d.pnl_usd, null) + ` <span class="flat">on tracked buys</span>`;
+    $("sol").textContent = d.balances.sol.toFixed(4);
+    $("solUsd").textContent = d.balances.sol_usd == null ? "" : usd(d.balances.sol_usd);
+    $("eth").textContent = d.balances.eth_base.toFixed(5);
+    $("ethUsd").textContent = d.balances.eth_usd == null ? "" : usd(d.balances.eth_usd);
+    $("npos").textContent = String(d.positions.length);
+
+    const box = $("positions");
+    if (!d.positions.length) {
+      box.className = "empty";
+      box.innerHTML = "No open bags yet.<br>Paste a token address in the bot to make your first buy.";
+    } else {
+      box.className = "list";
+      box.innerHTML = d.positions.map((p, i) => `
+        <button class="pos" role="listitem" data-i="${i}" aria-expanded="false">
+          <div><span class="sym">$${esc(p.symbol)}</span><span class="chain">${esc(p.chain)}</span></div>
+          <div class="val num">${p.priced ? usd(p.value) : "unpriced"}</div>
+          <div class="sub num">${amt(p.amount)} · ${chg(p.chg24)}</div>
+          <div class="right-sub num">${delta(p.pnl, p.pnl_pct)}</div>
+          <div class="actions">
+            <span class="act primary" data-sell="${esc(p.mint)}">Sell in bot</span>
+            ${p.chart ? `<span class="act ghost" data-chart="${esc(p.chart)}">Chart</span>` : ""}
+          </div>
+        </button>`).join("");
+    }
+    $("wallets").innerHTML = (d.wallets || []).map((w) => `
+      <div class="w"><span>${w.active ? "✅" : "▫️"} ${esc(w.label)}</span><code>${esc(w.sol.slice(0, 4))}…${esc(w.sol.slice(-4))}</code></div>`).join("");
+    $("foot").textContent = `Updated ${new Date(d.ts * 1000).toLocaleTimeString()} · trades run in the bot`;
+  }
+
+  $("positions").addEventListener("click", (e) => {
+    const sell = e.target.closest("[data-sell]");
+    if (sell) { tg && tg.HapticFeedback && tg.HapticFeedback.impactOccurred("medium"); openBot("sell_" + sell.dataset.sell); return; }
+    const chart = e.target.closest("[data-chart]");
+    if (chart) { openLink(chart.dataset.chart); return; }
+    const row = e.target.closest(".pos");
+    if (row) { row.classList.toggle("open"); row.setAttribute("aria-expanded", row.classList.contains("open")); }
+  });
+  $("walletChip").addEventListener("click", () => bot && openBot("wallets"));
+
+  let inflight = false;
+  async function load(refresh) {
+    if (inflight) return; inflight = true;
+    $("refresh").textContent = "…";
+    try {
+      const r = await fetch("/api/portfolio", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ initData: tg ? tg.initData : "", refresh: !!refresh }),
+      });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.detail || "Couldn't load");
+      render(j);
+    } catch (err) {
+      $("positions").className = "error";
+      $("positions").textContent = err.message || "Couldn't load your desk.";
+      $("total").textContent = data ? usd(data.total_usd) : "—";
+    } finally {
+      inflight = false; $("refresh").textContent = "↻ Refresh";
+    }
+  }
+  $("refresh").addEventListener("click", () => load(true));
+  load(false);
+  setInterval(() => { if (!document.hidden) load(false); }, 30000);
+})();
+</script>
+</body>
+</html>

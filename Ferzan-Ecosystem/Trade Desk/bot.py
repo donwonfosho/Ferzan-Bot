@@ -28,7 +28,7 @@ import requests
 from pathlib import Path
 
 from dotenv import dotenv_values, load_dotenv
-from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, MenuButtonWebApp, Update, WebAppInfo
 
 try:
     from telegram import CopyTextButton
@@ -735,7 +735,16 @@ def home_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("⚡ PASTE CA", callback_data="go:buyhelp")],
         [InlineKeyboardButton("𝕏 @FerzanEco", url=xurl)],
     ]
+    app_url = _webapp_url()
+    if app_url:
+        rows.insert(0, [InlineKeyboardButton("📱 Open Ferzan app", web_app=WebAppInfo(url=app_url))])
     return InlineKeyboardMarkup(rows)
+
+
+def _webapp_url() -> str:
+    """Mini App URL (must be https). Empty = app buttons hidden."""
+    url = (os.getenv("FERZAN_WEBAPP_URL") or "").strip()
+    return url if url.startswith("https://") else ""
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -753,6 +762,23 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             pass
     if extra and extra.startswith("sig_"):
         await _send_signal(update, extra[4:], edit=False)
+        return
+    if extra and extra.startswith("sell_"):
+        # Mini App "Sell in bot" -> the /bag sell panel for that token (any chain).
+        mint = extra[5:]
+        uid = update.effective_user.id
+        try:
+            amount, owner, venue = await asyncio.to_thread(_bag_position_amount, uid, mint)
+            text, kb = await asyncio.to_thread(_bag_panel, mint, amount, owner, uid, None, venue)
+            await update.effective_message.reply_text(
+                text, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True
+            )
+        except Exception as exc:
+            await update.effective_message.reply_text(f"Couldn't open that bag: {exc}")
+        return
+    if extra == "wallets":
+        text, kb = _mywallets_panel(update.effective_user.id)
+        await update.effective_message.reply_text(text, parse_mode="HTML", reply_markup=kb)
         return
     if extra and extra.startswith("buy_"):
         await _send_signal(update, extra[4:], edit=False)
@@ -5334,6 +5360,13 @@ def main() -> None:
                 os.environ["FERZAN_BOT_USERNAME"] = me.username
         except Exception:
             logger.exception("could not cache bot username")
+        try:
+            if _webapp_url():
+                await application.bot.set_chat_menu_button(
+                    menu_button=MenuButtonWebApp(text="📱 App", web_app=WebAppInfo(url=_webapp_url()))
+                )
+        except Exception:
+            logger.exception("set_chat_menu_button failed")
         try:
             await application.bot.set_my_commands(
                 [
