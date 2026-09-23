@@ -103,9 +103,10 @@ async def _notify_admins(bot, text: str) -> None:
 
 
 def _auto_trading_killed() -> bool:
-    """Global kill switch for TP-ladder rung sells and auto-buy-on-feed.
-    Defaults OFF (auto trading enabled) until an admin flips it. Does not
-    touch manual /buy, /livesell, or single-target /tp, /sl, /trail exits."""
+    """Global kill switch for TP-ladder rung sells, auto-buy-on-feed, and DCA
+    scheduled buys. Defaults OFF (auto trading enabled) until an admin flips
+    it. Does not touch manual /buy, /livesell, or single-target /tp, /sl,
+    /trail exits."""
     return db.flag_on(0, "kill_auto_trading", default=0)
 
 
@@ -783,6 +784,11 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "These stack — /tp, /sl, /trail, and /tpladder can all be armed on the same "
         "position at once, whichever triggers first fires.\n",
 
+        "📅 <b>Automated buying</b> (opt-in — nothing buys unless you set it)",
+        "/dca &lt;CA&gt; &lt;$amount&gt; &lt;hourly|daily|weekly&gt; — buy a fixed $ amount "
+        "on a repeating schedule (dollar-cost averaging)",
+        "/dca — list your active plans; /dca off &lt;CA&gt; to cancel one\n",
+
         "📡 <b>Signals &amp; feeds</b>",
         "/signal &lt;CA&gt; — score a token (rug/honeypot/liquidity checks)",
         "/launches — browse new pools",
@@ -807,7 +813,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "\n🔧 <b>Admin only</b>",
             "/addsmartwallet &lt;chain&gt; &lt;address&gt; &lt;label&gt; — add to the curated smart-money list",
             "/removesmartwallet &lt;id&gt; — remove one (no id = lists all with their ids)",
-            "/killswitch on|off — instantly stop TP-ladder sells and auto-buy-on-feed bot-wide",
+            "/killswitch on|off — instantly stop TP-ladder sells, auto-buy-on-feed, and DCA buys bot-wide",
         ]
     await update.effective_message.reply_text(
         "\n".join(lines), parse_mode="HTML", disable_web_page_preview=True
@@ -1382,6 +1388,88 @@ async def tpladder_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         db.set_live_exit(update.effective_user.id, mint)
     lines = "\n".join(f"  +{g:.0f}% → sell {s:.0f}%" for g, s in rungs)
     await update.effective_message.reply_text(f"🎯 TP ladder armed:\n{lines}")
+
+
+_DCA_INTERVALS = {"hourly": 3600, "daily": 86400, "weekly": 604800}
+
+
+def _dca_label(seconds: int) -> str:
+    for label, secs in _DCA_INTERVALS.items():
+        if secs == seconds:
+            return label
+    return f"{seconds}s"
+
+
+def _fmt_countdown(seconds: int) -> str:
+    if seconds < 3600:
+        return f"{max(1, seconds // 60)}m"
+    if seconds < 86400:
+        return f"{seconds // 3600}h"
+    return f"{seconds // 86400}d"
+
+
+async def dca_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard(update):
+        return
+    uid = update.effective_user.id
+    args = list(context.args or [])
+    if not args:
+        plans = db.list_dca_plans(uid)
+        if not plans:
+            await update.effective_message.reply_text(
+                "Usage: /dca &lt;CA&gt; &lt;$amount&gt; &lt;hourly|daily|weekly&gt;\n"
+                "Example: /dca 7xKX... 25 daily — buys $25 of that token every day.\n\n"
+                "/dca off &lt;CA&gt; — cancel a plan.\n"
+                "/dca with no args — list your active plans.\n\n"
+                "Each scheduled buy still runs through your normal safety checks "
+                "(score floor, rug/honeypot). If your wallet doesn't have enough "
+                "for a scheduled buy, you'll get a DM saying so instead of it "
+                "silently failing — top up and the next cycle will go through.",
+                parse_mode="HTML",
+            )
+            return
+        now = int(time.time())
+        lines = ["📅 <b>Active DCA plans</b>"]
+        for p in plans:
+            next_in = max(0, int(p["next_run_at"]) - now)
+            lines.append(
+                f"<code>{html.escape(str(p['mint'])[:10])}...</code> — "
+                f"${float(p['usd_per_buy']):.0f} every {_dca_label(int(p['interval_seconds']))}, "
+                f"next in {_fmt_countdown(next_in)}"
+            )
+        await update.effective_message.reply_text("\n".join(lines), parse_mode="HTML")
+        return
+    if args[0].lower() == "off":
+        if len(args) < 2:
+            await update.effective_message.reply_text("Usage: /dca off <CA>")
+            return
+        ok = db.clear_dca_plan(uid, args[1].strip())
+        await update.effective_message.reply_text(
+            "📅 DCA plan cancelled." if ok else "No active DCA plan for that token."
+        )
+        return
+    if len(args) < 3:
+        await update.effective_message.reply_text("Usage: /dca <CA> <$amount> <hourly|daily|weekly>")
+        return
+    mint = args[0].strip()
+    try:
+        usd = float(args[1])
+        if usd <= 0:
+            raise ValueError
+    except ValueError:
+        await update.effective_message.reply_text("Amount must be a positive number.")
+        return
+    interval_key = args[2].lower()
+    interval_s = _DCA_INTERVALS.get(interval_key)
+    if not interval_s:
+        await update.effective_message.reply_text("Frequency must be hourly, daily, or weekly.")
+        return
+    chain = "base" if mint.startswith("0x") else "solana"
+    db.set_dca_plan(uid, mint, chain, usd, interval_s)
+    await update.effective_message.reply_text(
+        f"📅 DCA armed: ${usd:.0f} every {interval_key}.\n"
+        f"First buy in {_fmt_countdown(interval_s)}. /dca off {mint} to cancel anytime."
+    )
 
 
 async def trail_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2028,9 +2116,10 @@ async def killswitch_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.effective_message.reply_text(
             "Usage: /killswitch on | off\n\n"
             f"Current state: {state}\n\n"
-            "ON stops TWO things bot-wide, for every user:\n"
+            "ON stops THREE things bot-wide, for every user:\n"
             "  • TP-ladder rung sells (/tpladder)\n"
-            "  • Auto-buy-on-feed (the auto_buy setting)\n\n"
+            "  • Auto-buy-on-feed (the auto_buy setting)\n"
+            "  • DCA scheduled buys (/dca)\n\n"
             "It does NOT touch: manual /buy, /livesell, /livesellevm, "
             "or single-target /tp, /sl, /trail exits — those keep working as-is."
         )
@@ -2039,13 +2128,15 @@ async def killswitch_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     db.set_flag(0, "kill_auto_trading", turn_on)
     if turn_on:
         await update.effective_message.reply_text(
-            "🛑 Kill switch ON. TP-ladder rung sells and auto-buy-on-feed are stopped bot-wide.\n"
+            "🛑 Kill switch ON. TP-ladder rung sells, auto-buy-on-feed, and DCA "
+            "buys are stopped bot-wide.\n"
             "Manual trading and single-target /tp, /sl, /trail are unaffected.\n"
             "Run /killswitch off to resume."
         )
     else:
         await update.effective_message.reply_text(
-            "✅ Kill switch OFF. TP-ladder rung sells and auto-buy-on-feed are running again."
+            "✅ Kill switch OFF. TP-ladder rung sells, auto-buy-on-feed, and DCA "
+            "buys are running again."
         )
 
 
@@ -4077,6 +4168,63 @@ async def snipe_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             logger.exception("snipe notify failed for %s", user_id)
 
 
+async def dca_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    try:
+        await _dca_job(context)
+    except Exception:
+        logger.exception("dca job crashed; will retry next cycle")
+        await _notify_admins(
+            context.bot,
+            "⚠️ dca_job crashed (see journalctl for the traceback). Due plans "
+            "were skipped this cycle; will retry next cycle.",
+        )
+
+
+async def _dca_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    if _auto_trading_killed():
+        return
+    now = int(time.time())
+    for plan in db.list_due_dca_plans(now):
+        try:
+            await _dca_run_one(context, plan)
+        except Exception:
+            logger.exception("dca job: plan #%s failed", plan["id"])
+            await _notify_admins(
+                context.bot,
+                f"⚠️ DCA plan #{plan['id']} (user {plan['user_id']}, mint {plan['mint']}) "
+                "failed unexpectedly (see journalctl).",
+            )
+        finally:
+            # Always advance, even on failure -- a broken plan should skip a
+            # cycle and retry later, not hammer the same error every 5 minutes.
+            db.advance_dca_plan(plan["id"], now + int(plan["interval_seconds"]))
+
+
+async def _dca_run_one(context: ContextTypes.DEFAULT_TYPE, plan: dict) -> None:
+    uid = int(plan["user_id"])
+    mint = plan["mint"]
+    usd = float(plan["usd_per_buy"])
+    try:
+        card = analyze(mint)
+    except Exception as exc:
+        try:
+            await context.bot.send_message(
+                uid, f"📅 DCA buy skipped for {mint[:10]}...: couldn't score it right now ({exc})."
+            )
+        except Exception:
+            logger.exception("dca notify failed")
+        return
+    # force=False -- same score_gate / rug_buy / honeypot checks a manual
+    # buy goes through. If the wallet is short on funds, the signer's own
+    # error message (e.g. "insufficient balance") comes back here and gets
+    # sent straight to the user below, same as any other failed live buy.
+    msg = _live_buy_followup(uid, card, mint, True, False, usd_override=usd)
+    try:
+        await context.bot.send_message(uid, f"📅 DCA buy ${usd:.0f}\n{msg}")
+    except Exception:
+        logger.exception("dca notify failed")
+
+
 async def launch_feed_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         await _launch_feed_job(context)
@@ -4371,6 +4519,7 @@ def main() -> None:
     app.add_handler(CommandHandler("tp", tp_cmd))
     app.add_handler(CommandHandler("sl", sl_cmd))
     app.add_handler(CommandHandler("tpladder", tpladder_cmd))
+    app.add_handler(CommandHandler("dca", dca_cmd))
     app.add_handler(CommandHandler("trail", trail_cmd))
     app.add_handler(CommandHandler("stake", stake_cmd))
     app.add_handler(CommandHandler("lpguard", lpguard_cmd))
@@ -4408,6 +4557,7 @@ def main() -> None:
         jq.run_repeating(buy_limit_job, interval=35, first=80)
         jq.run_repeating(launch_feed_job, interval=LAUNCH_FEED_SECONDS, first=35)
         jq.run_repeating(native_pulse_job, interval=600, first=50)
+        jq.run_repeating(dca_job, interval=300, first=90)
     else:
         logger.warning("job-queue extra missing; commands still work, scanners off")
 

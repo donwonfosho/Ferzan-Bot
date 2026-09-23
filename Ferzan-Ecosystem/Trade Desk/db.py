@@ -332,6 +332,23 @@ def init_db() -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS dca_plans (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                mint TEXT NOT NULL,
+                chain TEXT NOT NULL DEFAULT '',
+                usd_per_buy REAL NOT NULL,
+                interval_seconds INTEGER NOT NULL,
+                next_run_at INTEGER NOT NULL,
+                active INTEGER NOT NULL DEFAULT 1,
+                created_at INTEGER NOT NULL,
+                last_run_at INTEGER,
+                UNIQUE(user_id, mint)
+            )
+            """
+        )
         conn.commit()
 
 
@@ -1037,6 +1054,65 @@ def remove_curated_wallet(wallet_id: int) -> bool:
         cur = conn.execute("DELETE FROM curated_wallets WHERE id = ?", (wallet_id,))
         conn.commit()
         return cur.rowcount > 0
+
+
+def set_dca_plan(user_id: int, mint: str, chain: str, usd_per_buy: float, interval_seconds: int) -> None:
+    """Create or replace this user's DCA plan for a mint. Reactivates a
+    previously-cancelled plan for the same mint instead of duplicating it."""
+    now = int(time.time())
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO dca_plans
+                (user_id, mint, chain, usd_per_buy, interval_seconds, next_run_at, active, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, 1, ?)
+            ON CONFLICT(user_id, mint) DO UPDATE SET
+                chain = excluded.chain,
+                usd_per_buy = excluded.usd_per_buy,
+                interval_seconds = excluded.interval_seconds,
+                next_run_at = excluded.next_run_at,
+                active = 1
+            """,
+            (user_id, mint, chain, float(usd_per_buy), int(interval_seconds), now + int(interval_seconds), now),
+        )
+        conn.commit()
+
+
+def clear_dca_plan(user_id: int, mint: str) -> bool:
+    with get_conn() as conn:
+        cur = conn.execute(
+            "UPDATE dca_plans SET active = 0 WHERE user_id = ? AND mint = ? AND active = 1",
+            (user_id, mint),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def list_dca_plans(user_id: int) -> list[dict]:
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM dca_plans WHERE user_id = ? AND active = 1 ORDER BY id",
+            (user_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def list_due_dca_plans(now_ts: int) -> list[dict]:
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM dca_plans WHERE active = 1 AND next_run_at <= ? ORDER BY id",
+            (now_ts,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def advance_dca_plan(plan_id: int, next_run_at: int) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE dca_plans SET next_run_at = ?, last_run_at = ? WHERE id = ?",
+            (int(next_run_at), int(time.time()), plan_id),
+        )
+        conn.commit()
 
 
 def add_feed_chat(chat_id: int, title: str = "", chain: str = "*") -> None:
