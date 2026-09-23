@@ -90,6 +90,25 @@ ADMIN_IDS = {
 
 def _is_admin(uid: int) -> bool:
     return uid in ADMIN_IDS
+
+
+async def _notify_admins(bot, text: str) -> None:
+    """Best-effort DM to every configured admin. Never raises -- a notify
+    failure must not take down whatever job was reporting the problem."""
+    for admin_id in ADMIN_IDS:
+        try:
+            await bot.send_message(admin_id, text)
+        except Exception:
+            logger.exception("admin notify failed for %s", admin_id)
+
+
+def _auto_trading_killed() -> bool:
+    """Global kill switch for TP-ladder rung sells and auto-buy-on-feed.
+    Defaults OFF (auto trading enabled) until an admin flips it. Does not
+    touch manual /buy, /livesell, or single-target /tp, /sl, /trail exits."""
+    return db.flag_on(0, "kill_auto_trading", default=0)
+
+
 PROMO_PATH = Path(os.getenv("FERZAN_PROMO_GIF", str(Path(__file__).parent / "promo.gif")))
 
 ALERT_INTERVAL_SECONDS = int(os.getenv("ALERT_INTERVAL_SECONDS", "60"))
@@ -733,31 +752,65 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update):
         return
+    lines = [
+        "FERZAN TRADE DESK — commands\n",
+        "Paste a token address (CA) anytime to score it and get a buy card.",
+        "Pump.fun: paste the mint from DexScreener (usually ends in \"pump\").",
+        "Live spend is YOUR /wallet bag, not a shared treasury.\n",
+
+        "💼 <b>Wallet</b>",
+        "/wallet — generate / import / view your chain addresses",
+        "/importsol /importevm — import a key (private chat only)",
+        "/bag — live bag, PnL, and sell buttons",
+        "/positions — same as /bag\n",
+
+        "🛒 <b>Trading</b>",
+        "/buy &lt;CA&gt; — score + buy card for a token",
+        "/livesell &lt;mint&gt; — sell a Solana token",
+        "/livesellevm &lt;chain&gt; &lt;0x...&gt; — sell an EVM token",
+        "/quote &lt;chain&gt; &lt;CA&gt; — get a swap quote without trading",
+        "/chains — pick which network you're working on",
+        "/snipe &lt;CA&gt; — arm a live snipe on a new pool (capped size)",
+        "/buylimit &lt;CA&gt; &lt;price&gt; &lt;slippage&gt; — buy automatically when price hits a target",
+        "/limits — list your active buy limits\n",
+
+        "🎯 <b>Automated exits</b> (all opt-in — nothing sells unless you set it)",
+        "/tp 50 — auto-sell 100% when you're up 50%",
+        "/sl 30 — auto-sell 100% when you're down 30%",
+        "/trail 20 — auto-sell if price falls 20% off its peak since you set this",
+        "/tpladder 50:25 100:25 200:50 — sell in stages: 25% of your bag at +50%, "
+        "another 25% at +100%, the rest at +200% (add \"off &lt;mint&gt;\" to cancel)",
+        "These stack — /tp, /sl, /trail, and /tpladder can all be armed on the same "
+        "position at once, whichever triggers first fires.\n",
+
+        "📡 <b>Signals &amp; feeds</b>",
+        "/signal &lt;CA&gt; — score a token (rug/honeypot/liquidity checks)",
+        "/launches — browse new pools",
+        "/feeds — turn launch alerts on/off per chain in a group",
+        "/settings — default buy size, price floor, slippage protection",
+        "/alert &lt;symbol&gt; &lt;above|below&gt; &lt;price&gt; — price alert",
+        "/list — your active price alerts",
+        "/price &lt;symbol&gt; — current price\n",
+
+        "🐋 <b>Following other wallets</b>",
+        "/watchwallet &lt;chain&gt; &lt;address&gt; — get a DM when that wallet trades",
+        "/smartmoney — browse the curated smart-money wallet list and follow one\n",
+
+        "🤝 <b>Referrals</b>",
+        "/referral — your invite link, tier, and earnings",
+        "/claim — cash out once your claimable share hits $5\n",
+
+        "/help — this list",
+    ]
+    if _is_admin(update.effective_user.id):
+        lines += [
+            "\n🔧 <b>Admin only</b>",
+            "/addsmartwallet &lt;chain&gt; &lt;address&gt; &lt;label&gt; — add to the curated smart-money list",
+            "/removesmartwallet &lt;id&gt; — remove one (no id = lists all with their ids)",
+            "/killswitch on|off — instantly stop TP-ladder sells and auto-buy-on-feed bot-wide",
+        ]
     await update.effective_message.reply_text(
-        "FERZAN commands\n\n"
-        "/start — home + slogan\n"
-        "/wallet — generate / import / chain addresses\n"
-        "/importsol /importevm — import a key in private chat\n"
-        "/bag — live bag + PnL + sell %\n"
-        "/tp 50 — live take profit %\n"
-        "/sl 30 — live stop loss %\n"
-        "/buylimit <CA> <price> 3 — buy when mark hits\n"
-        "/limits — list buy limits\n"
-        "/settings — buy size, floor, protection\n"
-        "/feeds — on/off launch alerts per chain\n"
-        "/positions — live bag\n"
-        "/launches — new pools\n"
-        "/signal <CA> — score a token\n"
-        "/snipe <CA> — arm live snipe (capped)\n"
-        "/livesell <mint> — sell SOL token\n"
-        "/livesellevm <chain> <0x> — sell EVM token\n"
-        "/watchwallet — copy-trade alerts\n"
-        "/quote <chain> <CA> — swap quote\n"
-        "/chains — pick a network\n"
-        "/help — this list\n\n"
-        "Paste a CA anytime to score + buy.\n"
-        "Pump.fun: paste the mint from DexScreener (usually ends in pump).\n"
-        "Live spend is YOUR /wallet bag, not treasury."
+        "\n".join(lines), parse_mode="HTML", disable_web_page_preview=True
     )
 
 
@@ -1961,6 +2014,39 @@ async def removesmartwallet_cmd(update: Update, context: ContextTypes.DEFAULT_TY
         return
     ok = db.remove_curated_wallet(wid)
     await update.effective_message.reply_text("Removed." if ok else "No wallet with that id.")
+
+
+async def killswitch_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard(update):
+        return
+    if not _is_admin(update.effective_user.id):
+        await update.effective_message.reply_text("Admins only.")
+        return
+    args = list(context.args or [])
+    if not args or args[0].lower() not in ("on", "off"):
+        state = "ON — auto trading is stopped" if _auto_trading_killed() else "OFF — auto trading is running"
+        await update.effective_message.reply_text(
+            "Usage: /killswitch on | off\n\n"
+            f"Current state: {state}\n\n"
+            "ON stops TWO things bot-wide, for every user:\n"
+            "  • TP-ladder rung sells (/tpladder)\n"
+            "  • Auto-buy-on-feed (the auto_buy setting)\n\n"
+            "It does NOT touch: manual /buy, /livesell, /livesellevm, "
+            "or single-target /tp, /sl, /trail exits — those keep working as-is."
+        )
+        return
+    turn_on = args[0].lower() == "on"
+    db.set_flag(0, "kill_auto_trading", turn_on)
+    if turn_on:
+        await update.effective_message.reply_text(
+            "🛑 Kill switch ON. TP-ladder rung sells and auto-buy-on-feed are stopped bot-wide.\n"
+            "Manual trading and single-target /tp, /sl, /trail are unaffected.\n"
+            "Run /killswitch off to resume."
+        )
+    else:
+        await update.effective_message.reply_text(
+            "✅ Kill switch OFF. TP-ladder rung sells and auto-buy-on-feed are running again."
+        )
 
 
 def _onramp_url(code: str, address: str) -> str:
@@ -3837,20 +3923,45 @@ async def lp_watch_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def live_exit_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    try:
+        await _live_exit_job(context)
+    except Exception:
+        logger.exception("live exit job crashed; will retry next cycle")
+        await _notify_admins(
+            context.bot,
+            "⚠️ live_exit_job crashed (see journalctl for the traceback). "
+            "It will retry on the next 45s cycle, but any positions due to "
+            "check this cycle were skipped.",
+        )
+
+
+async def _live_exit_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     for row in db.list_live_exits():
         uid = int(row["user_id"])
         mint = row["mint"]
+        try:
+            await _live_exit_one(context, row, uid, mint)
+        except Exception:
+            logger.exception("live exit job: row failed for user=%s mint=%s", uid, mint)
+            await _notify_admins(
+                context.bot,
+                f"⚠️ live_exit_job: exit check failed for user {uid}, mint {mint} "
+                "(see journalctl). Other users' positions were unaffected.",
+            )
+
+
+async def _live_exit_one(context: ContextTypes.DEFAULT_TYPE, row, uid: int, mint: str) -> None:
         cost = db.live_cost(uid, mint)
         if cost <= 0:
-            continue
+            return
         px = _token_mark_usd(mint)
         if px <= 0:
-            continue
+            return
         # worth unknown without qty; compare mark vs implied entry from last cost only if we have holdings
         try:
             sol_secret, evm_secret = user_wallets.secrets(uid)
         except Exception:
-            continue
+            return
         worth = 0.0
         evm_chain = "base"
         try:
@@ -3870,11 +3981,15 @@ async def live_exit_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 if held:
                     worth = float(held["amount"]) * px
         except Exception:
-            continue
+            return
         if worth <= 0:
-            continue
+            return
         pnl_pct = ((worth - cost) / cost) * 100
-        for rung in db.list_tp_rungs(uid, mint):
+        if _auto_trading_killed():
+            rungs = []
+        else:
+            rungs = db.list_tp_rungs(uid, mint)
+        for rung in rungs:
             if rung.get("hit") or pnl_pct < float(rung["pct"]):
                 continue
             sell_pct = float(rung["sell_pct"])
@@ -3890,6 +4005,12 @@ async def live_exit_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             db.mark_tp_rung_hit(uid, mint, rung["pct"])
             if _rok:
                 db.reduce_live_cost_pct(uid, mint, sell_pct)
+            else:
+                await _notify_admins(
+                    context.bot,
+                    f"⚠️ TP-ladder sell FAILED for user {uid}, mint {mint} "
+                    f"(rung +{float(rung['pct']):.0f}%, wanted to sell {sell_pct:.0f}%): {rmsg}",
+                )
             try:
                 await context.bot.send_message(
                     uid,
@@ -3905,7 +4026,7 @@ async def live_exit_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             worth = worth * (1 - sell_pct / 100.0)
             pnl_pct = ((worth - cost) / cost) * 100
         if worth <= 0:
-            continue
+            return
         hit = None
         trail = float(row.get("trail_pct") or 0)
         peak = float(row.get("peak_pct") or 0)
@@ -3919,7 +4040,7 @@ async def live_exit_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         if trail > 0 and peak > 0 and pnl_pct <= peak - trail:
             hit = "trail"
         if not hit:
-            continue
+            return
         try:
             if mint.startswith("0x"):
                 _ok, msg = evm_signer.sell_evm(evm_chain, mint, key_hex=evm_secret)
@@ -3931,6 +4052,12 @@ async def live_exit_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         db.clear_live_exit(uid, mint)
         if _ok:
             db.clear_live_cost(uid, mint)
+        else:
+            await _notify_admins(
+                context.bot,
+                f"⚠️ {hit.upper()} exit sell FAILED for user {uid}, mint {mint} "
+                f"({pnl_pct:+.1f}%): {msg}\nPosition is still open on-chain for this user.",
+            )
         try:
             await context.bot.send_message(
                 uid,
@@ -3955,6 +4082,11 @@ async def launch_feed_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         await _launch_feed_job(context)
     except Exception:
         logger.exception("launch feed job crashed; will retry next cycle")
+        await _notify_admins(
+            context.bot,
+            "⚠️ launch_feed_job crashed (see journalctl for the traceback). "
+            "Launch alerts and auto-buy-on-feed were skipped this cycle; will retry next cycle.",
+        )
 
 
 async def _launch_feed_job(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -4013,7 +4145,7 @@ async def _launch_feed_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 await send_launch(context.bot, uid, text, markup, promo=False)
             except Exception:
                 logger.exception("launch feed failed for %s", uid)
-            if db.flag_on(uid, "auto_buy", 0):
+            if db.flag_on(uid, "auto_buy", 0) and not _auto_trading_killed():
                 auto_usd = float(user.get("auto_buy_usd") or 0)
                 if auto_usd > 0 and (ln.token or "").strip():
                     try:
@@ -4219,6 +4351,7 @@ def main() -> None:
     app.add_handler(CommandHandler("smartmoney", smartmoney_cmd))
     app.add_handler(CommandHandler("addsmartwallet", addsmartwallet_cmd))
     app.add_handler(CommandHandler("removesmartwallet", removesmartwallet_cmd))
+    app.add_handler(CommandHandler("killswitch", killswitch_cmd))
     app.add_handler(CommandHandler("wallet", wallet_cmd))
     app.add_handler(CommandHandler("buy", buy_cmd))
     app.add_handler(CommandHandler("onramp", buy_cmd))
