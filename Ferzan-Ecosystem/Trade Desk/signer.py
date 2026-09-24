@@ -43,7 +43,16 @@ def exec_opts(user_id: int | None) -> dict:
     fee = int(gas_sol * 1_000_000_000) if gas_sol > 0 else int(
         os.getenv("PRIORITY_FEE_LAMPORTS", str(DEFAULT_FEE_LAMPORTS))
     )
+    if anti_mev_paused():
+        anti_mev = False  # desk-wide pause: nobody pays a tip for protection they aren't getting
     return {"anti_mev": bool(anti_mev), "fee_lamports": max(JITO_MIN_TIP, fee)}
+
+
+def anti_mev_paused() -> bool:
+    """ANTI_MEV_PAUSED=1 in .env pauses the Jito route for EVERY user (e.g.
+    while Jito is dropping our bundles). Users' own on/off choices are kept
+    and come back when the pause is lifted."""
+    return (os.getenv("ANTI_MEV_PAUSED", "0").strip().lower()) in {"1", "true", "yes", "on"}
 
 
 def sol_usd() -> float:

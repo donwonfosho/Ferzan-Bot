@@ -952,9 +952,11 @@ async def _tour_step3(query, uid: int) -> None:
         "3️⃣ Sell from 📊 Bag: 25 / 50 / 100% in one tap.\n\n"
         "🛡 <b>Protection is on by default</b>\n"
         "• Blocks buys when liquidity is thin or the token is a honeypot\n"
-        "• Anti-MEV: Solana buys go private via Jito (no sandwiches, no fee if it fails)\n"
-        "• A trade only says ✅ once it's confirmed on-chain\n\n"
-        f"💵 Default buy size: <b>${size:.0f}</b> — change it in ⚙️ Desk.\n\n"
+        + ("• Anti-MEV: paused for maintenance — buys use the fast normal route for now\n"
+           if signer.anti_mev_paused() else
+           "• Anti-MEV: Solana buys go private via Jito (no sandwiches, no fee if it fails)\n")
+        + "• A trade only says ✅ once it's confirmed on-chain\n\n"
+        f"💵 Default buy size: <b>${size:.0f}</b> — change it in ⚙️ Settings.\n\n"
         "Try it now 👇"
     )
     kb = InlineKeyboardMarkup(
@@ -2367,6 +2369,10 @@ async def settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     gate = db.flag_on(uid, "score_gate", 0)
     auto = db.flag_on(uid, "auto_buy", 0)
     mev = db.flag_on(uid, "anti_mev", 1)
+    mev_paused = signer.anti_mev_paused()
+    mev_line = "⏸ Anti-MEV paused for maintenance — buys use the fast normal route" if mev_paused else (
+        f"{'🟢' if mev else '🔴'} Anti-MEV")
+    mev_btn = "⏸ Anti-MEV paused" if mev_paused else f"{'🟢' if mev else '🔴'} Anti-MEV"
     copy_live = db.flag_on(uid, "copy_live", 0)
     buy_usd = float(user.get("buy_usd") or 25)
     bslip = float(user.get("buy_slip_pct") or 10)
@@ -2379,7 +2385,7 @@ async def settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         f"   /settings buyslip 10   /settings sellslip 10\n"
         f"⚡️ Auto-buy paste  {'ON $'+str(int(abuy)) if auto and abuy else 'OFF'}\n"
         f"   /settings autobuy 25   (0 = off)\n"
-        f"{'🟢' if mev else '🔴'} Anti-MEV\n"
+        f"{mev_line}\n"
         f"🎯 Score floor  {user['min_confluence']}   ( /settings floor 0 )\n\n"
         "🛡 Protection — you turn these on or off\n"
         f"{'🟢' if gate else '🔴'} Block buy if score under floor\n"
@@ -2398,7 +2404,7 @@ async def settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     callback_data="flg:auto_buy",
                 )],
                 [InlineKeyboardButton(
-                    f"{'🟢' if mev else '🔴'} Anti-MEV",
+                    mev_btn,
                     callback_data="flg:anti_mev",
                 )],
                 [InlineKeyboardButton(
@@ -4631,6 +4637,13 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             "daily_recap",
         }:
             return
+        if flag == "anti_mev" and signer.anti_mev_paused():
+            await context.bot.send_message(
+                uid,
+                "⏸ Anti-MEV is paused for maintenance while we fix private (Jito) delivery. "
+                "Buys use the fast normal route meanwhile, and your setting comes back when it's fixed.",
+            )
+            return
         # Read with the SAME default the rest of the bot uses for this flag,
         # otherwise the first tap on a never-set default-OFF flag writes OFF.
         now = not db.flag_on(uid, flag, _FLAG_DEFAULTS.get(flag, 0))
@@ -4809,7 +4822,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         db.set_chain_trade(uid, cid, gas=nxt)
         await _safe_answer(query, f"{cid.upper()} gas tip {nxt}")
         if cid == "sol":
-            route = "Jito tip (Anti-MEV on)" if db.flag_on(uid, "anti_mev", 1) else "priority fee (Anti-MEV off)"
+            route = "Jito tip (Anti-MEV on)" if signer.exec_opts(uid)["anti_mev"] else "priority fee (Anti-MEV off)"
             shown = f"{nxt} SOL" if nxt else "default 0.001 SOL"
             await context.bot.send_message(uid, f"⛽ SOL speed → {shown} per trade, paid as {route}.")
         else:
