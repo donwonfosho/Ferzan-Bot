@@ -444,6 +444,150 @@ async def api_card(request: Request) -> JSONResponse:
     return JSONResponse({"queued": True})
 
 
+# ------------------------------------------------ alerts / tracker / copy --
+# Same tables the bot's /alert, /watchwallet, /copy and /wallets use; the
+# bot's jobs do the watching, alerting and copy-buying (with every gate).
+MAX_WATCHED = int(os.getenv("FERZAN_MAX_WATCHED_WALLETS", "20"))
+COPY_SIZES = [0, 10, 25, 50, 100, 250]  # 0 = the user's default buy size
+
+
+def _watch_state(uid: int) -> dict:
+    alerts = [
+        {"id": r["id"], "mint": r["mint"], "symbol": r.get("symbol") or "", "kind": r["kind"],
+         "direction": r["direction"], "target": float(r["target"]), "note": r.get("note") or ""}
+        for r in db.list_token_alerts(uid)
+    ]
+    wallets = [
+        {"id": w["id"], "chain": w["chain"], "address": w["address"], "label": w.get("label") or "",
+         "copy_on": bool(int(w.get("copy_on") or 0)), "copy_sells": bool(int(w.get("copy_sells") or 0)),
+         "copy_usd": float(w.get("copy_usd") or 0)}
+        for w in db.list_watched_wallets(uid)
+    ]
+    return {"alerts": alerts, "max_alerts": db.MAX_TOKEN_ALERTS, "wallets": wallets, "max_wallets": MAX_WATCHED,
+            "copy_live": db.flag_on(uid, "copy_live", 0), "copy_sizes": [s for s in COPY_SIZES if s <= _max_usd()]}
+
+
+@app.post("/api/watch")
+async def api_watch(request: Request) -> JSONResponse:
+    uid = _auth(await _json(request))
+    return JSONResponse(await asyncio.to_thread(_watch_state, uid))
+
+
+def _add_alert(uid: int, mint: str, text: str) -> dict:
+    from alert_targets import parse_alert_target
+
+    if len(db.list_token_alerts(uid)) >= db.MAX_TOKEN_ALERTS:
+        raise HTTPException(status_code=400, detail=f"You have {db.MAX_TOKEN_ALERTS} alerts — remove one first.")
+    marks = portfolio._ds_prices([mint])
+    m = marks.get(mint) or next((v for k, v in marks.items() if k.lower() == mint.lower()), {}) or {}
+    got = parse_alert_target(text, float(m.get("price") or 0), float(m.get("mc") or 0))
+    if isinstance(got, str):
+        raise HTTPException(status_code=400, detail=got)
+    kind, direction, target, note = got
+    db.add_token_alert(uid, mint, m.get("symbol") or "", kind, direction, target, note)
+    return _watch_state(uid)
+
+
+@app.post("/api/alerts/add")
+async def api_alert_add(request: Request) -> JSONResponse:
+    body = await _json(request)
+    uid = _auth(body, max_age=ORDER_MAX_AGE_S)
+    if not _rate_ok(uid, "watch", 20):
+        raise HTTPException(status_code=429, detail="Too many changes — give it a minute.")
+    mint = str(body.get("mint") or "").strip()
+    if not _valid_mint(mint):
+        raise HTTPException(status_code=400, detail="Bad token address.")
+    return JSONResponse(await asyncio.to_thread(_add_alert, uid, mint, str(body.get("target") or "")[:40]))
+
+
+@app.post("/api/alerts/del")
+async def api_alert_del(request: Request) -> JSONResponse:
+    body = await _json(request)
+    uid = _auth(body)
+    try:
+        db.delete_token_alert(int(body.get("id")), uid)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Bad alert.")
+    return JSONResponse(await asyncio.to_thread(_watch_state, uid))
+
+
+def _add_wallet(uid: int, chain_raw: str, address: str, label: str) -> dict:
+    import onchain
+
+    if db.count_watched_wallets(uid) >= MAX_WATCHED:
+        raise HTTPException(status_code=400, detail=f"You're tracking {MAX_WATCHED} wallets (the max) — remove one first.")
+    try:
+        chain = onchain.normalize_chain(chain_raw)
+        events = onchain.recent_activity(chain, address, 3)
+    except onchain.OnchainError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)[:200])
+    except Exception:
+        raise HTTPException(status_code=502, detail="Couldn't check that wallet right now — try again.")
+    wid = db.add_watched_wallet(uid, chain, address, label or None)
+    if events:
+        db.set_wallet_cursor(wid, events[0].txid)  # alert on NEW activity only
+    return _watch_state(uid)
+
+
+@app.post("/api/wallets/add")
+async def api_wallet_add(request: Request) -> JSONResponse:
+    body = await _json(request)
+    uid = _auth(body, max_age=ORDER_MAX_AGE_S)
+    if not _rate_ok(uid, "watch", 20):
+        raise HTTPException(status_code=429, detail="Too many changes — give it a minute.")
+    address = str(body.get("address") or "").strip()
+    if not _valid_mint(address) or address.startswith(("EQ", "UQ", "kQ")):
+        raise HTTPException(status_code=400, detail="That doesn't look like a Solana or EVM wallet address.")
+    label = " ".join(str(body.get("label") or "").split())[:24]
+    chain = str(body.get("chain") or ("eth" if address.startswith("0x") else "sol"))[:12]
+    return JSONResponse(await asyncio.to_thread(_add_wallet, uid, chain, address, label))
+
+
+@app.post("/api/wallets/del")
+async def api_wallet_del(request: Request) -> JSONResponse:
+    body = await _json(request)
+    uid = _auth(body)
+    try:
+        wid = int(body.get("id"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Bad wallet.")
+    if db.delete_watched_wallet(wid, uid):
+        db.clear_copy_fills_for_wallet(uid, wid)
+    return JSONResponse(await asyncio.to_thread(_watch_state, uid))
+
+
+@app.post("/api/wallets/copy")
+async def api_wallet_copy(request: Request) -> JSONResponse:
+    body = await _json(request)
+    uid = _auth(body, max_age=ORDER_MAX_AGE_S)
+    try:
+        wid = int(body.get("id"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Bad wallet.")
+    if not db.get_watched_wallet(wid, uid):
+        raise HTTPException(status_code=404, detail="No such wallet.")
+    fields = {}
+    if "copy_on" in body:
+        fields["copy_on"] = 1 if body.get("copy_on") else 0
+    if "copy_sells" in body:
+        fields["copy_sells"] = 1 if body.get("copy_sells") else 0
+    if "copy_usd" in body:
+        usd = _num(body.get("copy_usd"), 0, _max_usd(), "Copy size")
+        fields["copy_usd"] = float(usd or 0)
+    if not fields:
+        raise HTTPException(status_code=400, detail="Nothing to change.")
+    db.set_wallet_copy(wid, uid, **fields)
+    return JSONResponse(await asyncio.to_thread(_watch_state, uid))
+
+
+@app.post("/api/copylive")
+async def api_copy_live(request: Request) -> JSONResponse:
+    body = await _json(request)
+    uid = _auth(body, max_age=ORDER_MAX_AGE_S)
+    db.set_flag(uid, "copy_live", bool(body.get("on")))
+    return JSONResponse(await asyncio.to_thread(_watch_state, uid))
+
+
 async def _json(request: Request) -> dict:
     try:
         body = await request.json()

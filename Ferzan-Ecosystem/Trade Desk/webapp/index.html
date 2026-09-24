@@ -137,6 +137,20 @@
   .choice.primary { background: var(--btn); color: var(--tg-theme-button-text-color, #fff); border-color: transparent; }
   .choice.primary span { color: inherit; opacity: .85; }
   .remember { display: flex; align-items: center; justify-content: center; gap: 8px; color: var(--muted); font-size: 13px; margin-top: 4px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .chip { border: 0; border-radius: 999px; padding: 6px 10px; font: inherit; font-size: 12px; font-weight: 700;
+          background: var(--sunk); color: var(--ink); }
+  .chip.on { background: color-mix(in srgb, var(--gain) 18%, var(--sunk)); color: var(--gain); }
+  .chip.del { color: var(--loss); }
+  .wrow { padding: 12px 14px; border-top: 1px solid var(--line); }
+  .wrow:first-child { border-top: 0; }
+  .wrow .t { display: flex; justify-content: space-between; gap: 8px; font-size: 14px; }
+  .wrow code { color: var(--muted); font-size: 12px; }
+  .master { display: flex; justify-content: space-between; align-items: center; gap: 10px; font-size: 14px; margin-bottom: 10px; }
+  .addw { display: grid; grid-template-columns: 1fr 84px; gap: 8px; margin-top: 10px; }
+  .addw input, .addw select { border: 1px solid var(--line); background: var(--bg); color: var(--ink); border-radius: 10px;
+                              padding: 10px 12px; font: inherit; font-size: 14px; min-width: 0; }
+  .addw .full { grid-column: 1 / -1; }
   .skeleton { background: var(--sunk); border-radius: 8px; height: 1em; animation: pulse 1.2s ease-in-out infinite; }
   @keyframes pulse { 50% { opacity: .5; } }
   @media (prefers-reduced-motion: reduce) { .skeleton { animation: none; } }
@@ -176,6 +190,21 @@
 
 <h2>Positions</h2>
 <div id="positions" class="list" role="list"></div>
+
+<h2 style="margin-top:24px">Alerts</h2>
+<div id="alerts" class="list"><div class="empty">Loading…</div></div>
+
+<h2 style="margin-top:24px">Tracked wallets · copy</h2>
+<div class="trade" id="tracker">
+  <div class="master"><span id="copyLiveTxt">Live copy-mirror</span><button class="chip" id="copyLive">…</button></div>
+  <div id="twallets" class="list"></div>
+  <form class="addw" id="addWallet" autocomplete="off">
+    <input class="full" id="twAddr" placeholder="Wallet address to track" spellcheck="false" aria-label="Wallet address">
+    <input id="twLabel" placeholder="Label (optional)" maxlength="24" aria-label="Label">
+    <select id="twChain" aria-label="Chain"><option value="sol">SOL</option><option value="eth">ETH</option><option value="base">Base</option><option value="bsc">BSC</option><option value="arb">Arb</option></select>
+    <button class="btn full" type="submit">📍 Track wallet</button>
+  </form>
+</div>
 
 <div class="wallets">
   <h2>Wallets</h2>
@@ -361,6 +390,9 @@
         <div class="grid3">${(t.presets || []).map((v) =>
           `<button class="btn" data-buy="${v}">Buy ${v} ${esc(t.unit)}</button>`).join("")}</div>
         ${(data && data.multi >= 2) ? `<label class="remember" style="justify-content:flex-start;margin:8px 0 0"><input type="checkbox" id="multiBuy" checked> 👥 Buy in all ${data.multi} multi-buy wallets</label>` : ""}
+        <form class="row" id="alertForm" style="margin-top:8px" autocomplete="off">
+          <input id="alertTarget" placeholder="🔔 Alert at 2m, +50%, price 0.0012" aria-label="Alert target">
+          <button class="btn ghost" type="submit">Set</button></form>
         <div class="btnrow" style="margin-top:8px"><button class="btn ghost" data-rules="${esc(t.mint)}" data-sym="${esc(t.symbol)}" data-px="${t.price || 0}">⏳ Limit buy · 📅 DCA</button></div>
         ${t.chart ? `<p style="margin:10px 0 0"><a href="#" data-chart="${esc(t.chart)}" style="color:var(--link)">Open chart ↗</a></p>` : ""}`;
     } catch (err) {
@@ -512,6 +544,94 @@
   }
   $("refresh").addEventListener("click", () => load(true));
 
+  // ---- alerts + tracked wallets / copy-trade -----------------------------
+  const fmtMc = (v) => v >= 1e9 ? `$${(v / 1e9).toFixed(2)}B` : v >= 1e6 ? `$${(v / 1e6).toFixed(2)}M` : v >= 1e3 ? `$${(v / 1e3).toFixed(1)}K` : `$${v.toFixed(0)}`;
+  let watch = null;
+  function renderWatch(w) {
+    watch = w;
+    const al = $("alerts");
+    if (!w.alerts.length) { al.className = "empty"; al.innerHTML = "No alerts yet.<br>Find a token above and set one — like 2m, +50% or price 0.0012."; }
+    else {
+      al.className = "list";
+      al.innerHTML = w.alerts.map((a) => `
+        <div class="armed num" style="margin:0;border-radius:0;background:none;border-top:1px solid var(--line)">
+          <span>${a.direction === "above" ? "▲" : "▼"} $${esc(a.symbol || a.mint.slice(0, 6))} ${a.direction} ${a.kind === "mc" ? fmtMc(a.target) + " MC" : "$" + px(a.target)}</span>
+          <button data-delalert="${a.id}">Remove</button></div>`).join("");
+    }
+    $("copyLive").textContent = w.copy_live ? "🟢 ON" : "🔴 OFF";
+    $("copyLive").className = "chip" + (w.copy_live ? " on" : "");
+    $("copyLiveTxt").innerHTML = `<b>Live copy-mirror</b><br><span class="flat" style="font-size:12px">${w.copy_live ? "Copy-ON wallets are mirrored with real buys" : "Off — tracked wallets only send alerts"}</span>`;
+    const tw = $("twallets");
+    tw.className = w.wallets.length ? "list" : "";
+    tw.innerHTML = w.wallets.map((x) => `
+      <div class="wrow"><div class="t"><span><b>${esc(x.label || "Wallet #" + x.id)}</b> <span class="chain" style="font-size:11px;color:var(--muted)">${esc(x.chain.toUpperCase())}</span></span>
+        <code>${esc(x.address.slice(0, 4))}…${esc(x.address.slice(-4))}</code></div>
+        <div class="chips">
+          <button class="chip${x.copy_on ? " on" : ""}" data-copy="${x.id}" data-f="copy_on">${x.copy_on ? "👯 Copy ON" : "👁 Alerts only"}</button>
+          <button class="chip" data-copy="${x.id}" data-f="copy_usd">Size ${x.copy_usd ? "$" + x.copy_usd.toFixed(0) : "default"}</button>
+          <button class="chip${x.copy_sells ? " on" : ""}" data-copy="${x.id}" data-f="copy_sells">Sells ${x.copy_sells ? "ON" : "OFF"}</button>
+          <button class="chip del" data-delwallet="${x.id}" data-label="${esc(x.label || "this wallet")}">Remove</button>
+        </div></div>`).join("");
+  }
+  async function loadWatch() {
+    try { renderWatch(await api("/api/watch", {})); }
+    catch (err) { $("alerts").className = "error"; $("alerts").textContent = err.message; }
+  }
+  $("alerts").addEventListener("click", async (e) => {
+    const b = e.target.closest("[data-delalert]");
+    if (!b) return;
+    try { renderWatch(await api("/api/alerts/del", { id: +b.dataset.delalert })); toast("Alert removed", 2000); }
+    catch (err) { toast("🔴 " + err.message, 4000); }
+  });
+  $("tok").addEventListener("submit", async (e) => {
+    if (e.target.id !== "alertForm" || !token) return;
+    e.preventDefault();
+    const t = $("alertTarget").value.trim();
+    if (!t) return;
+    try {
+      renderWatch(await api("/api/alerts/add", { mint: token.mint, target: t }));
+      $("alertTarget").value = "";
+      toast(`🔔 Alert set for $${token.symbol}`, 2500);
+    } catch (err) { toast("🔴 " + err.message, 4000); }
+  });
+  $("copyLive").addEventListener("click", async () => {
+    if (!watch) return;
+    const on = !watch.copy_live;
+    if (on && !(await confirmBox("Turn on live copy-mirror? Wallets set to Copy ON will trigger REAL buys from your active wallet (same safety checks as any buy)."))) return;
+    try { renderWatch(await api("/api/copylive", { on })); toast(on ? "👯 Live copy-mirror ON" : "Copy-mirror off", 2500); }
+    catch (err) { toast("🔴 " + err.message, 4000); }
+  });
+  $("twallets").addEventListener("click", async (e) => {
+    const d = e.target.closest("[data-delwallet]");
+    if (d) {
+      if (!(await confirmBox(`Stop tracking ${d.dataset.label}?`))) return;
+      try { renderWatch(await api("/api/wallets/del", { id: +d.dataset.delwallet })); } catch (err) { toast("🔴 " + err.message, 4000); }
+      return;
+    }
+    const c = e.target.closest("[data-copy]");
+    if (!c || !watch) return;
+    const x = watch.wallets.find((w) => w.id === +c.dataset.copy);
+    const f = c.dataset.f, body = { id: x.id };
+    if (f === "copy_on") body.copy_on = !x.copy_on;
+    else if (f === "copy_sells") body.copy_sells = !x.copy_sells;
+    else { const s = watch.copy_sizes, i = s.indexOf(x.copy_usd); body.copy_usd = s[(i + 1) % s.length]; }
+    try {
+      renderWatch(await api("/api/wallets/copy", body));
+      if (f === "copy_on" && body.copy_on && !watch.copy_live) toast("Copy ON — it only buys once Live copy-mirror (above) is ON.", 4000);
+    } catch (err) { toast("🔴 " + err.message, 4000); }
+  });
+  $("addWallet").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const address = $("twAddr").value.trim();
+    if (!address) return;
+    const chain = address.startsWith("0x") ? ($("twChain").value === "sol" ? "eth" : $("twChain").value) : "sol";
+    try {
+      renderWatch(await api("/api/wallets/add", { address, chain, label: $("twLabel").value.trim() }));
+      $("twAddr").value = ""; $("twLabel").value = "";
+      toast("📍 Tracking — you'll get a DM when it trades.", 3000);
+    } catch (err) { toast("🔴 " + err.message, 4000); }
+  });
+
   // Opened from the chat's menu button: ask app vs classic first (unless the
   // person ticked "Always open the app" on this device).
   const qs = new URLSearchParams(location.search);
@@ -536,6 +656,7 @@
     });
   }
   load(false);
+  loadWatch();
   setInterval(() => { if (!document.hidden) load(false); }, 30000);
 })();
 </script>
