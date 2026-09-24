@@ -416,9 +416,11 @@ _UNDERPRICED_HINTS = (
 )
 
 
-def _broadcast(acct, meta: dict, to: str, data: str, value: int = 0) -> tuple[bool, str]:
+def _broadcast(acct, meta: dict, to: str, data: str, value: int = 0, gas_limit: int | None = None) -> tuple[bool, str]:
     data_hex = data if str(data).startswith("0x") else "0x" + str(data)
-    gas = _estimate_gas(meta["rpc"], acct.address, to, data_hex, int(value))
+    # gas_limit: callers that pre-computed the exact fee (a "send all"
+    # withdrawal) pass it so the fee we sign matches the fee they reserved.
+    gas = int(gas_limit) if gas_limit else _estimate_gas(meta["rpc"], acct.address, to, data_hex, int(value))
     nonce = _nonce(meta["rpc"], acct.address)
     base_gas_price = _gas_price(meta["rpc"])
     bumps = (1.2, 1.6, 2.2)  # first try, then two retries if underpriced

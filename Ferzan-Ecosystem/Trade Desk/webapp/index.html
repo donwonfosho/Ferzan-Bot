@@ -86,6 +86,22 @@
   .w:first-child { border-top: 0; }
   .w code { color: var(--muted); font-size: 12px; }
   .foot { color: var(--muted); font-size: 12px; text-align: center; margin-top: 18px; }
+  .trade { background: var(--card); border-radius: 14px; padding: 12px; margin-bottom: 24px; }
+  .row { display: flex; gap: 8px; }
+  .row input { flex: 1; min-width: 0; border: 1px solid var(--line); background: var(--bg); color: var(--ink);
+               border-radius: 10px; padding: 10px 12px; font: inherit; font-size: 14px; }
+  .btn { border: 0; border-radius: 10px; padding: 10px 14px; font-weight: 700; font-size: 14px; background: var(--btn); color: var(--btn-ink); }
+  .btn:disabled, .act[aria-disabled="true"] { opacity: .5; }
+  .tok { margin-top: 12px; }
+  .tok .head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+  .tok .name { font-weight: 700; font-size: 16px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tok .chain { font-size: 11px; font-weight: 600; color: var(--muted); background: var(--sunk); border-radius: 6px; padding: 1px 6px; margin-left: 6px; }
+  .tok .stats { color: var(--muted); font-size: 13px; margin: 4px 0 8px; }
+  .tok .safety { font-size: 12px; white-space: pre-line; background: var(--sunk); border-radius: 10px; padding: 8px 10px; margin-bottom: 10px; }
+  .grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  .toast { position: fixed; left: 16px; right: 16px; bottom: calc(16px + env(safe-area-inset-bottom)); background: var(--ink); color: var(--bg);
+           border-radius: 12px; padding: 12px 14px; font-size: 14px; white-space: pre-line; display: none; z-index: 10; max-height: 40vh; overflow: auto; }
+  .toast.show { display: block; }
   .skeleton { background: var(--sunk); border-radius: 8px; height: 1em; animation: pulse 1.2s ease-in-out infinite; }
   @keyframes pulse { 50% { opacity: .5; } }
   @media (prefers-reduced-motion: reduce) { .skeleton { animation: none; } }
@@ -107,6 +123,15 @@
   <div class="tile"><div class="k">📊 Positions</div><div class="v num" id="npos">–</div><div class="s">open bags</div></div>
 </div>
 
+<h2>Trade</h2>
+<div class="trade">
+  <form class="row" id="findForm" autocomplete="off">
+    <input id="ca" placeholder="Paste a token address" aria-label="Token address" spellcheck="false">
+    <button class="btn" id="findBtn" type="submit">Find</button>
+  </form>
+  <div class="tok" id="tok" hidden></div>
+</div>
+
 <h2>Positions</h2>
 <div id="positions" class="list" role="list"></div>
 
@@ -115,7 +140,8 @@
   <div id="wallets" class="list"></div>
 </div>
 
-<p class="foot" id="foot">Trades run in the bot — every sell goes through your safety checks.</p>
+<p class="foot" id="foot">Trades run through the bot — same safety checks as a button tap.</p>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
 
 <script>
 (() => {
@@ -175,18 +201,22 @@
           <div class="val num">${p.priced ? usd(p.value) : "unpriced"}</div>
           <div class="sub num">${amt(p.amount)} · ${chg(p.chg24)}</div>
           <div class="right-sub num">${delta(p.pnl, p.pnl_pct)}</div>
-          <div class="actions">
-            <span class="act primary" data-sell="${esc(p.mint)}">Sell in bot</span>
+          <div class="actions" style="flex-wrap:wrap">
+            ${sellPcts().map((v) => `<span class="act primary" data-sellpct="${v}" data-mint="${esc(p.mint)}" data-sym="${esc(p.symbol)}">Sell ${v}%</span>`).join("")}
+            <span class="act ghost" data-sell="${esc(p.mint)}">Bot</span>
             ${p.chart ? `<span class="act ghost" data-chart="${esc(p.chart)}">Chart</span>` : ""}
           </div>
         </button>`).join("");
     }
     $("wallets").innerHTML = (d.wallets || []).map((w) => `
       <div class="w"><span>${w.active ? "✅" : "▫️"} ${esc(w.label)}</span><code>${esc(w.sol.slice(0, 4))}…${esc(w.sol.slice(-4))}</code></div>`).join("");
-    $("foot").textContent = `Updated ${new Date(d.ts * 1000).toLocaleTimeString()} · trades run in the bot`;
+    $("foot").textContent = `Updated ${new Date(d.ts * 1000).toLocaleTimeString()} · trades run through the bot`;
   }
 
   $("positions").addEventListener("click", (e) => {
+    const sp = e.target.closest("[data-sellpct]");
+    if (sp) { order({ side: "sell", mint: sp.dataset.mint, amount: +sp.dataset.sellpct, unit: "pct" },
+                    `Sell ${sp.dataset.sellpct}% of $${sp.dataset.sym}?`); return; }
     const sell = e.target.closest("[data-sell]");
     if (sell) { tg && tg.HapticFeedback && tg.HapticFeedback.impactOccurred("medium"); openBot("sell_" + sell.dataset.sell); return; }
     const chart = e.target.closest("[data-chart]");
@@ -195,6 +225,90 @@
     if (row) { row.classList.toggle("open"); row.setAttribute("aria-expanded", row.classList.contains("open")); }
   });
   $("walletChip").addEventListener("click", () => bot && openBot("wallets"));
+
+  const sellPcts = () => {
+    const s = (data && data.presets && data.presets.sell) || [25, 50];
+    return [...s.filter((v) => v < 100), 100];
+  };
+  function toast(msg, ms) {
+    const t = $("toast"); t.textContent = msg; t.classList.add("show");
+    clearTimeout(toast._t); if (ms) toast._t = setTimeout(() => t.classList.remove("show"), ms);
+  }
+  $("toast").addEventListener("click", () => $("toast").classList.remove("show"));
+  const confirmBox = (msg) => new Promise((res) => {
+    if (tg && tg.showConfirm) tg.showConfirm(msg, (ok) => res(!!ok)); else res(window.confirm(msg));
+  });
+  async function api(path, body) {
+    const r = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ initData: tg ? tg.initData : "", ...body }) });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.detail || "Request failed");
+    return j;
+  }
+  let busy = false;
+  async function order(o, question) {
+    if (busy) { toast("A trade is already running…", 2500); return; }
+    if (!(await confirmBox(question))) return;
+    busy = true; document.body.classList.add("busy");
+    tg && tg.HapticFeedback && tg.HapticFeedback.impactOccurred("medium");
+    toast("⏳ Sending…");
+    try {
+      const { id } = await api("/api/order", o);
+      const started = Date.now();
+      while (Date.now() - started < 150000) {
+        await new Promise((r) => setTimeout(r, 1500));
+        const st = await api("/api/order/status", { id });
+        if (["done", "failed", "expired"].includes(st.status)) {
+          const ok = st.status === "done";
+          tg && tg.HapticFeedback && tg.HapticFeedback.notificationOccurred(ok ? "success" : "error");
+          toast(st.result || (ok ? "Done" : "Failed"), ok ? 6000 : 0);
+          load(true);
+          return;
+        }
+      }
+      toast("Still working — check the bot chat for the result.", 0);
+    } catch (err) {
+      toast("🔴 " + (err.message || "Couldn't send"), 0);
+    } finally { busy = false; document.body.classList.remove("busy"); }
+  }
+  let token = null;
+  $("findForm").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const mint = $("ca").value.trim();
+    if (!mint) return;
+    $("findBtn").disabled = true; $("findBtn").textContent = "…";
+    const box = $("tok"); box.hidden = false;
+    box.innerHTML = `<div class="skeleton" style="height:48px"></div>`;
+    try {
+      token = await api("/api/token", { mint });
+      const t = token;
+      box.innerHTML = `
+        <div class="head"><span class="name">$${esc(t.symbol)} <span class="chain">${esc((t.chain || "").toUpperCase())}</span></span>
+          <span class="num">${t.price ? "$" + Number(t.price).toPrecision(4) : ""}</span></div>
+        <div class="stats num">MC ${usd(t.mc)} · Liq ${usd(t.liq)} · ${chg(t.chg24)}</div>
+        ${t.safety ? `<div class="safety">${esc(t.safety)}</div>` : ""}
+        <div class="grid3">${(t.presets || []).map((v) =>
+          `<button class="btn" data-buy="${v}">Buy ${v} ${esc(t.unit)}</button>`).join("")}</div>
+        ${t.chart ? `<p style="margin:10px 0 0"><a href="#" data-chart="${esc(t.chart)}" style="color:var(--link)">Open chart ↗</a></p>` : ""}`;
+    } catch (err) {
+      box.innerHTML = `<div class="error" style="padding:12px">${esc(err.message)}</div>`;
+    } finally { $("findBtn").disabled = false; $("findBtn").textContent = "Find"; }
+  });
+  $("tok").addEventListener("click", (e) => {
+    const b = e.target.closest("[data-buy]");
+    if (b && token) {
+      const n = +b.dataset.buy, px = token.native_usd || 0, cap = token.max_usd || 0;
+      let q = `Buy ${n} ${token.unit} of $${token.symbol}`;
+      if (px) {
+        const v = n * px;
+        q += cap && v > cap ? ` (≈ $${v.toFixed(0)} — capped at $${cap.toFixed(0)} per trade)` : ` (≈ $${v.toFixed(2)})`;
+      }
+      order({ side: "buy", mint: token.mint, chain: token.chain, amount: n, unit: "native" }, q + "?");
+      return;
+    }
+    const c = e.target.closest("[data-chart]");
+    if (c) { e.preventDefault(); openLink(c.dataset.chart); }
+  });
 
   let inflight = false;
   async function load(refresh) {

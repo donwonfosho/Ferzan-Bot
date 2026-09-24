@@ -34,9 +34,7 @@ HERE = Path(__file__).resolve().parent
 load_dotenv(HERE / ".env")
 
 import db  # noqa: E402
-import evm_signer  # noqa: E402
-import signer  # noqa: E402
-from chains import CHAINS  # noqa: E402
+import portfolio  # noqa: E402
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("ferzan_webapp")
@@ -49,8 +47,6 @@ CACHE_TTL_S = 15
 _cache: dict[int, tuple[float, dict]] = {}
 _cache_lock = threading.Lock()
 
-# DexScreener chainId -> Ferzan chain id (EVM chains we can read balances on)
-DS_TO_CID = {"base": "base", "ethereum": "eth", "bsc": "bsc", "arbitrum": "arb", "avalanche": "avax"}
 
 
 # ---------------------------------------------------------------- auth ----
@@ -92,140 +88,11 @@ def _allowed(user_id: int) -> bool:
 
 
 # ----------------------------------------------------------- portfolio ----
-def _ds_prices(mints: list[str]) -> dict[str, dict]:
-    """Best pair (highest liquidity) per token from DexScreener, batched 30/call."""
-    out: dict[str, dict] = {}
-    for i in range(0, len(mints), 30):
-        chunk = mints[i : i + 30]
-        try:
-            r = requests.get(
-                "https://api.dexscreener.com/latest/dex/tokens/" + ",".join(chunk), timeout=10
-            )
-            pairs = (r.json() or {}).get("pairs") or []
-        except Exception:
-            continue
-        for p in pairs:
-            addr = ((p.get("baseToken") or {}).get("address") or "").strip()
-            key = next((m for m in chunk if m.lower() == addr.lower()), None)
-            if not key:
-                continue
-            liq = float((p.get("liquidity") or {}).get("usd") or 0)
-            if key in out and out[key]["liq"] >= liq:
-                continue
-            out[key] = {
-                "liq": liq,
-                "price": float(p.get("priceUsd") or 0),
-                "symbol": ((p.get("baseToken") or {}).get("symbol") or "?")[:16],
-                "chain": p.get("chainId") or "",
-                "chg24": float((p.get("priceChange") or {}).get("h24") or 0),
-                "url": p.get("url") or "",
-            }
-    return out
-
-
-def _erc20_amount(cid: str, token: str, owner: str) -> float:
-    rpc = (CHAINS.get(cid) or {}).get("rpc")
-    if not rpc or not owner:
-        return 0.0
-    raw = evm_signer._erc20_balance(rpc, token, owner)
-    if raw <= 0:
-        return 0.0
-    try:
-        dec_hex = evm_signer._rpc(rpc, "eth_call", [{"to": token, "data": "0x313ce567"}, "latest"]).get("result")
-        dec = int(dec_hex, 16) if dec_hex and dec_hex != "0x" else 18
-    except Exception:
-        dec = 18
-    return raw / (10 ** min(max(dec, 0), 36))
-
-
-def _price(coin: str) -> float | None:
-    try:
-        from price_fetcher import get_price_usd
-
-        px = float(get_price_usd(coin) or 0)
-        return px if px > 0 else None
-    except Exception:
-        return None
-
-
 def build_portfolio(uid: int) -> dict:
-    # Public data only: this internet-facing process never decrypts a key
-    # and never creates wallets (that happens in the bot).
-    wallet = db.get_user_wallet(uid)
-    if not wallet:
-        raise LookupError("no wallet")
-    slots = db.list_wallet_slots(uid)
-    sol_pub, evm_pub = wallet.get("sol_pub", ""), wallet.get("evm_pub", "")
-
-    sol_bal = signer.sol_balance_lamports(sol_pub) / 1e9 if sol_pub else 0.0
-    try:
-        eth_bal, _ = evm_signer.native_balance("base", evm_pub)
-    except Exception:
-        eth_bal = 0.0
-    sol_px, eth_px = _price("solana"), _price("ethereum")
-
-    try:
-        sol_holds = signer.holdings_pub(sol_pub)
-    except Exception:
-        sol_holds = []
-    amounts = {h["mint"]: float(h.get("amount") or 0) for h in sol_holds[:25]}
-    evm_mints = [m for m in db.live_mints(uid) if str(m).startswith("0x")][:10]
-    marks = _ds_prices(list(amounts) + evm_mints)
-
-    positions = []
-    for mint in list(amounts) + evm_mints:
-        m = marks.get(mint) or {}
-        if mint.startswith("0x"):
-            cid = DS_TO_CID.get(m.get("chain", ""), "")
-            amt = _erc20_amount(cid, mint, evm_pub) if cid else 0.0
-            chain = (cid or "evm").upper()
-        else:
-            amt = amounts.get(mint, 0.0)
-            chain = "SOL"
-        if amt <= 0:
-            continue
-        value = amt * float(m.get("price") or 0)
-        cost = float(db.live_cost(uid, mint) or 0)
-        pnl = (value - cost) if cost > 0 else None
-        positions.append(
-            {
-                "mint": mint,
-                "symbol": m.get("symbol") or mint[:4] + "…",
-                "chain": chain,
-                "amount": amt,
-                "price": m.get("price") or 0,
-                "value": value,
-                "cost": cost,
-                "pnl": pnl,
-                "pnl_pct": (pnl / cost * 100) if (pnl is not None and cost > 0) else None,
-                "chg24": m.get("chg24"),
-                "chart": m.get("url") or "",
-                "priced": bool(m.get("price")),
-            }
-        )
-    positions.sort(key=lambda p: p["value"], reverse=True)
-
-    native_usd = (sol_bal * sol_px if sol_px else 0) + (float(eth_bal) * eth_px if eth_px else 0)
-    total = native_usd + sum(p["value"] for p in positions)
-    costed = [p for p in positions if p["pnl"] is not None]
-    return {
-        "user_id": uid,
-        "total_usd": total,
-        "pnl_usd": sum(p["pnl"] for p in costed) if costed else None,
-        "balances": {
-            "sol": sol_bal,
-            "sol_usd": sol_bal * sol_px if sol_px else None,
-            "eth_base": float(eth_bal),
-            "eth_usd": float(eth_bal) * eth_px if eth_px else None,
-        },
-        "wallets": [
-            {"label": s["label"], "sol": s["sol_pub"], "evm": s["evm_pub"], "active": bool(s["active"])}
-            for s in slots
-        ],
-        "positions": positions,
-        "bot": _bot_username(),
-        "ts": int(time.time()),
-    }
+    data = portfolio.build_portfolio(uid)
+    data["bot"] = _bot_username()
+    data["presets"] = {"sol": db.buy_presets(uid, "sol"), "sell": db.sell_presets(uid)}
+    return data
 
 
 _BOT_USERNAME = ""
@@ -251,7 +118,7 @@ def index() -> FileResponse:
 
 
 @app.post("/api/portfolio")
-async def portfolio(request: Request) -> JSONResponse:
+async def api_portfolio(request: Request) -> JSONResponse:
     try:
         body = await request.json()
     except Exception:
@@ -263,7 +130,7 @@ async def portfolio(request: Request) -> JSONResponse:
     uid = int(user["id"])
     if not _allowed(uid):
         raise HTTPException(status_code=403, detail="This desk is locked to an allowlist.")
-    fresh = bool(body.get("refresh"))
+    fresh = bool(body.get("refresh")) and _rate_ok(uid, "refresh", 6)
     with _cache_lock:
         hit = _cache.get(uid)
     if hit and not fresh and time.time() - hit[0] < CACHE_TTL_S:
@@ -278,6 +145,186 @@ async def portfolio(request: Request) -> JSONResponse:
     with _cache_lock:
         _cache[uid] = (time.time(), data)
     return JSONResponse(data)
+
+
+# ------------------------------------------------------------- trading ----
+# The page never signs anything. An order is a row in webapp_orders; the BOT
+# process (which holds the keys) claims it within ~2s, runs it through the
+# same path as a button tap (per-user lock, rug/honeypot gates, size cap) and
+# writes the result back. Orders older than 45s expire unexecuted.
+ORDER_MAX_AGE_S = 3600  # trading needs initData from the last hour
+MAX_ORDERS_PER_MIN = 10
+_TOKEN_CACHE: dict[str, tuple[float, dict | None]] = {}
+_HITS: dict[tuple[int, str], list[float]] = {}
+_HITS_LOCK = threading.Lock()
+
+
+def _rate_ok(uid: int, bucket: str, per_min: int) -> bool:
+    """Per-user sliding-window limit: lookups here cost the bot's RPC quota."""
+    now = time.time()
+    with _HITS_LOCK:
+        hits = [t for t in _HITS.get((uid, bucket), []) if now - t < 60]
+        ok = len(hits) < per_min
+        if ok:
+            hits.append(now)
+        _HITS[(uid, bucket)] = hits
+        if len(_HITS) > 5000:  # prune idle users only; active limits survive
+            for k in [k for k, v in _HITS.items() if not v or now - v[-1] >= 60]:
+                _HITS.pop(k, None)
+    return ok
+
+
+def _auth(body: dict, max_age: int | None = None) -> int:
+    try:
+        user = verify_init_data(str(body.get("initData") or ""))
+        if max_age is not None:
+            pairs = dict(parse_qsl(str(body.get("initData") or "")))
+            if time.time() - int(pairs.get("auth_date") or 0) > max_age:
+                raise ValueError("session is over an hour old — close and reopen the app")
+    except ValueError as exc:
+        raise HTTPException(status_code=401, detail=f"Open this from the Ferzan bot ({exc}).")
+    uid = int(user["id"])
+    if not _allowed(uid):
+        raise HTTPException(status_code=403, detail="This desk is locked to an allowlist.")
+    return uid
+
+
+def _valid_mint(mint: str) -> bool:
+    import re
+
+    mint = (mint or "").strip()
+    if re.fullmatch(r"0x[0-9a-fA-F]{40}", mint):
+        return True
+    if re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{32,44}", mint):
+        return True
+    return bool(re.fullmatch(r"(EQ|UQ|kQ)[A-Za-z0-9_-]{46}", mint))
+
+
+def token_info(mint: str) -> dict:
+    now = time.time()
+    hit = _TOKEN_CACHE.get(mint)
+    if hit and now - hit[0] < (60 if hit[1] is None else 20):
+        if hit[1] is None:
+            raise LookupError("not found")
+        return hit[1]
+    marks = portfolio._ds_prices([mint])
+    m = marks.get(mint) or {}
+    if not m:
+        _TOKEN_CACHE[mint] = (now, None)  # negative cache: no re-lookup spam
+        raise LookupError("not found")
+    cid = portfolio.DS_TO_CID.get(m.get("chain", ""), "")
+    if m.get("chain") == "solana":
+        cid = "sol"
+    elif m.get("chain") == "ton":
+        cid = "ton"
+    safety = ""
+    if cid == "sol":
+        try:
+            import rugcheck
+
+            safety = rugcheck.security_line(rugcheck.sol_report(mint))
+        except Exception:
+            safety = ""
+    info = {
+        "mint": mint,
+        "symbol": m.get("symbol") or "?",
+        "name": m.get("name") or "",
+        "chain": cid or m.get("chain") or "",
+        "unit": {"sol": "SOL", "bsc": "BNB", "avax": "AVAX", "ton": "TON"}.get(cid, "ETH"),
+        "price": m.get("price") or 0,
+        "mc": m.get("mc") or 0,
+        "liq": m.get("liq") or 0,
+        "chg24": m.get("chg24"),
+        "chart": m.get("url") or "",
+        "safety": safety,
+        "native_usd": portfolio._price({"sol": "solana", "bsc": "binancecoin", "avax": "avalanche-2",
+                                        "ton": "the-open-network"}.get(cid, "ethereum")),
+        "max_usd": _max_usd(),
+    }
+    _TOKEN_CACHE[mint] = (now, info)
+    if len(_TOKEN_CACHE) > 2000:
+        for k in sorted(_TOKEN_CACHE, key=lambda k: _TOKEN_CACHE[k][0])[:1000]:
+            _TOKEN_CACHE.pop(k, None)
+    return info
+
+
+def _max_usd() -> float:
+    import signer  # env-only read; no key is touched
+
+    return signer.max_usd()
+
+
+@app.post("/api/token")
+async def api_token(request: Request) -> JSONResponse:
+    body = await _json(request)
+    uid = _auth(body)
+    mint = str(body.get("mint") or "").strip()
+    if not _valid_mint(mint):
+        raise HTTPException(status_code=400, detail="That doesn't look like a token address.")
+    if not _rate_ok(uid, "token", 20):
+        raise HTTPException(status_code=429, detail="Too many lookups — give it a minute.")
+    try:
+        info = await asyncio.to_thread(token_info, mint)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="No market found for that token yet.")
+    except Exception:
+        log.exception("token lookup failed")
+        raise HTTPException(status_code=502, detail="Lookup failed — try again.")
+    info["presets"] = db.buy_presets(uid, info["chain"] or "sol")
+    return JSONResponse(info)
+
+
+@app.post("/api/order")
+async def api_order(request: Request) -> JSONResponse:
+    body = await _json(request)
+    uid = _auth(body, max_age=ORDER_MAX_AGE_S)
+    side = str(body.get("side") or "")
+    mint = str(body.get("mint") or "").strip()
+    unit = str(body.get("unit") or "")
+    chain = str(body.get("chain") or "")[:12]
+    try:
+        amount = float(body.get("amount"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Bad amount.")
+    if side not in ("buy", "sell") or not _valid_mint(mint):
+        raise HTTPException(status_code=400, detail="Bad order.")
+    if side == "sell" and (unit != "pct" or not 1 <= amount <= 100):
+        raise HTTPException(status_code=400, detail="Sell 1–100%.")
+    if side == "buy" and (unit not in ("native", "usd") or not 0 < amount <= 1_000_000):
+        raise HTTPException(status_code=400, detail="Bad buy size.")
+    if db.open_webapp_orders(uid) > 0:
+        raise HTTPException(status_code=409, detail="You already have a trade running — wait for it to land.")
+    if db.recent_webapp_orders(uid, 60) >= MAX_ORDERS_PER_MIN:
+        raise HTTPException(status_code=429, detail="Too many orders this minute — slow down.")
+    oid = db.add_webapp_order(uid, side, mint, chain, amount, unit)
+    if not oid:
+        raise HTTPException(status_code=409, detail="You already have a trade running — wait for it to land.")
+    return JSONResponse({"id": oid, "status": "pending"})
+
+
+@app.post("/api/order/status")
+async def api_order_status(request: Request) -> JSONResponse:
+    body = await _json(request)
+    uid = _auth(body)
+    try:
+        oid = int(body.get("id"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Bad id.")
+    row = db.get_webapp_order(oid, uid)
+    if not row:
+        raise HTTPException(status_code=404, detail="No such order.")
+    with _cache_lock:
+        if row["status"] in ("done", "failed"):
+            _cache.pop(uid, None)  # next portfolio load is fresh
+    return JSONResponse({"id": oid, "status": row["status"], "result": row.get("result") or ""})
+
+
+async def _json(request: Request) -> dict:
+    try:
+        body = await request.json()
+        return body if isinstance(body, dict) else {}
+    except Exception:
+        return {}
 
 
 @app.get("/healthz")

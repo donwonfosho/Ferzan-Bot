@@ -169,7 +169,7 @@ async def _await_seqno(wallet, sent_seqno: int, timeout_s: float = CONFIRM_WAIT_
     return False
 
 
-async def _send_one(provider, wallet, destination, value: int, body) -> tuple[str, int]:
+async def _send_one(provider, wallet, destination, value: int, body, **msg_kwargs) -> tuple[str, int]:
     """Sign + broadcast one internal message from `wallet`. Handles a
     never-used wallet (no contract deployed yet): seqno 0 + state_init in the
     same external message deploys the wallet AND executes the transfer —
@@ -179,7 +179,7 @@ async def _send_one(provider, wallet, destination, value: int, body) -> tuple[st
     with (pass that to _await_seqno)."""
     import time as _t
 
-    msg = wallet.create_wallet_internal_message(destination=destination, value=value, body=body)
+    msg = wallet.create_wallet_internal_message(destination=destination, value=value, body=body, **msg_kwargs)
     seqno = await _seqno_for_send(provider, wallet)
     # state_init is ignored by the chain for an already-active account, so
     # attaching it whenever seqno is 0 is safe either way.
@@ -448,3 +448,61 @@ def status_text() -> str:
     except Exception:
         extra = "pytoniq missing — pip install pytoniq pytoniq-core"
     return f"TON STON.fi quotes live. Send: {extra}"
+
+
+async def _send_ton_native(seed64: bytes, dest: str, nano: int | None, reserve_nano: int) -> tuple[bool | None, str]:
+    from pytoniq import LiteBalancer, WalletV4R2
+    from pytoniq_core import Address, begin_cell
+
+    to = Address(dest)
+    provider = LiteBalancer.from_mainnet_config(trust_level=2)
+    await provider.start_up()
+    try:
+        wallet = await WalletV4R2.from_private_key(provider, seed64)
+        if to.to_str() == wallet.address.to_str():
+            return False, "That's this wallet's own address."
+        state = await provider.get_account_state(wallet.address)
+        bal = int(getattr(state, "balance", 0) or 0)
+        value = bal - int(reserve_nano) if nano is None else int(nano)
+        if value <= 0 or value + int(reserve_nano) > bal:
+            return False, f"Not enough TON (balance {bal / 1e9:.4f}; ~{reserve_nano / 1e9:.2f} stays for fees)."
+        # Respect the address's own bounce flag (UQ.. = non-bounceable, the
+        # right choice for a fresh wallet; EQ.. bounces back if undeployed).
+        body = begin_cell().end_cell()
+        kw = {"bounce": bool(to.is_bounceable)}
+        try:  # pure object build (no network): does this pytoniq take bounce=?
+            wallet.create_wallet_internal_message(destination=to, value=value, body=body, **kw)
+        except TypeError:
+            kw = {}  # older API: bounce follows its own default
+        try:
+            h, seqno = await _send_one(provider, wallet, to, value, body, **kw)
+        except Exception as exc:
+            # Could have failed before or after the broadcast: never say "not sent".
+            return None, (
+                f"TON send didn't confirm cleanly ({str(exc)[:100]}). It MAY have gone out — check "
+                f"https://tonviewer.com/{wallet.address.to_str()} before trying again."
+            )
+        landed = await _await_seqno(wallet, seqno)
+        link = f"https://tonviewer.com/transaction/{h}"
+        head = f"{value / 1e9:.4f} TON → {dest[:6]}…{dest[-4:]}"
+        if landed:
+            return True, f"Sent {head}\n{link}"
+        return None, f"Sent, not confirmed yet: {head}\nCheck https://tonviewer.com/{wallet.address.to_str()} before retrying."
+    finally:
+        try:
+            await provider.close_all()
+        except Exception:
+            pass
+
+
+def send_ton_native(secret: str, dest: str, nano: int | None, reserve_nano: int = 30_000_000) -> tuple[bool | None, str]:
+    """Plain TON transfer out of the user's wallet. nano=None = send all
+    except `reserve_nano` (fees + a deploy if this wallet was never used)."""
+    try:
+        seed64 = _ton_keypair_bytes(secret)
+    except Exception as exc:
+        return False, f"TON key problem, nothing sent: {exc}"
+    try:
+        return _run_async(_send_ton_native(seed64, dest, nano, reserve_nano))
+    except Exception as exc:
+        return None, f"TON send ended with an error ({str(exc)[:100]}). Check your TON wallet before retrying."

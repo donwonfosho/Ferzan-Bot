@@ -415,6 +415,7 @@ def init_db() -> None:
             )
             """
         )
+        _init_v4(conn)
         conn.commit()
 
 
@@ -1133,7 +1134,9 @@ def user_volume_usd(user_id: int, days: int = 30) -> float:
     since = int(time.time()) - int(days) * 86400
     with get_conn() as conn:
         row = conn.execute(
-            "SELECT COALESCE(SUM(volume_usd),0) FROM referral_ledger WHERE from_user = ? AND created_at >= ?",
+            # level 1 only: L2/L3 rows repeat the same trade's volume
+            "SELECT COALESCE(SUM(volume_usd),0) FROM referral_ledger "
+            "WHERE from_user = ? AND created_at >= ? AND COALESCE(level, 1) = 1",
             (int(user_id), since),
         ).fetchone()
         live = conn.execute(
@@ -1163,27 +1166,34 @@ def set_live_exit(
     sl_pct: float | None = None,
     trail_pct: float | None = None,
     peak_pct: float | None = None,
+    peak_px: float | None = None,
 ) -> None:
     with get_conn() as conn:
         row = conn.execute(
-            "SELECT tp_pct, sl_pct, trail_pct, peak_pct FROM live_exits WHERE user_id = ? AND mint = ?",
+            "SELECT tp_pct, sl_pct, trail_pct, peak_pct, peak_px FROM live_exits WHERE user_id = ? AND mint = ?",
             (user_id, mint),
         ).fetchone()
-        tp = tp_pct if tp_pct is not None else (float(row["tp_pct"]) if row and row["tp_pct"] is not None else None)
-        sl = sl_pct if sl_pct is not None else (float(row["sl_pct"]) if row and row["sl_pct"] is not None else None)
-        tr = trail_pct if trail_pct is not None else (float(row["trail_pct"]) if row and row.get("trail_pct") is not None else None)
-        pk = peak_pct if peak_pct is not None else (float(row["peak_pct"]) if row and row.get("peak_pct") is not None else 0)
+        # sqlite3.Row has no .get() -- convert first (the old code raised
+        # AttributeError here whenever a row existed, e.g. on every peak update).
+        cur = dict(row) if row else {}
+        tp = tp_pct if tp_pct is not None else cur.get("tp_pct")
+        sl = sl_pct if sl_pct is not None else cur.get("sl_pct")
+        tr = trail_pct if trail_pct is not None else cur.get("trail_pct")
+        # NULL peak_px = trailing stop starts from the next price read.
+        pk = peak_pct if peak_pct is not None else cur.get("peak_pct")
+        ppx = peak_px if peak_px is not None else cur.get("peak_px")
         conn.execute(
             """
-            INSERT INTO live_exits (user_id, mint, tp_pct, sl_pct, trail_pct, peak_pct)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO live_exits (user_id, mint, tp_pct, sl_pct, trail_pct, peak_pct, peak_px)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(user_id, mint) DO UPDATE SET
                 tp_pct = excluded.tp_pct,
                 sl_pct = excluded.sl_pct,
                 trail_pct = excluded.trail_pct,
-                peak_pct = excluded.peak_pct
+                peak_pct = excluded.peak_pct,
+                peak_px = excluded.peak_px
             """,
-            (user_id, mint, tp, sl, tr, pk),
+            (user_id, mint, tp, sl, tr, pk, ppx),
         )
         conn.commit()
 
@@ -1659,54 +1669,109 @@ def credit_desk_share(trader_id: int, volume_usd: float) -> str:
         return ""
     with get_conn() as conn:
         tot = conn.execute(
-            "SELECT COALESCE(SUM(volume_usd),0) FROM referral_ledger WHERE user_id = ? AND kind = 'share'",
+            "SELECT COALESCE(SUM(volume_usd),0) FROM referral_ledger "
+            "WHERE user_id = ? AND kind = 'share' AND COALESCE(level, 1) = 1",
             (parent,),
         ).fetchone()[0]
     tot = float(tot or 0) + vol
-    if tot >= 250_000:
-        pct = 0.40
-        tier = "Desk"
-    elif tot >= 50_000:
-        pct = 0.35
-        tier = "Captain"
-    else:
-        pct = 0.30
-        tier = "Scout"
+    pct, tier = _tier_for_volume(tot)
     import fees as _fees
 
     cut = vol * (_fees.current_bps() / 10_000.0)
     share = cut * pct
+    # Level 2 / 3: the referrer's own referrer, and theirs. Walk the chain,
+    # never paying the trader or anyone twice (a corrupted loop can't pay).
+    payees = [(parent, 1, share)]
+    seen = {int(trader_id), parent}
+    up = parent
+    for level, lvl_pct in ((2, REF_L2_PCT), (3, REF_L3_PCT)):
+        nxt = (get_user(up) or {}).get("referred_by")
+        if not nxt or int(nxt) in seen or lvl_pct <= 0:
+            break
+        up = int(nxt)
+        seen.add(up)
+        payees.append((up, level, cut * lvl_pct))
     with get_conn() as conn:
-        conn.execute(
-            """
-            INSERT INTO referral_ledger
-            (user_id, from_user, created_at, volume_usd, share_usd, kind, status)
-            VALUES (?, ?, ?, ?, ?, 'share', 'open')
-            """,
-            (parent, int(trader_id), now, vol, share),
-        )
+        for who, level, amt in payees:
+            conn.execute(
+                """
+                INSERT INTO referral_ledger
+                (user_id, from_user, created_at, volume_usd, share_usd, kind, status, level)
+                VALUES (?, ?, ?, ?, ?, 'share', 'open', ?)
+                """,
+                (who, int(trader_id), now, vol, amt, level),
+            )
         conn.commit()
     return f"Desk Share {tier} +${share:.4f} → {parent}"
 
 
+REF_L2_PCT = float(os.getenv("REF_L2_PCT", "0.10"))
+REF_L3_PCT = float(os.getenv("REF_L3_PCT", "0.05"))
+
+
+def _tier_for_volume(vol: float) -> tuple[float, str]:
+    if vol >= 250_000:
+        return 0.40, "Desk"
+    if vol >= 50_000:
+        return 0.35, "Captain"
+    return 0.30, "Scout"
+
+
+def would_create_ref_loop(user_id: int, referrer_id: int, depth: int = 12) -> bool:
+    """True if making referrer_id the referrer of user_id closes a loop
+    (user_id already sits somewhere above referrer_id)."""
+    cur = int(referrer_id)
+    for _ in range(depth):
+        if cur == int(user_id):
+            return True
+        nxt = (get_user(cur) or {}).get("referred_by")
+        if not nxt:
+            return False
+        cur = int(nxt)
+    return True  # absurdly deep chain: refuse rather than guess
+
+
 def referral_stats(user_id: int) -> dict:
+    uid = int(user_id)
     with get_conn() as conn:
-        row = conn.execute(
+        rows = conn.execute(
             """
-            SELECT
-              COALESCE(SUM(volume_usd),0),
-              COALESCE(SUM(share_usd),0),
-              COALESCE(SUM(CASE WHEN status='open' THEN share_usd ELSE 0 END),0),
-              COUNT(*)
+            SELECT COALESCE(level, 1) AS lvl,
+              COALESCE(SUM(volume_usd),0) AS vol,
+              COALESCE(SUM(share_usd),0) AS earned,
+              COALESCE(SUM(CASE WHEN status='open' THEN share_usd ELSE 0 END),0) AS open_usd,
+              COALESCE(SUM(CASE WHEN status='claimed' THEN share_usd ELSE 0 END),0) AS pending,
+              COUNT(*) AS n
             FROM referral_ledger WHERE user_id = ? AND kind = 'share'
+            GROUP BY COALESCE(level, 1)
             """,
-            (int(user_id),),
-        ).fetchone()
-        kids = conn.execute(
-            "SELECT COUNT(*) FROM users WHERE referred_by = ?",
-            (int(user_id),),
+            (uid,),
+        ).fetchall()
+        kids = conn.execute("SELECT COUNT(*) FROM users WHERE referred_by = ?", (uid,)).fetchone()[0]
+        l2 = conn.execute(
+            "SELECT COUNT(*) FROM users WHERE referred_by IN (SELECT user_id FROM users WHERE referred_by = ?)",
+            (uid,),
         ).fetchone()[0]
-    vol, earned, open_usd, n = [float(x or 0) for x in row]
+        l3 = conn.execute(
+            """
+            SELECT COUNT(*) FROM users WHERE referred_by IN (
+              SELECT user_id FROM users WHERE referred_by IN (
+                SELECT user_id FROM users WHERE referred_by = ?))
+            """,
+            (uid,),
+        ).fetchone()[0]
+    by_level = {1: 0.0, 2: 0.0, 3: 0.0}
+    vol = earned = open_usd = pending = 0.0
+    n = 0
+    for r in rows:
+        lvl = int(r["lvl"])
+        by_level[lvl] = by_level.get(lvl, 0.0) + float(r["earned"] or 0)
+        if lvl == 1:
+            vol += float(r["vol"] or 0)
+        earned += float(r["earned"] or 0)
+        open_usd += float(r["open_usd"] or 0)
+        pending += float(r["pending"] or 0)
+        n += int(r["n"] or 0)
     if vol >= 250_000:
         tier = "Desk"
     elif vol >= 50_000:
@@ -1719,8 +1784,12 @@ def referral_stats(user_id: int) -> dict:
         "volume": vol,
         "earned": earned,
         "open": open_usd,
-        "fills": int(n),
+        "pending": pending,
+        "fills": n,
         "invites": int(kids or 0),
+        "invites_l2": int(l2 or 0),
+        "invites_l3": int(l3 or 0),
+        "by_level": by_level,
         "tier": tier,
     }
 
@@ -1736,3 +1805,538 @@ def request_referral_claim(user_id: int) -> float:
         )
         conn.commit()
     return stats["open"]
+
+
+def max_claimed_ref_id(user_id: int) -> int:
+    with get_conn() as conn:
+        return int(conn.execute(
+            "SELECT COALESCE(MAX(id), 0) FROM referral_ledger WHERE user_id = ? AND status = 'claimed'",
+            (int(user_id),),
+        ).fetchone()[0])
+
+
+def mark_referral_paid(user_id: int, max_id: int | None = None) -> float:
+    """Admin paid a claim out of the treasury: claimed -> paid. One write
+    transaction, so a claim landing mid-way can't be marked paid unpaid."""
+    with get_conn() as conn:
+        conn.isolation_level = None
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            rows = conn.execute(
+                "SELECT id, share_usd FROM referral_ledger WHERE user_id = ? AND status = 'claimed' AND id <= ?",
+                (int(user_id), int(max_id) if max_id is not None else 2**62),
+            ).fetchall()
+            ids = [r[0] for r in rows]
+            for i in range(0, len(ids), 500):
+                chunk = ids[i : i + 500]
+                conn.execute(
+                    f"UPDATE referral_ledger SET status = 'paid' WHERE id IN ({','.join('?' * len(chunk))})", chunk
+                )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+    return float(sum(r[1] for r in rows))
+
+
+# =========================================================== batch 4 ====
+# Mini App orders, token alerts, migration sniper, address book, trade log,
+# presets, daily recap. Tables are created by init_db() -> _init_v4().
+
+def _init_v4(conn) -> None:
+    ex_cols = {r[1] for r in conn.execute("PRAGMA table_info(live_exits)").fetchall()}
+    if ex_cols and "peak_px" not in ex_cols:
+        conn.execute("ALTER TABLE live_exits ADD COLUMN peak_px REAL")
+    rl_cols = {r[1] for r in conn.execute("PRAGMA table_info(referral_ledger)").fetchall()}
+    if "level" not in rl_cols:
+        conn.execute("ALTER TABLE referral_ledger ADD COLUMN level INTEGER DEFAULT 1")
+    ucols = {r[1] for r in conn.execute("PRAGMA table_info(users)").fetchall()}
+    if "sell_presets" not in ucols:
+        conn.execute("ALTER TABLE users ADD COLUMN sell_presets TEXT")
+    ct_cols = {r[1] for r in conn.execute("PRAGMA table_info(chain_trade)").fetchall()}
+    if "presets" not in ct_cols:
+        conn.execute("ALTER TABLE chain_trade ADD COLUMN presets TEXT")
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS webapp_orders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            side TEXT NOT NULL CHECK(side IN ('buy', 'sell')),
+            mint TEXT NOT NULL,
+            chain TEXT NOT NULL DEFAULT '',
+            amount REAL NOT NULL,
+            unit TEXT NOT NULL CHECK(unit IN ('native', 'usd', 'pct')),
+            status TEXT NOT NULL DEFAULT 'pending',
+            result TEXT,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_webapp_orders_status ON webapp_orders(status);
+        CREATE INDEX IF NOT EXISTS idx_webapp_orders_user ON webapp_orders(user_id, created_at);
+
+        CREATE TABLE IF NOT EXISTS token_alerts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            mint TEXT NOT NULL,
+            symbol TEXT NOT NULL DEFAULT '',
+            kind TEXT NOT NULL CHECK(kind IN ('mc', 'price')),
+            direction TEXT NOT NULL CHECK(direction IN ('above', 'below')),
+            target REAL NOT NULL,
+            note TEXT NOT NULL DEFAULT '',
+            active INTEGER NOT NULL DEFAULT 1,
+            created_at INTEGER NOT NULL,
+            fired_at INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS idx_token_alerts_active ON token_alerts(active);
+
+        CREATE TABLE IF NOT EXISTS mig_config (
+            user_id INTEGER PRIMARY KEY,
+            mode TEXT NOT NULL DEFAULT 'off',
+            usd REAL NOT NULL DEFAULT 10,
+            max_top10 REAL NOT NULL DEFAULT 30,
+            min_liq REAL NOT NULL DEFAULT 5000,
+            max_per_day INTEGER NOT NULL DEFAULT 3,
+            tp_pct REAL NOT NULL DEFAULT 0,
+            sl_pct REAL NOT NULL DEFAULT 0,
+            updated_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS mig_seen (
+            pool TEXT PRIMARY KEY,
+            mint TEXT NOT NULL,
+            seen_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS mig_fills (
+            user_id INTEGER NOT NULL,
+            mint TEXT NOT NULL,
+            ts INTEGER NOT NULL,
+            PRIMARY KEY (user_id, mint)
+        );
+
+        CREATE TABLE IF NOT EXISTS address_book (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            family TEXT NOT NULL,
+            label TEXT NOT NULL,
+            address TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            UNIQUE(user_id, family, address)
+        );
+
+        CREATE TABLE IF NOT EXISTS live_trades (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            ts INTEGER NOT NULL,
+            side TEXT NOT NULL,
+            mint TEXT NOT NULL,
+            chain TEXT NOT NULL DEFAULT '',
+            usd REAL NOT NULL DEFAULT 0,
+            source TEXT NOT NULL DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_live_trades_user_ts ON live_trades(user_id, ts);
+
+        CREATE TABLE IF NOT EXISTS recap_marks (
+            user_id INTEGER PRIMARY KEY,
+            day TEXT NOT NULL,
+            desk_usd REAL NOT NULL,
+            sent_at INTEGER NOT NULL
+        );
+        """
+    )
+
+
+# ---------------------------------------------------------------- presets --
+DEFAULT_PRESETS = {
+    "sol": [0.05, 0.1, 0.25, 0.5, 1, 2],
+    "eth": [0.005, 0.01, 0.025, 0.05, 0.1, 0.25],
+    "base": [0.005, 0.01, 0.025, 0.05, 0.1, 0.25],
+    "arb": [0.005, 0.01, 0.025, 0.05, 0.1, 0.25],
+    "hood": [0.005, 0.01, 0.025, 0.05, 0.1, 0.25],
+    "bsc": [0.02, 0.05, 0.1, 0.25, 0.5, 1],
+    "avax": [0.5, 1, 2.5, 5, 10, 25],
+    "ton": [1, 2, 5, 10, 25, 50],
+}
+DEFAULT_SELL_PRESETS = [25, 50, 100]
+
+
+def _parse_nums(raw: str | None) -> list[float]:
+    out = []
+    for part in str(raw or "").replace(" ", ",").split(","):
+        try:
+            v = float(part)
+        except ValueError:
+            continue
+        if v > 0:
+            out.append(v)
+    return out
+
+
+def buy_presets(user_id: int | None, chain: str) -> list[float]:
+    cid = (chain or "sol").lower()
+    if user_id:
+        with get_conn() as conn:
+            row = conn.execute(
+                "SELECT presets FROM chain_trade WHERE user_id = ? AND chain = ?", (int(user_id), cid)
+            ).fetchone()
+        got = _parse_nums(row["presets"] if row else "")
+        if got:
+            return got[:6]
+    return list(DEFAULT_PRESETS.get(cid, DEFAULT_PRESETS["eth"]))
+
+
+def set_buy_presets(user_id: int, chain: str, values: list[float]) -> None:
+    cid = (chain or "sol").lower()
+    set_chain_trade(user_id, cid)  # make sure the row exists
+    raw = ",".join(f"{v:g}" for v in values[:6]) if values else None
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE chain_trade SET presets = ? WHERE user_id = ? AND chain = ?", (raw, int(user_id), cid)
+        )
+        conn.commit()
+
+
+def sell_presets(user_id: int | None) -> list[int]:
+    if user_id:
+        got = [int(v) for v in _parse_nums((get_user(int(user_id)) or {}).get("sell_presets")) if 1 <= v <= 100]
+        if got:
+            return got[:4]
+    return list(DEFAULT_SELL_PRESETS)
+
+
+def set_sell_presets(user_id: int, values: list[int]) -> None:
+    raw = ",".join(str(int(v)) for v in values[:4]) if values else None
+    update_user(int(user_id), sell_presets=raw)
+
+
+# ---------------------------------------------------------- webapp orders --
+WEBAPP_ORDER_TTL_S = 45  # a queued order older than this never executes
+
+
+def add_webapp_order(user_id: int, side: str, mint: str, chain: str, amount: float, unit: str) -> int:
+    """Returns the new id, or 0 if this user already has an order in flight
+    (checked in the same statement, so two fast taps can't both queue)."""
+    now = int(time.time())
+    with get_conn() as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO webapp_orders (user_id, side, mint, chain, amount, unit, status, created_at, updated_at)
+            SELECT ?, ?, ?, ?, ?, ?, 'pending', ?, ?
+            WHERE NOT EXISTS (
+                SELECT 1 FROM webapp_orders WHERE user_id = ? AND status IN ('pending', 'running')
+            )
+            """,
+            (int(user_id), side, mint, chain or "", float(amount), unit, now, now, int(user_id)),
+        )
+        conn.commit()
+        return int(cur.lastrowid) if cur.rowcount == 1 else 0
+
+
+def open_webapp_orders(user_id: int) -> int:
+    with get_conn() as conn:
+        return int(
+            conn.execute(
+                "SELECT COUNT(*) FROM webapp_orders WHERE user_id = ? AND status IN ('pending', 'running')",
+                (int(user_id),),
+            ).fetchone()[0]
+        )
+
+
+def recent_webapp_orders(user_id: int, seconds: int = 60) -> int:
+    with get_conn() as conn:
+        return int(
+            conn.execute(
+                "SELECT COUNT(*) FROM webapp_orders WHERE user_id = ? AND created_at >= ?",
+                (int(user_id), int(time.time()) - int(seconds)),
+            ).fetchone()[0]
+        )
+
+
+def get_webapp_order(order_id: int, user_id: int) -> dict | None:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM webapp_orders WHERE id = ? AND user_id = ?", (int(order_id), int(user_id))
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def claim_webapp_orders(limit: int = 20) -> list[dict]:
+    """Expire stale pending orders, then atomically claim fresh ones
+    (pending -> running). A row is claimed by exactly one caller."""
+    now = int(time.time())
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE webapp_orders SET status = 'expired', result = ?, updated_at = ? "
+            "WHERE status = 'pending' AND created_at < ?",
+            ("Expired before the bot picked it up — nothing was sent.", now, now - WEBAPP_ORDER_TTL_S),
+        )
+        rows = conn.execute(
+            "SELECT * FROM webapp_orders WHERE status = 'pending' ORDER BY id LIMIT ?", (int(limit),)
+        ).fetchall()
+        claimed = []
+        for r in rows:
+            cur = conn.execute(
+                "UPDATE webapp_orders SET status = 'running', updated_at = ? WHERE id = ? AND status = 'pending'",
+                (now, r["id"]),
+            )
+            if cur.rowcount == 1:
+                claimed.append(dict(r))
+        conn.commit()
+    return claimed
+
+
+def finish_webapp_order(order_id: int, ok: bool, result: str) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE webapp_orders SET status = ?, result = ?, updated_at = ? WHERE id = ?",
+            ("done" if ok else "failed", (result or "")[:1500], int(time.time()), int(order_id)),
+        )
+        conn.commit()
+
+
+def fail_stuck_webapp_orders(max_running_s: int = 600) -> int:
+    """After a crash/restart, 'running' rows never finish. Mark them unknown
+    (the trade may or may not have landed — the user checks their bag)."""
+    now = int(time.time())
+    with get_conn() as conn:
+        cur = conn.execute(
+            "UPDATE webapp_orders SET status = 'failed', updated_at = ?, "
+            "result = 'The bot restarted mid-trade — check your bag before retrying.' "
+            "WHERE status = 'running' AND updated_at < ?",
+            (now, now - int(max_running_s)),
+        )
+        conn.commit()
+        return cur.rowcount
+
+
+# ----------------------------------------------------------- token alerts --
+MAX_TOKEN_ALERTS = 25
+
+
+def add_token_alert(
+    user_id: int, mint: str, symbol: str, kind: str, direction: str, target: float, note: str = ""
+) -> int:
+    with get_conn() as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO token_alerts (user_id, mint, symbol, kind, direction, target, note, active, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)
+            """,
+            (int(user_id), mint, symbol or "", kind, direction, float(target), note or "", int(time.time())),
+        )
+        conn.commit()
+        return int(cur.lastrowid)
+
+
+def list_token_alerts(user_id: int | None = None) -> list[dict]:
+    with get_conn() as conn:
+        if user_id is None:
+            rows = conn.execute("SELECT * FROM token_alerts WHERE active = 1").fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM token_alerts WHERE active = 1 AND user_id = ? ORDER BY id", (int(user_id),)
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def fire_token_alert(alert_id: int) -> bool:
+    """active -> fired. True only for the caller that flipped it."""
+    with get_conn() as conn:
+        cur = conn.execute(
+            "UPDATE token_alerts SET active = 0, fired_at = ? WHERE id = ? AND active = 1",
+            (int(time.time()), int(alert_id)),
+        )
+        conn.commit()
+        return cur.rowcount == 1
+
+
+def delete_token_alert(alert_id: int, user_id: int) -> bool:
+    with get_conn() as conn:
+        cur = conn.execute(
+            "UPDATE token_alerts SET active = 0 WHERE id = ? AND user_id = ? AND active = 1",
+            (int(alert_id), int(user_id)),
+        )
+        conn.commit()
+        return cur.rowcount == 1
+
+
+# ------------------------------------------------------- migration sniper --
+def get_mig_config(user_id: int) -> dict:
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM mig_config WHERE user_id = ?", (int(user_id),)).fetchone()
+    if row:
+        return dict(row)
+    return {
+        "user_id": int(user_id), "mode": "off", "usd": 10.0, "max_top10": 30.0, "min_liq": 5000.0,
+        "max_per_day": 3, "tp_pct": 0.0, "sl_pct": 0.0, "updated_at": 0,
+    }
+
+
+def set_mig_config(user_id: int, **fields) -> dict:
+    cfg = get_mig_config(user_id)
+    for k, v in fields.items():
+        if k in {"mode", "usd", "max_top10", "min_liq", "max_per_day", "tp_pct", "sl_pct"}:
+            cfg[k] = v
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO mig_config (user_id, mode, usd, max_top10, min_liq, max_per_day, tp_pct, sl_pct, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+              mode = excluded.mode, usd = excluded.usd, max_top10 = excluded.max_top10,
+              min_liq = excluded.min_liq, max_per_day = excluded.max_per_day,
+              tp_pct = excluded.tp_pct, sl_pct = excluded.sl_pct, updated_at = excluded.updated_at
+            """,
+            (
+                int(user_id), cfg["mode"], float(cfg["usd"]), float(cfg["max_top10"]), float(cfg["min_liq"]),
+                int(cfg["max_per_day"]), float(cfg["tp_pct"]), float(cfg["sl_pct"]), int(time.time()),
+            ),
+        )
+        conn.commit()
+    return cfg
+
+
+def list_mig_users() -> list[dict]:
+    with get_conn() as conn:
+        return [dict(r) for r in conn.execute("SELECT * FROM mig_config WHERE mode IN ('watch', 'buy')").fetchall()]
+
+
+def mig_mark_seen(pool: str, mint: str) -> bool:
+    """True if this pool is new (first time we see it)."""
+    with get_conn() as conn:
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO mig_seen (pool, mint, seen_at) VALUES (?, ?, ?)",
+            (pool, mint, int(time.time())),
+        )
+        conn.execute("DELETE FROM mig_seen WHERE seen_at < ?", (int(time.time()) - 7 * 86400,))
+        conn.commit()
+        return cur.rowcount == 1
+
+
+def mig_fill(user_id: int, mint: str) -> bool:
+    """Reserve (user, mint) before buying. False = already bought/attempted."""
+    with get_conn() as conn:
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO mig_fills (user_id, mint, ts) VALUES (?, ?, ?)",
+            (int(user_id), mint, int(time.time())),
+        )
+        conn.commit()
+        return cur.rowcount == 1
+
+
+def mig_unfill(user_id: int, mint: str) -> None:
+    with get_conn() as conn:
+        conn.execute("DELETE FROM mig_fills WHERE user_id = ? AND mint = ?", (int(user_id), mint))
+        conn.commit()
+
+
+def mig_fills_today(user_id: int) -> int:
+    with get_conn() as conn:
+        return int(
+            conn.execute(
+                "SELECT COUNT(*) FROM mig_fills WHERE user_id = ? AND ts >= ?",
+                (int(user_id), int(time.time()) - 86400),
+            ).fetchone()[0]
+        )
+
+
+# ----------------------------------------------------------- address book --
+def list_addresses(user_id: int, family: str | None = None) -> list[dict]:
+    with get_conn() as conn:
+        if family:
+            rows = conn.execute(
+                "SELECT * FROM address_book WHERE user_id = ? AND family = ? ORDER BY id", (int(user_id), family)
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM address_book WHERE user_id = ? ORDER BY family, id", (int(user_id),)
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_address(addr_id: int, user_id: int) -> dict | None:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM address_book WHERE id = ? AND user_id = ?", (int(addr_id), int(user_id))
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def save_address(user_id: int, family: str, label: str, address: str) -> int:
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO address_book (user_id, family, label, address, created_at) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(user_id, family, address) DO UPDATE SET label = excluded.label
+            """,
+            (int(user_id), family, (label or "Saved")[:24], address, int(time.time())),
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT id FROM address_book WHERE user_id = ? AND family = ? AND address = ?",
+            (int(user_id), family, address),
+        ).fetchone()
+        return int(row["id"])
+
+
+def delete_address(addr_id: int, user_id: int) -> bool:
+    with get_conn() as conn:
+        cur = conn.execute("DELETE FROM address_book WHERE id = ? AND user_id = ?", (int(addr_id), int(user_id)))
+        conn.commit()
+        return cur.rowcount == 1
+
+
+# -------------------------------------------------------------- trade log --
+def log_trade(user_id: int, side: str, mint: str, chain: str = "", usd: float = 0.0, source: str = "") -> None:
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO live_trades (user_id, ts, side, mint, chain, usd, source) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (int(user_id), int(time.time()), side, mint or "", chain or "", float(usd or 0), source or ""),
+        )
+        conn.commit()
+
+
+def trades_since(user_id: int, since_ts: int) -> list[dict]:
+    with get_conn() as conn:
+        return [
+            dict(r)
+            for r in conn.execute(
+                "SELECT * FROM live_trades WHERE user_id = ? AND ts >= ? ORDER BY ts", (int(user_id), int(since_ts))
+            ).fetchall()
+        ]
+
+
+def users_with_wallets() -> list[int]:
+    with get_conn() as conn:
+        return [int(r[0]) for r in conn.execute("SELECT user_id FROM user_wallets").fetchall()]
+
+
+def get_recap_mark(user_id: int) -> dict | None:
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM recap_marks WHERE user_id = ?", (int(user_id),)).fetchone()
+        return dict(row) if row else None
+
+
+def set_recap_mark(user_id: int, day: str, desk_usd: float) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO recap_marks (user_id, day, desk_usd, sent_at) VALUES (?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET day = excluded.day, desk_usd = excluded.desk_usd,
+              sent_at = excluded.sent_at
+            """,
+            (int(user_id), day, float(desk_usd), int(time.time())),
+        )
+        conn.commit()
+
+
+def reset_live_peak(user_id: int, mint: str) -> None:
+    """Trailing stop (re)armed: NULL peak price = start from the next price."""
+    with get_conn() as conn:
+        conn.execute("UPDATE live_exits SET peak_px = NULL WHERE user_id = ? AND mint = ?", (int(user_id), mint))
+        conn.commit()
+
+
+def count_watched_wallets(user_id: int) -> int:
+    with get_conn() as conn:
+        return int(
+            conn.execute("SELECT COUNT(*) FROM watched_wallets WHERE user_id = ?", (int(user_id),)).fetchone()[0]
+        )

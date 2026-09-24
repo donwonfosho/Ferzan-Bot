@@ -21,6 +21,7 @@ import asyncio
 import html
 import logging
 import os
+import datetime as dt
 import re
 import time
 
@@ -52,10 +53,14 @@ except Exception:  # noqa: BLE001 — keep the bot alive if quotes.py is missing
     quotes = None
     logging.getLogger(__name__).exception("quotes module failed to load")
 import evm_signer
+import migration
+import portfolio
+import rugcheck
 import signer
 import sniper
 import trading
 import user_wallets
+import withdraw
 from chains import ACTIVE, CHAINS, chain_list, resolve_chain
 
 try:
@@ -296,6 +301,28 @@ def _security_line(chain: str, ca: str) -> str:
     return out
 
 
+def _is_sol_mint(ca: str) -> bool:
+    ca = (ca or "").strip()
+    return (
+        32 <= len(ca) <= 44
+        and not ca.startswith("0x")
+        and not ca.startswith(("EQ", "UQ", "kQ"))
+        and not (ca.startswith("T") and len(ca) <= 36)
+    )
+
+
+def _safety_line(chain: str, ca: str) -> str:
+    """Rug / honeypot summary for a card. Blocking (RPC / GoPlus)."""
+    try:
+        if ca.startswith("0x"):
+            return _security_line(chain, ca)
+        if _is_sol_mint(ca):
+            return rugcheck.security_line(rugcheck.sol_report(ca))
+    except Exception:
+        logger.exception("safety line failed for %s", ca)
+    return ""
+
+
 def _age_ms(ms: int | None) -> str:
     if not ms:
         return ""
@@ -488,6 +515,7 @@ def _render_card(card: SignalCard, uid: int | None = None) -> str:
             f"  💵 {_esc(_fmt_px(s.price_usd))}"
             f"  💧 {_esc(f'${liq:,.0f}' if liq else '—')}{_esc(liq_pct)}"
         ),
+        _esc(_safety_line(s.chain or "", ca)),
         _card_wallet(uid, ca, s.chain or ""),
         f"📊 1h {s.buys_h1}/{s.sells_h1}  ·  24h {_esc(f'${vol:,.0f}' if vol else '—')}  ·  {card.score}/100 {_esc(card.bias)}",
         " · ".join(links),
@@ -504,36 +532,16 @@ def card_keyboard(
         "sol": "SOL", "bsc": "BNB", "eth": "ETH", "base": "ETH",
         "arb": "ETH", "avax": "AVAX", "pol": "POL", "hood": "ETH",
     }.get(cid, "ETH")
-    rows = [
-        [InlineKeyboardButton("🎯 Snipe now", callback_data=f"snp:{q}")],
-        [
-            InlineKeyboardButton("📍 Track", callback_data=f"watch:{q}"),
-            InlineKeyboardButton(f"🔄 {unit}", callback_data=f"sig:{q}"),
-        ],
-        [InlineKeyboardButton("↔️ Go to sell", callback_data=f"slc:{q}")],
-        [
-            InlineKeyboardButton("💳 Multi buy | 1", callback_data="go:wallets"),
-            InlineKeyboardButton("🟢 Multi", callback_data="go:wallets"),
-        ],
-        [InlineKeyboardButton(f"🟢 {unit}", callback_data=f"sig:{q}")],
-        [
-            InlineKeyboardButton(f"0.01 {unit}", callback_data=f"bnv:0.01:{q}"),
-            InlineKeyboardButton(f"0.05 {unit}", callback_data=f"bnv:0.05:{q}"),
-            InlineKeyboardButton(f"0.1 {unit}", callback_data=f"bnv:0.1:{q}"),
-        ],
-        [
-            InlineKeyboardButton(f"0.2 {unit}", callback_data=f"bnv:0.2:{q}"),
-            InlineKeyboardButton(f"0.5 {unit}", callback_data=f"bnv:0.5:{q}"),
-            InlineKeyboardButton(f"1 {unit}", callback_data=f"bnv:1:{q}"),
-        ],
-        [
-            InlineKeyboardButton("$5", callback_data=f"buyz:5:{q}"),
-            InlineKeyboardButton("$25", callback_data=f"buyz:25:{q}"),
-            InlineKeyboardButton("$50", callback_data=f"buyz:50:{q}"),
-        ],
+    presets = db.buy_presets(uid, cid)
+    buy_btns = [
+        InlineKeyboardButton(f"🟢 {v:g} {unit}", callback_data=f"bnv:{v:g}:{q}") for v in presets
+    ]
+    rows = [buy_btns[i : i + 3] for i in range(0, len(buy_btns), 3)]
+    default_usd = _default_buy_usd(uid) if uid else 25.0
+    rows += [
         [
             InlineKeyboardButton(f"✏️ Buy X {unit}", callback_data=f"buyx:{q}"),
-            InlineKeyboardButton("✏️ Buy X tokens", callback_data=f"buyx:{q}"),
+            InlineKeyboardButton(f"💵 Buy ${default_usd:g}", callback_data=f"buyz:{default_usd:g}:{q}"),
         ],
         [
             InlineKeyboardButton(
@@ -548,10 +556,17 @@ def card_keyboard(
                 else "⛽ Gas",
                 callback_data=f"xgas:{cid}",
             ),
+            InlineKeyboardButton("⚙️ Presets", callback_data=f"pst:{cid}"),
         ],
         [
             InlineKeyboardButton("🎯 Snipe", callback_data=f"snp:{q}"),
-            InlineKeyboardButton("⏳ Buy limit", callback_data=f"blm:{q}"),
+            InlineKeyboardButton("⏳ Limit", callback_data=f"blm:{q}"),
+            InlineKeyboardButton("🔔 Alert", callback_data=f"talt:{q}"),
+        ],
+        [
+            InlineKeyboardButton("↔️ Sell", callback_data=f"slc:{q}"),
+            InlineKeyboardButton("📍 Track", callback_data=f"watch:{q}"),
+            InlineKeyboardButton("🔄 Refresh", callback_data=f"sig:{q}"),
         ],
     ]
     addr = (ca or query or "").strip()
@@ -728,8 +743,13 @@ def home_keyboard(private: bool = True) -> InlineKeyboardMarkup:
             InlineKeyboardButton("🌉 Bridge", callback_data="go:bridge"),
         ],
         [
+            InlineKeyboardButton("🎓 Migrations", callback_data="go:mig"),
+            InlineKeyboardButton("🔔 Alerts", callback_data="go:alerts"),
+            InlineKeyboardButton("📤 Withdraw", callback_data="go:withdraw"),
+        ],
+        [
             InlineKeyboardButton("🚀 Launch", callback_data="go:launches"),
-            InlineKeyboardButton("💸 Cut", callback_data="go:fees"),
+            InlineKeyboardButton("🤝 Refer", callback_data="go:ref"),
             InlineKeyboardButton("💬 Chat", url=chat),
         ],
         [InlineKeyboardButton("⚡ PASTE CA", callback_data="go:buyhelp")],
@@ -757,7 +777,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             me = update.effective_user.id
             if rid and rid != me:
                 db.ensure_user(me, update.effective_user.username)
-                db.update_user(me, referred_by=rid, discount_until=int(time.time()) + 30 * 86400)
+                mine = db.get_user(me) or {}
+                # First link wins, and a link can't make a loop (A->B->A).
+                if not mine.get("referred_by") and not db.would_create_ref_loop(me, rid):
+                    db.update_user(me, referred_by=rid, discount_until=int(time.time()) + 30 * 86400)
         except (TypeError, ValueError):
             pass
     if extra and extra.startswith("sig_"):
@@ -979,7 +1002,8 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "🎯 <b>Automated exits</b> (all opt-in — nothing sells unless you set it)",
         "/tp 50 — auto-sell 100% when you're up 50%",
         "/sl 30 — auto-sell 100% when you're down 30%",
-        "/trail 20 — auto-sell if price falls 20% off its peak since you set this",
+        "/trail 20 — sell everything if the bag's value falls 20% from its highest point since you set it",
+        "💰 Sell initials (bag panel) — sell just enough to get your money back out",
         "/tpladder 50:25 100:25 200:50 — sell in stages: 25% of your bag at +50%, "
         "another 25% at +100%, the rest at +200% (add \"off &lt;mint&gt;\" to cancel)",
         "These stack — /tp, /sl, /trail, and /tpladder can all be armed on the same "
@@ -995,16 +1019,24 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/launches — browse new pools",
         "/feeds — turn launch alerts on/off per chain in a group",
         "/settings — default buy size, price floor, slippage protection",
-        "/alert &lt;symbol&gt; &lt;above|below&gt; &lt;price&gt; — price alert",
+        "/alert &lt;CA&gt; 2m — ping when a token hits a market cap (or +50%, -30%, price 0.001)",
+        "/alerts — your token alerts",
+        "/alert &lt;symbol&gt; &lt;above|below&gt; &lt;price&gt; — big-coin price alert (e.g. sol above 200)",
         "/list — your active price alerts",
+        "/migsnipe — pump.fun graduation sniper (alerts or auto-buy)",
+        "/presets — your one-tap buy and sell amounts",
+        "/recap — your day at a glance (also sent every morning)\n",
+        "📤 <b>Moving money</b>",
+        "/withdraw — send SOL, ETH, BNB, TON or any token out, with confirm",
+        "/addressbook — saved withdrawal addresses",
         "/price &lt;symbol&gt; — current price\n",
 
         "🐋 <b>Following other wallets</b>",
-        "/watchwallet &lt;chain&gt; &lt;address&gt; — get a DM when that wallet trades",
+        "/watchwallet &lt;chain&gt; &lt;address&gt; — get a DM (with a one-tap buy) when that wallet trades (up to 20)",
         "/smartmoney — browse the curated smart-money wallet list and follow one\n",
 
         "🤝 <b>Referrals</b>",
-        "/referral — your invite link, tier, and earnings",
+        "/referral — your invite link, 3 levels of earnings",
         "/claim — cash out once your claimable share hits $5\n",
 
         "/help — this list",
@@ -1043,6 +1075,15 @@ async def price_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def alert_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update):
+        return
+    args = context.args or []
+    if args and len(args[0]) >= 32:  # a contract address -> token alert
+        if len(args) < 2:
+            await update.effective_message.reply_text(
+                "Usage: /alert <CA> 2m   (market cap)\n/alert <CA> +50%   (move)\n/alert <CA> price 0.0012"
+            )
+            return
+        await _create_token_alert(update, update.effective_user.id, args[0], " ".join(args[1:]))
         return
     if len(context.args) != 3:
         await update.effective_message.reply_text(
@@ -1170,6 +1211,13 @@ def _rug_block(uid: int, card, mint: str) -> str:
             return "🛡 Honeypot guard ON: live buy blocked."
         if "cannot sell all" in sec or "owner can change" in sec:
             return "🛡 Honeypot guard ON: sell looks trapped. Live buy blocked."
+    if db.flag_on(uid, "honeypot", 1) and _is_sol_mint(mint):
+        try:
+            why = rugcheck.block_reason(rugcheck.sol_report(mint))
+        except Exception:
+            why = ""
+        if why:
+            return f"🛡 Honeypot guard ON: {why}. Live buy blocked. (/settings to turn the guard off)"
     return ""
 
 
@@ -1270,6 +1318,7 @@ def _live_buy(
         ok, msg = signer.buy_sol(mint, usd, secret=sol_secret, slip_bps=_slip_bps(uid, "buy"), user_id=uid)
     if ok:
         db.add_live_cost(uid, mint, usd)
+        _log_trade_safe(uid, "buy", mint, label, usd)
         if liq_mark:
             db.set_lp_mark(uid, mint, float(card.snapshot.liquidity_usd or 0))
         extra = db.credit_desk_share(uid, usd)
@@ -1382,6 +1431,7 @@ def _sell_any(uid: int, mint: str, pct: int = 100) -> tuple[bool, str, str]:
     else:
         ok, msg = evm_signer.sell_evm(cid, mint, key_hex=evm_secret, pct=pct)
     if ok:
+        _log_trade_safe(uid, "sell", mint, cid, 0.0)
         try:
             if pct >= 100:
                 db.clear_live_cost(uid, mint)
@@ -1390,6 +1440,13 @@ def _sell_any(uid: int, mint: str, pct: int = 100) -> tuple[bool, str, str]:
         except Exception:
             logger.exception("cost-basis update failed after sell")
     return bool(ok), msg, label
+
+
+def _log_trade_safe(uid: int, side: str, mint: str, chain: str, usd: float, source: str = "") -> None:
+    try:
+        db.log_trade(uid, side, mint, chain, usd, source)
+    except Exception:
+        logger.exception("trade log failed")
 
 
 def _trade_result(side: str, ok: bool, chain_label: str, msg: str, *, usd: float | None = None, pct: int | None = None) -> str:
@@ -1582,41 +1639,50 @@ def _bag_panel(
         f"Tokens: <b>{amount:g}</b>\n"
         f"{pnl_line}\n"
     )
-    ex = db.get_live_exit(uid, mint)
-    if ex and (ex.get("tp_pct") or ex.get("sl_pct")):
-        bits = []
-        if ex.get("tp_pct"):
-            bits.append(f"🎯 TP +{float(ex['tp_pct']):.0f}%")
-        if ex.get("sl_pct"):
-            bits.append(f"🛑 SL -{float(ex['sl_pct']):.0f}%")
-        text += " · ".join(bits) + "\n"
+    ex = db.get_live_exit(uid, mint) or {}
+    rungs = [r for r in db.list_tp_rungs(uid, mint) if not r.get("hit")]
+    bits = []
+    if ex.get("tp_pct"):
+        bits.append(f"🎯 TP +{float(ex['tp_pct']):.0f}%")
+    if ex.get("sl_pct"):
+        bits.append(f"🛑 SL -{float(ex['sl_pct']):.0f}%")
+    if ex.get("trail_pct"):
+        peak_px = ex.get("peak_px")
+        stop = f" (sells under {_fmt_px(float(peak_px) * (1 - float(ex['trail_pct']) / 100))})" if peak_px else ""
+        bits.append(f"📉 Trail {float(ex['trail_pct']):.0f}%{stop}")
+    if rungs:
+        bits.append(f"🪜 {len(rungs)} TP rung{'s' if len(rungs) != 1 else ''}")
+    if bits:
+        text += "Armed: " + " · ".join(bits) + "\n"
     text += "<i>Tap CA to copy</i>"
-    kb = InlineKeyboardMarkup(
+    sell_row = [
+        InlineKeyboardButton(f"{v}%", callback_data=f"slp:{v}:{short}") for v in db.sell_presets(uid) if v < 100
+    ]
+    sell_row.append(InlineKeyboardButton("☢️ 100%", callback_data=f"slp:100:{short}"))
+    rows = [sell_row]
+    if cost > 0 and worth > cost:
+        rows.append([InlineKeyboardButton("💰 Sell initials (take my money out)", callback_data=f"sli:{short}")])
+    rows += [
         [
-            [
-                InlineKeyboardButton("☢️ Sell All", callback_data=f"slp:100:{short}"),
-            ],
-            [
-                InlineKeyboardButton("🎯 TP +50%", callback_data=f"tpx:50:{short}"),
-                InlineKeyboardButton("🛑 SL -30%", callback_data=f"slx:30:{short}"),
-            ],
-            [
-                InlineKeyboardButton("25%", callback_data=f"slp:25:{short}"),
-                InlineKeyboardButton("50%", callback_data=f"slp:50:{short}"),
-                InlineKeyboardButton("75%", callback_data=f"slp:75:{short}"),
-                InlineKeyboardButton("100%", callback_data=f"slp:100:{short}"),
-            ],
-            [
-                InlineKeyboardButton("📡 Score", callback_data=f"sig:{short}"),
-                InlineKeyboardButton("💵 Buy more", callback_data=f"buy:{short}"),
-            ],
-            [
-                InlineKeyboardButton("🔄 Refresh", callback_data=f"bagr:{short}"),
-                InlineKeyboardButton("📸 PnL card", callback_data=f"pnlc:{short}"),
-            ],
-        ]
-    )
-    return text, kb
+            InlineKeyboardButton("🎯 TP +50%", callback_data=f"tpx:50:{short}"),
+            InlineKeyboardButton("🛑 SL -30%", callback_data=f"slx:30:{short}"),
+            InlineKeyboardButton("📉 Trail 20%", callback_data=f"trl:20:{short}"),
+        ],
+    ]
+    if bits:
+        rows.append([InlineKeyboardButton("🧹 Clear exit rules", callback_data=f"exc:{short}")])
+    rows += [
+        [
+            InlineKeyboardButton("📡 Score", callback_data=f"sig:{short}"),
+            InlineKeyboardButton("💵 Buy more", callback_data=f"buy:{short}"),
+            InlineKeyboardButton("🔔 Alert", callback_data=f"talt:{short}"),
+        ],
+        [
+            InlineKeyboardButton("🔄 Refresh", callback_data=f"bagr:{short}"),
+            InlineKeyboardButton("📸 PnL card", callback_data=f"pnlc:{short}"),
+        ],
+    ]
+    return text, InlineKeyboardMarkup(rows)
 
 
 async def tp_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1821,9 +1887,15 @@ async def trail_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not mint:
         await update.effective_message.reply_text("Buy live first, or pass a mint.")
         return
-    db.set_live_exit(update.effective_user.id, mint, trail_pct=pct)
+    if not 1 <= pct <= 90:
+        await update.effective_message.reply_text("Pick a trail between 1 and 90 (%).")
+        return
+    uid = update.effective_user.id
+    db.set_live_exit(uid, mint, trail_pct=pct)
+    db.reset_live_peak(uid, mint)
     await update.effective_message.reply_text(
-        f"📉 Trailing stop {pct:.0f}% under peak PnL. It only ratchets up."
+        f"📉 Trailing stop armed: sells everything if the bag's value falls {pct:.0f}% "
+        "from its highest point from now on. The high only ratchets up."
     )
 
 
@@ -2344,6 +2416,14 @@ async def settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     f"{'🟢' if lpw else '🔴'} LP yank auto-sell",
                     callback_data="flg:lp_watch",
                 )],
+                [InlineKeyboardButton(
+                    f"{'🟢' if db.flag_on(uid, 'daily_recap', 1) else '🔴'} Daily morning recap",
+                    callback_data="flg:daily_recap",
+                )],
+                [
+                    InlineKeyboardButton("⚙️ Buy/sell presets", callback_data="pst:sol"),
+                    InlineKeyboardButton("🎓 Migration sniper", callback_data="mig:x:panel"),
+                ],
                 [InlineKeyboardButton("📡 Per-chain feeds", callback_data="go:feeds")],
             ]
         ),
@@ -2450,6 +2530,9 @@ async def resetpaper_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await update.effective_message.reply_text(f"Paper account reset to ${start_bal:,.0f}.")
 
 
+MAX_WATCHED_WALLETS = int(os.getenv("FERZAN_MAX_WATCHED_WALLETS", "20"))
+
+
 async def watchwallet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update):
         return
@@ -2462,6 +2545,11 @@ async def watchwallet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
     chain_raw, address = context.args[0], context.args[1]
     label = " ".join(context.args[2:]) if len(context.args) > 2 else None
+    if db.count_watched_wallets(update.effective_user.id) >= MAX_WATCHED_WALLETS:
+        await update.effective_message.reply_text(
+            f"You're tracking {MAX_WATCHED_WALLETS} wallets (the max). Remove one with /unwatchwallet <id>."
+        )
+        return
     try:
         chain = onchain.normalize_chain(chain_raw)
         events = await asyncio.to_thread(onchain.recent_activity, chain, address, 3)
@@ -2847,61 +2935,84 @@ async def importevm_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def collectsol_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Send ALL SOL to an address (legacy shortcut; /withdraw is the full flow)."""
     if not await guard(update):
         return
-    if not context.args:
-        await update.effective_message.reply_text("Usage: /collectsol <your-sol-address>")
+    if update.effective_chat and update.effective_chat.type != "private":
+        await update.effective_message.reply_text("Private chat only.")
         return
-    sol_secret, _evm = user_wallets.secrets(update.effective_user.id)
-    _ok, msg = signer.send_sol(context.args[0], secret=sol_secret)
-    await update.effective_message.reply_text(msg)
+    if not context.args:
+        await update.effective_message.reply_text("Usage: /collectsol <your-sol-address>  — or use /withdraw")
+        return
+    ok, dest = withdraw.validate_address("sol", context.args[0])
+    if not ok:
+        await update.effective_message.reply_text(dest)
+        return
+    uid = update.effective_user.id
+    sol_secret, _evm = user_wallets.secrets(uid)
+    status = await _progress(context.bot, update.effective_chat.id, "⏳ Sending all SOL…")
+    sent, msg = await _off(uid, withdraw.send_sol, sol_secret, dest, None, _busy=(False, BUSY_MSG))
+    await _done(context.bot, update.effective_chat.id, status, msg, disable_web_page_preview=True)
 
 
 async def disperse_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update):
         return
-    if len(context.args or []) < 2:
-        await update.effective_message.reply_text(
-            "📤 Disperse SOL equally.\n/disperse <addr1> <addr2> [addr3]"
-        )
+    if update.effective_chat and update.effective_chat.type != "private":
+        await update.effective_message.reply_text("Private chat only.")
         return
-    dests = [a.strip() for a in context.args if len(a.strip()) >= 32]
+    dests = []
+    for a in context.args or []:
+        ok, norm = withdraw.validate_address("sol", a)
+        if ok:
+            dests.append(norm)
     if len(dests) < 2:
-        await update.effective_message.reply_text("Need at least two Solana addresses.")
+        await update.effective_message.reply_text("📤 Split SOL equally.\n/disperse <addr1> <addr2> [addr3 …]")
         return
-    sol_secret, _evm = user_wallets.secrets(update.effective_user.id)
-    try:
+    uid = update.effective_user.id
+    sol_secret, _evm = user_wallets.secrets(uid)
+
+    def run() -> str:
         kp = signer.keypair_from_secret(sol_secret)
-        bag = await asyncio.to_thread(signer.sol_balance_lamports, str(kp.pubkey()))
-    except Exception as exc:
-        await update.effective_message.reply_text(str(exc))
-        return
-    fee_each = 5000
-    spendable = bag - fee_each * len(dests)
-    if spendable <= 0:
-        await update.effective_message.reply_text("Not enough SOL to disperse.")
-        return
-    chunk = spendable // len(dests)
-    lines = []
-    for dest in dests:
-        _ok, msg = signer.send_sol(dest, secret=sol_secret, lamports=chunk)
-        lines.append(msg)
-    await update.effective_message.reply_text("📤 Disperse\n" + "\n".join(lines))
+        bag = withdraw.sol_balance(str(kp.pubkey()))
+        fee = withdraw.SIG_FEE + withdraw._priority_lamports(800)
+        chunk = (bag - fee * len(dests)) // len(dests)
+        if chunk < withdraw.SOL_RENT_MIN:
+            return "Not enough SOL to split that many ways."
+        out = []
+        for i, dest in enumerate(dests):
+            last = i == len(dests) - 1
+            _ok, msg = withdraw.send_sol(sol_secret, dest, None if last else chunk)
+            out.append(msg)
+            if _ok is not True:
+                out.append("Stopped here — check the link before retrying.")
+                break
+        return "\n".join(out)
+
+    status = await _progress(context.bot, update.effective_chat.id, "⏳ Dispersing…")
+    msg = await _off(uid, run, _busy=BUSY_MSG)
+    await _done(context.bot, update.effective_chat.id, status, "📤 Disperse\n" + msg, disable_web_page_preview=True)
 
 
 async def collectevm_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update):
         return
-    if not context.args:
-        await update.effective_message.reply_text("Usage: /collectevm [eth|base|bsc|hood] <0x>")
+    if update.effective_chat and update.effective_chat.type != "private":
+        await update.effective_message.reply_text("Private chat only.")
         return
-    if len(context.args) == 1:
-        chain, dest = "eth", context.args[0]
-    else:
-        chain, dest = context.args[0], context.args[1]
-    _sol, evm_secret = user_wallets.secrets(update.effective_user.id)
-    _ok, msg = evm_signer.send_native(chain, dest, key_hex=evm_secret)
-    await update.effective_message.reply_text(msg)
+    if not context.args:
+        await update.effective_message.reply_text("Usage: /collectevm [eth|base|bsc|arb] <0x>  — or use /withdraw")
+        return
+    chain, raw_dest = ("eth", context.args[0]) if len(context.args) == 1 else (context.args[0], context.args[1])
+    ok, dest = withdraw.validate_address("evm", raw_dest)
+    if not ok:
+        await update.effective_message.reply_text(dest)
+        return
+    uid = update.effective_user.id
+    _sol, evm_secret = user_wallets.secrets(uid)
+    status = await _progress(context.bot, update.effective_chat.id, "⏳ Sending…")
+    sent, msg = await _off(uid, withdraw.send_evm_native, evm_secret, chain, dest, None, _busy=(False, BUSY_MSG))
+    await _done(context.bot, update.effective_chat.id, status, msg, disable_web_page_preview=True)
 
 
 async def wallets_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2924,6 +3035,7 @@ _FLAG_DEFAULTS = {
     "score_gate": 0,
     "auto_buy": 0,
     "copy_live": 0,
+    "daily_recap": 1,
 }
 
 
@@ -3581,11 +3693,12 @@ async def ref_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Not a cashback gimmick. You earn a slice of OUR cut when they trade.\n"
         "They get Ape Pass — first 30 days on your link.\n\n"
         f"Tier  <b>{st['tier']}</b>\n"
-        f"Invites  {st['invites']}\n"
+        f"Invites  {st['invites']} direct · {st['invites_l2']} level 2 · {st['invites_l3']} level 3\n"
         f"Their volume  ${st['volume']:,.0f}\n"
-        f"Your share  ${st['earned']:.4f}\n"
-        f"Claimable  ${st['open']:.4f}\n\n"
-        f"Scout 30% of our cut · Captain 35% at $50k · Desk 40% at $250k\n\n"
+        f"Earned  ${st['earned']:.4f}  (L1 ${st['by_level'].get(1, 0):.2f} · L2 ${st['by_level'].get(2, 0):.2f} · L3 ${st['by_level'].get(3, 0):.2f})\n"
+        f"Claimable  ${st['open']:.4f}" + (f"  · being paid ${st['pending']:.2f}" if st.get('pending') else "") + "\n\n"
+        f"Level 1: Scout 30% of our cut · Captain 35% at $50k · Desk 40% at $250k\n"
+        f"Level 2 (their invites): {db.REF_L2_PCT * 100:g}% · Level 3: {db.REF_L3_PCT * 100:g}%\n\n"
         f"Link\n{link}\n"
         f"Referred by: {parent}\n"
         "/claim when claimable ≥ $5 — paid from treasury to your /wallet.",
@@ -3605,11 +3718,22 @@ async def claim_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
     amt = db.request_referral_claim(uid)
+    upto = db.max_claimed_ref_id(uid)
+    sol_pub = (db.get_user_wallet(uid) or {}).get("sol_pub") or "(no wallet yet)"
     await update.effective_message.reply_text(
-        f"🧾 Claim locked ${amt:.4f}.\n"
-        "Operator pays this from FEE_WALLET to your Ferzan SOL address.\n"
-        "Not instant on-chain in this build — the ticket is in the ledger."
+        f"🧾 Claim of ${amt:.2f} sent to the desk.\n"
+        "It's paid from the Ferzan treasury to your SOL wallet — you'll get a message here when it lands."
     )
+    for admin in ADMIN_IDS:
+        try:
+            await context.bot.send_message(
+                admin,
+                f"🧾 Referral claim ${amt:.2f} from {uid}\nPay to SOL: <code>{html.escape(sol_pub)}</code>",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅ Mark paid", callback_data=f"refpaid:{uid}:{upto}")]]),
+            )
+        except Exception:
+            logger.exception("claim notify failed for admin %s", admin)
 
 
 async def treasury_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3670,6 +3794,13 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     text = (update.message.text or "").strip()
     if not text or text.startswith("/"):
+        return
+    if update.effective_chat and update.effective_chat.type == "private" and await _withdraw_text(update, context, text):
+        return
+    talert = (context.user_data or {}).get("talert")
+    if talert:
+        context.user_data["talert"] = None
+        await _create_token_alert(update, update.effective_user.id, talert, text)
         return
     pending = (context.user_data or {}).get("buyx")
     if pending:
@@ -4225,6 +4356,21 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             )
         elif kind == "smartmoney":
             await smartmoney_cmd(update, context)
+        elif kind == "mig":
+            await _mig_callback(update, context, "mig:x:panel")
+        elif kind == "alerts":
+            text, kb = _token_alerts_panel(uid)
+            await context.bot.send_message(uid, text, parse_mode="HTML", reply_markup=kb)
+        elif kind == "withdraw":
+            if update.effective_chat and update.effective_chat.type != "private":
+                await context.bot.send_message(uid, "Open /withdraw in your private chat with the bot.")
+            else:
+                context.user_data["wd"] = {}
+                bals = await asyncio.to_thread(_wd_balances, uid)
+                text, kb = _wd_menu(uid, bals)
+                await context.bot.send_message(uid, text, parse_mode="HTML", reply_markup=kb)
+        elif kind == "ref":
+            await ref_cmd(update, context)
         elif kind == "snipehelp":
             await context.bot.send_message(
                 uid,
@@ -4260,6 +4406,99 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 "/settings autobuy 25\n"
                 "/bag to sell.",
             )
+        return
+    if data.startswith("trl:"):
+        _tag, pct_s, mint = data.split(":", 2)
+        try:
+            pct = max(1.0, min(90.0, float(pct_s)))
+        except ValueError:
+            pct = 20.0
+        db.set_live_exit(uid, mint, trail_pct=pct)
+        db.reset_live_peak(uid, mint)
+        await context.bot.send_message(
+            uid,
+            f"📉 Trailing stop {pct:.0f}% armed: sells everything if the bag's value falls "
+            f"{pct:.0f}% from its highest point from now on. Custom size: /trail 15 {mint}",
+        )
+        return
+    if data.startswith("exc:"):
+        mint = data[4:]
+        db.clear_live_exit(uid, mint)
+        db.clear_tp_ladder(uid, mint)
+        await context.bot.send_message(uid, "🧹 Exit rules cleared for that token (TP, SL, trail, ladder).")
+        return
+    if data.startswith("sli:"):
+        mint = data[4:]
+        status = await _progress(context.bot, uid, "⏳ Working out your initials…")
+        try:
+            amount, _owner, _venue = await asyncio.to_thread(_bag_position_amount, uid, mint)
+            px = await asyncio.to_thread(_token_mark_usd, mint)
+        except Exception as exc:
+            await _done(context.bot, uid, status, f"Couldn't read the bag: {exc}")
+            return
+        cost = db.live_cost(uid, mint)
+        worth = amount * px
+        pct = _initials_pct(cost, worth)
+        if pct is None:
+            await _done(
+                context.bot, uid, status,
+                "Nothing to take out yet — the bag is worth less than you put in (or the price is unavailable).",
+            )
+            return
+        ok, msg, label = await _off(uid, _sell_any, uid, mint, pct, _busy=(False, BUSY_MSG, ""))
+        head = f"💰 Initials: sold {pct}% (≈ ${cost:,.2f} of ${worth:,.2f}) — the rest rides free.\n"
+        await _done(context.bot, uid, status, head + _trade_result("sell", ok, label, msg, pct=pct))
+        if ok and _is_bag_panel(query.message):
+            await _refresh_bag_panel(query, uid, mint, quiet=True)
+        return
+    if data.startswith("pst:"):
+        cid = resolve_chain(data[4:]) or data[4:] or "sol"
+        await context.bot.send_message(uid, _presets_text(uid, cid), parse_mode="HTML")
+        return
+    if data.startswith("talt:"):
+        context.user_data["talert"] = data[5:]
+        await context.bot.send_message(
+            uid,
+            "🔔 Send the alert target:\n"
+            "• <code>2m</code> or <code>250k</code> — market cap\n"
+            "• <code>+50%</code> / <code>-30%</code> — move from the price now\n"
+            "• <code>price 0.0012</code> — exact USD price",
+            parse_mode="HTML",
+        )
+        return
+    if data.startswith("tax:"):
+        try:
+            aid = int(data[4:])
+        except ValueError:
+            return
+        ok = db.delete_token_alert(aid, uid)
+        await _safe_answer(query, "Alert removed" if ok else "Already gone")
+        text, kb = _token_alerts_panel(uid)
+        try:
+            await query.edit_message_text(text, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True)
+        except Exception:
+            pass
+        return
+    if data.startswith("refpaid:") and _is_admin(uid):
+        parts = data.split(":")
+        try:
+            who = int(parts[1])
+            upto = int(parts[2]) if len(parts) > 2 else None
+        except (ValueError, IndexError):
+            return
+        amt = db.mark_referral_paid(who, upto)  # only the claim this button was sent for
+        await context.bot.send_message(uid, f"✅ Marked ${amt:.2f} paid for {who}.")
+        if amt > 0:
+            try:
+                await context.bot.send_message(who, f"💸 Your referral payout of ${amt:.2f} was sent to your Ferzan SOL wallet.")
+            except Exception:
+                pass
+        return
+    if data.startswith("wd:") or data.startswith("ab:"):
+        await _withdraw_callback(update, context, data)
+        return
+    if data.startswith("mig:"):
+        await _mig_callback(update, context, data)
         return
     if data.startswith("tpx:") or data.startswith("slx:"):
         kind, pct_s, mint = data.split(":", 2)
@@ -4384,6 +4623,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             "auto_buy",
             "anti_mev",
             "copy_live",
+            "daily_recap",
         }:
             return
         # Read with the SAME default the rest of the bot uses for this flag,
@@ -4462,6 +4702,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
         if already:
             await _safe_answer(query, "Already following.")
+            return
+        if db.count_watched_wallets(uid) >= MAX_WATCHED_WALLETS:
+            await context.bot.send_message(uid, f"You're tracking {MAX_WATCHED_WALLETS} wallets (the max). Remove one first.")
             return
         new_id = db.add_watched_wallet(uid, w["chain"], w["address"], w["label"])
         try:
@@ -4614,6 +4857,949 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
 
 
+# ============================================================ batch 4 ====
+# Presets, sell-initials, token alerts, withdraw, migration sniper, Mini App
+# orders, daily recap. Blocking helpers are plain functions (run them via
+# asyncio.to_thread / _off); handlers are async.
+
+_NATIVE_GECKO = {
+    "sol": "solana", "bsc": "binancecoin", "eth": "ethereum", "base": "ethereum", "arb": "ethereum",
+    "hood": "ethereum", "avax": "avalanche-2", "ton": "the-open-network",
+}
+_NATIVE_UNIT = {
+    "sol": "SOL", "bsc": "BNB", "eth": "ETH", "base": "ETH", "arb": "ETH", "hood": "ETH",
+    "avax": "AVAX", "ton": "TON",
+}
+
+
+def _native_usd(cid: str) -> float:
+    """USD price of a chain's native coin, 0 if unavailable. Blocking."""
+    try:
+        return float(get_price_usd(_NATIVE_GECKO.get(cid, "ethereum")) or 0)
+    except Exception:
+        return 0.0
+
+
+def _initials_pct(cost: float, worth: float) -> int | None:
+    """% of the bag to sell to get the money you put in back out.
+    None when the bag isn't worth more than it cost."""
+    import math
+
+    if cost <= 0 or worth <= 0 or worth <= cost:
+        return None
+    return max(1, min(100, math.ceil(cost / worth * 100)))
+
+
+# ---------------------------------------------------------------- presets --
+def _presets_text(uid: int, cid: str) -> str:
+    unit = _NATIVE_UNIT.get(cid, "ETH")
+    cur = " · ".join(f"{v:g}" for v in db.buy_presets(uid, cid))
+    sells = " · ".join(f"{v}%" for v in db.sell_presets(uid))
+    return (
+        f"⚙️ <b>Quick-buy presets · {html.escape(cid.upper())}</b>\n"
+        f"Buy buttons: {html.escape(cur)} {unit}\n"
+        f"Sell buttons: {html.escape(sells)} (+ 100%)\n\n"
+        f"Change buys: <code>/presets {cid} 0.1 0.25 0.5 1 2 5</code> (up to 6)\n"
+        "Change sells: <code>/presets sell 20 50 75</code> (up to 3)\n"
+        f"Back to default: <code>/presets {cid} reset</code>"
+    )
+
+
+async def presets_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard(update):
+        return
+    uid = update.effective_user.id
+    args = [a.strip().lower() for a in (context.args or [])]
+    if not args:
+        await update.effective_message.reply_text(_presets_text(uid, "sol"), parse_mode="HTML")
+        return
+    target = args[0]
+    if target == "sell":
+        vals = sorted({int(v) for v in db._parse_nums(" ".join(args[1:])) if 1 <= v < 100})
+        if args[1:2] == ["reset"]:
+            vals = []
+        elif not vals:
+            await update.effective_message.reply_text("Give 1–3 percentages under 100. Example: /presets sell 20 50 75")
+            return
+        db.set_sell_presets(uid, vals[:3])
+        await update.effective_message.reply_text(_presets_text(uid, "sol"), parse_mode="HTML")
+        return
+    cid = resolve_chain(target) or ""
+    if cid not in _NATIVE_UNIT:
+        await update.effective_message.reply_text("Chains: sol, eth, base, bsc, arb, avax, ton, hood — or 'sell'.")
+        return
+    if args[1:2] == ["reset"]:
+        db.set_buy_presets(uid, cid, [])
+    else:
+        vals = [v for v in db._parse_nums(" ".join(args[1:])) if v <= 1_000_000]
+        if not vals:
+            await update.effective_message.reply_text(f"Give up to 6 amounts. Example: /presets {cid} 0.1 0.5 1")
+            return
+        db.set_buy_presets(uid, cid, sorted(set(vals))[:6])
+    await update.effective_message.reply_text(_presets_text(uid, cid), parse_mode="HTML")
+
+
+# ----------------------------------------------------------- token alerts --
+_SUFFIX = {"k": 1e3, "m": 1e6, "b": 1e9}
+
+
+def _parse_money(raw: str) -> float | None:
+    t = raw.strip().lower().replace("$", "").replace(",", "")
+    mult = 1.0
+    if t and t[-1] in _SUFFIX:
+        mult, t = _SUFFIX[t[-1]], t[:-1]
+    try:
+        v = float(t) * mult
+    except ValueError:
+        return None
+    return v if v > 0 else None
+
+
+def parse_alert_target(text: str, px: float, mc: float) -> tuple[str, str, float, str] | str:
+    """-> (kind, direction, target, note) or an error string.
+    kind: 'mc' | 'price'."""
+    t = " ".join((text or "").strip().lower().split())
+    if not t:
+        return "Send a target like 2m, +50% or price 0.0012."
+    if t.endswith("%"):
+        try:
+            pct = float(t[:-1].replace("+", ""))
+        except ValueError:
+            return "Percent looks off. Try +50% or -30%."
+        if pct == 0 or pct <= -100:
+            return "Pick a move between -99% and anything up."
+        if px <= 0:
+            return "No live price for this token right now — use a market cap target like 2m."
+        target = px * (1 + pct / 100)
+        return "price", ("above" if pct > 0 else "below"), target, f"{pct:+g}%"
+    if t.startswith("price") or t.startswith("px"):
+        v = _parse_money(t.split(" ", 1)[1] if " " in t else "")
+        if v is None:
+            return "Price looks off. Example: price 0.0012"
+        if px <= 0:
+            return "No live price for this token right now."
+        return "price", ("above" if v > px else "below"), v, f"${v:.6g}"
+    if t.startswith("mc"):
+        t = t[2:].strip()
+    v = _parse_money(t)
+    if v is None:
+        return "Couldn't read that. Try 2m, 250k, +50% or price 0.0012."
+    if v < 1000:
+        return "That's too small for a market cap. For a price use: price 0.0012"
+    if mc <= 0:
+        return "No live market cap for this token right now — try a % move instead."
+    return "mc", ("above" if v > mc else "below"), v, f"${v:,.0f} MC"
+
+
+def _fmt_mc(v: float) -> str:
+    for n, s in ((1e9, "B"), (1e6, "M"), (1e3, "K")):
+        if v >= n:
+            return f"${v / n:.2f}{s}"
+    return f"${v:,.0f}"
+
+
+def _token_alerts_panel(uid: int) -> tuple[str, InlineKeyboardMarkup | None]:
+    rows = db.list_token_alerts(uid)
+    if not rows:
+        return (
+            "🔔 <b>Token alerts</b>\nNone set. Tap 🔔 Alert on any token card, or:\n"
+            "<code>/alert &lt;CA&gt; 2m</code> · <code>/alert &lt;CA&gt; +50%</code>",
+            None,
+        )
+    lines = ["🔔 <b>Token alerts</b>"]
+    kb = []
+    for r in rows:
+        what = _fmt_mc(r["target"]) + " MC" if r["kind"] == "mc" else f"${r['target']:.6g}"
+        arrow = "▲" if r["direction"] == "above" else "▼"
+        sym = html.escape(r["symbol"] or r["mint"][:6])
+        lines.append(f"#{r['id']} ${sym} {arrow} {what}" + (f" ({html.escape(r['note'])})" if r["note"] else ""))
+        kb.append([InlineKeyboardButton(f"❌ #{r['id']} ${r['symbol'] or r['mint'][:6]}", callback_data=f"tax:{r['id']}")])
+    return "\n".join(lines), InlineKeyboardMarkup(kb)
+
+
+async def _create_token_alert(update: Update, uid: int, mint: str, target_text: str) -> None:
+    msg = update.effective_message
+    if len(db.list_token_alerts(uid)) >= db.MAX_TOKEN_ALERTS:
+        await msg.reply_text(f"You have {db.MAX_TOKEN_ALERTS} alerts — remove some in /alerts first.")
+        return
+    marks = await asyncio.to_thread(portfolio._ds_prices, [mint])
+    m = marks.get(mint) or next((v for k, v in marks.items() if k.lower() == mint.lower()), {}) or {}
+    got = parse_alert_target(target_text, float(m.get("price") or 0), float(m.get("mc") or 0))
+    if isinstance(got, str):
+        await msg.reply_text(got)
+        return
+    kind, direction, target, note = got
+    sym = m.get("symbol") or ""
+    aid = db.add_token_alert(uid, mint, sym, kind, direction, target, note)
+    now = _fmt_mc(float(m.get("mc") or 0)) + " MC" if kind == "mc" else f"${float(m.get('price') or 0):.6g}"
+    what = _fmt_mc(target) + " MC" if kind == "mc" else f"${target:.6g}"
+    await msg.reply_text(
+        f"🔔 Alert #{aid} set: ${sym or mint[:6]} {'▲ above' if direction == 'above' else '▼ below'} {what}\n"
+        f"Now: {now}. Checked every minute. /alerts to manage."
+    )
+
+
+async def alerts_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard(update):
+        return
+    text, kb = _token_alerts_panel(update.effective_user.id)
+    await update.effective_message.reply_text(text, parse_mode="HTML", reply_markup=kb)
+
+
+async def token_alert_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    rows = db.list_token_alerts()
+    if not rows:
+        return
+    mints = sorted({r["mint"] for r in rows})
+    marks = await asyncio.to_thread(portfolio._ds_prices, mints)
+    for r in rows:
+        m = marks.get(r["mint"]) or {}
+        val = float((m.get("mc") if r["kind"] == "mc" else m.get("price")) or 0)
+        if val <= 0:
+            continue
+        hit = val >= r["target"] if r["direction"] == "above" else val <= r["target"]
+        if not hit or not db.fire_token_alert(r["id"]):
+            continue
+        mint = r["mint"]
+        cid = portfolio.DS_TO_CID.get(m.get("chain", ""), "") or ("sol" if _is_sol_mint(mint) else "base")
+        unit = _NATIVE_UNIT.get(cid, "ETH")
+        q = mint[:48]
+        buys = [InlineKeyboardButton(f"🟢 {v:g} {unit}", callback_data=f"bnv:{v:g}:{q}") for v in db.buy_presets(r["user_id"], cid)[:3]]
+        kb = [buys, [
+            InlineKeyboardButton("↔️ Sell", callback_data=f"slc:{q}"),
+            InlineKeyboardButton("📡 Card", callback_data=f"sig:{q}"),
+        ]]
+        if m.get("url"):
+            kb[1].append(InlineKeyboardButton("📈 Chart", url=m["url"]))
+        what = _fmt_mc(val) + " MC" if r["kind"] == "mc" else f"${val:.6g}"
+        tgt = _fmt_mc(r["target"]) + " MC" if r["kind"] == "mc" else f"${r['target']:.6g}"
+        try:
+            await context.bot.send_message(
+                r["user_id"],
+                f"🔔 ${html.escape(m.get('symbol') or r['symbol'] or mint[:6])} hit {tgt}"
+                f"{' (' + html.escape(r['note']) + ')' if r['note'] else ''}\nNow {what} · 24h {float(m.get('chg24') or 0):+.1f}%\n<code>{html.escape(mint)}</code>",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(kb),
+            )
+        except Exception:
+            logger.exception("token alert send failed for %s", r["user_id"])
+
+
+# --------------------------------------------------------------- withdraw --
+_WD_NATIVE = {
+    "sol": ("sol", "SOL", "Solana", 9),
+    "base": ("evm", "ETH", "Base", 18),
+    "eth": ("evm", "ETH", "Ethereum", 18),
+    "bsc": ("evm", "BNB", "BNB Chain", 18),
+    "arb": ("evm", "ETH", "Arbitrum", 18),
+    "ton": ("ton", "TON", "TON", 9),
+}
+
+
+def _wd_balances(uid: int) -> dict:
+    """Native balances of the ACTIVE wallet (raw units). Blocking."""
+    w = db.get_user_wallet(uid) or {}
+    sol_pub, evm_pub = w.get("sol_pub", ""), w.get("evm_pub", "")
+    out: dict = {}
+    try:
+        out["sol"] = withdraw.sol_balance(sol_pub) if sol_pub else 0
+    except Exception:
+        out["sol"] = None
+    for cid in ("base", "eth", "bsc", "arb"):
+        try:
+            out[cid] = withdraw.evm_native_balance(cid, evm_pub) if evm_pub else 0
+        except Exception:
+            out[cid] = None
+    try:
+        import ton_signer
+
+        sol_secret, _evm = user_wallets.secrets(uid)
+        _addr, bal = ton_signer.address_and_balance(sol_secret)
+        out["ton"] = int(bal * 1e9)
+    except Exception:
+        out["ton"] = None
+    return out
+
+
+def _wd_menu(uid: int, bals: dict) -> tuple[str, InlineKeyboardMarkup]:
+    label = user_wallets.active_label(uid)
+    rows, pair = [], []
+    for key, (_fam, sym, name, dec) in _WD_NATIVE.items():
+        raw = bals.get(key)
+        amt = "?" if raw is None else f"{raw / 10 ** dec:.4g}"
+        pair.append(InlineKeyboardButton(f"{sym} · {name} ({amt})", callback_data=f"wd:a:{key}"))
+        if len(pair) == 2:
+            rows.append(pair)
+            pair = []
+    if pair:
+        rows.append(pair)
+    rows.append([
+        InlineKeyboardButton("🪙 A Solana token", callback_data="wd:spl"),
+        InlineKeyboardButton("🪙 An EVM token", callback_data="wd:erc"),
+    ])
+    rows.append([InlineKeyboardButton("📒 Address book", callback_data="ab:list"), InlineKeyboardButton("✖️ Cancel", callback_data="wd:cancel")])
+    return (
+        f"📤 <b>Withdraw</b> from <b>{html.escape(label)}</b>\nPick what to send:",
+        InlineKeyboardMarkup(rows),
+    )
+
+
+async def withdraw_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard(update):
+        return
+    if update.effective_chat and update.effective_chat.type != "private":
+        await update.effective_message.reply_text("Withdrawals only work in a private chat with the bot.")
+        return
+    uid = update.effective_user.id
+    context.user_data["wd"] = {}
+    status = await update.effective_message.reply_text("⏳ Reading balances…")
+    bals = await asyncio.to_thread(_wd_balances, uid)
+    text, kb = _wd_menu(uid, bals)
+    try:
+        await status.edit_text(text, parse_mode="HTML", reply_markup=kb)
+    except Exception:
+        await update.effective_message.reply_text(text, parse_mode="HTML", reply_markup=kb)
+
+
+def _wd_amount_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("25%", callback_data="wd:p:25"),
+            InlineKeyboardButton("50%", callback_data="wd:p:50"),
+            InlineKeyboardButton("100%", callback_data="wd:p:100"),
+        ],
+        [InlineKeyboardButton("✏️ Type an amount", callback_data="wd:x"), InlineKeyboardButton("✖️ Cancel", callback_data="wd:cancel")],
+    ])
+
+
+def _wd_ui(st: dict) -> str:
+    return f"{st['bal_raw'] / 10 ** st['decimals']:,.6g} {st['sym']}"
+
+
+def _wd_amount_text(st: dict) -> str:
+    if st.get("raw") is None:
+        return f"everything ({_wd_ui(st)}{' minus the network fee' if st['kind'] == 'native' else ''})"
+    return f"{st['raw'] / 10 ** st['decimals']:,.6g} {st['sym']}"
+
+
+async def _wd_ask_dest(bot, uid: int, st: dict) -> None:
+    st["await"] = "dest"
+    book = db.list_addresses(uid, st["family"])[:8]
+    kb = [[InlineKeyboardButton(f"📒 {b['label']} · {withdraw.short(b['address'])}", callback_data=f"wd:d:{b['id']}")] for b in book]
+    kb.append([InlineKeyboardButton("✖️ Cancel", callback_data="wd:cancel")])
+    await bot.send_message(
+        uid,
+        f"📤 Sending {_wd_amount_text(st)}\nNow paste the {st['net']} address to send to"
+        + (", or pick a saved one:" if book else ":"),
+        reply_markup=InlineKeyboardMarkup(kb),
+    )
+
+
+async def _wd_confirm(bot, uid: int, st: dict) -> None:
+    import secrets as _secrets
+
+    st["await"] = ""
+    st["nonce"] = _secrets.token_hex(4)
+    st["confirmed"] = _wd_snapshot(st)
+    label = user_wallets.active_label(uid)
+    to = st["dest"]
+    saved = next((b for b in db.list_addresses(uid, st["family"]) if b["address"] == to), None)
+    await bot.send_message(
+        uid,
+        "📤 <b>Confirm withdrawal</b>\n"
+        f"Send: <b>{html.escape(_wd_amount_text(st))}</b>\n"
+        f"Network: {html.escape(st['net'])}\n"
+        f"From: {html.escape(label)}\n"
+        f"To: {html.escape(saved['label'] + ' · ') if saved else ''}<code>{html.escape(to)}</code>\n\n"
+        "⚠️ Crypto sends can't be reversed. Check the address matches, character for character.",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ Send it", callback_data=f"wd:go:{st['nonce']}"),
+            InlineKeyboardButton("✖️ Cancel", callback_data="wd:cancel"),
+        ]]),
+    )
+
+
+def _wd_from(uid: int) -> dict:
+    w = db.get_user_wallet(uid) or {}
+    return {"from_sol": w.get("sol_pub", ""), "from_evm": (w.get("evm_pub") or "").lower()}
+
+
+def _wd_select_native(uid: int, key: str) -> dict:
+    fam, sym, net, dec = _WD_NATIVE[key]
+    bals = _wd_balances(uid)
+    return {"kind": "native", "family": fam, "chain": key, "sym": sym, "net": net, "decimals": dec,
+            "bal_raw": int(bals.get(key) or 0), "raw": None, "mint": "", **_wd_from(uid)}
+
+
+def _wd_select_spl(uid: int, mint: str) -> dict:
+    w = db.get_user_wallet(uid) or {}
+    h = withdraw.spl_holding(w.get("sol_pub", ""), mint)
+    meta = _token_meta(mint)
+    return {"kind": "token", "family": "sol", "chain": "sol", "sym": (meta.get("symbol") or mint[:4]).upper(),
+            "net": "Solana", "decimals": h["decimals"], "bal_raw": h["raw"], "raw": None, "mint": mint, **_wd_from(uid)}
+
+
+def _wd_select_erc(uid: int, chain: str, token: str) -> dict:
+    w = db.get_user_wallet(uid) or {}
+    raw, dec, sym = withdraw.erc20_holding(chain, token, w.get("evm_pub", ""))
+    return {"kind": "token", "family": "evm", "chain": chain, "sym": sym or "TOKEN",
+            "net": _WD_NATIVE.get(chain, ("", "", chain.upper(), 18))[2], "decimals": dec,
+            "bal_raw": raw, "raw": None, "mint": token, **_wd_from(uid)}
+
+
+def _wd_snapshot(st: dict) -> tuple:
+    """Everything a confirm screen promised. Executing re-checks it."""
+    return (st.get("kind"), st.get("family"), st.get("chain"), st.get("mint"), st.get("raw"),
+            st.get("dest"), st.get("from_sol"), st.get("from_evm"))
+
+
+def _wd_execute(uid: int, st: dict) -> tuple[bool | None, str]:
+    sol_secret, evm_secret = user_wallets.secrets(uid)
+    # Send ONLY from the wallet the user picked the balance from: switching
+    # the active wallet between confirm and send must not redirect the funds.
+    now_sol = str(signer.keypair_from_secret(sol_secret).pubkey()) if sol_secret else ""
+    try:
+        from eth_account import Account
+
+        now_evm = Account.from_key(evm_secret if evm_secret.startswith("0x") else "0x" + evm_secret).address.lower()
+    except Exception:
+        now_evm = ""
+    if (st["family"] in ("sol", "ton") and now_sol != st.get("from_sol")) or (
+        st["family"] == "evm" and now_evm != st.get("from_evm")
+    ):
+        return False, "Your active wallet changed since you started — nothing sent. Run /withdraw again."
+    raw, dest = st.get("raw"), st["dest"]
+    if st["kind"] == "native":
+        if st["family"] == "sol":
+            ok, msg = withdraw.send_sol(sol_secret, dest, raw)
+        elif st["family"] == "ton":
+            ok, msg = withdraw.send_ton(sol_secret, dest, raw)
+        else:
+            ok, msg = withdraw.send_evm_native(evm_secret, st["chain"], dest, raw)
+    elif st["family"] == "sol":
+        ok, msg = withdraw.send_spl(sol_secret, st["mint"], dest, raw)
+    else:
+        ok, msg = withdraw.send_erc20(evm_secret, st["chain"], st["mint"], dest, raw)
+    if ok is not False:
+        try:
+            db.log_trade(uid, "withdraw", st.get("mint") or st["sym"], st["chain"], 0.0, "withdraw")
+        except Exception:
+            pass
+    return ok, msg
+
+
+async def _withdraw_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, data: str) -> None:
+    query = update.callback_query
+    uid = update.effective_user.id
+    bot = context.bot
+    if update.effective_chat and update.effective_chat.type != "private":
+        return
+    st = context.user_data.get("wd")
+    if data == "ab:list":
+        text, kb = _addressbook_view(uid)
+        await bot.send_message(uid, text, reply_markup=kb, parse_mode="HTML")
+        return
+    if data == "wd:save":
+        await _withdraw_save_prompt(update, context)
+        return
+    if data.startswith("ab:del:"):
+        try:
+            db.delete_address(int(data.split(":")[2]), uid)
+        except ValueError:
+            pass
+        text, kb = _addressbook_view(uid)
+        try:
+            await query.edit_message_text(text, parse_mode="HTML", reply_markup=kb)
+        except Exception:
+            pass
+        return
+    if data == "wd:cancel":
+        context.user_data["wd"] = {}
+        await bot.send_message(uid, "Withdrawal cancelled. Nothing was sent.")
+        return
+    if data == "wd:spl":
+        w = db.get_user_wallet(uid) or {}
+        try:
+            held = await asyncio.to_thread(signer.holdings_pub, w.get("sol_pub", ""))
+        except Exception as exc:
+            await bot.send_message(uid, f"Couldn't read tokens: {exc}")
+            return
+        if not held:
+            await bot.send_message(uid, "No Solana tokens in this wallet.")
+            return
+        metas = await asyncio.to_thread(portfolio._ds_prices, [h["mint"] for h in held[:20]])
+        kb = []
+        for h in held[:12]:
+            sym = (metas.get(h["mint"]) or {}).get("symbol") or h["mint"][:4] + "…"
+            kb.append([InlineKeyboardButton(f"${sym} · {h['amount']:,.6g}", callback_data=f"wd:t:{h['mint']}")])
+        kb.append([InlineKeyboardButton("✖️ Cancel", callback_data="wd:cancel")])
+        await bot.send_message(uid, "🪙 Which token?", reply_markup=InlineKeyboardMarkup(kb))
+        return
+    if data == "wd:erc":
+        context.user_data["wd"] = {"await": "erc"}
+        await bot.send_message(uid, "🪙 Send the chain and token address, e.g.\n<code>base 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913</code>", parse_mode="HTML")
+        return
+    if data.startswith("wd:a:") or data.startswith("wd:t:"):
+        try:
+            if data.startswith("wd:a:"):
+                key = data[5:]
+                if key not in _WD_NATIVE:
+                    return
+                st = await asyncio.to_thread(_wd_select_native, uid, key)
+            else:
+                st = await asyncio.to_thread(_wd_select_spl, uid, data[5:])
+        except Exception as exc:
+            await bot.send_message(uid, f"Couldn't read that balance: {exc}")
+            return
+        if st["bal_raw"] <= 0:
+            await bot.send_message(uid, f"No {st['sym']} to send in this wallet.")
+            return
+        context.user_data["wd"] = st
+        await bot.send_message(uid, f"📤 {st['sym']} on {st['net']} — balance {_wd_ui(st)}.\nHow much?", reply_markup=_wd_amount_kb())
+        return
+    if not st or "family" not in st:
+        if data.startswith("wd:"):
+            await bot.send_message(uid, "That withdrawal expired. Start again with /withdraw.")
+        return
+    if data.startswith("wd:p:") or data == "wd:x":
+        st.pop("nonce", None)  # amount is changing: any shown confirm is void
+        st.pop("confirmed", None)
+        st.pop("dest", None)
+    if data.startswith("wd:p:"):
+        pct = int(data[5:]) if data[5:].isdigit() else 100
+        st["raw"] = None if pct >= 100 else st["bal_raw"] * pct // 100
+        if st["raw"] is not None and st["raw"] <= 0:
+            await bot.send_message(uid, "That rounds to zero. Pick a bigger share.")
+            return
+        await _wd_ask_dest(bot, uid, st)
+        return
+    if data == "wd:x":
+        st["await"] = "amount"
+        await bot.send_message(uid, f"Type the amount of {st['sym']} to send (you have {_wd_ui(st)}).")
+        return
+    if data.startswith("wd:d:"):
+        book = db.get_address(int(data[5:]), uid) if data[5:].isdigit() else None
+        if not book or book["family"] != st["family"]:
+            await bot.send_message(uid, "That saved address isn't for this network.")
+            return
+        st["dest"] = book["address"]
+        await _wd_confirm(bot, uid, st)
+        return
+    if data.startswith("wd:go:"):
+        if not st.get("dest") or data[6:] != st.get("nonce") or st.get("confirmed") != _wd_snapshot(st):
+            await bot.send_message(uid, "That confirmation is stale. Start again with /withdraw.")
+            return
+        context.user_data["wd"] = {"last_dest": st["dest"], "last_family": st["family"]}  # one tap = one send
+        status = await _progress(bot, uid, "⏳ Sending…")
+        try:
+            ok, msg = await _off(uid, _wd_execute, uid, st, _busy=(False, BUSY_MSG))
+        except Exception as exc:
+            logger.exception("withdraw failed for %s", uid)
+            ok, msg = None, (
+                f"Something went wrong mid-send ({str(exc)[:120]}). It may or may not have gone out — "
+                "check your wallet on the explorer before trying again."
+            )
+        icon = "🟢" if ok else ("🟡" if ok is None else "🔴")
+        kb = None
+        if ok is not False and not any(b["address"] == st["dest"] for b in db.list_addresses(uid, st["family"])):
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("💾 Save this address", callback_data="wd:save")]])
+        await _done(bot, uid, status, f"{icon} {msg}", reply_markup=kb, disable_web_page_preview=True)
+        return
+
+
+async def _withdraw_save_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    st = context.user_data.get("wd") or {}
+    if not st.get("last_dest"):
+        return
+    st["await"] = "label"
+    await context.bot.send_message(update.effective_user.id, "Name this address (e.g. Coinbase, Ledger):")
+
+
+async def _withdraw_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> bool:
+    """Handle typed input for an open withdrawal. True if consumed."""
+    st = context.user_data.get("wd") or {}
+    step = st.get("await")
+    if not step:
+        return False
+    uid = update.effective_user.id
+    msg = update.effective_message
+    if step == "erc":
+        parts = text.split()
+        if len(parts) != 2 or not (resolve_chain(parts[0]) in {"base", "eth", "bsc", "arb"}):
+            await msg.reply_text("Format: <chain> <0x token>. Chains: base, eth, bsc, arb.")
+            return True
+        cid = resolve_chain(parts[0])
+        ok, tok = withdraw.validate_address("evm", parts[1])
+        if not ok:
+            await msg.reply_text(tok)
+            return True
+        try:
+            new = await asyncio.to_thread(_wd_select_erc, uid, cid, tok)
+        except Exception as exc:
+            await msg.reply_text(f"Couldn't read that token: {exc}")
+            return True
+        if new["bal_raw"] <= 0:
+            await msg.reply_text("No balance of that token on that chain in this wallet.")
+            context.user_data["wd"] = {}
+            return True
+        context.user_data["wd"] = new
+        await msg.reply_text(f"📤 {new['sym']} on {new['net']} — balance {_wd_ui(new)}.\nHow much?", reply_markup=_wd_amount_kb())
+        return True
+    if step == "amount":
+        st.pop("nonce", None)
+        st.pop("confirmed", None)
+        from decimal import Decimal, InvalidOperation
+
+        try:
+            dec_amt = Decimal(text.replace(",", ""))
+            if not dec_amt.is_finite():
+                raise ValueError
+            raw = int(dec_amt * (10 ** st["decimals"]))
+        except (InvalidOperation, ValueError, OverflowError):
+            await msg.reply_text("Send just a number, e.g. 0.5")
+            return True
+        if raw <= 0 or raw > st["bal_raw"]:
+            await msg.reply_text(f"Pick an amount between 0 and {_wd_ui(st)}.")
+            return True
+        st["raw"] = raw
+        await _wd_ask_dest(context.bot, uid, st)
+        return True
+    if step == "dest":
+        ok, addr = withdraw.validate_address(st["family"], text)
+        if not ok:
+            await msg.reply_text(addr + " Paste it again, or /withdraw to restart.")
+            return True
+        st["dest"] = addr
+        await _wd_confirm(context.bot, uid, st)
+        return True
+    if step == "label":
+        db.save_address(uid, st["last_family"], text.strip()[:24] or "Saved", st["last_dest"])
+        context.user_data["wd"] = {}
+        await msg.reply_text("💾 Saved to your address book. /addressbook to manage.")
+        return True
+    return False
+
+
+def _addressbook_view(uid: int) -> tuple[str, InlineKeyboardMarkup | None]:
+    book = db.list_addresses(uid)
+    if not book:
+        return "📒 <b>Address book</b>\nEmpty. After a withdrawal, tap 💾 Save this address.", None
+    names = {"sol": "Solana", "evm": "EVM", "ton": "TON"}
+    lines = ["📒 <b>Address book</b>"]
+    kb = []
+    for b in book:
+        lines.append(f"• {html.escape(b['label'])} ({names.get(b['family'], b['family'])})\n  <code>{html.escape(b['address'])}</code>")
+        kb.append([InlineKeyboardButton(f"🗑 {b['label']}", callback_data=f"ab:del:{b['id']}")])
+    return "\n".join(lines), InlineKeyboardMarkup(kb)
+
+
+async def addressbook_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard(update):
+        return
+    text, kb = _addressbook_view(update.effective_user.id)
+    await update.effective_message.reply_text(text, parse_mode="HTML", reply_markup=kb)
+
+
+# ------------------------------------------------------- migration sniper --
+_MIG_PRIMED = False
+_MIG_CYCLES = {
+    "usd": [5, 10, 25, 50, 100],
+    "max_top10": [20, 30, 40, 50],
+    "max_per_day": [1, 3, 5, 10],
+    "tp_pct": [0, 50, 100, 200],
+    "sl_pct": [0, 20, 30, 50],
+    "min_liq": [0, 5000, 15000, 30000],
+}
+
+
+def _mig_panel(uid: int) -> tuple[str, InlineKeyboardMarkup]:
+    c = db.get_mig_config(uid)
+    mode = c["mode"]
+    mode_txt = {"off": "🔴 Off", "watch": "👀 Alerts only", "buy": "🟢 Auto-buy"}[mode if mode in ("off", "watch", "buy") else "off"]
+    text = (
+        "🎓 <b>Migration sniper</b>\n"
+        "When a pump.fun coin graduates to its real pool, Ferzan checks it on-chain and "
+        "(if you want) buys in the first seconds.\n\n"
+        f"Mode: <b>{mode_txt}</b>\n"
+        f"Buy size: ${float(c['usd']):g} · Max {int(c['max_per_day'])}/day\n"
+        f"Filters: top-10 holders ≤ {float(c['max_top10']):g}% · liquidity ≥ ${float(c['min_liq']):,.0f}\n"
+        "Always required: mint + freeze authority revoked, no trap extensions.\n"
+        f"Auto exits: TP {'+' + format(float(c['tp_pct']), 'g') + '%' if c['tp_pct'] else 'off'} · "
+        f"SL {'-' + format(float(c['sl_pct']), 'g') + '%' if c['sl_pct'] else 'off'}"
+    )
+    kb = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(("✅ " if mode == "off" else "") + "Off", callback_data="mig:m:off"),
+            InlineKeyboardButton(("✅ " if mode == "watch" else "") + "Alerts", callback_data="mig:m:watch"),
+            InlineKeyboardButton(("✅ " if mode == "buy" else "") + "Auto-buy", callback_data="mig:m:buy"),
+        ],
+        [
+            InlineKeyboardButton(f"💵 ${float(c['usd']):g}", callback_data="mig:c:usd"),
+            InlineKeyboardButton(f"🔁 {int(c['max_per_day'])}/day", callback_data="mig:c:max_per_day"),
+        ],
+        [
+            InlineKeyboardButton(f"👥 Top10 ≤{float(c['max_top10']):g}%", callback_data="mig:c:max_top10"),
+            InlineKeyboardButton(f"💧 Liq ≥${float(c['min_liq']) / 1000:g}k", callback_data="mig:c:min_liq"),
+        ],
+        [
+            InlineKeyboardButton(f"🎯 TP {('+' + format(float(c['tp_pct']), 'g') + '%') if c['tp_pct'] else 'off'}", callback_data="mig:c:tp_pct"),
+            InlineKeyboardButton(f"🛑 SL {('-' + format(float(c['sl_pct']), 'g') + '%') if c['sl_pct'] else 'off'}", callback_data="mig:c:sl_pct"),
+        ],
+    ])
+    return text, kb
+
+
+async def migsnipe_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard(update):
+        return
+    text, kb = _mig_panel(update.effective_user.id)
+    await update.effective_message.reply_text(text, parse_mode="HTML", reply_markup=kb)
+
+
+async def _mig_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, data: str) -> None:
+    query = update.callback_query
+    uid = update.effective_user.id
+    parts = data.split(":")
+    if len(parts) < 3:
+        return
+    if parts[1] == "m":
+        mode = parts[2]
+        if mode == "buy":
+            c = db.get_mig_config(uid)
+            await context.bot.send_message(
+                uid,
+                f"⚠️ Auto-buy spends real money: up to ${float(c['usd']):g} × {int(c['max_per_day'])} a day "
+                "from your active wallet, on brand-new coins that can still go to zero. Turn it on?",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("✅ Yes, auto-buy", callback_data="mig:m:buyok"),
+                    InlineKeyboardButton("Alerts only", callback_data="mig:m:watch"),
+                ]]),
+            )
+            return
+        if mode == "buyok":
+            mode = "buy"
+        if mode not in ("off", "watch", "buy"):
+            return
+        db.set_mig_config(uid, mode=mode)
+    elif parts[1] == "c" and parts[2] in _MIG_CYCLES:
+        key = parts[2]
+        cycle = _MIG_CYCLES[key]
+        cur = float(db.get_mig_config(uid)[key])
+        nxt = next((v for v in cycle if v > cur), cycle[0])
+        db.set_mig_config(uid, **{key: nxt})
+    text, kb = _mig_panel(uid)
+    try:
+        if query and query.message and "Migration sniper" in (query.message.text or ""):
+            await query.edit_message_text(text, parse_mode="HTML", reply_markup=kb)
+            return
+    except Exception:
+        pass
+    await context.bot.send_message(uid, text, parse_mode="HTML", reply_markup=kb)
+
+
+def _mig_card(m):
+    from types import SimpleNamespace
+
+    snap = SimpleNamespace(token_address=m.mint, chain="solana", liquidity_usd=m.liq_usd, dex=m.dex)
+    return SimpleNamespace(snapshot=snap, score=100)
+
+
+async def migration_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    global _MIG_PRIMED
+    users = db.list_mig_users()
+    if not users:
+        _MIG_PRIMED = False  # re-prime when someone arms it: never act on a backlog
+        return
+    fetched_ok, migs = await asyncio.to_thread(migration.fetch_migrations)
+    if not fetched_ok:
+        return  # a failed poll must never count as "primed"
+    if not _MIG_PRIMED:
+        for m in migs:
+            db.mig_mark_seen(m.pool, m.mint)
+        _MIG_PRIMED = True
+        return
+    for m in migs:
+        if not db.mig_mark_seen(m.pool, m.mint):
+            continue
+        rep = await asyncio.to_thread(rugcheck.sol_report, m.mint, True)
+        await asyncio.gather(*(_mig_for_user(context, cfg, m, rep) for cfg in users), return_exceptions=True)
+
+
+async def _mig_for_user(context: ContextTypes.DEFAULT_TYPE, cfg: dict, m, rep: dict) -> None:
+    uid = int(cfg["user_id"])
+    ok, _why = migration.passes_filters(m, rep, cfg)
+    if not ok:
+        return
+    q = m.mint[:48]
+    head = (
+        f"🎓 <b>${html.escape(m.symbol)}</b> just graduated to {html.escape(m.dex or 'its pool')}\n"
+        f"MC {_fmt_mc(m.fdv_usd)} · Liq {_fmt_mc(m.liq_usd)} · top 10 {float(rep.get('top10_pct') or 0):.0f}%\n"
+        f"<code>{html.escape(m.mint)}</code>"
+    )
+    too_late = time.time() - float(m.created_ts or 0) > migration.MAX_BUY_AGE_S
+    if cfg["mode"] != "buy" or too_late or _auto_trading_killed() or not signer.live_enabled():
+        buys = [InlineKeyboardButton(f"🟢 {v:g} SOL", callback_data=f"bnv:{v:g}:{q}") for v in db.buy_presets(uid, "sol")[:3]]
+        kb = InlineKeyboardMarkup([buys, [InlineKeyboardButton("📡 Full card", callback_data=f"sig:{q}")]])
+        try:
+            await context.bot.send_message(uid, head, parse_mode="HTML", reply_markup=kb)
+        except Exception:
+            logger.exception("migration alert failed for %s", uid)
+        return
+    if db.mig_fills_today(uid) >= int(cfg["max_per_day"]):
+        return
+    if not db.mig_fill(uid, m.mint):
+        return
+    usd = min(signer.max_usd(), max(1.0, float(cfg["usd"])))
+    bought, msg = await _off(uid, _live_buy, uid, _mig_card(m), m.mint, True, usd)
+    if not bought:
+        db.mig_unfill(uid, m.mint)  # failures don't use up the daily cap
+    elif cfg.get("tp_pct") or cfg.get("sl_pct"):
+        db.set_live_exit(uid, m.mint, tp_pct=float(cfg["tp_pct"]) or None, sl_pct=float(cfg["sl_pct"]) or None)
+    try:
+        await context.bot.send_message(
+            uid, head + "\n\n" + html.escape(msg), parse_mode="HTML", disable_web_page_preview=True,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🎒 Open bag", callback_data=f"slc:{q}")]]) if bought else None,
+        )
+    except Exception:
+        logger.exception("migration buy notify failed for %s", uid)
+
+
+# ------------------------------------------------------ Mini App orders ----
+async def webapp_order_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    orders = await asyncio.to_thread(db.claim_webapp_orders)
+    for o in orders:
+        asyncio.create_task(_run_webapp_order(context, o))
+
+
+def _webapp_trade(uid: int, o: dict) -> tuple[bool, str]:
+    """Blocking. Runs under the user's trade lock (via _off)."""
+    mint = o["mint"]
+    if o["side"] == "sell":
+        pct = max(1, min(100, int(o["amount"])))
+        ok, msg, label = _sell_any(uid, mint, pct)
+        return ok, _trade_result("sell", ok, label, msg, pct=pct)
+    card = analyze(mint)
+    if o["unit"] == "usd":
+        usd = float(o["amount"])
+    else:
+        cid = resolve_chain(card.snapshot.chain or o.get("chain") or "") or ("sol" if _is_sol_mint(mint) else "base")
+        px = _native_usd(cid)
+        if px <= 0:
+            return False, "Couldn't price the native coin right now — nothing sent."
+        usd = float(o["amount"]) * px
+    usd = min(signer.max_usd(), max(1.0, usd))
+    return _live_buy(uid, card, mint, True, usd)
+
+
+async def _run_webapp_order(context: ContextTypes.DEFAULT_TYPE, o: dict) -> None:
+    uid = int(o["user_id"])
+    try:
+        if not _allowed(uid):
+            ok, msg = False, "This desk is locked to an allowlist."
+        else:
+            ok, msg = await _off(uid, _webapp_trade, uid, o, _busy=(False, BUSY_MSG))
+    except Exception as exc:
+        logger.exception("webapp order %s failed", o.get("id"))
+        ok, msg = False, f"Trade failed: {exc}"
+    db.finish_webapp_order(o["id"], bool(ok), msg)
+    try:
+        await context.bot.send_message(uid, "📱 From the app\n" + msg, disable_web_page_preview=True)
+    except Exception:
+        pass
+
+
+# ------------------------------------------------------------ daily recap --
+RECAP_HOUR_UTC = int(os.getenv("FERZAN_RECAP_HOUR_UTC", "13"))
+
+
+def _recap_text(uid: int, mark: bool = True) -> str | None:
+    """Yesterday's desk in one message. None = nothing worth sending.
+    Blocking (balances + marks)."""
+    since = int(time.time()) - 86400
+    trades = db.trades_since(uid, since)
+    buys = [t for t in trades if t["side"] == "buy"]
+    sells = [t for t in trades if t["side"] == "sell"]
+    try:
+        snap = portfolio.build_portfolio(uid)
+    except LookupError:
+        return None
+    total = float(snap.get("total_usd") or 0)
+    positions = snap.get("positions") or []
+    if not trades and total < 1:
+        return None
+    lines = ["🗞 <b>Your Ferzan day</b>"]
+    lines.append(f"💼 Desk value <b>${total:,.2f}</b>")
+    prev = db.get_recap_mark(uid)
+    if prev and prev.get("desk_usd") is not None:
+        d = total - float(prev["desk_usd"])
+        arrow = "▲" if d > 0 else "▼" if d < 0 else "•"
+        lines[-1] += f"  {arrow} {'+' if d >= 0 else '−'}${abs(d):,.2f} vs last recap"
+    if buys or sells:
+        lines.append(f"🧾 {len(buys)} buy{'s' if len(buys) != 1 else ''} (${sum(float(t['usd'] or 0) for t in buys):,.2f} in) · "
+                     f"{len(sells)} sell{'s' if len(sells) != 1 else ''}")
+    costed = [p for p in positions if p.get("pnl") is not None]
+    if costed:
+        upnl = sum(p["pnl"] for p in costed)
+        lines.append(f"📊 Open bags {'▲ +' if upnl >= 0 else '▼ −'}${abs(upnl):,.2f} unrealized")
+        best = max(costed, key=lambda p: p.get("pnl_pct") or -1e9)
+        worst = min(costed, key=lambda p: p.get("pnl_pct") or 1e9)
+        if best.get("pnl_pct") is not None:
+            lines.append(f"🏆 Best: ${html.escape(best['symbol'])} {best['pnl_pct']:+.1f}%")
+        if worst is not best and worst.get("pnl_pct") is not None and worst["pnl_pct"] < 0:
+            lines.append(f"🩹 Worst: ${html.escape(worst['symbol'])} {worst['pnl_pct']:+.1f}%")
+    lines.append("<i>Value change includes deposits and withdrawals. Turn off: /settings.</i>")
+    if mark:
+        db.set_recap_mark(uid, dt.datetime.utcnow().strftime("%Y-%m-%d"), total)
+    return "\n".join(lines)
+
+
+async def recap_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard(update):
+        return
+    uid = update.effective_user.id
+    status = await update.effective_message.reply_text("⏳ Adding up your day…")
+    text = await asyncio.to_thread(_recap_text, uid, False)
+    text = text or "Nothing to report yet — make a trade and check back."
+    try:
+        await status.edit_text(text, parse_mode="HTML", reply_markup=_recap_kb())
+    except Exception:
+        await update.effective_message.reply_text(text, parse_mode="HTML", reply_markup=_recap_kb())
+
+
+def _recap_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("🎒 Bag", callback_data="go:bag"),
+        InlineKeyboardButton("📸 PnL cards", callback_data="go:bag"),
+    ]])
+
+
+async def daily_recap_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    sem = asyncio.Semaphore(4)
+    today = dt.datetime.utcnow().strftime("%Y-%m-%d")
+
+    async def one(uid: int) -> None:
+        if not db.flag_on(uid, "daily_recap", 1) or not _allowed(uid):
+            return
+        mark = db.get_recap_mark(uid)
+        if mark and mark.get("day") == today:
+            return  # already sent today (restart safety)
+        async with sem:
+            try:
+                text = await asyncio.to_thread(_recap_text, uid)
+            except Exception:
+                logger.exception("recap build failed for %s", uid)
+                return
+        if text:
+            try:
+                await context.bot.send_message(uid, text, parse_mode="HTML", reply_markup=_recap_kb())
+            except Exception:
+                pass
+            await asyncio.sleep(0.05)
+
+    await asyncio.gather(*(one(u) for u in db.users_with_wallets()))
+
+
 async def check_alerts_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     alerts = db.get_all_active_alerts()
     if not alerts:
@@ -4712,13 +5898,37 @@ async def wallet_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 except Exception:
                     pass
         try:
-            await context.bot.send_message(row["user_id"], "\n".join(lines)[:3500])
+            await context.bot.send_message(
+                row["user_id"], "\n".join(lines)[:3500], disable_web_page_preview=True,
+                reply_markup=_tracker_kb(int(row["user_id"]), row.get("chain") or "", fresh),
+            )
         except Exception:
             logger.exception("wallet notify failed for %s", row["user_id"])
         try:
             await _copy_wallet_moves(context, row, fresh)
         except Exception:
             logger.exception("copy-trade failed for wallet #%s", row.get("id"))
+
+
+def _tracker_kb(uid: int, chain: str, fresh: list) -> InlineKeyboardMarkup | None:
+    """One-tap follow: buy what the wallet just bought, or open its card."""
+    rows, seen = [], set()
+    for ev in fresh:
+        tok = getattr(ev, "token", "") or ""
+        if not tok or tok in seen or getattr(ev, "kind", "") != "buy":
+            continue
+        seen.add(tok)
+        cid = "sol" if _is_sol_mint(tok) else (resolve_chain(chain) or "base")
+        unit = _NATIVE_UNIT.get(cid, "ETH")
+        amt = db.buy_presets(uid, cid)[0]
+        q = tok[:48]
+        rows.append([
+            InlineKeyboardButton(f"🟢 Buy {amt:g} {unit} too", callback_data=f"bnv:{amt:g}:{q}"),
+            InlineKeyboardButton("📡 Card", callback_data=f"sig:{q}"),
+        ])
+        if len(rows) == 2:
+            break
+    return InlineKeyboardMarkup(rows) if rows else None
 
 
 async def _copy_wallet_moves(context: ContextTypes.DEFAULT_TYPE, row: dict, fresh: list) -> None:
@@ -5000,6 +6210,13 @@ async def _exit_failed(context, uid: int, mint: str, what: str, msg: str) -> boo
     return give_up
 
 
+def _trail_hit(px: float, peak_px: float, trail_pct: float) -> bool:
+    """Real trailing stop: price has fallen trail_pct % from its highest
+    point since the trail was armed. (The old check used PnL points:
+    +100% -> +80% is only a 10% drop in value.)"""
+    return peak_px > 0 and px > 0 and px <= peak_px * (1 - float(trail_pct) / 100.0)
+
+
 async def _live_exit_one(context: ContextTypes.DEFAULT_TYPE, row, uid: int, mint: str) -> None:
     cost = db.live_cost(uid, mint)
     if cost <= 0:
@@ -5031,6 +6248,7 @@ async def _live_exit_one(context: ContextTypes.DEFAULT_TYPE, row, uid: int, mint
         # sold this rung). A wallet that failed is under-sold, not over-sold.
         db.mark_tp_rung_hit(uid, mint, rung["pct"])
         db.reduce_live_cost_pct(uid, mint, sell_pct * share)
+        _log_trade_safe(uid, "sell", mint, "", worth * sell_pct / 100 * share, "tp_rung")
         if _rok:
             _EXIT_FAILS.pop((uid, mint), None)
         else:
@@ -5046,16 +6264,21 @@ async def _live_exit_one(context: ContextTypes.DEFAULT_TYPE, row, uid: int, mint
         return
     hit = None
     trail = float(row.get("trail_pct") or 0)
-    peak = float(row.get("peak_pct") or 0)
-    if pnl_pct > peak:
-        peak = pnl_pct
-        db.set_live_exit(uid, mint, peak_pct=peak)
+    if pnl_pct > float(row.get("peak_pct") or -1e18):
+        db.set_live_exit(uid, mint, peak_pct=pnl_pct)  # display only
+    if trail > 0:
+        # The trail follows the token PRICE, so adding to the bag (Buy more,
+        # DCA) or a partial sell can't move it -- only the market can.
+        peak_px = row.get("peak_px")
+        if peak_px is None or px > float(peak_px):
+            db.set_live_exit(uid, mint, peak_px=px)
+            peak_px = px
+        if _trail_hit(px, float(peak_px), trail):
+            hit = "trail"
     if row.get("tp_pct") and pnl_pct >= float(row["tp_pct"]):
         hit = "tp"
     if row.get("sl_pct") and pnl_pct <= -float(row["sl_pct"]):
         hit = "sl"
-    if trail > 0 and peak > 0 and pnl_pct <= peak - trail:
-        hit = "trail"
     if not hit:
         return
     what = {"tp": "🎯 TP", "trail": "📉 Trail", "sl": "🛑 SL"}[hit]
@@ -5069,6 +6292,7 @@ async def _live_exit_one(context: ContextTypes.DEFAULT_TYPE, row, uid: int, mint
             db.clear_live_exit(uid, mint)
         return  # rule stays armed for what's left -> retried next cycle
     _EXIT_FAILS.pop((uid, mint), None)
+    _log_trade_safe(uid, "sell", mint, "", worth, hit)
     db.clear_live_exit(uid, mint)
     db.clear_live_cost(uid, mint)
     try:
@@ -5457,6 +6681,12 @@ def main() -> None:
                     BotCommand("wallets", "Copy trading"),
                     BotCommand("livesell", "Sell a live Solana mint"),
                     BotCommand("settings", "Risk vault"),
+                    BotCommand("withdraw", "Send funds out"),
+                    BotCommand("alerts", "Token alerts"),
+                    BotCommand("migsnipe", "Graduation sniper"),
+                    BotCommand("presets", "Quick-buy amounts"),
+                    BotCommand("recap", "Your day"),
+                    BotCommand("referral", "Invite + earn"),
                 ]
             )
         except Exception:
@@ -5545,6 +6775,15 @@ def main() -> None:
     app.add_handler(CommandHandler("menu", start))
     app.add_handler(CommandHandler("bridge", bridge_cmd))
     app.add_handler(CommandHandler("live", quote_cmd))
+    app.add_handler(CommandHandler("withdraw", withdraw_cmd))
+    app.add_handler(CommandHandler("send", withdraw_cmd))
+    app.add_handler(CommandHandler("addressbook", addressbook_cmd))
+    app.add_handler(CommandHandler("alerts", alerts_cmd))
+    app.add_handler(CommandHandler("migsnipe", migsnipe_cmd))
+    app.add_handler(CommandHandler("migrations", migsnipe_cmd))
+    app.add_handler(CommandHandler("presets", presets_cmd))
+    app.add_handler(CommandHandler("recap", recap_cmd))
+    app.add_handler(CommandHandler("tracker", wallets_cmd))
     app.add_handler(CallbackQueryHandler(on_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
 
@@ -5561,6 +6800,11 @@ def main() -> None:
         jq.run_repeating(launch_feed_job, interval=LAUNCH_FEED_SECONDS, first=35)
         jq.run_repeating(native_pulse_job, interval=600, first=50)
         jq.run_repeating(dca_job, interval=300, first=90)
+        jq.run_repeating(token_alert_job, interval=60, first=30)
+        jq.run_repeating(migration_job, interval=int(os.getenv("MIG_POLL_SECONDS", "20")), first=45)
+        jq.run_repeating(webapp_order_job, interval=2, first=10)
+        jq.run_daily(daily_recap_job, time=dt.time(hour=RECAP_HOUR_UTC, minute=0, tzinfo=dt.timezone.utc))
+        db.fail_stuck_webapp_orders(max_running_s=0)  # a restart orphans 'running' app orders
     else:
         logger.warning("job-queue extra missing; commands still work, scanners off")
 
