@@ -1,0 +1,10 @@
+.env
+.env.*
+*.db
+*.bak*
+*.pre-*
+*.save
+*.mine-*
+.master
+__pycache__/
+node_modules/
