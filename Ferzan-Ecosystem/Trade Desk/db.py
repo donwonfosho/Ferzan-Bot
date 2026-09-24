@@ -1605,11 +1605,17 @@ def set_lp_mark(user_id: int, mint: str, liq: float) -> None:
 
 def clear_live_cost(user_id: int, mint: str) -> None:
     with get_conn() as conn:
+        row = conn.execute(
+            "SELECT cost_usd FROM live_basis WHERE user_id = ? AND mint = ?",
+            (user_id, mint),
+        ).fetchone()
+        removed = float(row["cost_usd"] or 0) if row else 0.0
         conn.execute(
             "DELETE FROM live_basis WHERE user_id = ? AND mint = ?",
             (user_id, mint),
         )
         conn.commit()
+        _attach_sell_cost(conn, user_id, mint, removed)
 
 
 def reduce_live_cost_pct(user_id: int, mint: str, sold_pct: float) -> None:
@@ -1632,6 +1638,7 @@ def reduce_live_cost_pct(user_id: int, mint: str, sold_pct: float) -> None:
             (delta, int(time.time()), user_id, mint),
         )
         conn.commit()
+        _attach_sell_cost(conn, user_id, mint, -delta)
 
 
 def credit_desk_share(trader_id: int, volume_usd: float) -> str:
@@ -2287,13 +2294,94 @@ def delete_address(addr_id: int, user_id: int) -> bool:
 
 
 # -------------------------------------------------------------- trade log --
+# ------------------------------------------------------- realized PnL --
+# Every sell row in live_trades gets cost_usd (the cost basis of the part
+# sold) and pnl_usd (proceeds - cost). The cost is captured at the moment the
+# basis shrinks/clears; whichever of "log the sell" / "shrink the basis" runs
+# first, the two are matched up within _SELL_MATCH_S seconds.
+_SELL_MATCH_S = 180
+_PENDING_SELL_COST: dict = {}
+_PNL_COLS_OK = False
+
+
+def _pnl_cols(conn) -> None:
+    global _PNL_COLS_OK
+    if _PNL_COLS_OK:
+        return
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(live_trades)").fetchall()}
+    if "cost_usd" not in cols:
+        conn.execute("ALTER TABLE live_trades ADD COLUMN cost_usd REAL")
+    if "pnl_usd" not in cols:
+        conn.execute("ALTER TABLE live_trades ADD COLUMN pnl_usd REAL")
+    conn.commit()
+    _PNL_COLS_OK = True
+
+
+def _set_sell_cost(conn, row_id: int, usd: float, cost: float) -> None:
+    pnl = (float(usd) - float(cost)) if float(usd or 0) > 0 else None
+    conn.execute("UPDATE live_trades SET cost_usd = ?, pnl_usd = ? WHERE id = ?", (float(cost), pnl, int(row_id)))
+    conn.commit()
+
+
+def _attach_sell_cost(conn, user_id: int, mint: str, removed: float) -> None:
+    """Called when cost basis shrinks. Put the removed cost on the matching
+    sell row, or park it for the sell that's about to be logged."""
+    try:
+        if float(removed or 0) <= 0:
+            return
+        _pnl_cols(conn)
+        row = conn.execute(
+            "SELECT id, usd FROM live_trades WHERE user_id = ? AND mint = ? AND side = 'sell' "
+            "AND cost_usd IS NULL AND ts >= ? ORDER BY id DESC LIMIT 1",
+            (int(user_id), mint or "", int(time.time()) - _SELL_MATCH_S),
+        ).fetchone()
+        if row:
+            _set_sell_cost(conn, row["id"], row["usd"], removed)
+        else:
+            _PENDING_SELL_COST[(int(user_id), mint or "")] = (float(removed), time.time())
+    except Exception:
+        pass  # PnL bookkeeping must never break a trade
+
+
 def log_trade(user_id: int, side: str, mint: str, chain: str = "", usd: float = 0.0, source: str = "") -> None:
     with get_conn() as conn:
-        conn.execute(
+        cur = conn.execute(
             "INSERT INTO live_trades (user_id, ts, side, mint, chain, usd, source) VALUES (?, ?, ?, ?, ?, ?, ?)",
             (int(user_id), int(time.time()), side, mint or "", chain or "", float(usd or 0), source or ""),
         )
         conn.commit()
+        if side == "sell":
+            try:
+                _pnl_cols(conn)
+                pend = _PENDING_SELL_COST.pop((int(user_id), mint or ""), None)
+                if pend and time.time() - pend[1] <= _SELL_MATCH_S:
+                    _set_sell_cost(conn, cur.lastrowid, float(usd or 0), pend[0])
+            except Exception:
+                pass
+
+
+def recent_trades(user_id: int, limit: int = 15) -> list[dict]:
+    with get_conn() as conn:
+        _pnl_cols(conn)
+        return [
+            dict(r)
+            for r in conn.execute(
+                "SELECT * FROM live_trades WHERE user_id = ? AND side IN ('buy', 'sell') ORDER BY id DESC LIMIT ?",
+                (int(user_id), int(limit)),
+            ).fetchall()
+        ]
+
+
+def realized_sells(user_id: int, since_ts: int = 0) -> list[dict]:
+    with get_conn() as conn:
+        _pnl_cols(conn)
+        return [
+            dict(r)
+            for r in conn.execute(
+                "SELECT * FROM live_trades WHERE user_id = ? AND side = 'sell' AND ts >= ? ORDER BY ts",
+                (int(user_id), int(since_ts)),
+            ).fetchall()
+        ]
 
 
 def trades_since(user_id: int, since_ts: int) -> list[dict]:

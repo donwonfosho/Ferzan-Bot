@@ -1018,6 +1018,8 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/sl 30 — auto-sell 100% when you're down 30%",
         "/trail 20 — sell everything if the bag's value falls 20% from its highest point since you set it",
         "/autoexit tp 100 sl 30 — set your exits once, armed on every new buy",
+        "/history — your recent live trades with profit/loss on each sell",
+        "/pnl — realized profit today, 7d, 30d, all time + win rate",
         "💰 Sell initials (bag panel) — sell just enough to get your money back out",
         "/tpladder 50:25 100:25 200:50 — sell in stages: 25% of your bag at +50%, "
         "another 25% at +100%, the rest at +200% (add \"off &lt;mint&gt;\" to cancel)",
@@ -1517,11 +1519,38 @@ def _holder_wallet(uid: int, mint: str) -> tuple[str, str, str, str]:
     return act_sol, act_evm, act_label, cid
 
 
+class _SellEstimate:
+    """Reads the position's USD value in a side thread while the sell runs,
+    so recording the proceeds never slows the sell down. Balance is read
+    first (before the sell lands), then price."""
+
+    def __init__(self, uid: int, mint: str, pct: int) -> None:
+        import threading
+
+        self._v = 0.0
+        self._t = threading.Thread(target=self._run, args=(uid, mint, pct), daemon=True)
+        self._t.start()
+
+    def _run(self, uid: int, mint: str, pct: int) -> None:
+        try:
+            amt = sum(float(h[3]) for h in _exit_holdings(uid, mint))
+            px = float(_token_mark_usd(mint) or 0)
+            if amt > 0 and px > 0:
+                self._v = amt * px * max(0, min(100, int(pct))) / 100.0
+        except Exception:
+            self._v = 0.0
+
+    def value(self, timeout: float = 8.0) -> float:
+        self._t.join(timeout)
+        return 0.0 if self._t.is_alive() else float(self._v)
+
+
 def _sell_any(uid: int, mint: str, pct: int = 100) -> tuple[bool, str, str]:
     """One sell path for every chain. Blocking — call via _off().
     Returns (ok, message, chain_label)."""
     pct = max(1, min(100, int(pct)))
     sol_secret, evm_secret, wlabel, cid = _holder_wallet(uid, mint)
+    _est = _SellEstimate(uid, mint, pct)
     label = cid.upper()
     if len(user_wallets.all_secrets(uid)) > 1:
         label = f"{label} · {wlabel}"
@@ -1541,7 +1570,7 @@ def _sell_any(uid: int, mint: str, pct: int = 100) -> tuple[bool, str, str]:
     else:
         ok, msg = evm_signer.sell_evm(cid, mint, key_hex=evm_secret, pct=pct)
     if ok:
-        _log_trade_safe(uid, "sell", mint, cid, 0.0)
+        _log_trade_safe(uid, "sell", mint, cid, _est.value())
         try:
             if pct >= 100:
                 db.clear_live_cost(uid, mint)
@@ -2194,6 +2223,99 @@ async def autoexit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     updates["enabled"] = 1
     plan = db.set_auto_exit(uid, updates)
     await msg.reply_text(status(plan), parse_mode="HTML")
+
+
+# ---------------------------------------------------- history & realized PnL --
+def _fmt_usd(v: float, signed: bool = False) -> str:
+    if signed:
+        return f"{'+' if v >= 0 else '−'}${abs(v):,.2f}"
+    return f"${v:,.2f}"
+
+
+def _short_mint(mint: str) -> str:
+    return html.escape(f"{mint[:5]}…{mint[-4:]}" if len(mint) > 11 else mint)
+
+
+async def history_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    import time
+
+    if not await guard(update):
+        return
+    uid = update.effective_user.id
+    try:
+        n = max(5, min(40, int(context.args[0]))) if context.args else 15
+    except ValueError:
+        n = 15
+    rows = db.recent_trades(uid, n)
+    if not rows:
+        await update.effective_message.reply_text("No live trades yet.")
+        return
+    lines = [f"📜 <b>Last {len(rows)} live trades</b> (UTC)"]
+    for r in rows:
+        when = time.strftime("%m-%d %H:%M", time.gmtime(int(r["ts"])))
+        chain = (r.get("chain") or "").upper()
+        tag = f" {html.escape(chain)}" if chain else ""
+        usd = float(r.get("usd") or 0)
+        amt = _fmt_usd(usd) if usd > 0 else "$?"
+        if r["side"] == "buy":
+            lines.append(f"🟢 {when} Buy <code>{_short_mint(r['mint'])}</code>{tag} {amt}")
+            continue
+        pnl = r.get("pnl_usd")
+        cost = r.get("cost_usd")
+        res = ""
+        if pnl is not None and cost:
+            pct = (float(pnl) / float(cost)) * 100 if float(cost) > 0 else 0.0
+            res = f" → {'✅' if pnl >= 0 else '🔻'} {_fmt_usd(float(pnl), True)} ({pct:+.0f}%)"
+        src = r.get("source") or ""
+        why = f" · {html.escape(src)}" if src else ""
+        lines.append(f"🔴 {when} Sell <code>{_short_mint(r['mint'])}</code>{tag} {amt}{res}{why}")
+    lines.append("\n/history 30 for more · /pnl for totals")
+    await update.effective_message.reply_text("\n".join(lines), parse_mode="HTML")
+
+
+def _pnl_block(rows: list[dict]) -> tuple[float, int, int, int]:
+    tot, wins, losses, unknown = 0.0, 0, 0, 0
+    for r in rows:
+        p = r.get("pnl_usd")
+        if p is None:
+            unknown += 1
+            continue
+        tot += float(p)
+        if float(p) >= 0:
+            wins += 1
+        else:
+            losses += 1
+    return tot, wins, losses, unknown
+
+
+async def pnl_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    import time
+
+    if not await guard(update):
+        return
+    uid = update.effective_user.id
+    now = int(time.time())
+    today0 = now - (now % 86400)
+    every = db.realized_sells(uid, 0)
+    if not every:
+        await update.effective_message.reply_text("No live sells yet — realized PnL shows up after your first sell.")
+        return
+    lines = ["💰 <b>Realized PnL</b> (live trades)"]
+    for label, since in (("Today", today0), ("7 days", now - 7 * 86400), ("30 days", now - 30 * 86400), ("All time", 0)):
+        tot, w, l, _u = _pnl_block([r for r in every if int(r["ts"]) >= since])
+        wr = f" · {w}W/{l}L ({w / (w + l) * 100:.0f}%)" if (w + l) else ""
+        lines.append(f"{'▲' if tot >= 0 else '▼'} {label}: <b>{_fmt_usd(tot, True)}</b>{wr}")
+    scored = [r for r in every if r.get("pnl_usd") is not None]
+    if scored:
+        best = max(scored, key=lambda r: float(r["pnl_usd"]))
+        worst = min(scored, key=lambda r: float(r["pnl_usd"]))
+        lines.append(f"\n🏆 Best: <code>{_short_mint(best['mint'])}</code> {_fmt_usd(float(best['pnl_usd']), True)}")
+        lines.append(f"💀 Worst: <code>{_short_mint(worst['mint'])}</code> {_fmt_usd(float(worst['pnl_usd']), True)}")
+    _t, _w, _l, unknown = _pnl_block(every)
+    if unknown:
+        lines.append(f"\n<i>{unknown} sell(s) without a recorded value (e.g. from before PnL tracking) aren't counted.</i>")
+    lines.append("Open bags: /recap · Trade list: /history")
+    await update.effective_message.reply_text("\n".join(lines), parse_mode="HTML")
 
 
 async def stake_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -6686,6 +6808,7 @@ async def _live_exit_one(context: ContextTypes.DEFAULT_TYPE, row, uid: int, mint
             # Sold out of some wallets: drop exactly that share of the cost so
             # the next cycle compares the REMAINING bag against its own cost.
             db.reduce_live_cost_pct(uid, mint, 100.0 * share)
+            _log_trade_safe(uid, "sell", mint, "", worth * share, f"{hit}_partial")
         if await _exit_failed(context, uid, mint, f"{what} exit ({pnl_pct:+.1f}%)", msg):
             db.clear_live_exit(uid, mint)
         return  # rule stays armed for what's left -> retried next cycle
@@ -7156,6 +7279,8 @@ def main() -> None:
     app.add_handler(CommandHandler("dca", dca_cmd))
     app.add_handler(CommandHandler("trail", trail_cmd))
     app.add_handler(CommandHandler("autoexit", autoexit_cmd))
+    app.add_handler(CommandHandler("history", history_cmd))
+    app.add_handler(CommandHandler("pnl", pnl_cmd))
     app.add_handler(CommandHandler("stake", stake_cmd))
     app.add_handler(CommandHandler("lpguard", lpguard_cmd))
     app.add_handler(CommandHandler("buylimit", buylimit_cmd))
