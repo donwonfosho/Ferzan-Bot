@@ -726,34 +726,39 @@ async def resolve_symbol_or_reply(update: Update, symbol: str):
 def home_keyboard(private: bool = True) -> InlineKeyboardMarkup:
     chat = (os.getenv("FERZAN_CHAT_URL") or "https://t.me/Ferzan_Chat").strip()
     xurl = (os.getenv("FERZAN_X_URL") or "https://x.com/ferzaneco").strip()
+    # Telegram sizes a photo card's buttons to the photo, so a row of three
+    # only fits short labels. Long labels (Settings, Migrations, Withdraw)
+    # get rows of two so nothing is cut off with "…".
     rows = [
         [
-            InlineKeyboardButton("⛓ Chains", callback_data="go:chains"),
+            InlineKeyboardButton("⚙️ Settings", callback_data="go:settings"),
             InlineKeyboardButton("👛 Wallets", callback_data="go:wallets"),
-            InlineKeyboardButton("⚙️ Desk", callback_data="go:settings"),
         ],
         [
+            InlineKeyboardButton("⛓ Chains", callback_data="go:chains"),
             InlineKeyboardButton("📊 Bag", callback_data="go:bag"),
             InlineKeyboardButton("📡 Signals", callback_data="go:feeds"),
-            InlineKeyboardButton("🎯 Snipe", callback_data="go:snipehelp"),
         ],
         [
+            InlineKeyboardButton("🎯 Snipe", callback_data="go:snipehelp"),
             InlineKeyboardButton("⏱ Limits", callback_data="go:snipes"),
             InlineKeyboardButton("👯 Copy", callback_data="go:copy"),
-            InlineKeyboardButton("🌉 Bridge", callback_data="go:bridge"),
         ],
         [
             InlineKeyboardButton("🎓 Migrations", callback_data="go:mig"),
-            InlineKeyboardButton("🔔 Alerts", callback_data="go:alerts"),
             InlineKeyboardButton("📤 Withdraw", callback_data="go:withdraw"),
         ],
         [
+            InlineKeyboardButton("🔔 Alerts", callback_data="go:alerts"),
+            InlineKeyboardButton("🌉 Bridge", callback_data="go:bridge"),
             InlineKeyboardButton("🚀 Launch", callback_data="go:launches"),
+        ],
+        [
             InlineKeyboardButton("🤝 Refer", callback_data="go:ref"),
             InlineKeyboardButton("💬 Chat", url=chat),
+            InlineKeyboardButton("𝕏 X", url=xurl),
         ],
         [InlineKeyboardButton("⚡ PASTE CA", callback_data="go:buyhelp")],
-        [InlineKeyboardButton("𝕏 @FerzanEco", url=xurl)],
     ]
     app_url = _webapp_url()
     if app_url and private:  # Telegram rejects web_app buttons outside private chats
@@ -823,7 +828,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "👀 See it.  🦍 Ape it.  🚀 Send it.\n\n"
             "⛓ Chains: enable the venues you trade.\n"
             "👛 Wallets: your Ferzan desk addresses.\n"
-            "⚙️ Desk: slip, size, gas.\n"
+            "⚙️ Settings: slip, size, gas, anti-MEV.\n"
             "📊 Bag: open bags and sell %.\n"
             "📡 Signals: chain rooms.\n"
             "🎯 Snipe: arm a first-block buy.\n"
@@ -6657,8 +6662,12 @@ def main() -> None:
             logger.exception("could not cache bot username")
         try:
             if _webapp_url():
+                # The menu button opens a chooser first: the app, or classic
+                # chat mode (/start + commands) for people who don't want it.
+                sep = "&" if "?" in _webapp_url() else "?"
+                menu_url = f"{_webapp_url()}{sep}from=menu&bot={os.getenv('FERZAN_BOT_USERNAME', '')}"
                 await application.bot.set_chat_menu_button(
-                    menu_button=MenuButtonWebApp(text="📱 App", web_app=WebAppInfo(url=_webapp_url()))
+                    menu_button=MenuButtonWebApp(text="⚡ Ferzan", web_app=WebAppInfo(url=menu_url))
                 )
         except Exception:
             logger.exception("set_chat_menu_button failed")

@@ -102,12 +102,31 @@
   .toast { position: fixed; left: 16px; right: 16px; bottom: calc(16px + env(safe-area-inset-bottom)); background: var(--ink); color: var(--bg);
            border-radius: 12px; padding: 12px 14px; font-size: 14px; white-space: pre-line; display: none; z-index: 10; max-height: 40vh; overflow: auto; }
   .toast.show { display: block; }
+  .chooser { position: fixed; inset: 0; background: var(--bg); z-index: 20; display: flex; flex-direction: column;
+             justify-content: center; gap: 12px; padding: 24px 16px calc(24px + env(safe-area-inset-bottom)); }
+  .chooser[hidden] { display: none; }
+  .chooser h1 { font-size: 22px; margin: 0; text-align: center; }
+  .chooser p { color: var(--muted); text-align: center; margin: 0 0 8px; font-size: 14px; }
+  .choice { display: block; width: 100%; text-align: left; border: 1px solid var(--line); background: var(--card);
+            color: var(--ink); border-radius: 14px; padding: 16px; font: inherit; cursor: pointer; }
+  .choice b { display: block; font-size: 17px; margin-bottom: 2px; }
+  .choice span { color: var(--muted); font-size: 13px; }
+  .choice.primary { background: var(--btn); color: var(--tg-theme-button-text-color, #fff); border-color: transparent; }
+  .choice.primary span { color: inherit; opacity: .85; }
+  .remember { display: flex; align-items: center; justify-content: center; gap: 8px; color: var(--muted); font-size: 13px; margin-top: 4px; }
   .skeleton { background: var(--sunk); border-radius: 8px; height: 1em; animation: pulse 1.2s ease-in-out infinite; }
   @keyframes pulse { 50% { opacity: .5; } }
   @media (prefers-reduced-motion: reduce) { .skeleton { animation: none; } }
 </style>
 </head>
 <body>
+<div class="chooser" id="chooser" hidden role="dialog" aria-labelledby="chooserTitle">
+  <h1 id="chooserTitle">⚡ Ferzan</h1>
+  <p>How do you want to trade?</p>
+  <button class="choice primary" id="pickApp"><b>📱 Open the app</b><span>Portfolio, one-tap buys and sells</span></button>
+  <button class="choice" id="pickClassic"><b>💬 Classic</b><span>Back to the chat — buttons and /commands</span></button>
+  <label class="remember"><input type="checkbox" id="rememberApp"> Always open the app</label>
+</div>
 <header>
   <button class="wallet-chip" id="walletChip" aria-label="Active wallet">👛 <span id="walletName">…</span></button>
   <button class="refresh" id="refresh">↻ Refresh</button>
@@ -141,6 +160,7 @@
 </div>
 
 <p class="foot" id="foot">Trades run through the bot — same safety checks as a button tap.</p>
+<p class="foot"><a href="#" id="toClassic">💬 Switch to classic chat mode</a></p>
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
 <script>
@@ -255,18 +275,29 @@
     try {
       const { id } = await api("/api/order", o);
       const started = Date.now();
-      while (Date.now() - started < 150000) {
+      let misses = 0;
+      // A landing can take a minute+ (Jito try, then the fallback route), so
+      // show a live timer instead of a frozen "Sending…".
+      while (Date.now() - started < 240000) {
         await new Promise((r) => setTimeout(r, 1500));
-        const st = await api("/api/order/status", { id });
+        const secs = Math.round((Date.now() - started) / 1000);
+        let st;
+        try { st = await api("/api/order/status", { id }); misses = 0; }
+        catch (e) {  // one dropped poll must not end the wait: the trade is still running
+          if (++misses >= 8) throw e;
+          continue;
+        }
         if (["done", "failed", "expired"].includes(st.status)) {
           const ok = st.status === "done";
           tg && tg.HapticFeedback && tg.HapticFeedback.notificationOccurred(ok ? "success" : "error");
-          toast(st.result || (ok ? "Done" : "Failed"), ok ? 6000 : 0);
+          // Stays up until tapped, so a result that lands while you look away isn't missed.
+          toast((st.result || (ok ? "✅ Done" : "🔴 Failed")) + "\n\nTap to close", 0);
           load(true);
           return;
         }
+        toast(st.status === "running" ? `⏳ Landing on-chain… ${secs}s` : `⏳ Queued… ${secs}s`);
       }
-      toast("Still working — check the bot chat for the result.", 0);
+      toast("⏳ Still working — the result will show in the bot chat.\n\nTap to close", 0);
     } catch (err) {
       toast("🔴 " + (err.message || "Couldn't send"), 0);
     } finally { busy = false; document.body.classList.remove("busy"); }
@@ -331,6 +362,30 @@
     }
   }
   $("refresh").addEventListener("click", () => load(true));
+
+  // Opened from the chat's menu button: ask app vs classic first (unless the
+  // person ticked "Always open the app" on this device).
+  const qs = new URLSearchParams(location.search);
+  const menuBot = (qs.get("bot") || "").replace(/[^A-Za-z0-9_]/g, "");
+  let skipChooser = false;
+  try { skipChooser = localStorage.getItem("ferzan_open") === "app"; } catch (e) { /* storage blocked */ }
+  $("toClassic").addEventListener("click", (e) => {
+    e.preventDefault();
+    try { localStorage.removeItem("ferzan_open"); } catch (err) { /* ignore */ }
+    const b = bot || menuBot;
+    if (b) { bot = b; openBot("home"); } else if (tg) { tg.close(); }
+  });
+  if (qs.get("from") === "menu" && !skipChooser) {
+    $("chooser").hidden = false;
+    $("pickApp").addEventListener("click", () => {
+      try { if ($("rememberApp").checked) localStorage.setItem("ferzan_open", "app"); } catch (e) { /* ignore */ }
+      $("chooser").hidden = true;
+    });
+    $("pickClassic").addEventListener("click", () => {
+      const b = bot || menuBot;
+      if (b) { bot = b; openBot("home"); } else if (tg) { tg.close(); }
+    });
+  }
   load(false);
   setInterval(() => { if (!document.hidden) load(false); }, 30000);
 })();
