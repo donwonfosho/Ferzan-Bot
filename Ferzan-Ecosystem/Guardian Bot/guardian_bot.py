@@ -6,12 +6,22 @@ import logging
 import os
 import re
 import sqlite3
+import time
 from pathlib import Path
 
 from dotenv import load_dotenv
 from telegram import BotCommand, ChatPermissions, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatMemberStatus
-from telegram.ext import Application, ChatMemberHandler, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram.error import TelegramError
+from telegram.ext import (
+    Application,
+    CallbackQueryHandler,
+    ChatMemberHandler,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 
 load_dotenv("/opt/ferzan/.env")
 load_dotenv()
@@ -27,6 +37,9 @@ ME = (os.getenv("FERZAN_GUARDIAN_BOT") or "FerzanGuardianBot").lstrip("@")
 CHAT = os.getenv("FERZAN_CHAT_URL") or "https://t.me/Ferzan_Chat"
 FAKE = re.compile(r"(admin|owner|dev|support|moderator|official|helpdesk)", re.I)
 DEFAULT_WORDS = {"airdrop claim", "double your sol", "seed phrase", "connect wallet to claim", "free mint drainer"}
+DEFAULT_WELCOME = "👋 Welcome {name} to {chat}!\n\nCheck the pinned message for rules and links. Glad to have you."
+CAPTCHA_TIMEOUT_DEFAULT = 300  # seconds
+CAPTCHA_TIMEOUT_RANGE = (30, 3600)
 
 
 def _db() -> sqlite3.Connection:
@@ -50,7 +63,47 @@ def _db() -> sqlite3.Connection:
             antimedia INTEGER DEFAULT 0
         )"""
     )
+    # migration: welcome-message + captcha columns on the existing settings table
+    scols = {r[1] for r in con.execute("PRAGMA table_info(settings)").fetchall()}
+    if "welcome_on" not in scols:
+        con.execute("ALTER TABLE settings ADD COLUMN welcome_on INTEGER DEFAULT 1")
+    if "welcome_text" not in scols:
+        con.execute("ALTER TABLE settings ADD COLUMN welcome_text TEXT")
+    if "captcha_on" not in scols:
+        con.execute("ALTER TABLE settings ADD COLUMN captcha_on INTEGER DEFAULT 0")
+    if "captcha_timeout" not in scols:
+        con.execute(f"ALTER TABLE settings ADD COLUMN captcha_timeout INTEGER DEFAULT {CAPTCHA_TIMEOUT_DEFAULT}")
+    con.execute(
+        """CREATE TABLE IF NOT EXISTS pending_captcha (
+            chat_id INTEGER, user_id INTEGER, message_id INTEGER, deadline INTEGER,
+            PRIMARY KEY (chat_id, user_id)
+        )"""
+    )
+    con.commit()
     return con
+
+
+def _get_settings(con: sqlite3.Connection, chat_id: int) -> dict:
+    con.execute("INSERT OR IGNORE INTO settings(chat_id) VALUES(?)", (chat_id,))
+    con.commit()
+    row = con.execute(
+        "SELECT welcome_on, welcome_text, captcha_on, captcha_timeout FROM settings WHERE chat_id=?", (chat_id,)
+    ).fetchone()
+    return {
+        "welcome_on": bool(row[0]) if row and row[0] is not None else True,
+        "welcome_text": (row[1] if row else None) or DEFAULT_WELCOME,
+        "captcha_on": bool(row[2]) if row else False,
+        "captcha_timeout": int(row[3]) if row and row[3] else CAPTCHA_TIMEOUT_DEFAULT,
+    }
+
+
+def _render_welcome(template: str, user, chat) -> str:
+    name = _esc(user.full_name or (f"@{user.username}" if user.username else "there"))
+    title = _esc(getattr(chat, "title", None) or "the group")
+    try:
+        return template.format(name=name, chat=title)
+    except (KeyError, IndexError, ValueError):
+        return DEFAULT_WELCOME.format(name=name, chat=title)
 
 
 def _esc(s) -> str:
@@ -100,14 +153,21 @@ async def gmenu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_chat.type == "private":
         await start(update, context)
         return
+    con = _db()
+    s = _get_settings(con, update.effective_chat.id)
+    con.close()
     await update.effective_message.reply_text(
         "🛡 <b>Guardian /gmenu</b>\n\n"
         "/gfilter scamword — add a blocked phrase\n"
         "/gunfilter scamword — remove it\n"
         "/gfilters — list\n"
         "/gban reply or /gban user_id — global ban\n"
-        "/gunban user_id — lift global ban\n"
-        "/glink on|off — block links from brand-new members\n"
+        "/gunban user_id — lift global ban\n\n"
+        f"/welcome on|off — greet new members ({'ON' if s['welcome_on'] else 'OFF'})\n"
+        "/setwelcome text — customize it ({name} and {chat} are filled in)\n"
+        "/testwelcome — preview it now\n"
+        f"/captcha on|off [seconds] — tap-to-verify before a new member can chat "
+        f"({'ON, ' + str(s['captcha_timeout']) + 's' if s['captcha_on'] else 'OFF'})\n\n"
         "Leave me admin. I already watch joins for fake admin names.",
         parse_mode="HTML",
     )
@@ -197,6 +257,207 @@ async def gunban(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.effective_message.reply_text(f"Lifted {uid}.")
 
 
+async def welcome_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _is_admin(update, context):
+        return
+    arg = (context.args[0].lower() if context.args else "")
+    if arg not in ("on", "off"):
+        await update.effective_message.reply_text("Usage: /welcome on  or  /welcome off")
+        return
+    con = _db()
+    con.execute("INSERT OR IGNORE INTO settings(chat_id) VALUES(?)", (update.effective_chat.id,))
+    con.execute("UPDATE settings SET welcome_on=? WHERE chat_id=?", (1 if arg == "on" else 0, update.effective_chat.id))
+    con.commit()
+    con.close()
+    await update.effective_message.reply_text(f"👋 Welcome message: {'ON' if arg == 'on' else 'OFF'}.")
+
+
+async def setwelcome_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _is_admin(update, context):
+        return
+    text = update.effective_message.text or ""
+    body = text.split(None, 1)[1].strip() if len(text.split(None, 1)) > 1 else ""
+    if not body:
+        await update.effective_message.reply_text(
+            "Usage: /setwelcome 👋 Welcome {name} to {chat}! Read the pinned rules.\n\n"
+            "{name} and {chat} get filled in automatically. /setwelcome default resets it."
+        )
+        return
+    con = _db()
+    con.execute("INSERT OR IGNORE INTO settings(chat_id) VALUES(?)", (update.effective_chat.id,))
+    if body.lower() == "default":
+        con.execute("UPDATE settings SET welcome_text=NULL WHERE chat_id=?", (update.effective_chat.id,))
+        con.commit()
+        con.close()
+        await update.effective_message.reply_text("Reset to the default welcome message.")
+        return
+    con.execute("UPDATE settings SET welcome_text=? WHERE chat_id=?", (body, update.effective_chat.id))
+    con.commit()
+    con.close()
+    preview = _render_welcome(body, update.effective_user, update.effective_chat)
+    await update.effective_message.reply_text(f"Saved. Preview:\n\n{preview}")
+
+
+async def testwelcome_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _is_admin(update, context):
+        return
+    con = _db()
+    s = _get_settings(con, update.effective_chat.id)
+    con.close()
+    await update.effective_message.reply_text(_render_welcome(s["welcome_text"], update.effective_user, update.effective_chat))
+
+
+async def captcha_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _is_admin(update, context):
+        return
+    args = context.args or []
+    arg = args[0].lower() if args else ""
+    if arg not in ("on", "off"):
+        await update.effective_message.reply_text(
+            "Usage: /captcha on [seconds]  or  /captcha off\n"
+            "New members are muted with a \"tap to verify\" button until they tap it "
+            f"(default {CAPTCHA_TIMEOUT_DEFAULT}s, then they're removed)."
+        )
+        return
+    timeout = CAPTCHA_TIMEOUT_DEFAULT
+    if arg == "on" and len(args) > 1:
+        try:
+            timeout = max(CAPTCHA_TIMEOUT_RANGE[0], min(CAPTCHA_TIMEOUT_RANGE[1], int(args[1])))
+        except ValueError:
+            await update.effective_message.reply_text("Seconds must be a number.")
+            return
+    con = _db()
+    con.execute("INSERT OR IGNORE INTO settings(chat_id) VALUES(?)", (update.effective_chat.id,))
+    if arg == "on":
+        con.execute(
+            "UPDATE settings SET captcha_on=1, captcha_timeout=? WHERE chat_id=?",
+            (timeout, update.effective_chat.id),
+        )
+    else:
+        con.execute("UPDATE settings SET captcha_on=0 WHERE chat_id=?", (update.effective_chat.id,))
+    con.commit()
+    con.close()
+    if arg == "on":
+        await update.effective_message.reply_text(
+            f"🔐 Captcha ON — new members must tap to verify within {timeout}s or they're removed."
+        )
+    else:
+        await update.effective_message.reply_text("🔐 Captcha OFF.")
+
+
+async def _start_captcha(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user, timeout: int) -> None:
+    try:
+        await context.bot.restrict_chat_member(chat_id, user.id, ChatPermissions(can_send_messages=False))
+    except TelegramError as exc:
+        log.warning("captcha mute failed for %s in %s: %s", user.id, chat_id, exc)
+        return
+    name = _esc(user.full_name or (f"@{user.username}" if user.username else "there"))
+    try:
+        msg = await context.bot.send_message(
+            chat_id,
+            f"🔐 {name}, tap below within {timeout}s to verify you're human and unlock chat.",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("✅ I'm human", callback_data=f"cap:{user.id}")]]
+            ),
+        )
+    except TelegramError as exc:
+        log.warning("captcha post failed in %s: %s", chat_id, exc)
+        return
+    con = _db()
+    con.execute(
+        "INSERT OR REPLACE INTO pending_captcha(chat_id, user_id, message_id, deadline) VALUES(?,?,?,?)",
+        (chat_id, user.id, msg.message_id, int(time.time()) + timeout),
+    )
+    con.commit()
+    con.close()
+    context.job_queue.run_once(
+        _captcha_timeout_job,
+        timeout,
+        data={"chat_id": chat_id, "user_id": user.id, "message_id": msg.message_id},
+        name=f"captcha:{chat_id}:{user.id}",
+    )
+
+
+async def _unmute(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int) -> None:
+    perms = None
+    try:
+        chat = await context.bot.get_chat(chat_id)
+        perms = chat.permissions
+    except TelegramError:
+        pass
+    if not perms:
+        perms = ChatPermissions(
+            can_send_messages=True, can_send_polls=True, can_send_other_messages=True,
+            can_add_web_page_previews=True, can_invite_users=True,
+        )
+    try:
+        await context.bot.restrict_chat_member(chat_id, user_id, perms)
+    except TelegramError as exc:
+        log.warning("unmute failed for %s in %s: %s", user_id, chat_id, exc)
+
+
+async def captcha_verify_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    if not q or not q.data or not q.data.startswith("cap:"):
+        return
+    try:
+        target_id = int(q.data.split(":", 1)[1])
+    except ValueError:
+        await q.answer()
+        return
+    if q.from_user.id != target_id:
+        await q.answer("That button isn't for you.", show_alert=True)
+        return
+    chat_id = q.message.chat_id
+    con = _db()
+    row = con.execute(
+        "SELECT 1 FROM pending_captcha WHERE chat_id=? AND user_id=?", (chat_id, target_id)
+    ).fetchone()
+    if not row:
+        con.close()
+        await q.answer("Already handled.")
+        return
+    con.execute("DELETE FROM pending_captcha WHERE chat_id=? AND user_id=?", (chat_id, target_id))
+    s = _get_settings(con, chat_id)
+    con.commit()
+    con.close()
+    for job in context.job_queue.get_jobs_by_name(f"captcha:{chat_id}:{target_id}"):
+        job.schedule_removal()
+    await _unmute(context, chat_id, target_id)
+    await q.answer("Verified ✅")
+    try:
+        await q.message.delete()
+    except TelegramError:
+        pass
+    if s["welcome_on"]:
+        await context.bot.send_message(chat_id, _render_welcome(s["welcome_text"], q.from_user, q.message.chat))
+
+
+async def _captcha_timeout_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    d = context.job.data or {}
+    chat_id, user_id, message_id = d.get("chat_id"), d.get("user_id"), d.get("message_id")
+    if not chat_id or not user_id:
+        return
+    con = _db()
+    row = con.execute("SELECT 1 FROM pending_captcha WHERE chat_id=? AND user_id=?", (chat_id, user_id)).fetchone()
+    if not row:
+        con.close()
+        return  # already verified
+    con.execute("DELETE FROM pending_captcha WHERE chat_id=? AND user_id=?", (chat_id, user_id))
+    con.commit()
+    con.close()
+    try:
+        await context.bot.ban_chat_member(chat_id, user_id)
+        await context.bot.unban_chat_member(chat_id, user_id)  # kick, not a permanent ban
+    except TelegramError as exc:
+        log.warning("captcha kick failed for %s in %s: %s", user_id, chat_id, exc)
+    if message_id:
+        try:
+            await context.bot.delete_message(chat_id, message_id)
+        except TelegramError:
+            pass
+
+
 async def _admins(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> list[str]:
     names = []
     try:
@@ -215,12 +476,17 @@ async def on_member(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not cmu:
         return
     new = cmu.new_chat_member
+    old = cmu.old_chat_member
     if new.status not in (ChatMemberStatus.MEMBER, ChatMemberStatus.RESTRICTED):
         return
+    # Only a real join (not our own mute/unmute, or an admin action) starts
+    # welcome/captcha -- otherwise every restrict we do would re-fire this.
+    is_join = old.status in (ChatMemberStatus.LEFT, ChatMemberStatus.BANNED)
     user = new.user
     chat_id = update.effective_chat.id
     con = _db()
     banned = con.execute("SELECT 1 FROM global_bans WHERE user_id=?", (user.id,)).fetchone()
+    settings = _get_settings(con, chat_id)
     con.close()
     handle = f"{user.username or ''} {user.full_name or ''}"
     if banned or FAKE.search(handle):
@@ -238,6 +504,13 @@ async def on_member(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await context.bot.send_message(chat_id, "🛡 Removed admin look-alike.")
         except Exception:
             pass
+        return
+    if not is_join or user.is_bot:
+        return
+    if settings["captcha_on"]:
+        await _start_captcha(context, chat_id, user, settings["captcha_timeout"])
+    elif settings["welcome_on"]:
+        await context.bot.send_message(chat_id, _render_welcome(settings["welcome_text"], user, update.effective_chat))
 
 
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -285,6 +558,11 @@ def main() -> None:
     app.add_handler(CommandHandler("gfilters", gfilters))
     app.add_handler(CommandHandler("gban", gban))
     app.add_handler(CommandHandler("gunban", gunban))
+    app.add_handler(CommandHandler("welcome", welcome_cmd))
+    app.add_handler(CommandHandler("setwelcome", setwelcome_cmd))
+    app.add_handler(CommandHandler("testwelcome", testwelcome_cmd))
+    app.add_handler(CommandHandler("captcha", captcha_cmd))
+    app.add_handler(CallbackQueryHandler(captcha_verify_cb, pattern=r"^cap:"))
     app.add_handler(ChatMemberHandler(on_member, ChatMemberHandler.CHAT_MEMBER))
     app.add_handler(MessageHandler(filters.TEXT | filters.CAPTION, on_text))
 
@@ -298,6 +576,10 @@ def main() -> None:
             BotCommand("gfilters", "List extra filters"),
             BotCommand("gban", "Global ban"),
             BotCommand("gunban", "Lift a global ban"),
+            BotCommand("welcome", "Toggle welcome message"),
+            BotCommand("setwelcome", "Set the welcome message"),
+            BotCommand("testwelcome", "Preview the welcome message"),
+            BotCommand("captcha", "Toggle tap-to-verify for new members"),
         ]
         await application.bot.set_my_commands(cmds)
 
