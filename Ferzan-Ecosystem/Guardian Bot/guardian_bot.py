@@ -180,6 +180,26 @@ async def _is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     return member.status in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER)
 
 
+async def _require_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Same admin check, but never silent: replies with what Telegram
+    actually reported so a "nothing happened" report is self-diagnosing."""
+    if update.effective_chat.type == "private":
+        return True
+    try:
+        member = await context.bot.get_chat_member(update.effective_chat.id, update.effective_user.id)
+    except TelegramError as exc:
+        await update.effective_message.reply_text(f"Couldn't check your admin status: {exc}")
+        return False
+    if member.status in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER):
+        return True
+    await update.effective_message.reply_text(
+        f"Admins only for that one — Telegram has you as \"{member.status}\" in this chat, not admin.\n"
+        "If you were just promoted, leave and rejoin the chat once, or wait a minute — Telegram's admin "
+        "list can lag a bit right after a promotion."
+    )
+    return False
+
+
 async def gfilter(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _is_admin(update, context):
         return
@@ -258,7 +278,7 @@ async def gunban(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def welcome_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await _is_admin(update, context):
+    if not await _require_admin(update, context):
         return
     arg = (context.args[0].lower() if context.args else "")
     if arg not in ("on", "off"):
@@ -273,7 +293,7 @@ async def welcome_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 async def setwelcome_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await _is_admin(update, context):
+    if not await _require_admin(update, context):
         return
     text = update.effective_message.text or ""
     body = text.split(None, 1)[1].strip() if len(text.split(None, 1)) > 1 else ""
@@ -299,7 +319,7 @@ async def setwelcome_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 async def testwelcome_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await _is_admin(update, context):
+    if not await _require_admin(update, context):
         return
     con = _db()
     s = _get_settings(con, update.effective_chat.id)
@@ -308,7 +328,7 @@ async def testwelcome_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 
 async def captcha_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await _is_admin(update, context):
+    if not await _require_admin(update, context):
         return
     args = context.args or []
     arg = args[0].lower() if args else ""
