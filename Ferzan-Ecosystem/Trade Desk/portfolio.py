@@ -148,7 +148,7 @@ def build_portfolio(uid: int) -> dict:
             "eth_usd": float(eth_bal) * eth_px if eth_px else None,
         },
         "wallets": [
-            {"label": s["label"], "sol": s["sol_pub"], "evm": s["evm_pub"], "active": bool(s["active"])}
+            {"id": s["id"], "label": s["label"], "sol": s["sol_pub"], "evm": s["evm_pub"], "active": bool(s["active"])}
             for s in slots
         ],
         "positions": positions,

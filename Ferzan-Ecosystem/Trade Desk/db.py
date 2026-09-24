@@ -416,6 +416,7 @@ def init_db() -> None:
             """
         )
         _init_v4(conn)
+        _init_v5(conn)
         conn.commit()
 
 
@@ -2340,3 +2341,126 @@ def count_watched_wallets(user_id: int) -> int:
         return int(
             conn.execute("SELECT COUNT(*) FROM watched_wallets WHERE user_id = ?", (int(user_id),)).fetchone()[0]
         )
+
+
+# ------------------------------------------------------------------ v5 --
+# Mini App: exit rules / DCA / limit buys / wallet switch / PnL card.
+
+
+def _init_v5(conn) -> None:
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS card_requests (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            mint TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            created_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_card_requests_status ON card_requests(status);
+        """
+    )
+
+
+def replace_live_exit(user_id: int, mint: str, tp_pct: float | None, sl_pct: float | None,
+                      trail_pct: float | None) -> None:
+    """The app's "Exit rules" save: sets all three exactly (None clears
+    that one; all None removes the rules). A new or changed trailing stop
+    starts from the next price read, same as the bot's 📉 button."""
+    user_id, mint = int(user_id), (mint or "").strip()
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT trail_pct FROM live_exits WHERE user_id = ? AND mint = ?", (user_id, mint)
+        ).fetchone()
+        if tp_pct is None and sl_pct is None and trail_pct is None:
+            conn.execute("DELETE FROM live_exits WHERE user_id = ? AND mint = ?", (user_id, mint))
+            conn.commit()
+            return
+        old_trail = row["trail_pct"] if row else None
+        if row:
+            conn.execute(
+                "UPDATE live_exits SET tp_pct = ?, sl_pct = ?, trail_pct = ? WHERE user_id = ? AND mint = ?",
+                (tp_pct, sl_pct, trail_pct, user_id, mint),
+            )
+        else:
+            conn.execute(
+                "INSERT INTO live_exits (user_id, mint, tp_pct, sl_pct, trail_pct) VALUES (?, ?, ?, ?, ?)",
+                (user_id, mint, tp_pct, sl_pct, trail_pct),
+            )
+        if trail_pct is not None and (old_trail is None or float(old_trail) != float(trail_pct)):
+            conn.execute(
+                "UPDATE live_exits SET peak_px = NULL WHERE user_id = ? AND mint = ?", (user_id, mint)
+            )
+        conn.commit()
+
+
+def get_dca_plan(user_id: int, mint: str) -> dict | None:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM dca_plans WHERE user_id = ? AND mint = ? AND active = 1",
+            (int(user_id), (mint or "").strip()),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def armed_buy_limits(user_id: int, mint: str | None = None) -> list[dict]:
+    with get_conn() as conn:
+        if mint:
+            rows = conn.execute(
+                "SELECT * FROM buy_limits WHERE user_id = ? AND mint = ? AND status = 'armed' ORDER BY id",
+                (int(user_id), mint.strip()),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM buy_limits WHERE user_id = ? AND status = 'armed' ORDER BY id",
+                (int(user_id),),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+
+MAX_BUY_LIMITS = 10
+
+
+def add_card_request(user_id: int, mint: str, per_min: int = 3) -> int:
+    """Queue a PnL card for the bot to render + send. 0 = refused (one
+    already pending, or too many this minute)."""
+    now = int(time.time())
+    with get_conn() as conn:
+        pending = conn.execute(
+            "SELECT COUNT(*) FROM card_requests WHERE user_id = ? AND status = 'pending'", (int(user_id),)
+        ).fetchone()[0]
+        recent = conn.execute(
+            "SELECT COUNT(*) FROM card_requests WHERE user_id = ? AND created_at > ?", (int(user_id), now - 60)
+        ).fetchone()[0]
+        if pending or recent >= per_min:
+            return 0
+        cur = conn.execute(
+            "INSERT INTO card_requests (user_id, mint, created_at) VALUES (?, ?, ?)",
+            (int(user_id), (mint or "").strip(), now),
+        )
+        conn.commit()
+        return int(cur.lastrowid)
+
+
+def claim_card_requests(limit: int = 20) -> list[dict]:
+    """Pending -> sent, atomically; stale (>2 min) requests are dropped."""
+    now = int(time.time())
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE card_requests SET status = 'expired' WHERE status = 'pending' AND created_at < ?",
+            (now - 120,),
+        )
+        rows = conn.execute(
+            "SELECT * FROM card_requests WHERE status = 'pending' ORDER BY id LIMIT ?", (int(limit),)
+        ).fetchall()
+        out = []
+        for r in rows:
+            cur = conn.execute(
+                "UPDATE card_requests SET status = 'sent' WHERE id = ? AND status = 'pending'", (r["id"],)
+            )
+            if cur.rowcount == 1:
+                out.append(dict(r))
+        conn.commit()
+        conn.execute("DELETE FROM card_requests WHERE created_at < ?", (now - 7 * 86400,))
+        conn.commit()
+        return out

@@ -319,6 +319,129 @@ async def api_order_status(request: Request) -> JSONResponse:
     return JSONResponse({"id": oid, "status": row["status"], "result": row.get("result") or ""})
 
 
+# ------------------------------------------------ rules / wallets / cards --
+# None of these move money directly: they save the same exit rules, DCA
+# plans and limit buys the bot's commands save, and the bot's own jobs run
+# them (with every safety check). The PnL card is queued for the bot too.
+DCA_EVERY = {"hourly": 3600, "daily": 86400, "weekly": 604800}
+
+
+def _num(v, lo: float, hi: float, what: str) -> float | None:
+    if v is None or v == "":
+        return None
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail=f"{what} must be a number.")
+    if not (lo <= x <= hi) or x != x:
+        raise HTTPException(status_code=400, detail=f"{what} must be between {lo:g} and {hi:g}.")
+    return x
+
+
+def _rules_for(uid: int, mint: str) -> dict:
+    ex = db.get_live_exit(uid, mint) or {}
+    plan = db.get_dca_plan(uid, mint)
+    every = None
+    if plan:
+        every = next((k for k, v in DCA_EVERY.items() if v == int(plan["interval_seconds"])), None)
+    return {
+        "mint": mint,
+        "has_cost": db.live_cost(uid, mint) > 0,
+        "exit": {"tp": ex.get("tp_pct"), "sl": ex.get("sl_pct"), "trail": ex.get("trail_pct")} if ex else None,
+        "dca": {"usd": float(plan["usd_per_buy"]), "every": every,
+                "next_in": max(0, int(plan["next_run_at"]) - int(time.time()))} if plan else None,
+        "limits": [{"id": r["id"], "usd": float(r["usd"]), "target_px": float(r["target_px"])}
+                   for r in db.armed_buy_limits(uid, mint)],
+        "max_usd": _max_usd(),
+    }
+
+
+@app.post("/api/rules")
+async def api_rules(request: Request) -> JSONResponse:
+    body = await _json(request)
+    uid = _auth(body)
+    mint = str(body.get("mint") or "").strip()
+    if not _valid_mint(mint):
+        raise HTTPException(status_code=400, detail="Bad token address.")
+    return JSONResponse(await asyncio.to_thread(_rules_for, uid, mint))
+
+
+@app.post("/api/rules/save")
+async def api_rules_save(request: Request) -> JSONResponse:
+    body = await _json(request)
+    uid = _auth(body, max_age=ORDER_MAX_AGE_S)
+    if not _rate_ok(uid, "rules", 20):
+        raise HTTPException(status_code=429, detail="Too many changes — give it a minute.")
+    mint = str(body.get("mint") or "").strip()
+    if not _valid_mint(mint):
+        raise HTTPException(status_code=400, detail="Bad token address.")
+    kind = str(body.get("kind") or "")
+    cap = _max_usd()
+    if kind == "exit":
+        if db.live_cost(uid, mint) <= 0:
+            raise HTTPException(status_code=400, detail="Exit rules need a bag bought through Ferzan (no cost basis here).")
+        tp = _num(body.get("tp"), 1, 10000, "Take profit")
+        sl = _num(body.get("sl"), 1, 99, "Stop loss")
+        trail = _num(body.get("trail"), 1, 90, "Trailing stop")
+        db.replace_live_exit(uid, mint, tp, sl, trail)
+    elif kind == "dca":
+        usd = _num(body.get("usd"), 1, cap, "DCA amount")
+        every = str(body.get("every") or "")
+        if usd is None or every not in DCA_EVERY:
+            raise HTTPException(status_code=400, detail="Pick an amount and hourly / daily / weekly.")
+        db.set_dca_plan(uid, mint, "base" if mint.startswith("0x") else "solana", usd, DCA_EVERY[every])
+    elif kind == "dca_off":
+        db.clear_dca_plan(uid, mint)
+    elif kind == "limit":
+        usd = _num(body.get("usd"), 1, cap, "Limit size")
+        px = _num(body.get("target_px"), 1e-18, 1e9, "Target price")
+        if usd is None or px is None:
+            raise HTTPException(status_code=400, detail="Pick a target price and an amount.")
+        if len(db.armed_buy_limits(uid)) >= db.MAX_BUY_LIMITS:
+            raise HTTPException(status_code=400, detail=f"Limit reached ({db.MAX_BUY_LIMITS} open limit buys).")
+        db.add_buy_limit(uid, mint, "bsc" if mint.startswith("0x") else "sol", usd, px)
+    elif kind == "limit_cancel":
+        try:
+            lid = int(body.get("id"))
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="Bad limit id.")
+        db.cancel_buy_limit(uid, lid)
+    else:
+        raise HTTPException(status_code=400, detail="Unknown change.")
+    return JSONResponse(await asyncio.to_thread(_rules_for, uid, mint))
+
+
+@app.post("/api/wallet")
+async def api_wallet(request: Request) -> JSONResponse:
+    body = await _json(request)
+    uid = _auth(body, max_age=ORDER_MAX_AGE_S)
+    try:
+        slot_id = int(body.get("id"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Bad wallet.")
+    if db.open_webapp_orders(uid) > 0:
+        raise HTTPException(status_code=409, detail="A trade is running — switch wallets after it lands.")
+    if not db.set_active_wallet(uid, slot_id):
+        raise HTTPException(status_code=404, detail="No such wallet.")
+    with _cache_lock:
+        _cache.pop(uid, None)
+    return JSONResponse({"ok": True})
+
+
+@app.post("/api/card")
+async def api_card(request: Request) -> JSONResponse:
+    body = await _json(request)
+    uid = _auth(body)
+    mint = str(body.get("mint") or "").strip()
+    if not _valid_mint(mint):
+        raise HTTPException(status_code=400, detail="Bad token address.")
+    if db.live_cost(uid, mint) <= 0:
+        raise HTTPException(status_code=400, detail="PnL cards are for bags bought through Ferzan.")
+    if not db.add_card_request(uid, mint):
+        raise HTTPException(status_code=429, detail="A card is already on its way — check the chat.")
+    return JSONResponse({"queued": True})
+
+
 async def _json(request: Request) -> dict:
     try:
         body = await request.json()

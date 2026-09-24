@@ -75,14 +75,37 @@
   .pos .sub { color: var(--muted); font-size: 12px; }
   .pos .right-sub { font-size: 12px; text-align: right; font-weight: 600; }
   .actions { display: none; grid-column: 1 / -1; gap: 8px; margin-top: 10px; }
-  .pos.open .actions { display: flex; }
-  .act { flex: 1; border: 0; border-radius: 10px; padding: 10px; font-weight: 700; font-size: 14px; }
+  .pos.open .actions { display: flex; flex-direction: column; }
+  .arow { display: flex; gap: 8px; }
+  .act { flex: 1; border: 0; border-radius: 10px; padding: 10px 6px; font-weight: 700; font-size: 13px; text-align: center; white-space: nowrap; }
   .act.primary { background: var(--btn); color: var(--btn-ink); }
   .act.ghost { background: var(--sunk); color: var(--ink); }
   .empty, .error { background: var(--card); border-radius: 14px; padding: 20px; text-align: center; color: var(--muted); }
   .error { color: var(--loss); }
   .wallets { margin-top: 24px; }
-  .w { display: flex; justify-content: space-between; padding: 10px 14px; border-top: 1px solid var(--line); font-size: 14px; }
+  .w { display: flex; justify-content: space-between; align-items: center; width: 100%; padding: 12px 14px; border: 0; border-top: 1px solid var(--line);
+       font: inherit; font-size: 14px; color: inherit; background: none; text-align: left; }
+  .w .hint { color: var(--link); font-size: 12px; font-weight: 600; margin-left: 6px; }
+  .sheet-bg { position: fixed; inset: 0; background: rgba(0,0,0,.45); z-index: 15; }
+  .sheet { position: fixed; left: 0; right: 0; bottom: 0; z-index: 16; background: var(--bg); border-radius: 18px 18px 0 0;
+           padding: 16px 16px calc(20px + env(safe-area-inset-bottom)); max-height: 88vh; overflow: auto; box-shadow: 0 -8px 30px rgba(0,0,0,.2); }
+  .sheet[hidden], .sheet-bg[hidden] { display: none; }
+  .sheet .top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
+  .sheet .top b { font-size: 18px; }
+  .sheet .x { background: var(--sunk); border: 0; border-radius: 999px; width: 32px; height: 32px; font-size: 16px; color: var(--ink); }
+  .sheet .px { color: var(--muted); font-size: 13px; margin: 0 0 12px; }
+  .sec { background: var(--card); border-radius: 14px; padding: 12px; margin-bottom: 12px; }
+  .sec h3 { font-size: 15px; margin: 0 0 2px; }
+  .sec .why { color: var(--muted); font-size: 12px; margin: 0 0 10px; }
+  .field { display: grid; grid-template-columns: 1fr 110px; align-items: center; gap: 8px; margin-bottom: 8px; font-size: 14px; }
+  .field input, .field select { width: 100%; border: 1px solid var(--line); background: var(--bg); color: var(--ink); border-radius: 10px;
+                                padding: 9px 10px; font: inherit; font-size: 15px; text-align: right; }
+  .btnrow { display: flex; gap: 8px; margin-top: 4px; }
+  .btnrow .btn { flex: 1; }
+  .btn.ghost { background: var(--sunk); color: var(--ink); }
+  .armed { font-size: 13px; background: var(--sunk); border-radius: 10px; padding: 8px 10px; margin-bottom: 8px; display: flex;
+           justify-content: space-between; align-items: center; gap: 8px; }
+  .armed button { border: 0; background: none; color: var(--loss); font-weight: 700; font: inherit; font-size: 13px; }
   .w:first-child { border-top: 0; }
   .w code { color: var(--muted); font-size: 12px; }
   .foot { color: var(--muted); font-size: 12px; text-align: center; margin-top: 18px; }
@@ -161,6 +184,12 @@
 
 <p class="foot" id="foot">Trades run through the bot — same safety checks as a button tap.</p>
 <p class="foot"><a href="#" id="toClassic">💬 Switch to classic chat mode</a></p>
+<div class="sheet-bg" id="sheetBg" hidden></div>
+<div class="sheet" id="sheet" hidden role="dialog" aria-labelledby="sheetTitle">
+  <div class="top"><b id="sheetTitle">Rules</b><button class="x" id="sheetClose" aria-label="Close">✕</button></div>
+  <p class="px num" id="sheetPx"></p>
+  <div id="sheetBody"></div>
+</div>
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
 <script>
@@ -221,15 +250,22 @@
           <div class="val num">${p.priced ? usd(p.value) : "unpriced"}</div>
           <div class="sub num">${amt(p.amount)} · ${chg(p.chg24)}</div>
           <div class="right-sub num">${delta(p.pnl, p.pnl_pct)}</div>
-          <div class="actions" style="flex-wrap:wrap">
-            ${sellPcts().map((v) => `<span class="act primary" data-sellpct="${v}" data-mint="${esc(p.mint)}" data-sym="${esc(p.symbol)}">Sell ${v}%</span>`).join("")}
-            <span class="act ghost" data-sell="${esc(p.mint)}">Bot</span>
-            ${p.chart ? `<span class="act ghost" data-chart="${esc(p.chart)}">Chart</span>` : ""}
+          <div class="actions">
+            <div class="arow">${sellPcts().map((v) => `<span class="act primary" data-sellpct="${v}" data-mint="${esc(p.mint)}" data-sym="${esc(p.symbol)}">Sell ${v}%</span>`).join("")}</div>
+            <div class="arow">
+              <span class="act ghost" data-rules="${esc(p.mint)}" data-sym="${esc(p.symbol)}" data-px="${p.price || 0}">⚙️ Rules</span>
+              ${p.pnl != null ? `<span class="act ghost" data-card="${esc(p.mint)}">📸 Card</span>` : ""}
+              ${p.chart ? `<span class="act ghost" data-chart="${esc(p.chart)}">📈 Chart</span>` : ""}
+              <span class="act ghost" data-sell="${esc(p.mint)}">💬 Bot</span>
+            </div>
           </div>
         </button>`).join("");
     }
-    $("wallets").innerHTML = (d.wallets || []).map((w) => `
-      <div class="w"><span>${w.active ? "✅" : "▫️"} ${esc(w.label)}</span><code>${esc(w.sol.slice(0, 4))}…${esc(w.sol.slice(-4))}</code></div>`).join("");
+    const ws = d.wallets || [];
+    $("wallets").innerHTML = ws.map((w) => `
+      <button class="w" data-wallet="${w.id}" data-label="${esc(w.label)}" ${w.active ? 'aria-current="true"' : ""}>
+        <span>${w.active ? "✅" : "▫️"} ${esc(w.label)}${!w.active && ws.length > 1 ? '<span class="hint">Switch</span>' : ""}</span>
+        <code>${esc(w.sol.slice(0, 4))}…${esc(w.sol.slice(-4))}</code></button>`).join("");
     $("foot").textContent = `Updated ${new Date(d.ts * 1000).toLocaleTimeString()} · trades run through the bot`;
   }
 
@@ -237,6 +273,10 @@
     const sp = e.target.closest("[data-sellpct]");
     if (sp) { order({ side: "sell", mint: sp.dataset.mint, amount: +sp.dataset.sellpct, unit: "pct" },
                     `Sell ${sp.dataset.sellpct}% of $${sp.dataset.sym}?`); return; }
+    const ru = e.target.closest("[data-rules]");
+    if (ru) { openRules(ru.dataset.rules, ru.dataset.sym, +ru.dataset.px); return; }
+    const cd = e.target.closest("[data-card]");
+    if (cd) { sendCard(cd.dataset.card); return; }
     const sell = e.target.closest("[data-sell]");
     if (sell) { tg && tg.HapticFeedback && tg.HapticFeedback.impactOccurred("medium"); openBot("sell_" + sell.dataset.sell); return; }
     const chart = e.target.closest("[data-chart]");
@@ -320,6 +360,7 @@
         ${t.safety ? `<div class="safety">${esc(t.safety)}</div>` : ""}
         <div class="grid3">${(t.presets || []).map((v) =>
           `<button class="btn" data-buy="${v}">Buy ${v} ${esc(t.unit)}</button>`).join("")}</div>
+        <div class="btnrow" style="margin-top:8px"><button class="btn ghost" data-rules="${esc(t.mint)}" data-sym="${esc(t.symbol)}" data-px="${t.price || 0}">⏳ Limit buy · 📅 DCA</button></div>
         ${t.chart ? `<p style="margin:10px 0 0"><a href="#" data-chart="${esc(t.chart)}" style="color:var(--link)">Open chart ↗</a></p>` : ""}`;
     } catch (err) {
       box.innerHTML = `<div class="error" style="padding:12px">${esc(err.message)}</div>`;
@@ -337,8 +378,113 @@
       order({ side: "buy", mint: token.mint, chain: token.chain, amount: n, unit: "native" }, q + "?");
       return;
     }
+    const ru = e.target.closest("[data-rules]");
+    if (ru) { openRules(ru.dataset.rules, ru.dataset.sym, +ru.dataset.px); return; }
     const c = e.target.closest("[data-chart]");
     if (c) { e.preventDefault(); openLink(c.dataset.chart); }
+  });
+
+  // ---- wallets: tap one to make it the active wallet --------------------
+  $("wallets").addEventListener("click", async (e) => {
+    const w = e.target.closest("[data-wallet]");
+    if (!w || w.getAttribute("aria-current") === "true") return;
+    if (!(await confirmBox(`Switch to "${w.dataset.label}"? Trades and balances will use that wallet.`))) return;
+    try {
+      await api("/api/wallet", { id: +w.dataset.wallet });
+      tg && tg.HapticFeedback && tg.HapticFeedback.notificationOccurred("success");
+      toast(`✅ Now trading from ${w.dataset.label}`, 3000);
+      load(true);
+    } catch (err) { toast("🔴 " + err.message, 4000); }
+  });
+
+  // ---- PnL card: the bot renders it and sends it to your chat -----------
+  async function sendCard(mint) {
+    try {
+      await api("/api/card", { mint });
+      toast("📸 Card on its way to your chat — forward it anywhere.", 4000);
+    } catch (err) { toast("🔴 " + err.message, 4000); }
+  }
+
+  // ---- rules sheet: exit rules, limit buys, DCA -------------------------
+  const px = (v) => !v ? "" : v >= 1 ? v.toFixed(4) : Number(v).toPrecision(4);
+  let sheetMint = null, sheetSym = "", sheetPx = 0;
+  function closeSheet() { $("sheet").hidden = true; $("sheetBg").hidden = true; sheetMint = null; }
+  $("sheetClose").addEventListener("click", closeSheet);
+  $("sheetBg").addEventListener("click", closeSheet);
+  async function openRules(mint, sym, price) {
+    sheetMint = mint; sheetSym = sym || "TOKEN"; sheetPx = price || 0;
+    $("sheetTitle").textContent = `$${sheetSym}`;
+    $("sheetPx").textContent = sheetPx ? `Now $${px(sheetPx)}` : "";
+    $("sheetBody").innerHTML = `<div class="skeleton" style="height:120px"></div>`;
+    $("sheet").hidden = false; $("sheetBg").hidden = false;
+    try { renderRules(await api("/api/rules", { mint })); }
+    catch (err) { $("sheetBody").innerHTML = `<div class="error">${esc(err.message)}</div>`; }
+  }
+  const val = (v) => v == null ? "" : String(v);
+  function renderRules(r) {
+    const ex = r.exit || {};
+    const exitSec = r.has_cost ? `
+      <div class="sec"><h3>🎯 Exit rules</h3>
+        <p class="why">Sells the whole bag automatically. Leave a box empty to turn that rule off.</p>
+        <label class="field">Take profit at +%<input id="rTp" inputmode="decimal" placeholder="off" value="${val(ex.tp)}"></label>
+        <label class="field">Stop loss at −%<input id="rSl" inputmode="decimal" placeholder="off" value="${val(ex.sl)}"></label>
+        <label class="field">Trailing stop %<input id="rTr" inputmode="decimal" placeholder="off" value="${val(ex.trail)}"></label>
+        <div class="btnrow"><button class="btn" data-save="exit">Save exits</button>
+          ${r.exit ? `<button class="btn ghost" data-save="exit_clear">Clear</button>` : ""}</div>
+      </div>` : `
+      <div class="sec"><h3>🎯 Exit rules</h3><p class="why" style="margin:0">Buy through Ferzan first — exits need the price you paid.</p></div>`;
+    const limits = (r.limits || []).map((l) => `
+      <div class="armed num"><span>Buy $${l.usd.toFixed(0)} at $${px(l.target_px)}</span><button data-cancel="${l.id}">Cancel</button></div>`).join("");
+    const limitSec = `
+      <div class="sec"><h3>⏳ Limit buy</h3>
+        <p class="why">Buys when the price drops to your target. Checked about every 35s.</p>
+        ${limits}
+        <label class="field">Target price $<input id="rLpx" inputmode="decimal" placeholder="${sheetPx ? px(sheetPx * 0.8) : "0.0001"}"></label>
+        <label class="field">Spend $ (max ${r.max_usd.toFixed(0)})<input id="rLusd" inputmode="decimal" value="${Math.min(10, r.max_usd)}"></label>
+        <div class="btnrow"><button class="btn" data-save="limit">Arm limit buy</button></div>
+      </div>`;
+    const d = r.dca;
+    const dcaSec = `
+      <div class="sec"><h3>📅 DCA</h3>
+        <p class="why">Buys a fixed amount on a schedule, with the same safety checks as any buy.</p>
+        ${d ? `<div class="armed num"><span>$${d.usd.toFixed(0)} ${esc(d.every || "")} · next in ${Math.max(1, Math.round(d.next_in / 60))}m</span><button data-save="dca_off">Stop</button></div>` : ""}
+        <label class="field">Spend $ each time<input id="rDusd" inputmode="decimal" value="${d ? d.usd : Math.min(10, r.max_usd)}"></label>
+        <label class="field">How often<select id="rDev">
+          ${["hourly", "daily", "weekly"].map((k) => `<option value="${k}" ${(d ? d.every : "daily") === k ? "selected" : ""}>${k}</option>`).join("")}
+        </select></label>
+        <div class="btnrow"><button class="btn" data-save="dca">${d ? "Update DCA" : "Start DCA"}</button></div>
+      </div>`;
+    $("sheetBody").innerHTML = exitSec + limitSec + dcaSec;
+  }
+  $("sheetBody").addEventListener("click", async (e) => {
+    const b = e.target.closest("[data-save], [data-cancel]");
+    if (!b || !sheetMint) return;
+    const v = (id) => { const x = $(id); return x && x.value.trim() !== "" ? x.value.trim() : null; };
+    let body = { mint: sheetMint }, msg = "Saved";
+    if (b.dataset.cancel) { body = { ...body, kind: "limit_cancel", id: +b.dataset.cancel }; msg = "Limit cancelled"; }
+    else {
+      const k = b.dataset.save;
+      if (k === "exit") { body = { ...body, kind: "exit", tp: v("rTp"), sl: v("rSl"), trail: v("rTr") }; msg = "✅ Exit rules saved"; }
+      else if (k === "exit_clear") { body = { ...body, kind: "exit" }; msg = "Exit rules cleared"; }
+      else if (k === "limit") {
+        const t = v("rLpx"), u = v("rLusd");
+        if (!t || !u) { toast("Enter a target price and an amount.", 3000); return; }
+        if (sheetPx && +t >= sheetPx && !(await confirmBox(`$${px(+t)} is at or above the current price — it will buy right away. Arm it anyway?`))) return;
+        body = { ...body, kind: "limit", target_px: t, usd: u }; msg = "⏳ Limit buy armed";
+      }
+      else if (k === "dca") {
+        const u = v("rDusd"), ev = $("rDev").value;
+        if (!(await confirmBox(`Buy $${u} of $${sheetSym} ${ev}, until you stop it?`))) return;
+        body = { ...body, kind: "dca", usd: u, every: ev }; msg = "📅 DCA started";
+      }
+      else if (k === "dca_off") { body = { ...body, kind: "dca_off" }; msg = "DCA stopped"; }
+    }
+    b.disabled = true;
+    try {
+      renderRules(await api("/api/rules/save", body));
+      tg && tg.HapticFeedback && tg.HapticFeedback.notificationOccurred("success");
+      toast(msg, 2500);
+    } catch (err) { toast("🔴 " + err.message, 4000); b.disabled = false; }
   });
 
   let inflight = false;

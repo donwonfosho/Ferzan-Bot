@@ -5675,6 +5675,11 @@ async def webapp_order_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     orders = await asyncio.to_thread(db.claim_webapp_orders)
     for o in orders:
         asyncio.create_task(_run_webapp_order(context, o))
+    # PnL cards asked for from the app: rendered here (the bot owns the
+    # renderer) and sent to the user's chat, ready to forward.
+    for c in await asyncio.to_thread(db.claim_card_requests):
+        if _allowed(int(c["user_id"])):
+            asyncio.create_task(_send_pnl_card(context.bot, int(c["user_id"]), c["mint"]))
 
 
 def _webapp_trade(uid: int, o: dict) -> tuple[bool, str]:
