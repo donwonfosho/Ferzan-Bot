@@ -174,10 +174,73 @@ def _swap_send_with_retry(quote: dict, kp, opts: dict | None = None) -> tuple[bo
     normal RPC path with a priority fee, retried with a bumped fee if the
     RPC rejects it for a reason a higher fee / fresh blockhash would fix.
     Returns (ok, signature) — ok only once the swap is CONFIRMED on-chain."""
-    opts = opts or exec_opts(None)
-    if opts.get("anti_mev"):
-        return _swap_send_jito(quote, kp, int(opts["fee_lamports"]))
-    return _swap_send_rpc(quote, kp, int(opts["fee_lamports"]))
+    opts = opts if opts is not None else exec_opts(None)
+    fee = int(opts["fee_lamports"])
+    if not opts.get("anti_mev"):
+        opts["route_used"] = "priority fee"
+        return _swap_send_rpc(quote, kp, fee)
+    opts["route_used"] = "Jito · MEV-protected"
+    ok, res = _swap_send_jito(quote, kp, fee)
+    if ok or not res.startswith(_JITO_EXPIRED) or not _jito_fallback_on():
+        return ok, res
+    # The Jito tx PROVABLY can't land any more (blockhash expired, full-history
+    # lookup found nothing), so a fresh send can't double-trade. Re-quote --
+    # the old quote is ~a minute stale -- and go the normal route.
+    log.warning("jito tx expired unlanded; falling back to priority-fee route")
+    fresh = _requote(quote)
+    if fresh is None:
+        return False, res + "\nFallback re-quote failed — nothing else sent."
+    opts["route_used"] = "priority fee (Jito didn't land, resent)"
+    return _swap_send_rpc(fresh, kp, fee)
+
+
+_JITO_EXPIRED = "Expired without landing"
+
+
+def _jito_fallback_on() -> bool:
+    return (os.getenv("JITO_FALLBACK", "1").strip().lower()) not in {"0", "false", "off", "no"}
+
+
+def _requote(quote: dict) -> dict | None:
+    """Fresh Jupiter quote with the same pair, size and slippage."""
+    try:
+        params = {
+            "inputMint": str(quote["inputMint"]),
+            "outputMint": str(quote["outputMint"]),
+            "amount": str(int(quote["inAmount"])),
+            "slippageBps": str(int(quote.get("slippageBps") or 1000)),
+        }
+        qr = requests.get(JUP_QUOTE, params=params, timeout=15)
+        fresh = qr.json() if qr.content else {}
+    except Exception as exc:
+        log.warning("fallback re-quote failed: %s", exc)
+        return None
+    if qr.status_code >= 400 or not isinstance(fresh, dict) or fresh.get("error") or not fresh.get("outAmount"):
+        log.warning("fallback re-quote rejected: %s", str(fresh)[:200])
+        return None
+    return fresh
+
+
+def _jito_bundle_status(bundle_id: str) -> str:
+    """Best-effort Jito verdict on a bundle, for the logs only."""
+    if not bundle_id:
+        return "no bundle id"
+    base = os.getenv("JITO_BLOCK_ENGINE", "https://mainnet.block-engine.jito.wtf")
+    payload = {"jsonrpc": "2.0", "id": 1, "method": "getInflightBundleStatuses", "params": [[bundle_id]]}
+    for path in ("/api/v1/getInflightBundleStatuses", "/api/v1/bundles"):
+        try:
+            r = requests.post(base + path, json=payload, timeout=8)
+            if r.status_code == 404:
+                continue
+            body = r.json() if r.content else {}
+            rows = ((body.get("result") or {}).get("value")) or []
+            if rows:
+                row = rows[0] or {}
+                return f"{row.get('status')} (landed_slot={row.get('landed_slot')})"
+            return str(body.get("error") or body)[:200]
+        except Exception as exc:
+            return f"status lookup failed: {exc}"
+    return "status endpoint not found"
 
 
 def _jupiter_swap_tx(quote: dict, kp, fee_field) -> dict:
@@ -225,6 +288,7 @@ def _swap_send_jito(quote: dict, kp, tip: int) -> tuple[bool, str]:
     # just back off and resend.
     maybe_sent = False
     last_err = ""
+    bundle_id = ""
     for attempt in range(5):
         try:
             resp = requests.post(
@@ -247,12 +311,18 @@ def _swap_send_jito(quote: dict, kp, tip: int) -> tuple[bool, str]:
                 return False, "Jito: " + msg[:200]
             break
         maybe_sent = True
+        try:
+            bundle_id = str(resp.headers.get("x-bundle-id") or "")
+        except Exception:
+            bundle_id = ""
+        log.info("jito accepted tx %s bundle=%s tip=%s", sig, bundle_id or "?", max(JITO_MIN_TIP, tip))
         break
     if not maybe_sent:
         return False, (last_err or "Jito accepted nothing.") + " — nothing sent, safe to retry."
     landed, why = _confirm(sig, swap.get("lastValidBlockHeight"))
     if landed:
         return True, sig
+    log.warning("jito tx %s not landed (%s); jito says: %s", sig, why, _jito_bundle_status(bundle_id))
     return False, f"{why}\nhttps://solscan.io/tx/{sig}"
 
 
@@ -467,7 +537,7 @@ def buy_sol(
     ok, res = _swap_send_with_retry(quote, kp, opts)
     if not ok:
         return False, res
-    route = "Jito · MEV-protected" if opts["anti_mev"] else "priority fee"
+    route = opts.get("route_used") or ("Jito · MEV-protected" if opts["anti_mev"] else "priority fee")
     return True, f"Live SOL buy ~${usd:.2f} · confirmed · {route}\nhttps://solscan.io/tx/{res}"
 
 
@@ -681,5 +751,5 @@ def sell_sol(
     if not ok:
         return False, res
     bag_note = "full bag" if pct >= 100 else f"{pct}% of bag"
-    route = "Jito · MEV-protected" if opts["anti_mev"] else "priority fee"
+    route = opts.get("route_used") or ("Jito · MEV-protected" if opts["anti_mev"] else "priority fee")
     return True, f"Live SOL sell ({bag_note}) · confirmed · {route}\nhttps://solscan.io/tx/{res}"
