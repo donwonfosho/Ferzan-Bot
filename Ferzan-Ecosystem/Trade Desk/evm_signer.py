@@ -218,19 +218,14 @@ def buy_curve(
         "chainId": int(meta["chain_id"]),
         "gas": 350000,
         "gasPrice": _gas_price(meta["rpc"]),
-        "nonce": _nonce(meta["rpc"], acct.address),
+        "nonce": _nonce_guarded(meta, acct.address),
     }
     try:
         signed = acct.sign_transaction(raw_tx)
         raw_hex = "0x" + signed.raw_transaction.hex() if hasattr(signed, "raw_transaction") else signed.rawTransaction.hex()
         if not raw_hex.startswith("0x"):
             raw_hex = "0x" + raw_hex
-        rr = requests.post(
-            meta["rpc"],
-            json={"jsonrpc": "2.0", "id": 1, "method": "eth_sendRawTransaction", "params": [raw_hex]},
-            timeout=20,
-        )
-        body = rr.json() if rr.content else {}
+        body = _send_raw(meta, raw_hex, acct.address, raw_tx["nonce"])
     except Exception as exc:
         return False, f"Curve buy failed: {exc}"
     if body.get("error"):
@@ -336,19 +331,14 @@ def buy_evm(
         "chainId": int(meta["chain_id"]),
         "gas": _as_int(tx.get("gas") or tx.get("gasLimit"), 400000),
         "gasPrice": _as_int(tx.get("gasPrice"), 2_000_000_000),
-        "nonce": _nonce(meta["rpc"], acct.address),
+        "nonce": _nonce_guarded(meta, acct.address),
     }
     try:
         signed = acct.sign_transaction(raw_tx)
         raw_hex = "0x" + signed.raw_transaction.hex() if hasattr(signed, "raw_transaction") else signed.rawTransaction.hex()
         if not raw_hex.startswith("0x"):
             raw_hex = "0x" + raw_hex
-        rr = requests.post(
-            meta["rpc"],
-            json={"jsonrpc": "2.0", "id": 1, "method": "eth_sendRawTransaction", "params": [raw_hex]},
-            timeout=20,
-        )
-        body = rr.json() if rr.content else {}
+        body = _send_raw(meta, raw_hex, acct.address, raw_tx["nonce"])
     except Exception as exc:
         return False, f"EVM broadcast failed: {exc} | to={raw_tx.get('to')}"
     if body.get("error"):
@@ -370,6 +360,59 @@ def _nonce(rpc: str, addr: str) -> int:
     data = r.json() if r.content else {}
     val = data.get("result") or "0x0"
     return int(val, 16)
+
+
+# --- EVM MEV protection -------------------------------------------------
+# Only the final signed tx goes to a private, MEV-protected endpoint; quotes,
+# balances, gas and nonces stay on the chain's normal RPC. If the private
+# endpoint refuses, the SAME signed tx (same hash + nonce, so it can never
+# double-trade) goes out through the public RPC instead.
+# EVM_MEV_PROTECT=0 in .env turns this off desk-wide;
+# EVM_MEV_RPC_<chainId>=<url> overrides/adds an endpoint for a chain.
+_MEV_RPCS = {
+    1: "https://rpc.flashbots.net/fast",        # Ethereum: Flashbots Protect
+    56: "https://bscrpc.pancakeswap.finance",   # BNB Chain: PancakeSwap MEV Guard
+}
+# Private txs don't show in the public "pending" pool, so the public RPC would
+# hand the NEXT trade the same nonce. Remember nonces we sent privately.
+_NONCE_MEM: dict = {}
+_NONCE_MEM_TTL = 180  # seconds
+
+
+def _mev_rpc(meta: dict) -> str:
+    if (os.getenv("EVM_MEV_PROTECT", "1").strip().lower()) in {"0", "false", "off", "no"}:
+        return ""
+    cid = int(meta.get("chain_id") or 0)
+    return (os.getenv(f"EVM_MEV_RPC_{cid}") or _MEV_RPCS.get(cid, "")).strip()
+
+
+def _nonce_guarded(meta: dict, addr: str) -> int:
+    import time as _time
+
+    n = _nonce(meta["rpc"], addr)
+    rec = _NONCE_MEM.get((int(meta.get("chain_id") or 0), str(addr).lower()))
+    if rec and _time.time() - rec[1] < _NONCE_MEM_TTL and rec[0] + 1 > n:
+        return rec[0] + 1
+    return n
+
+
+def _send_raw(meta: dict, raw_hex: str, addr: str = "", nonce=None) -> dict:
+    import time as _time
+
+    priv = _mev_rpc(meta)
+    if priv:
+        try:
+            body = _rpc(priv, "eth_sendRawTransaction", [raw_hex])
+        except Exception as exc:
+            body = {"error": {"message": f"{exc}"}}
+        if isinstance(body, dict) and body.get("result"):
+            if addr and nonce is not None:
+                _NONCE_MEM[(int(meta.get("chain_id") or 0), str(addr).lower())] = (int(nonce), _time.time())
+            log.info("evm tx sent via MEV-protected rpc (chain %s): %s", meta.get("chain_id"), body.get("result"))
+            return body
+        err = body.get("error") if isinstance(body, dict) else body
+        log.warning("MEV-protected rpc refused (chain %s): %s -- sending same tx via public rpc", meta.get("chain_id"), err)
+    return _rpc(meta["rpc"], "eth_sendRawTransaction", [raw_hex])
 
 
 def _rpc(rpc: str, method: str, params: list):
@@ -421,7 +464,7 @@ def _broadcast(acct, meta: dict, to: str, data: str, value: int = 0, gas_limit: 
     # gas_limit: callers that pre-computed the exact fee (a "send all"
     # withdrawal) pass it so the fee we sign matches the fee they reserved.
     gas = int(gas_limit) if gas_limit else _estimate_gas(meta["rpc"], acct.address, to, data_hex, int(value))
-    nonce = _nonce(meta["rpc"], acct.address)
+    nonce = _nonce_guarded(meta, acct.address)
     base_gas_price = _gas_price(meta["rpc"])
     bumps = (1.2, 1.6, 2.2)  # first try, then two retries if underpriced
     last_err = "RPC accepted nothing."
@@ -439,7 +482,7 @@ def _broadcast(acct, meta: dict, to: str, data: str, value: int = 0, gas_limit: 
         raw_hex = signed.raw_transaction.hex() if hasattr(signed, "raw_transaction") else signed.rawTransaction.hex()
         if not raw_hex.startswith("0x"):
             raw_hex = "0x" + raw_hex
-        body = _rpc(meta["rpc"], "eth_sendRawTransaction", [raw_hex])
+        body = _send_raw(meta, raw_hex, acct.address, nonce)
         if body.get("error"):
             err = body["error"]
             last_err = str(err.get("message") if isinstance(err, dict) else err)
