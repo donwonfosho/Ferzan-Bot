@@ -185,8 +185,13 @@ def simulate(rpc: str, wire: str) -> str | None:
 # Error text that proves Sender rejected the tx BEFORE forwarding it. Only
 # these let the caller fall back to another route; anything else might have
 # been forwarded, so the caller checks the chain instead of re-building.
-_REFUSED_HINTS = ("tip", "compute unit price", "computeunitprice", "priority fee", "rate limit",
-                  "too many requests", "invalid", "malformed", "decode", "deserial", "too large")
+# Exact phrases / JSON-RPC codes only: loose words ("tip" is inside
+# "multiple", "invalid" shows up in gateway errors after a forward) could turn
+# a maybe-forwarded tx into a second buy.
+_REFUSED_PHRASES = ("must include a tip", "tip account", "compute unit price", "computeunitprice",
+                    "rate limit", "too many requests", "failed to deserialize", "could not decode",
+                    "transaction too large")
+_REFUSED_CODES = (-32600, -32602)  # invalid request / invalid params: rejected before forwarding
 
 
 def send(wire: str, mev_protect: bool) -> tuple[str, str]:
@@ -208,8 +213,10 @@ def send(wire: str, mev_protect: bool) -> tuple[str, str]:
         if body.get("error"):
             err = body["error"]
             msg = str(err.get("message") if isinstance(err, dict) else err)[:200]
+            code = err.get("code") if isinstance(err, dict) else None
             low = msg.lower()
-            return ("refused" if any(h in low for h in _REFUSED_HINTS) else "uncertain"), msg
+            refused = code in _REFUSED_CODES or any(p in low for p in _REFUSED_PHRASES)
+            return ("refused" if refused else "uncertain"), msg
         if r.status_code >= 400:
             return "uncertain", f"HTTP {r.status_code}"
         return "sent", ""

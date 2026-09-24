@@ -1407,11 +1407,22 @@ def _multi_buy(
 
     with ThreadPoolExecutor(max_workers=len(chosen)) as pool:
         results = list(pool.map(one, chosen))
-    first_ok = next((label for label, ok, _m in results if ok), None)
+    first_idx = next((i for i, (_l, ok, _m) in enumerate(results) if ok), None)
+    first_ok = results[first_idx][0] if first_idx is not None else None
+    chain_l = (snap.chain or "").lower()
+    ton_tron = mint.startswith(("EQ", "UQ", "kQ")) or chain_l in {"ton", "trx", "tron"} or (
+        mint.startswith("T") and 30 <= len(mint) <= 36 and "sol" not in chain_l)
+    unmanaged = ""
     if first_ok and mint:
-        db.add_live_cost(uid, mint, each)
-        if not mint.startswith(("EQ", "UQ", "kQ", "T")):
-            db.set_lp_mark(uid, mint, float(snap.liquidity_usd or 0))
+        if ton_tron and first_idx != 0:
+            # TON/TRON exits only look at the ACTIVE wallet: don't point them
+            # at a bag they can't see.
+            unmanaged = "Your active wallet didn't fill, so no exit rules on this TON/TRON buy."
+            first_ok = None
+        else:
+            db.add_live_cost(uid, mint, each)
+            if not ton_tron:
+                db.set_lp_mark(uid, mint, float(snap.liquidity_usd or 0))
     won = sum(1 for _l, ok, _m in results if ok)
     lines = [f"👥 Multi-buy · {won}/{len(results)} wallets filled · ${each:.2f} each"]
     if scaled:
@@ -1419,10 +1430,15 @@ def _multi_buy(
     for label, ok, msg in results:
         text = (msg or "").strip()
         link = next(iter(re.findall(r"https://\S+", text)), "")
-        first = next((ln for ln in text.splitlines() if ln.strip() and not ln.startswith("http")), "")[:110]
-        lines.append(f"{'✅' if ok else '🔴'} {label}: {first}" + (f"\n{link}" if link else ""))
+        body = [ln.strip() for ln in text.splitlines() if ln.strip() and not ln.strip().startswith("http")]
+        # A failure's REASON is on line 2 (line 1 is just "🔴 Buy failed $x");
+        # it can say "not confirmed yet - check the link", which must show.
+        detail = (body[1] if not ok and len(body) > 1 else (body[0] if body else ""))[:110]
+        lines.append(f"{'✅' if ok else '🔴'} {label}: {detail}" + (f"\n{link}" if link else ""))
     if first_ok:
         lines.append(f"PnL and exit rules follow the {first_ok} bag.")
+    elif unmanaged:
+        lines.append(unmanaged)
     return won > 0, "\n".join(lines)
 
 
@@ -3020,7 +3036,27 @@ async def _multi_callback(query, context, uid: int, data: str) -> None:
             await context.bot.send_message(uid, f"Max {db.MAX_MULTI_WALLETS} wallets per multi-buy.")
         db.set_multi_wallets(uid, picked)
     elif data == "mwo":
-        db.set_flag(uid, "multi_buy", not db.flag_on(uid, "multi_buy", 0))
+        if db.flag_on(uid, "multi_buy", 0):
+            db.set_flag(uid, "multi_buy", False)
+        else:
+            active = [w["id"] for w in db.list_wallet_slots(uid) if w["active"]]
+            n = len((active + [i for i in db.multi_wallets(uid) if i not in active])[: db.MAX_MULTI_WALLETS])
+            if n < 2:
+                await context.bot.send_message(uid, "👥 Tick at least one more wallet first, then turn multi-buy on.")
+            else:
+                text, kb = _multi_panel(uid)
+                rows = [list(r) for r in kb.inline_keyboard if not any(b.callback_data == "mwo" for b in r)]
+                rows.insert(0, [InlineKeyboardButton(f"✅ Confirm multi-buy ×{n}", callback_data="mwc"),
+                                InlineKeyboardButton("✖ Cancel", callback_data="mwp")])
+                text += (f"\n\n⚠️ Each tap will buy in {n} wallets. Your ${float(signer.max_usd()):.0f} per-trade cap "
+                         "covers the whole tap (sizes shrink to fit). DCA / auto-buys / copy stay single-wallet.")
+                try:
+                    await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(rows))
+                except Exception:
+                    await context.bot.send_message(uid, text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(rows))
+                return
+    elif data == "mwc":
+        db.set_flag(uid, "multi_buy", True)
     text, kb = _multi_panel(uid)
     try:
         await query.edit_message_text(text, parse_mode="HTML", reply_markup=kb)
@@ -4924,7 +4960,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await _safe_answer(query, "Following")
         await context.bot.send_message(uid, f"👁 Now following {w['label']} ({w['chain']}). DM ping when it moves.")
         return
-    if data.startswith(("mwt:", "mwy:", "mwn:", "mws:")) or data in ("mwp", "mwo"):
+    if data.startswith(("mwt:", "mwy:", "mwn:", "mws:")) or data in ("mwp", "mwo", "mwc"):
         await _multi_callback(query, context, uid, data)
         return
     if data.startswith("bnv:"):
