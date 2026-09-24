@@ -36,10 +36,8 @@ def _unlock(blob: str) -> str:
     return _fernet().decrypt(blob.encode()).decode()
 
 
-def ensure(user_id: int) -> dict:
-    row = db.get_user_wallet(user_id)
-    if row:
-        return row
+def _fresh_keys() -> tuple[str, str, str, str]:
+    """(sol_pub, locked sol secret, evm address, locked evm secret)."""
     from eth_account import Account
     from solders.keypair import Keypair
 
@@ -49,25 +47,56 @@ def ensure(user_id: int) -> dict:
         sol_secret = sol.to_base58_string()
     except Exception:
         sol_secret = base64.b64encode(bytes(sol)).decode()
-    evm_secret = evm.key.hex()
-    db.save_user_wallet(
-        user_id,
-        str(sol.pubkey()),
-        _lock(sol_secret),
-        evm.address,
-        _lock(evm_secret),
-    )
+    return str(sol.pubkey()), _lock(sol_secret), evm.address, _lock(evm.key.hex())
+
+
+def ensure(user_id: int) -> dict:
+    """The user's ACTIVE wallet, creating their first one if needed."""
+    row = db.get_user_wallet(user_id)
+    if row:
+        return row
+    db.save_user_wallet(user_id, *_fresh_keys())
     return db.get_user_wallet(user_id) or {}
 
 
+def new_wallet(user_id: int, label: str = "") -> dict:
+    """Generate another wallet and make it active. Existing wallets are kept."""
+    ensure(user_id)  # first wallet always exists before a second one
+    sid = db.add_wallet_slot(user_id, label, *_fresh_keys())
+    return db.set_active_wallet(user_id, sid) or {}
+
+
+def switch_wallet(user_id: int, slot_id: int) -> dict | None:
+    return db.set_active_wallet(user_id, slot_id)
+
+
+def all_secrets(user_id: int) -> list[tuple[int, str, str, str]]:
+    """[(slot_id, label, sol_secret, evm_secret)], ACTIVE wallet first.
+    Used by sells to find whichever wallet actually holds a token."""
+    ensure(user_id)
+    slots = db.list_wallet_slots(user_id)
+    slots.sort(key=lambda r: (not r["active"], r["id"]))
+    return [(int(r["id"]), r["label"], _unlock(r["sol_key"]), _unlock(r["evm_key"])) for r in slots]
+
+
+def active_label(user_id: int) -> str:
+    for r in db.list_wallet_slots(user_id):
+        if r["active"]:
+            return r["label"]
+    return "Main"
+
+
 def import_keys(user_id: int, sol_secret: str = "", evm_secret: str = "") -> dict:
+    """Import into a NEW wallet slot and make it active. Never overwrites an
+    existing key (the old behaviour replaced the active key, which could
+    strand funds sitting in the bot-generated wallet). The chain you didn't
+    import gets a fresh generated key in the new slot."""
     sol_secret = (sol_secret or "").strip()
     evm_secret = (evm_secret or "").strip()
     if not sol_secret and not evm_secret:
         raise ValueError("Need a Solana key or an EVM hex key.")
-    row = db.get_user_wallet(user_id) or ensure(user_id)
-    sol_pub, evm_pub = row["sol_pub"], row["evm_pub"]
-    sol_store, evm_store = row["sol_key"], row["evm_key"]
+    ensure(user_id)
+    sol_pub, sol_store, evm_pub, evm_store = _fresh_keys()
     if sol_secret:
         from solders.keypair import Keypair
 
@@ -88,8 +117,15 @@ def import_keys(user_id: int, sol_secret: str = "", evm_secret: str = "") -> dic
         acct = Account.from_key("0x" + raw)
         evm_pub = acct.address
         evm_store = _lock(acct.key.hex())
-    db.save_user_wallet(user_id, sol_pub, sol_store, evm_pub, evm_store)
-    return db.get_user_wallet(user_id) or {}
+    for r in db.list_wallet_slots(user_id):
+        # Same key(s) imported again: just switch to that wallet. Every key
+        # given must match, so a new key passed alongside is never dropped.
+        sol_match = (not sol_secret) or r["sol_pub"] == sol_pub
+        evm_match = (not evm_secret) or r["evm_pub"].lower() == evm_pub.lower()
+        if sol_match and evm_match:
+            return db.set_active_wallet(user_id, int(r["id"])) or {}
+    sid = db.add_wallet_slot(user_id, "Imported", sol_pub, sol_store, evm_pub, evm_store)
+    return db.set_active_wallet(user_id, sid) or {}
 
 
 def secrets(user_id: int) -> tuple[str, str]:
@@ -103,6 +139,7 @@ def export_text(user_id: int) -> str:
     return (
         "⚠️ SAVE OFFLINE. Delete this Telegram message after you copy it.\n"
         "Anyone with these keys owns the bag.\n\n"
+        f"Wallet: {active_label(user_id)} (switch in /wallet → 👛 to export another)\n\n"
         f"Solana address\n`{row['sol_pub']}`\n"
         f"Solana private key\n`{sol}`\n\n"
         f"EVM address\n`{row['evm_pub']}`\n"

@@ -43,8 +43,185 @@ def _tg_chat(val: str, fallback: str) -> str:
 
 RAID_CH = _tg_chat(os.getenv("FERZAN_RAID_CHAT") or "", "@Ferzan_Raid")
 TRENDING_CH = _tg_chat(os.getenv("FERZAN_TRENDING_CHAT") or "", "@Ferzan_Trending")
+# Explicit override for the Leaderboard button when RAID_CH is a private chat (numeric ID) —
+# a t.me/<username> link only works for public chats, so a private raid channel needs its
+# actual invite link (t.me/+xxxx) spelled out here instead.
+RAID_INVITE = (os.getenv("FERZAN_RAID_INVITE") or "").strip()
 TREASURY_SOL = (os.getenv("FEE_WALLET_SOL") or os.getenv("PLATFORM_TREASURY_SOL") or "").strip()
 TREASURY_EVM = (os.getenv("FEE_WALLET_EVM") or os.getenv("PLATFORM_TREASURY_EVM") or "").strip()
+
+# Boost pricing (USD) — deliberately low while the project has low exposure, raise later.
+# duration in hours, price in USD.
+BOOST_TIERS = {
+    "raid": [
+        (24, 12.0),
+        (72, 28.0),
+        (168, 50.0),
+    ],
+    "trending": [
+        (24, 40.0),
+        (72, 90.0),
+        (168, 165.0),
+    ],
+}
+# Minimum a partial/underpaid tx still has to clear to be worth prorating into any boost time.
+BOOST_MIN_USD = 3.0
+
+# Buy-card button ads — SOL-denominated (not USD-pegged like raid/trending), same as before.
+ADS_TIERS_SOL = [(24, 2.7), (72, 6.3), (168, 13.5)]
+ADS_MIN_SOL = 0.05
+
+OWNER_IDS = {
+    int(x) for x in (os.getenv("FERZAN_OWNER_IDS") or "5107098957").replace(" ", "").split(",") if x.strip().isdigit()
+}
+
+# Weighted raid points — a reply takes more effort than a like, so it should be worth more.
+RAID_WEIGHTS = {"like": 1, "rt": 2, "re": 3, "join": 1}
+
+# XP tiers — display-only labels over a chat's cumulative raid points.
+RAID_TIERS = [
+    (0, "🥚 Rookie"),
+    (15, "🥉 Bronze Raider"),
+    (50, "🥈 Silver Raider"),
+    (150, "🥇 Gold Raider"),
+    (400, "💎 Diamond Raider"),
+    (1000, "👑 Raid Legend"),
+]
+
+STREAK_BONUS_EVERY = 5  # every 5th consecutive raid-day earns a bonus
+STREAK_BONUS_PTS = 5
+
+MILESTONES = [
+    100_000, 250_000, 500_000, 1_000_000, 2_500_000, 5_000_000,
+    10_000_000, 25_000_000, 50_000_000, 100_000_000, 250_000_000,
+    500_000_000, 1_000_000_000,
+]
+
+
+def _next_milestone(mcap: float, last: float) -> float:
+    for m in MILESTONES:
+        if mcap >= m > last:
+            return m
+    return 0
+
+
+def _dev_balance(chain: str, ca: str, wallet: str) -> float | None:
+    """Current token balance of a dev/deployer wallet, or None if it couldn't be read."""
+    try:
+        low = str(chain).lower()
+        if low in ("sol", "solana", "pump", "pumpfun"):
+            r = requests.post(
+                SOL_RPC,
+                json={
+                    "jsonrpc": "2.0", "id": 1, "method": "getTokenAccountsByOwner",
+                    "params": [wallet, {"mint": ca}, {"encoding": "jsonParsed"}],
+                },
+                timeout=10,
+            )
+            accts = ((r.json() or {}).get("result") or {}).get("value") or []
+            total = 0.0
+            for acc in accts:
+                info = (((acc.get("account") or {}).get("data") or {}).get("parsed") or {}).get("info") or {}
+                amt = ((info.get("tokenAmount") or {}).get("uiAmount")) or 0
+                total += float(amt or 0)
+            return total
+        rpc = EVM_RPC.get(low)
+        if not rpc:
+            return None
+        selector = "70a08231"  # balanceOf(address)
+        padded = wallet.lower().replace("0x", "").rjust(64, "0")
+        r = requests.post(
+            rpc,
+            json={"jsonrpc": "2.0", "id": 1, "method": "eth_call",
+                  "params": [{"to": ca, "data": "0x" + selector + padded}, "latest"]},
+            timeout=10,
+        )
+        hexval = (r.json() or {}).get("result") or "0x0"
+        raw = int(hexval, 16)
+        decimals = 18
+        try:
+            dsel = "313ce567"  # decimals()
+            rd = requests.post(
+                rpc,
+                json={"jsonrpc": "2.0", "id": 1, "method": "eth_call",
+                      "params": [{"to": ca, "data": "0x" + dsel}, "latest"]},
+                timeout=8,
+            )
+            dhex = (rd.json() or {}).get("result")
+            if dhex:
+                decimals = int(dhex, 16)
+        except Exception:
+            pass
+        return raw / (10 ** decimals)
+    except Exception as exc:
+        log.warning("dev balance %s %s: %s", chain, wallet, exc)
+        return None
+
+
+def _tier_for_pts(pts: int) -> str:
+    label = RAID_TIERS[0][1]
+    for floor, name in RAID_TIERS:
+        if pts >= floor:
+            label = name
+        else:
+            break
+    return label
+
+
+def _bump_streak(con: sqlite3.Connection, chat_id: int, user_id: int) -> int:
+    """Advance a user's daily raid streak. Returns bonus points earned (0 if none), and
+    awards them onto raid_scores directly. Only advances once per calendar day."""
+    today = time.strftime("%Y-%m-%d", time.gmtime())
+    row = con.execute(
+        "SELECT last_day, streak FROM raid_streaks WHERE chat_id=? AND user_id=?",
+        (chat_id, user_id),
+    ).fetchone()
+    if row and row[0] == today:
+        return 0  # already counted today
+    if row:
+        last_day, streak = row[0], int(row[1] or 0)
+        yesterday = time.strftime("%Y-%m-%d", time.gmtime(time.time() - 86400))
+        streak = streak + 1 if last_day == yesterday else 1
+    else:
+        streak = 1
+    con.execute(
+        "INSERT INTO raid_streaks(chat_id, user_id, last_day, streak) VALUES(?,?,?,?) "
+        "ON CONFLICT(chat_id, user_id) DO UPDATE SET last_day=excluded.last_day, streak=excluded.streak",
+        (chat_id, user_id, today, streak),
+    )
+    if streak and streak % STREAK_BONUS_EVERY == 0:
+        return STREAK_BONUS_PTS
+    return 0
+
+WALLET_RE = {
+    "sol": re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$"),
+    "evm": re.compile(r"^0x[a-fA-F0-9]{40}$"),
+}
+
+
+async def _is_chat_admin(update: Update) -> bool:
+    u = update.effective_user
+    if not u:
+        return False
+    if u.id in OWNER_IDS:
+        return True
+    chat = update.effective_chat
+    if not chat or chat.type == "private":
+        return False
+    try:
+        member = await chat.get_member(u.id)
+        return member.status in ("creator", "administrator")
+    except Exception:
+        return False
+
+SOL_RPC = (os.getenv("FERZAN_SOL_RPC") or "https://api.mainnet-beta.solana.com").strip()
+EVM_RPC = {
+    "eth": os.getenv("FERZAN_ETH_RPC") or "https://ethereum-rpc.publicnode.com",
+    "ethereum": os.getenv("FERZAN_ETH_RPC") or "https://ethereum-rpc.publicnode.com",
+    "base": os.getenv("FERZAN_BASE_RPC") or "https://base-rpc.publicnode.com",
+    "bsc": os.getenv("FERZAN_BSC_RPC") or "https://bsc-rpc.publicnode.com",
+    "arb": os.getenv("FERZAN_ARB_RPC") or "https://arbitrum-one-rpc.publicnode.com",
+}
 LAST_MEDIA: dict = {}
 SETGIF_WAIT: set = set()
 MIN_USD = float(os.getenv("BUYBOT_MIN_USD") or "15")
@@ -167,6 +344,14 @@ def _db() -> sqlite3.Connection:
             mute_until INTEGER DEFAULT 0
         )"""
     )
+    try:
+        con.execute("ALTER TABLE chat_flags ADD COLUMN raid_pin INTEGER DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        con.execute("ALTER TABLE chat_flags ADD COLUMN last_recap INTEGER DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
     con.execute(
         """CREATE TABLE IF NOT EXISTS buy_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -174,6 +359,36 @@ def _db() -> sqlite3.Connection:
             ca TEXT,
             usd REAL,
             ts INTEGER
+        )"""
+    )
+    try:
+        con.execute("ALTER TABLE buy_log ADD COLUMN buyer TEXT")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        con.execute("ALTER TABLE buy_log ADD COLUMN kind TEXT DEFAULT 'buy'")
+    except sqlite3.OperationalError:
+        pass
+    for col, spec in (
+        ("last_milestone", "REAL DEFAULT 0"),
+        ("ath_mcap", "REAL DEFAULT 0"),
+        ("whale_usd", "REAL DEFAULT 0"),
+        ("sell_alerts", "INTEGER DEFAULT 0"),
+        ("dev_wallet", "TEXT"),
+        ("dev_last_bal", "REAL DEFAULT -1"),
+    ):
+        try:
+            con.execute(f"ALTER TABLE watches ADD COLUMN {col} {spec}")
+        except sqlite3.OperationalError:
+            pass
+    con.execute(
+        """CREATE TABLE IF NOT EXISTS price_alerts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER,
+            user_id INTEGER,
+            target_mcap REAL,
+            created INTEGER,
+            fired INTEGER DEFAULT 0
         )"""
     )
     con.execute(
@@ -258,6 +473,84 @@ def _db() -> sqlite3.Connection:
             chat_id INTEGER PRIMARY KEY,
             kind TEXT,
             file_id TEXT
+        )"""
+    )
+    con.execute(
+        """CREATE TABLE IF NOT EXISTS boosts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            kind TEXT,
+            chat_id INTEGER,
+            cashtag TEXT,
+            ca TEXT,
+            url TEXT,
+            user_id INTEGER,
+            chain TEXT,
+            tx_hash TEXT UNIQUE,
+            usd_paid REAL,
+            hours_granted REAL,
+            starts_ts INTEGER,
+            ends_ts INTEGER,
+            status TEXT DEFAULT 'active',
+            created_ts INTEGER
+        )"""
+    )
+    try:
+        con.execute("ALTER TABLE boosts ADD COLUMN reminded INTEGER DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
+    con.execute(
+        """CREATE TABLE IF NOT EXISTS user_wallets (
+            user_id INTEGER,
+            chain TEXT,
+            address TEXT,
+            updated INTEGER,
+            PRIMARY KEY (user_id, chain)
+        )"""
+    )
+    con.execute(
+        """CREATE TABLE IF NOT EXISTS raid_blacklist (
+            chat_id INTEGER,
+            user_id INTEGER,
+            name TEXT,
+            added_by INTEGER,
+            added_ts INTEGER,
+            PRIMARY KEY (chat_id, user_id)
+        )"""
+    )
+    con.execute(
+        """CREATE TABLE IF NOT EXISTS raid_presets (
+            chat_id INTEGER,
+            name TEXT,
+            likes_t INTEGER,
+            rt_t INTEGER,
+            re_t INTEGER,
+            mins INTEGER,
+            PRIMARY KEY (chat_id, name)
+        )"""
+    )
+    con.execute(
+        """CREATE TABLE IF NOT EXISTS raid_links (
+            chat_id INTEGER,
+            linked_chat_id INTEGER,
+            linked_title TEXT,
+            PRIMARY KEY (chat_id, linked_chat_id)
+        )"""
+    )
+    con.execute(
+        """CREATE TABLE IF NOT EXISTS raid_streaks (
+            chat_id INTEGER,
+            user_id INTEGER,
+            last_day TEXT,
+            streak INTEGER DEFAULT 0,
+            PRIMARY KEY (chat_id, user_id)
+        )"""
+    )
+    con.execute(
+        """CREATE TABLE IF NOT EXISTS raid_seasons (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER,
+            ended_ts INTEGER,
+            snapshot TEXT
         )"""
     )
     return con
@@ -360,13 +653,13 @@ def _pool_for(chain: str, ca: str) -> tuple[str, dict]:
     return pool, (row.get("attributes") or {})
 
 
-def _trades(net: str, pool: str, last_ts: int) -> list[dict]:
+def _trades(net: str, pool: str, last_ts: int, kind: str = "buy") -> list[dict]:
     data = _gt(f"/networks/{net}/pools/{pool}/trades?trade_volume_in_usd_greater_than=1")
     rows = (data or {}).get("data") or []
     out = []
     for row in rows:
         a = row.get("attributes") or {}
-        if str(a.get("kind") or "").lower() != "buy":
+        if str(a.get("kind") or "").lower() != kind:
             continue
         ts = a.get("block_timestamp") or a.get("timestamp") or ""
         try:
@@ -449,7 +742,7 @@ def _usd(v) -> str:
     return f"${x:,.2f}"
 
 
-def _card(chain: str, ca: str, tr: dict, attrs: dict, emoji: str = "🟢", tg_url: str = "", cluster: int = 1, discord_url: str = "", x_url: str = "") -> tuple[str, InlineKeyboardMarkup]:
+def _card(chain: str, ca: str, tr: dict, attrs: dict, emoji: str = "🟢", tg_url: str = "", cluster: int = 1, discord_url: str = "", x_url: str = "", whale: bool = False, vip: bool = False) -> tuple[str, InlineKeyboardMarkup]:
     usd = float(tr.get("volume_in_usd") or 0)
     got = tr.get("to_token_amount") or tr.get("to_token_output") or ""
     spent = tr.get("from_token_amount") or ""
@@ -475,7 +768,7 @@ def _card(chain: str, ca: str, tr: dict, attrs: dict, emoji: str = "🟢", tg_ur
         if str(s.get("type") or "").lower() in ("telegram", "tg"):
             tg = s.get("url") or ""
             break
-    buy = f"https://t.me/{TRADE}?start={ca}"
+    buy = f"https://t.me/{TRADE}?start=buy_{ca}"
     scan = {
         "sol": f"https://solscan.io/tx/{tx}",
         "solana": f"https://solscan.io/tx/{tx}",
@@ -555,9 +848,15 @@ def _card(chain: str, ca: str, tr: dict, attrs: dict, emoji: str = "🟢", tg_ur
         extra.extend(flags)
     if cluster and cluster > 1:
         extra.append(f"{cluster} buys / 12s")
+    title = f"<b>{_esc(name)}</b>   [${_esc(sym)}]   ·   {_esc(str(chain).upper())}"
+    if vip:
+        title = "⭐ <b>VIP</b>  " + title
+    bar_line = f"{_esc(label)}  {_bar(usd, emoji)}"
+    if whale:
+        bar_line = f"🐳 <b>WHALE BUY</b>  🐳🐳🐳🐳🐳🐳"
     lines = [
-        f"<b>{_esc(name)}</b>   [${_esc(sym)}]   ·   {_esc(str(chain).upper())}",
-        f"{_esc(label)}  {_bar(usd, emoji)}",
+        title,
+        bar_line,
         f"<code>{_esc(ca)}</code>",
         "",
         f"{_icon('USD', 1, '💵')}  Spent   {_esc(spent_s)}   (${usd:,.2f})",
@@ -590,20 +889,43 @@ def _card(chain: str, ca: str, tr: dict, attrs: dict, emoji: str = "🟢", tg_ur
     hub = HUB
     rows = [
         [
-            InlineKeyboardButton("Buy", url=buy),
+            InlineKeyboardButton("⚡ Buy on Ferzan", url=buy),
             InlineKeyboardButton("Chart", url=ds),
-            InlineKeyboardButton("Eco Hub", url=hub),
         ],
-        [
-            InlineKeyboardButton("0.05", url=buy),
-            InlineKeyboardButton("0.1", url=buy),
-            InlineKeyboardButton("0.25", url=buy),
-        ],
-        [InlineKeyboardButton("See it. Ape it. Send it.", url=buy)],
+        [InlineKeyboardButton("Eco Hub", url=hub)],
         [InlineKeyboardButton("Boost this alert", url=boost)],
     ]
     kb = InlineKeyboardMarkup(rows)
     return text, kb
+
+
+def _sell_card(chain: str, ca: str, tr: dict, attrs: dict, is_dev: bool = False) -> str:
+    usd = float(tr.get("volume_in_usd") or 0)
+    seller = tr.get("tx_from_address") or tr.get("origin_from_address") or ""
+    tx = tr.get("tx_hash") or ""
+    pair = _ds(ca)
+    name = attrs.get("name") or (pair.get("baseToken") or {}).get("name") or ca[:8]
+    sym = attrs.get("symbol") or (pair.get("baseToken") or {}).get("symbol") or name
+    mc = attrs.get("fdv_usd") or attrs.get("market_cap_usd") or pair.get("marketCap") or pair.get("fdv") or ""
+    net = GT_NET.get(chain, chain)
+    ds = pair.get("url") or f"https://dexscreener.com/{net}/{ca}"
+    scan = {
+        "sol": f"https://solscan.io/tx/{tx}", "solana": f"https://solscan.io/tx/{tx}",
+        "base": f"https://basescan.org/tx/{tx}", "eth": f"https://etherscan.io/tx/{tx}",
+        "ethereum": f"https://etherscan.io/tx/{tx}", "bsc": f"https://bscscan.com/tx/{tx}",
+        "arb": f"https://arbiscan.io/tx/{tx}",
+    }.get(chain, ds)
+    header = "🚨 <b>DEV WALLET SELL</b>" if is_dev else "🔴 SELL"
+    return (
+        f"{header}\n"
+        f"<b>{_esc(name)}</b>   [${_esc(sym)}]   ·   {_esc(str(chain).upper())}\n"
+        f"🔻🔻🔻\n"
+        f"<code>{_esc(ca)}</code>\n\n"
+        f"💵  Sold   ${usd:,.2f}\n"
+        f"🧢  MC     {_usd(mc)}\n"
+        + (f"👤  <a href=\"{_esc(scan)}\">Seller / Txn</a>\n" if seller else f"<a href=\"{_esc(scan)}\">Txn</a>\n")
+        + f"📉  <a href=\"{_esc(ds)}\">Chart</a>"
+    )
 
 
 SETUP_CHAIN, SETUP_CA, SETUP_MIN, SETUP_EMOJI, SETUP_TG = range(5)
@@ -633,7 +955,28 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/preview  fake card   /status\n"
         "/tape on|off   /mute 1h   /min 50   /who\n"
         "/chart  token card + Dex chart\n"
-        "/stats /price /dex /market /vote /raid\n"
+        "/stats /price /dex /market /vote /raid\n\n"
+        "⚔️ Raids:\n"
+        "/raid <x link> [likes rt re mins]  or  /raid <link> <preset>\n"
+        "/addtag /tags /deltag  — save reusable raid presets\n"
+        "/linkgroup /unlinkgroup /linkedgroups  — multi-group raids, shared leaderboard\n"
+        "/blacklist add|remove|list  — exclude wallets/users from raid points\n"
+        "/exportpoints  — CSV of this chat's raid leaderboard + linked wallets\n"
+        "/linkwallet sol|evm <address>  /mywallet  /unlinkwallet\n"
+        "/raidpin on|off  — auto-pin raid posts (off by default)\n"
+        "/season  /lastseason  — close out + reset the leaderboard\n"
+        "/payoutpreview <$/pt>  /exportpayout <$/pt>  — $ owed per raider\n\n"
+        "📈 Growth & safety:\n"
+        "Auto: milestone alerts, new-ATH alerts, 🐳 whale-buy cards, 24h recap\n"
+        "/setwhale <$>  — whale-buy threshold (default 10x your min buy)\n"
+        "/sellalerts on|off  /setdev <wallet>  — sell + dev-wallet-move alerts\n"
+        "/alert <mcap>  — DM me when it hits that market cap\n"
+        "/topbuyers [7d]  — biggest buyers leaderboard\n\n"
+        "📣 Promotion:\n"
+        "/trending  buy a Trending-board boost\n"
+        "/raidboost  buy a Raid-Leaderboard boost\n"
+        "/paid <txhash>  activate the boost you just paid for\n"
+        "/boosts  see what's currently boosted\n"
         "/help"
     )
 
@@ -811,6 +1154,113 @@ async def setx_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.effective_message.reply_text(f"X set: {url}")
 
 
+def _parse_money(raw: str) -> float | None:
+    raw = (raw or "").strip().lower().replace("$", "").replace(",", "")
+    mult = 1
+    if raw.endswith("k"):
+        mult, raw = 1_000, raw[:-1]
+    elif raw.endswith("m"):
+        mult, raw = 1_000_000, raw[:-1]
+    elif raw.endswith("b"):
+        mult, raw = 1_000_000_000, raw[:-1]
+    try:
+        return float(raw) * mult
+    except ValueError:
+        return None
+
+
+async def setwhale_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    args = context.args or []
+    amt = _parse_money(args[0]) if args else None
+    if not amt or amt <= 0:
+        await update.effective_message.reply_text(
+            "Usage: /setwhale <usd>\nExample: /setwhale 1000\n"
+            "Buys at or above this get the 🐳 WHALE BUY treatment. Send 0 to use the default (10x your min buy floor)."
+        )
+        return
+    con = _db()
+    con.execute("UPDATE watches SET whale_usd=? WHERE chat_id=?", (amt, update.effective_chat.id))
+    con.commit()
+    con.close()
+    await update.effective_message.reply_text(f"🐳 Whale threshold set to ${amt:,.0f}")
+
+
+async def sellalerts_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    arg = (context.args[0] if context.args else "").lower()
+    if arg not in {"on", "off"}:
+        await update.effective_message.reply_text("Usage: /sellalerts on   or   /sellalerts off")
+        return
+    con = _db()
+    con.execute("UPDATE watches SET sell_alerts=? WHERE chat_id=?", (1 if arg == "on" else 0, update.effective_chat.id))
+    con.commit()
+    con.close()
+    await update.effective_message.reply_text("Sell alerts ON." if arg == "on" else "Sell alerts OFF.")
+
+
+async def setdev_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    args = context.args or []
+    if not args:
+        con = _db()
+        row = con.execute("SELECT dev_wallet FROM watches WHERE chat_id=?", (update.effective_chat.id,)).fetchone()
+        con.close()
+        await update.effective_message.reply_text(
+            f"Dev wallet currently: `{row[0]}`" if row and row[0] else
+            "No dev wallet set.\nUsage: /setdev <wallet address>\n"
+            "The bot will flag it here if the balance drops 5%+ (likely a sell or transfer).",
+            parse_mode="Markdown",
+        )
+        return
+    addr = args[0].strip()
+    con = _db()
+    con.execute("UPDATE watches SET dev_wallet=?, dev_last_bal=-1 WHERE chat_id=?", (addr, update.effective_chat.id))
+    con.commit()
+    con.close()
+    await update.effective_message.reply_text(f"👀 Watching dev wallet `{addr}` for balance drops.", parse_mode="Markdown")
+
+
+async def alert_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    args = context.args or []
+    amt = _parse_money(args[0]) if args else None
+    if not amt or amt <= 0:
+        await update.effective_message.reply_text(
+            "Usage: /alert <market cap>\nExample: /alert 1m\n"
+            "Run this in a project chat with a token paired — I'll DM you when it hits that market cap.\n"
+            "Message me first (/start in DM) so I'm able to DM you."
+        )
+        return
+    row = _watch(update.effective_chat.id)
+    if not row:
+        await update.effective_message.reply_text("Pair a token here first. /setup")
+        return
+    con = _db()
+    con.execute(
+        "INSERT INTO price_alerts(chat_id, user_id, target_mcap, created) VALUES(?,?,?,?)",
+        (update.effective_chat.id, update.effective_user.id, amt, int(time.time())),
+    )
+    con.commit()
+    con.close()
+    await update.effective_message.reply_text(f"🔔 I'll DM you when this hits {_usd(amt)} market cap.")
+
+
+async def topbuyers_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    args = context.args or []
+    window = 7 * 86400 if args and args[0].lower() in ("7d", "week") else 86400
+    label = "7 days" if window > 86400 else "24h"
+    con = _db()
+    rows = con.execute(
+        "SELECT buyer, SUM(usd) s, COUNT(*) n FROM buy_log "
+        "WHERE chat_id=? AND kind='buy' AND ts>=? AND buyer<>'' "
+        "GROUP BY buyer ORDER BY s DESC LIMIT 10",
+        (update.effective_chat.id, int(time.time()) - window),
+    ).fetchall()
+    con.close()
+    if not rows:
+        await update.effective_message.reply_text(f"No buys logged in the last {label}.")
+        return
+    lines = [f"{i+1}. {b[:6]}…{b[-4:]}  ${s:,.0f} ({n} buys)" for i, (b, s, n) in enumerate(rows)]
+    await update.effective_message.reply_text(f"🐋 Top buyers — last {label}\n" + "\n".join(lines))
+
+
 def _token_img(ca: str) -> str:
     p = _ds(ca) or {}
     info = p.get("info") or {}
@@ -951,6 +1401,34 @@ async def mute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     con.commit()
     con.close()
     await update.effective_message.reply_text(f"Muted until {time.strftime('%H:%M', time.localtime(until))}")
+
+
+async def raidpin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    arg = (context.args[0] if context.args else "").lower()
+    if arg not in {"on", "off"}:
+        con = _db()
+        row = con.execute(
+            "SELECT raid_pin FROM chat_flags WHERE chat_id=?", (update.effective_chat.id,)
+        ).fetchone()
+        con.close()
+        on = bool(row and int(row[0] or 0))
+        await update.effective_message.reply_text(
+            f"Raid auto-pin is currently {'ON' if on else 'OFF'} (default off).\n"
+            "Usage: /raidpin on   or   /raidpin off"
+        )
+        return
+    on = 1 if arg == "on" else 0
+    con = _db()
+    con.execute(
+        "INSERT INTO chat_flags(chat_id, tape, mute_until, raid_pin) VALUES(?,1,0,?) "
+        "ON CONFLICT(chat_id) DO UPDATE SET raid_pin=excluded.raid_pin",
+        (update.effective_chat.id, on),
+    )
+    con.commit()
+    con.close()
+    await update.effective_message.reply_text(
+        "Raid posts will now be pinned." if on else "Raid posts will no longer be auto-pinned."
+    )
 
 
 async def min_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1133,7 +1611,7 @@ def _chart_caption(chain: str, ca: str, p: dict) -> str:
         if typ in ("twitter", "x") and url:
             social_lines.append(f"🐦 <a href=\"{_esc(url)}\">X</a>")
     ds = p.get("url") or f"https://dexscreener.com/{cid}/{ca}"
-    buy = f"https://t.me/{TRADE}?start={ca}"
+    buy = f"https://t.me/{TRADE}?start=buy_{ca}"
     v5 = vol.get("m5") or 0
     v1 = vol.get("h1") or 0
     v24 = vol.get("h24") or 0
@@ -1171,7 +1649,7 @@ async def chart_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     token = (p.get("baseToken") or {}).get("address") or ca
     header = f"https://dd.dexscreener.com/ds-data/tokens/{cid}/{token}/header.png?size=lg"
     cap = _chart_caption(chain, ca, p)
-    buy = f"https://t.me/{TRADE}?start={ca}"
+    buy = f"https://t.me/{TRADE}?start=buy_{ca}"
     ds = p.get("url") or f"https://dexscreener.com/{cid}/{ca}"
     kb = InlineKeyboardMarkup(
         [
@@ -1250,6 +1728,15 @@ async def paste_ca(update: Update, context: ContextTypes.DEFAULT_TYPE, forced_ca
     if not msg:
         return
     txt = msg.text or ""
+    pending = context.user_data.get("boost_pending")
+    if pending and pending.get("hours") and not pending.get("target_set") and not forced_ca and not txt.startswith("/"):
+        if pending.get("kind") == "ads":
+            await _finalize_boost_target(msg, context, txt.strip())
+            return
+        ca_candidate = _extract_ca(txt) or txt.strip()
+        if ca_candidate:
+            await _finalize_boost_target(msg, context, ca_candidate)
+            return
     is_scan = txt.lower().startswith("/scan")
     if txt.startswith("/") and not is_scan and not forced_ca:
         return
@@ -1288,7 +1775,7 @@ async def paste_ca(update: Update, context: ContextTypes.DEFAULT_TYPE, forced_ca
         age = f"{hrs:.1f}h" if hrs < 48 else f"{hrs/24:.1f}d"
     dex = (pair.get("dexId") or "dex").title()
     ds = pair.get("url") or f"https://dexscreener.com/{pair.get('chainId')}/{ca}"
-    buy = f"https://t.me/{TRADE}?start={ca}"
+    buy = f"https://t.me/{TRADE}?start=buy_{ca}"
     hub = HUB
     scan = {
         "sol": f"https://solscan.io/token/{ca}",
@@ -1449,6 +1936,37 @@ def _raid_text(row: dict) -> str:
     )
 
 
+def _raid_ping_kb(rid: int, url: str) -> InlineKeyboardMarkup:
+    """Reminder cards get the same one-tap Like / Repost / Reply as the first
+    card (":p" marks the tap as coming from a reminder). No Stop button:
+    reminders also go to the raid channel."""
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("Open Post", url=url)],
+            [
+                InlineKeyboardButton("❤️ Like", callback_data=f"rd:like:{rid}:p"),
+                InlineKeyboardButton("🔁 Repost", callback_data=f"rd:rt:{rid}:p"),
+                InlineKeyboardButton("💬 Reply", callback_data=f"rd:re:{rid}:p"),
+            ],
+            [InlineKeyboardButton("🏆 Raid Leaderboard", url=_raid_board_url())],
+        ]
+    )
+
+
+def _raid_ping_text(tag, url, lh, lt, rh, rt, eh, et) -> str:
+    return (
+        f"{_icon('TITLE', 0, '⚡')}  <b>{_esc(tag or 'RAID')}</b>\n"
+        f"{_icon('ROUTE', 5, '📡')}  LIVE RAID\n"
+        f"────────────────\n"
+        f"{_icon('USD', 1, '❤️')}  Likes      <b>{lh}</b> / {lt}\n"
+        f"{_icon('BAG', 2, '🔁')}  Reposts    <b>{rh}</b> / {rt}\n"
+        f"{_icon('TG', 8, '💬')}  Replies    <b>{eh}</b> / {et}\n"
+        f"────────────────\n"
+        f"{_icon('BUYER', 6, '🔗')}  <a href=\"{_esc(url)}\">Open the post</a>\n"
+        f"<i>Tap ❤️ 🔁 💬 after you smash. See it. Ape it. Send it.</i>"
+    )
+
+
 def _raid_kb(rid: int, url: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
@@ -1457,11 +1975,11 @@ def _raid_kb(rid: int, url: str) -> InlineKeyboardMarkup:
                 InlineKeyboardButton("Stop", callback_data=f"rd:stop:{rid}"),
             ],
             [
-                InlineKeyboardButton("LB", url="https://t.me/Ferzan_Raid"),
-                InlineKeyboardButton("❤️", callback_data=f"rd:like:{rid}"),
-                InlineKeyboardButton("🔁", callback_data=f"rd:rt:{rid}"),
-                InlineKeyboardButton("💬", callback_data=f"rd:re:{rid}"),
+                InlineKeyboardButton("❤️ Like", callback_data=f"rd:like:{rid}"),
+                InlineKeyboardButton("🔁 Repost", callback_data=f"rd:rt:{rid}"),
+                InlineKeyboardButton("💬 Reply", callback_data=f"rd:re:{rid}"),
             ],
+            [InlineKeyboardButton("🏆 Raid Leaderboard", url=_raid_board_url())],
             [InlineKeyboardButton("Eco Hub", url=HUB)],
         ]
     )
@@ -1486,9 +2004,11 @@ async def raid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.effective_message.reply_text(
             "⚔️ FERZAN RAID\n"
             "/raid <x link> [likes] [reposts] [replies] [minutes]\n"
+            "/raid <x link> <preset name>   — use a saved /addtag preset\n"
             "Example:\n"
             "/raid https://x.com/user/status/123 5 5 2 60\n"
-            "/raidstop  /raidlb  /queue <link>"
+            "/raidstop  /raidlb  /queue <link>\n"
+            "/addtag  /tags  /linkgroup  /linkedgroups"
         )
         return
     url = context.args[0]
@@ -1499,10 +2019,24 @@ async def raid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     for a in context.args[1:]:
         if a.isdigit():
             nums.append(int(a))
-    likes_t = nums[0] if len(nums) > 0 else 5
-    rt_t = nums[1] if len(nums) > 1 else 5
-    re_t = nums[2] if len(nums) > 2 else 2
-    mins = nums[3] if len(nums) > 3 else 60
+    preset = None
+    words = [a for a in context.args[1:] if not a.isdigit() and not a.startswith("$")]
+    if words and not nums:
+        con_p = _db()
+        prow = con_p.execute(
+            "SELECT likes_t, rt_t, re_t, mins FROM raid_presets WHERE chat_id=? AND name=?",
+            (update.effective_chat.id, words[0].lower()),
+        ).fetchone()
+        con_p.close()
+        if prow:
+            preset = prow
+    if preset:
+        likes_t, rt_t, re_t, mins = int(preset[0]), int(preset[1]), int(preset[2]), int(preset[3])
+    else:
+        likes_t = nums[0] if len(nums) > 0 else 5
+        rt_t = nums[1] if len(nums) > 1 else 5
+        re_t = nums[2] if len(nums) > 2 else 2
+        mins = nums[3] if len(nums) > 3 else 60
     tag = ""
     w = _watch(update.effective_chat.id)
     if w:
@@ -1573,12 +2107,19 @@ async def raid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
     con.commit()
     con.close()
-    try:
-        await context.bot.pin_chat_message(
-            update.effective_chat.id, msg.message_id, disable_notification=True
-        )
-    except Exception as exc:
-        log.warning("raid pin: %s", exc)
+    # Auto-pin is opt-in per project chat (off by default) — /raidpin on to enable it.
+    con_pf = _db()
+    pin_row = con_pf.execute(
+        "SELECT raid_pin FROM chat_flags WHERE chat_id=?", (update.effective_chat.id,)
+    ).fetchone()
+    con_pf.close()
+    if pin_row and int(pin_row[0] or 0):
+        try:
+            await context.bot.pin_chat_message(
+                update.effective_chat.id, msg.message_id, disable_notification=True
+            )
+        except Exception as exc:
+            log.warning("raid pin: %s", exc)
     if RAID_CH and str(update.effective_chat.username or "") != RAID_CH.lstrip("@"):
         try:
             if banner.exists():
@@ -1590,6 +2131,43 @@ async def raid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 await context.bot.send_message(RAID_CH, start, reply_markup=kb)
         except Exception as exc:
             log.warning("raid mirror %s: %s", RAID_CH, exc)
+    # Multi-group raids: any sister chats linked with /linkgroup get the same raid card,
+    # same raid id — taps there feed the same leaderboard (see raid_cb, which scores against
+    # the raid's home chat_id rather than wherever the tap happened).
+    con_l = _db()
+    linked = con_l.execute(
+        "SELECT linked_chat_id FROM raid_links WHERE chat_id=?", (update.effective_chat.id,)
+    ).fetchall()
+    con_l.close()
+    for (linked_id,) in linked:
+        try:
+            if banner.exists():
+                with banner.open("rb") as fh:
+                    await context.bot.send_photo(
+                        linked_id, fh, caption=start, parse_mode="HTML", reply_markup=kb
+                    )
+            else:
+                await context.bot.send_message(linked_id, start, parse_mode="HTML", reply_markup=kb)
+        except Exception as exc:
+            log.warning("raid multi-group send %s: %s", linked_id, exc)
+    # Register the token on the leaderboard the moment a raid starts (0 pts is fine) and post/refresh
+    # the board right away — previously the board only appeared after the first tap, so a raid group
+    # with no taps yet showed no leaderboard at all.
+    if tag:
+        try:
+            con3 = _db()
+            con3.execute(
+                "INSERT OR IGNORE INTO raid_tokens(cashtag, chat_id, invite, ca, pts) VALUES(?,?,?,?,0)",
+                (tag, update.effective_chat.id, f"https://t.me/{update.effective_chat.username}" if update.effective_chat.username else "", w[1] if w else ""),
+            )
+            con3.commit()
+            con3.close()
+        except Exception as exc:
+            log.warning("raid token register %s", exc)
+        try:
+            await _post_board(context.bot)
+        except Exception as exc:
+            log.warning("raid board post-on-start %s", exc)
 
 
 async def _bump_token(bot, chat, tag: str, ca: str = "") -> None:
@@ -1631,7 +2209,7 @@ async def _bump_token(bot, chat, tag: str, ca: str = "") -> None:
         rows_kb = []
         if invite:
             rows_kb.append([InlineKeyboardButton("Open group", url=invite)])
-        rows_kb.append([InlineKeyboardButton("Buy", url=f"https://t.me/{TRADE}?start={ca}" if ca else HUB)])
+        rows_kb.append([InlineKeyboardButton("Buy", url=f"https://t.me/{TRADE}?start=buy_{ca}" if ca else HUB)])
         rows_kb.append([InlineKeyboardButton("Boost", url=HUB)])
         kb = InlineKeyboardMarkup(rows_kb)
         try:
@@ -1660,28 +2238,54 @@ async def _bump_token(bot, chat, tag: str, ca: str = "") -> None:
 
 async def _post_board(bot) -> str:
     await _load_pack(bot)
+    now = int(time.time())
     con = _db()
-    rows = con.execute(
-        "SELECT cashtag, pts, invite, mc, ca, dex FROM raid_tokens ORDER BY pts DESC LIMIT 10"
+    boost_rows = con.execute(
+        "SELECT cashtag FROM boosts WHERE kind='raid' AND status='active' AND ends_ts>? "
+        "ORDER BY usd_paid DESC, ends_ts DESC",
+        (now,),
+    ).fetchall()
+    token_rows = con.execute(
+        "SELECT cashtag, pts, invite, mc, ca, dex FROM raid_tokens ORDER BY pts DESC"
     ).fetchall()
     mid = con.execute("SELECT v FROM kv WHERE k='raid_board_msg'").fetchone()
     con.close()
-    if not rows:
+    if not token_rows and not boost_rows:
+        return "no tokens on the board yet"
+    token_by_tag = {t[0]: t for t in token_rows}
+    ordered = []
+    seen = set()
+    # Boosted tokens (bigger spend first) lead the board regardless of organic points; the rest
+    # follow sorted by points, same as before.
+    for (tag,) in boost_rows:
+        if not tag or tag in seen:
+            continue
+        t = token_by_tag.get(tag) or (tag, 0, "", "", "", "")
+        ordered.append((*t, True))
+        seen.add(tag)
+    for t in token_rows:
+        if t[0] in seen:
+            continue
+        ordered.append((*t, False))
+        seen.add(t[0])
+    ordered = ordered[:10]
+    if not ordered:
         return "no tokens on the board yet"
     medals = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
     lines = [f"{_icon('TITLE', 0, 'F')} <b>FERZAN RAID LEADERBOARD</b>\n"]
     btn_rows = []
-    for i, (tag, pts, invite, mc, ca, dex) in enumerate(rows):
+    for i, (tag, pts, invite, mc, ca, dex, boosted) in enumerate(ordered):
         name = _esc(tag)
-        buy = f"https://t.me/{TRADE}?start={ca}" if ca else HUB
+        buy = f"https://t.me/{TRADE}?start=buy_{ca}" if ca else HUB
         title = f"<a href=\"{_esc(invite)}\">{name}</a>" if invite else name
-        lines.append(f"{medals[i]}  <b>{title}</b>")
+        badge = " 🚀" if boosted else ""
+        lines.append(f"{medals[i]}  <b>{title}</b>{badge}")
         lines.append(f"{_icon('USD', 1, 'F')} Points: {pts}")
         lines.append(f"{_icon('MC', 3, 'F')} Market cap: {mc or '—'}")
         lines.append(f"{_icon('ROUTE', 5, 'F')} Dex: {_esc(dex or '—')}")
         lines.append(f"{_icon('BAG', 2, 'F')} <a href=\"{_esc(buy)}\">Buy</a>\n")
         btn_rows.append([InlineKeyboardButton(f"Buy {tag[:16]}", url=buy)])
-    lines.append("<i>See it. Ape it. Send it.</i>")
+    lines.append("<i>🚀 = boosted. See it. Ape it. Send it.</i>")
     kb = InlineKeyboardMarkup(btn_rows[:8])
     text = "\n".join(lines)
     if mid:
@@ -1780,6 +2384,17 @@ async def raid_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             )
         return
     if kind == "stop":
+        chat = q.message.chat if q.message else None
+        if chat and chat.type in ("group", "supergroup"):
+            try:
+                member = await context.bot.get_chat_member(chat.id, update.effective_user.id)
+                is_admin = member.status in ("administrator", "creator")
+            except Exception:
+                is_admin = False
+            if not is_admin:
+                con.close()
+                await q.answer("Only group admins can stop a raid.", show_alert=True)
+                return
         await q.answer()
         con.execute("UPDATE raids SET active=0 WHERE id=?", (rid,))
         con.commit()
@@ -1800,7 +2415,31 @@ async def raid_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await q.answer()
         con.close()
         return
+    # Bug fix: this used to INSERT the tap and increment blindly with a WHERE id=? AND active=1
+    # clause. If the raid had already ended (timed out or /raidstop'd) by the time someone tapped —
+    # very easy to hit once a raid is more than an hour old, exactly what was happening on the
+    # cards sitting in the raid group and in project chats — the UPDATE silently touched 0 rows
+    # while the code still said "+1" and re-showed the card with unchanged counts. That's the
+    # "these buttons don't work" symptom. Now an ended raid tells you plainly instead of faking it,
+    # and the tap isn't wasted from raid_taps' per-user/per-kind dedup if the raid gets resumed.
+    live_row = con.execute("SELECT active, chat_id FROM raids WHERE id=?", (rid,)).fetchone()
+    if not live_row:
+        con.close()
+        await q.answer("This raid no longer exists.", show_alert=True)
+        return
+    if not live_row[0]:
+        con.close()
+        await q.answer("This raid has ended — tap Resume Raid, or start a new one with /raid.", show_alert=True)
+        return
+    home_chat_id = live_row[1] or update.effective_chat.id
     u = update.effective_user
+    blocked = con.execute(
+        "SELECT 1 FROM raid_blacklist WHERE chat_id=? AND user_id=?", (home_chat_id, u.id)
+    ).fetchone()
+    if blocked:
+        con.close()
+        await q.answer("You're blacklisted from raid points in this project.", show_alert=True)
+        return
     cur = con.execute(
         "INSERT OR IGNORE INTO raid_taps(raid_id, user_id, kind) VALUES(?,?,?)",
         (rid, u.id, kind),
@@ -1809,10 +2448,14 @@ async def raid_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         con.close()
         await q.answer("Already counted on this button.", show_alert=False)
         return
+    weight = RAID_WEIGHTS.get(kind, 1)
+    bonus = _bump_streak(con, home_chat_id, u.id)
+    # Points pool on the raid's home chat, not wherever the button was tapped — this is what
+    # lets a multi-group raid (posted into several linked sister chats) share one leaderboard.
     con.execute(
-        "INSERT INTO raid_scores(chat_id, user_id, name, pts) VALUES(?,?,?,1) "
-        "ON CONFLICT(chat_id, user_id) DO UPDATE SET pts = pts + 1, name=excluded.name",
-        (update.effective_chat.id, u.id, u.full_name or u.username or str(u.id)),
+        "INSERT INTO raid_scores(chat_id, user_id, name, pts) VALUES(?,?,?,?) "
+        "ON CONFLICT(chat_id, user_id) DO UPDATE SET pts = pts + excluded.pts, name=excluded.name",
+        (home_chat_id, u.id, u.full_name or u.username or str(u.id), weight + bonus),
     )
     con.execute(f"UPDATE raids SET {col} = {col} + 1 WHERE id=? AND active=1", (rid,))
     con.commit()
@@ -1849,8 +2492,8 @@ async def raid_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     [
                         [InlineKeyboardButton("Open Post", url=d["url"])],
                         [
-                            InlineKeyboardButton("Resume Raid", callback_data=f"raid:resume:{rid}"),
-                            InlineKeyboardButton("Leaderboard", url="https://t.me/Ferzan_Raid"),
+                            InlineKeyboardButton("Resume Raid", callback_data=f"rd:resume:{rid}"),
+                            InlineKeyboardButton("Leaderboard", url=_raid_board_url()),
                         ],
                     ]
                 ),
@@ -1860,17 +2503,24 @@ async def raid_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     else:
         await q.answer("+1")
     w = _watch(update.effective_chat.id)
-    await _bump_token(context.bot, update.effective_chat, d.get("cashtag") or "", w[1] if w else "")
-    txt = _raid_text(d)
+    try:
+        await _bump_token(context.bot, update.effective_chat, d.get("cashtag") or "", w[1] if w else "")
+    except Exception as exc:
+        log.warning("raid tap bump_token %s", exc)
+    if len(parts) > 3 and parts[3] == "p":  # tapped on a reminder card
+        txt = _raid_ping_text(d.get("cashtag"), d["url"], d["likes_h"], d["likes_t"],
+                              d["rt_h"], d["rt_t"], d["re_h"], d["re_t"])
+        kb = _raid_ping_kb(rid, d["url"])
+    else:
+        txt = _raid_text(d)
+        kb = _raid_kb(rid, d["url"])
     try:
         if q.message.photo:
-            await q.edit_message_caption(
-                caption=txt, parse_mode="HTML", reply_markup=_raid_kb(rid, d["url"])
-            )
+            await q.edit_message_caption(caption=txt, parse_mode="HTML", reply_markup=kb)
         else:
-            await q.edit_message_text(txt, parse_mode="HTML", reply_markup=_raid_kb(rid, d["url"]))
-    except Exception:
-        pass
+            await q.edit_message_text(txt, parse_mode="HTML", reply_markup=kb)
+    except Exception as exc:
+        log.warning("raid tap card refresh %s", exc)
 
 
 async def queue_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1918,14 +2568,27 @@ async def list_raids(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 async def raidjoin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     u = update.effective_user
     con = _db()
+    blocked = con.execute(
+        "SELECT 1 FROM raid_blacklist WHERE chat_id=? AND user_id=?",
+        (update.effective_chat.id, u.id),
+    ).fetchone()
+    if blocked:
+        con.close()
+        await update.effective_message.reply_text("You're blacklisted from raid points in this project.")
+        return
+    bonus = _bump_streak(con, update.effective_chat.id, u.id)
+    total = RAID_WEIGHTS["join"] + bonus
     con.execute(
-        "INSERT INTO raid_scores(chat_id, user_id, name, pts) VALUES(?,?,?,1) "
-        "ON CONFLICT(chat_id, user_id) DO UPDATE SET pts = pts + 1, name=excluded.name",
-        (update.effective_chat.id, u.id, u.full_name or u.username or str(u.id)),
+        "INSERT INTO raid_scores(chat_id, user_id, name, pts) VALUES(?,?,?,?) "
+        "ON CONFLICT(chat_id, user_id) DO UPDATE SET pts = pts + excluded.pts, name=excluded.name",
+        (update.effective_chat.id, u.id, u.full_name or u.username or str(u.id), total),
     )
     con.commit()
     con.close()
-    await update.effective_message.reply_text(f"+1 raid point for {u.first_name}")
+    msg = f"+{total} raid point{'s' if total != 1 else ''} for {u.first_name}"
+    if bonus:
+        msg += f" (🔥 streak bonus +{bonus}!)"
+    await update.effective_message.reply_text(msg)
 
 
 async def lb_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1940,9 +2603,9 @@ async def lb_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         lines.append("No taps in this chat yet.")
     else:
         for i, (name, pts) in enumerate(rows, 1):
-            lines.append(f"{i}. {name}  {pts}")
+            lines.append(f"{i}. {name}  {pts}  {_tier_for_pts(pts)}")
     kb = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("Token leaderboard", url="https://t.me/Ferzan_Raid")]]
+        [[InlineKeyboardButton("Token leaderboard", url=_raid_board_url())]]
     )
     await update.effective_message.reply_text("\n".join(lines), reply_markup=kb)
     con2 = _db()
@@ -2044,6 +2707,56 @@ async def tick(context: ContextTypes.DEFAULT_TYPE) -> None:
     con = _db()
     now = int(time.time())
     try:
+        expired = con.execute(
+            "SELECT kind FROM boosts WHERE status='active' AND ends_ts<=?", (now,)
+        ).fetchall()
+        if expired:
+            con.execute("UPDATE boosts SET status='expired' WHERE status='active' AND ends_ts<=?", (now,))
+            con.commit()
+            kinds = {k for (k,) in expired}
+            if "raid" in kinds:
+                try:
+                    await _post_board(context.bot)
+                except Exception as exc:
+                    log.warning("raid board refresh on expiry %s", exc)
+            if "trending" in kinds:
+                try:
+                    await _post_trending_board(context.bot)
+                except Exception as exc:
+                    log.warning("trending board refresh on expiry %s", exc)
+    except sqlite3.OperationalError:
+        pass
+    try:
+        soon = con.execute(
+            "SELECT id, kind, chat_id, user_id, cashtag, ca, url FROM boosts "
+            "WHERE status='active' AND reminded=0 AND ends_ts>? AND ends_ts<=?",
+            (now, now + 3600),
+        ).fetchall()
+        for bid, bkind, chat_id, user_id, tag, ca, url in soon:
+            label = {"raid": "Raid Leaderboard boost", "trending": "Trending boost", "ads": "Buy-card button ad"}.get(
+                bkind, bkind
+            )
+            name = tag or ca or url or "your boost"
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔁 Renew", callback_data=f"bst:{bkind}:renew:{bid}")]])
+            text = f"⏰ Your {label} for {name} expires in under an hour. Tap to renew at the same tier."
+            sent = False
+            if user_id:
+                try:
+                    await context.bot.send_message(user_id, text, reply_markup=kb)
+                    sent = True
+                except Exception:
+                    pass
+            if not sent and chat_id:
+                try:
+                    await context.bot.send_message(chat_id, text, reply_markup=kb)
+                except Exception as exc:
+                    log.warning("boost reminder %s", exc)
+            con.execute("UPDATE boosts SET reminded=1 WHERE id=?", (bid,))
+        if soon:
+            con.commit()
+    except Exception as exc:
+        log.warning("boost reminders %s", exc)
+    try:
         live = list(
             con.execute(
                 "SELECT id, chat_id, url, cashtag, likes_h, likes_t, rt_h, rt_t, re_h, re_t, ends, last_ping, ping_min "
@@ -2071,8 +2784,8 @@ async def tick(context: ContextTypes.DEFAULT_TYPE) -> None:
                 [
                     [InlineKeyboardButton("Open Post", url=url)],
                     [
-                        InlineKeyboardButton("Resume Raid", callback_data=f"raid:resume:{rid}"),
-                        InlineKeyboardButton("Leaderboard", url="https://t.me/Ferzan_Raid"),
+                        InlineKeyboardButton("Resume Raid", callback_data=f"rd:resume:{rid}"),
+                        InlineKeyboardButton("Leaderboard", url=_raid_board_url()),
                     ],
                 ]
             )
@@ -2097,12 +2810,8 @@ async def tick(context: ContextTypes.DEFAULT_TYPE) -> None:
             f"{_icon('BUYER', 6, '🔗')}  <a href=\"{_esc(url)}\">Open the post</a>\n"
             f"<i>See it. Ape it. Send it.</i>"
         )
-        kb = InlineKeyboardMarkup(
-            [
-                [InlineKeyboardButton("Open Post", url=url)],
-                [InlineKeyboardButton("Leaderboard", url="https://t.me/Ferzan_Raid")],
-            ]
-        )
+        txt = _raid_ping_text(tag, url, lh, lt, rh, rt, eh, et)
+        kb = _raid_ping_kb(rid, url)
         banner = Path("/opt/ferzan/app/raid.jpg")
         if not banner.exists():
             banner = Path(__file__).resolve().parent / "raid.jpg"
@@ -2128,22 +2837,26 @@ async def tick(context: ContextTypes.DEFAULT_TYPE) -> None:
             log.warning("raid ping %s: %s", chat_id, exc)
     con.commit()
     try:
-        rows = list(con.execute("SELECT chat_id, chain, ca, pool, last_ts, min_usd, emoji, tg_url, discord_url, x_url FROM watches"))
+        rows = list(con.execute(
+            "SELECT chat_id, chain, ca, pool, last_ts, min_usd, emoji, tg_url, discord_url, x_url, "
+            "last_milestone, ath_mcap, whale_usd, sell_alerts, dev_wallet, dev_last_bal FROM watches"
+        ))
     except sqlite3.OperationalError:
-        rows = [(*r, "") for r in con.execute("SELECT chat_id, chain, ca, pool, last_ts, min_usd, emoji FROM watches")]
-    for chat_id, chain, ca, pool, last_ts, min_usd, emoji, *rest in rows:
-        tg_url = rest[0] if rest else ""
-        discord_url = rest[1] if len(rest) > 1 else ""
-        x_url = rest[2] if len(rest) > 2 else ""
+        rows = [(*r, "", "", "", 0, 0, 0, 0, "", -1) for r in con.execute("SELECT chat_id, chain, ca, pool, last_ts, min_usd, emoji FROM watches")]
+    for (chat_id, chain, ca, pool, last_ts, min_usd, emoji, tg_url, discord_url, x_url,
+         last_milestone, ath_mcap, whale_usd, sell_alerts, dev_wallet, dev_last_bal) in rows:
         tape, mute_until = _flags(chat_id)
         if not tape or mute_until > time.time():
             continue
         floor = float(min_usd or MIN_USD)
+        whale_floor = float(whale_usd or 0) or max(500.0, floor * 10)
         net = GT_NET.get(chain, chain)
-        trades = _trades(net, pool, int(last_ts or 0))
-        if not trades:
-            continue
+        trades = _trades(net, pool, int(last_ts or 0), "buy")
         _, attrs = _pool_for(chain, ca)
+        vip = bool(con.execute(
+            "SELECT 1 FROM boosts WHERE kind='trending' AND status='active' AND (ca=? OR cashtag LIKE ?) LIMIT 1",
+            (ca, f"%{(attrs.get('symbol') or '')}%"),
+        ).fetchone())
         newest = last_ts
         for tr in trades:
             usd = float(tr.get("volume_in_usd") or 0)
@@ -2151,8 +2864,13 @@ async def tick(context: ContextTypes.DEFAULT_TYPE) -> None:
                 newest = max(newest, tr["ts"])
                 continue
             cluster = sum(1 for x in trades if abs(x["ts"] - tr["ts"]) <= 12)
-            text, kb = _card(chain, ca, tr, attrs, emoji or "🟢", tg_url or "", cluster, discord_url, x_url)
-            con.execute("INSERT INTO buy_log(chat_id, ca, usd, ts) VALUES(?,?,?,?)", (chat_id, ca, usd, tr["ts"]))
+            whale = usd >= whale_floor
+            text, kb = _card(chain, ca, tr, attrs, emoji or "🟢", tg_url or "", cluster, discord_url, x_url, whale, vip)
+            buyer = tr.get("tx_from_address") or tr.get("origin_from_address") or ""
+            con.execute(
+                "INSERT INTO buy_log(chat_id, ca, usd, ts, buyer, kind) VALUES(?,?,?,?,?,'buy')",
+                (chat_id, ca, usd, tr["ts"], buyer),
+            )
             try:
                 media = _media(chat_id)
                 if media and media[0] in {"animation", "video"}:
@@ -2169,10 +2887,135 @@ async def tick(context: ContextTypes.DEFAULT_TYPE) -> None:
             except Exception as exc:
                 log.warning("post %s %s", chat_id, exc)
             newest = max(newest, tr["ts"])
-        con.execute(
-            "UPDATE watches SET last_ts=? WHERE chat_id=? AND chain=? AND ca=?",
-            (newest, chat_id, chain, ca),
-        )
+        # Sell alerts — opt-in per project via /sellalerts on.
+        if sell_alerts:
+            try:
+                sells = _trades(net, pool, int(last_ts or 0), "sell")
+                for tr in sells:
+                    susd = float(tr.get("volume_in_usd") or 0)
+                    if susd < floor:
+                        newest = max(newest, tr["ts"])
+                        continue
+                    seller = (tr.get("tx_from_address") or tr.get("origin_from_address") or "").lower()
+                    is_dev = bool(dev_wallet) and seller == str(dev_wallet).lower()
+                    stext = _sell_card(chain, ca, tr, attrs, is_dev)
+                    con.execute(
+                        "INSERT INTO buy_log(chat_id, ca, usd, ts, buyer, kind) VALUES(?,?,?,?,?,'sell')",
+                        (chat_id, ca, susd, tr["ts"], seller),
+                    )
+                    try:
+                        await context.bot.send_message(chat_id, stext, parse_mode="HTML", disable_web_page_preview=True)
+                    except Exception as exc:
+                        log.warning("sell post %s %s", chat_id, exc)
+                    newest = max(newest, tr["ts"])
+            except Exception as exc:
+                log.warning("sell scan %s %s: %s", chat_id, ca, exc)
+        # Milestone + ATH alerts — once per crossing, off the freshest market cap snapshot.
+        try:
+            snap = _ds(ca, chain)
+            mc_now = float(snap.get("marketCap") or snap.get("fdv") or 0)
+            if mc_now > 0:
+                hit = _next_milestone(mc_now, float(last_milestone or 0))
+                if hit:
+                    sym = attrs.get("symbol") or ""
+                    try:
+                        await context.bot.send_message(
+                            chat_id,
+                            f"🎉 <b>{_esc(attrs.get('name') or ca[:8])}</b> [${_esc(sym)}] just crossed <b>{_usd(hit)}</b> market cap!\n"
+                            f"See it. Ape it. Send it. 🚀",
+                            parse_mode="HTML",
+                        )
+                    except Exception as exc:
+                        log.warning("milestone post %s", exc)
+                    con.execute("UPDATE watches SET last_milestone=? WHERE chat_id=? AND chain=? AND ca=?", (hit, chat_id, chain, ca))
+                if mc_now > float(ath_mcap or 0) and float(ath_mcap or 0) > 0:
+                    try:
+                        await context.bot.send_message(
+                            chat_id,
+                            f"🚀 <b>NEW ALL-TIME HIGH</b> — {_esc(attrs.get('name') or ca[:8])} MC {_usd(mc_now)}",
+                            parse_mode="HTML",
+                        )
+                    except Exception as exc:
+                        log.warning("ath post %s", exc)
+                if mc_now > float(ath_mcap or 0):
+                    con.execute("UPDATE watches SET ath_mcap=? WHERE chat_id=? AND chain=? AND ca=?", (mc_now, chat_id, chain, ca))
+                # Personal price alerts tied to this chat's paired token.
+                fired = con.execute(
+                    "SELECT id, user_id, target_mcap FROM price_alerts WHERE chat_id=? AND fired=0 AND target_mcap<=?",
+                    (chat_id, mc_now),
+                ).fetchall()
+                for aid, auid, target in fired:
+                    try:
+                        await context.bot.send_message(
+                            auid,
+                            f"🔔 {_esc(attrs.get('name') or ca[:8])} hit your target of {_usd(target)} MC — now at {_usd(mc_now)}.",
+                            parse_mode="HTML",
+                        )
+                    except Exception as exc:
+                        log.warning("price alert dm %s: %s", auid, exc)
+                    con.execute("UPDATE price_alerts SET fired=1 WHERE id=?", (aid,))
+        except Exception as exc:
+            log.warning("milestone/ath scan %s %s: %s", chat_id, ca, exc)
+        # Dev-wallet watch — flag a meaningful balance drop (likely a sell/transfer out).
+        if dev_wallet:
+            try:
+                bal = _dev_balance(chain, ca, dev_wallet)
+                prev = float(dev_last_bal) if dev_last_bal is not None else -1
+                if bal is not None:
+                    if prev >= 0 and bal < prev * 0.95:
+                        pct = 100 * (prev - bal) / prev if prev else 0
+                        try:
+                            await context.bot.send_message(
+                                chat_id,
+                                f"⚠️ <b>Dev wallet balance dropped {pct:.0f}%</b>\n"
+                                f"<code>{_esc(dev_wallet)}</code>\nWas keeping an eye on this — check recent txns.",
+                                parse_mode="HTML",
+                            )
+                        except Exception as exc:
+                            log.warning("dev alert %s", exc)
+                    con.execute("UPDATE watches SET dev_last_bal=? WHERE chat_id=? AND chain=? AND ca=?", (bal, chat_id, chain, ca))
+            except Exception as exc:
+                log.warning("dev watch %s %s: %s", chat_id, ca, exc)
+        # Daily recap — once per 24h per chat, a shareable "here's what happened" stat card.
+        try:
+            frow = con.execute("SELECT last_recap FROM chat_flags WHERE chat_id=?", (chat_id,)).fetchone()
+            last_recap = int(frow[0] or 0) if frow else 0
+            if now - last_recap >= 86400:
+                since = now - 86400
+                buys = con.execute(
+                    "SELECT COUNT(*), COALESCE(SUM(usd),0) FROM buy_log WHERE chat_id=? AND ca=? AND kind='buy' AND ts>=?",
+                    (chat_id, ca, since),
+                ).fetchone()
+                top = con.execute(
+                    "SELECT buyer, SUM(usd) s FROM buy_log WHERE chat_id=? AND ca=? AND kind='buy' AND ts>=? AND buyer<>'' "
+                    "GROUP BY buyer ORDER BY s DESC LIMIT 1",
+                    (chat_id, ca, since),
+                ).fetchone()
+                n_buys, vol = int(buys[0] or 0), float(buys[1] or 0)
+                if n_buys > 0:
+                    top_line = f"\n🏆 Top buyer: {top[0][:6]}…{top[0][-4:]} (${top[1]:,.0f})" if top and top[0] else ""
+                    try:
+                        await context.bot.send_message(
+                            chat_id,
+                            f"📊 <b>24h recap — {_esc(attrs.get('name') or ca[:8])}</b>\n"
+                            f"{n_buys} buys · ${vol:,.0f} volume{top_line}\n"
+                            f"See it. Ape it. Send it. 🚀",
+                            parse_mode="HTML",
+                        )
+                    except Exception as exc:
+                        log.warning("recap post %s", exc)
+                con.execute(
+                    "INSERT INTO chat_flags(chat_id, tape, mute_until, last_recap) VALUES(?,1,0,?) "
+                    "ON CONFLICT(chat_id) DO UPDATE SET last_recap=excluded.last_recap",
+                    (chat_id, now),
+                )
+        except Exception as exc:
+            log.warning("recap scan %s %s: %s", chat_id, ca, exc)
+        if newest != last_ts:
+            con.execute(
+                "UPDATE watches SET last_ts=? WHERE chat_id=? AND chain=? AND ca=?",
+                (newest, chat_id, chain, ca),
+            )
         con.commit()
     con.close()
 
@@ -2189,126 +3032,1036 @@ def _pay_box() -> str:
     )
 
 
-PAY_CHAINS = [
-    [InlineKeyboardButton("BNB Smart Chain", callback_data="mk:bsc")],
-    [InlineKeyboardButton("Ethereum", callback_data="mk:eth")],
-    [InlineKeyboardButton("Base", callback_data="mk:base")],
-    [InlineKeyboardButton("Arbitrum One", callback_data="mk:arb")],
-    [InlineKeyboardButton("Solana", callback_data="mk:sol")],
-    [InlineKeyboardButton("❌ Cancel", callback_data="mk:x")],
-]
+_PRICE_CACHE = {"ts": 0.0, "sol": 0.0, "eth": 0.0}
+
+
+def _get_usd_prices() -> tuple[float, float]:
+    """Live SOL/ETH USD prices, cached 5 min. Returns (sol_usd, eth_usd) — 0.0 if the feed is down."""
+    now = time.time()
+    if now - _PRICE_CACHE["ts"] < 300 and (_PRICE_CACHE["sol"] or _PRICE_CACHE["eth"]):
+        return _PRICE_CACHE["sol"], _PRICE_CACHE["eth"]
+    try:
+        r = requests.get(
+            "https://api.coingecko.com/api/v3/simple/price?ids=ethereum,solana&vs_currencies=usd",
+            timeout=10,
+        )
+        d = r.json()
+        sol = float((d.get("solana") or {}).get("usd") or 0)
+        eth = float((d.get("ethereum") or {}).get("usd") or 0)
+        if sol or eth:
+            _PRICE_CACHE.update(ts=now, sol=sol or _PRICE_CACHE["sol"], eth=eth or _PRICE_CACHE["eth"])
+    except Exception as exc:
+        log.warning("price feed %s", exc)
+    return _PRICE_CACHE["sol"], _PRICE_CACHE["eth"]
+
+
+def _tier_label(hours: float) -> str:
+    return {24: "24h", 72: "3 days", 168: "7 days"}.get(int(hours), f"{hours:.0f}h")
+
+
+def _tier_lines(kind: str, chain: str) -> list[str]:
+    sol_usd, eth_usd = _get_usd_prices()
+    is_sol = chain in ("sol", "solana")
+    price = sol_usd if is_sol else eth_usd
+    sym = "SOL" if is_sol else "ETH"
+    lines = []
+    for hours, usd in BOOST_TIERS.get(kind, []):
+        amt = f"{usd / price:.4f} {sym}" if price else "(price feed down)"
+        lines.append(f"{_tier_label(hours)}  ${usd:.0f}  ·  {amt}")
+    return lines
+
+
+def _prorate_hours(kind: str, usd_paid: float) -> float:
+    """How much boost time a (possibly underpaid) amount buys, interpolated linearly between tiers."""
+    tiers = sorted(BOOST_TIERS.get(kind, []), key=lambda t: t[1])
+    if not tiers or usd_paid < BOOST_MIN_USD:
+        return 0.0
+    if usd_paid <= tiers[0][1]:
+        rate = tiers[0][1] / tiers[0][0]  # usd per hour at the cheapest tier
+        return round(usd_paid / rate, 2)
+    for i in range(len(tiers) - 1):
+        lo_hours, lo_usd = tiers[i]
+        hi_hours, hi_usd = tiers[i + 1]
+        if usd_paid <= hi_usd:
+            frac = (usd_paid - lo_usd) / (hi_usd - lo_usd)
+            return round(lo_hours + frac * (hi_hours - lo_hours), 2)
+    return float(tiers[-1][0])  # paid at/above the top tier — cap at its duration, no bonus
+
+
+def _prorate_native(tiers: list[tuple[int, float]], min_amt: float, amount_paid: float) -> float:
+    """Same interpolation as _prorate_hours but keyed on a native on-chain amount (e.g. SOL)
+    instead of USD — used for the ads tiers, which are SOL-denominated rather than USD-pegged."""
+    tiers = sorted(tiers, key=lambda t: t[1])
+    if not tiers or amount_paid < min_amt:
+        return 0.0
+    if amount_paid <= tiers[0][1]:
+        rate = tiers[0][1] / tiers[0][0]
+        return round(amount_paid / rate, 2)
+    for i in range(len(tiers) - 1):
+        lo_hours, lo_amt = tiers[i]
+        hi_hours, hi_amt = tiers[i + 1]
+        if amount_paid <= hi_amt:
+            frac = (amount_paid - lo_amt) / (hi_amt - lo_amt)
+            return round(lo_hours + frac * (hi_hours - lo_hours), 2)
+    return float(tiers[-1][0])
+
+
+def _verify_sol_tx(tx_hash: str) -> tuple[bool, float, str]:
+    """Returns (ok, sol_received_by_treasury, error)."""
+    if not TREASURY_SOL:
+        return False, 0.0, "Treasury SOL wallet not configured."
+    try:
+        r = requests.post(
+            SOL_RPC,
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "getTransaction",
+                "params": [tx_hash, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0}],
+            },
+            timeout=15,
+        )
+        data = r.json()
+    except Exception as exc:
+        return False, 0.0, f"Solana RPC unreachable: {exc}"
+    result = data.get("result")
+    if not result:
+        return False, 0.0, "Transaction not found — not confirmed yet? wait a bit and retry."
+    meta = result.get("meta") or {}
+    if meta.get("err"):
+        return False, 0.0, "Transaction failed on-chain."
+    try:
+        keys = result["transaction"]["message"]["accountKeys"]
+        addrs = [k.get("pubkey") if isinstance(k, dict) else k for k in keys]
+        idx = addrs.index(TREASURY_SOL)
+    except (KeyError, ValueError, TypeError):
+        return False, 0.0, "Treasury wallet isn't a party to that transaction."
+    pre = meta.get("preBalances") or []
+    post = meta.get("postBalances") or []
+    if idx >= len(pre) or idx >= len(post):
+        return False, 0.0, "Could not read balances for that transaction."
+    lamports = post[idx] - pre[idx]
+    if lamports <= 0:
+        return False, 0.0, "No SOL was received by the treasury wallet in that transaction."
+    return True, lamports / 1_000_000_000, ""
+
+
+def _verify_evm_tx(tx_hash: str, chain: str) -> tuple[bool, float, str]:
+    """Returns (ok, native-token received by treasury, error)."""
+    rpc = EVM_RPC.get(chain)
+    if not rpc:
+        return False, 0.0, f"No RPC configured for chain {chain}."
+    if not TREASURY_EVM:
+        return False, 0.0, "Treasury EVM wallet not configured."
+    try:
+        r = requests.post(
+            rpc,
+            json={"jsonrpc": "2.0", "id": 1, "method": "eth_getTransactionByHash", "params": [tx_hash]},
+            timeout=15,
+        )
+        tx = (r.json() or {}).get("result")
+    except Exception as exc:
+        return False, 0.0, f"RPC unreachable: {exc}"
+    if not tx:
+        return False, 0.0, "Transaction not found — not confirmed yet? wait a bit and retry."
+    to_addr = (tx.get("to") or "").lower()
+    if to_addr != TREASURY_EVM.lower():
+        return False, 0.0, "That transaction did not pay the treasury wallet."
+    try:
+        r2 = requests.post(
+            rpc,
+            json={"jsonrpc": "2.0", "id": 2, "method": "eth_getTransactionReceipt", "params": [tx_hash]},
+            timeout=15,
+        )
+        receipt = (r2.json() or {}).get("result") or {}
+    except Exception as exc:
+        return False, 0.0, f"RPC unreachable: {exc}"
+    if receipt.get("status") != "0x1":
+        return False, 0.0, "Transaction failed or isn't confirmed yet."
+    try:
+        wei = int(tx.get("value") or "0x0", 16)
+    except ValueError:
+        wei = 0
+    if wei <= 0:
+        return False, 0.0, "No value was transferred to the treasury wallet."
+    return True, wei / 1e18, ""
+
+
+def _grant_boost(
+    kind: str, chat_id: int, cashtag: str, ca: str, url: str, user_id: int,
+    chain: str, tx_hash: str, usd_paid: float, hours: float,
+) -> tuple[int, int]:
+    now = int(time.time())
+    ends = now + int(hours * 3600)
+    con = _db()
+    con.execute(
+        "INSERT INTO boosts(kind,chat_id,cashtag,ca,url,user_id,chain,tx_hash,usd_paid,hours_granted,"
+        "starts_ts,ends_ts,status,created_ts) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'active',?)",
+        (kind, chat_id, cashtag, ca, url, user_id, chain, tx_hash, usd_paid, hours, now, ends, now),
+    )
+    con.commit()
+    con.close()
+    return now, ends
+
+
+def _raid_board_url() -> str:
+    # A private chat's RAID_CH is a numeric ID (e.g. -1001234567890) which can never resolve
+    # as a t.me/<name> link — that's exactly what produced "this user doesn't seem to exist".
+    # Prefer an explicit invite link when one's configured; fall back to Eco Hub rather than
+    # ever building a link we know is dead.
+    if RAID_INVITE:
+        return RAID_INVITE
+    ch = (RAID_CH or "").lstrip("@")
+    if not ch or ch.lstrip("-").isdigit():
+        return HUB
+    con = _db()
+    row = con.execute("SELECT v FROM kv WHERE k='raid_board_msg'").fetchone()
+    con.close()
+    base = f"https://t.me/{ch}"
+    return f"{base}/{row[0]}" if row and row[0] else base
+
+
+def _trending_board_url() -> str:
+    con = _db()
+    row = con.execute("SELECT v FROM kv WHERE k='trending_board_msg'").fetchone()
+    con.close()
+    base = f"https://t.me/{TRENDING_CH.lstrip('@')}" if TRENDING_CH else "https://t.me/Ferzan_Trending"
+    return f"{base}/{row[0]}" if row and row[0] else base
+
+
+async def _post_trending_board(bot) -> str:
+    """Live, auto-updating, pinned board of currently-active paid Trending boosts — the Trending
+    equivalent of the raid leaderboard board below. Previously /paid just fired an unformatted
+    one-off ping into the channel with no ongoing board at all."""
+    now = int(time.time())
+    con = _db()
+    rows = con.execute(
+        "SELECT cashtag, ca, url, ends_ts FROM boosts WHERE kind='trending' AND status='active' AND ends_ts>? "
+        "ORDER BY usd_paid DESC, ends_ts DESC LIMIT 10",
+        (now,),
+    ).fetchall()
+    mid = con.execute("SELECT v FROM kv WHERE k='trending_board_msg'").fetchone()
+    con.close()
+    if not rows:
+        text = (
+            f"{_icon('TITLE', 0, 'F')} <b>FERZAN TRENDING</b>\n\n"
+            "No active boosts right now.\n/trending in the bot's DM or your project chat to list here."
+        )
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("Boost your token", url=HUB)]])
+    else:
+        lines = [f"{_icon('TITLE', 0, 'F')} <b>FERZAN TRENDING</b>\n"]
+        btn_rows = []
+        for tag, ca, url, ends_ts in rows:
+            name = _esc(tag or ca or "TOKEN")
+            left_min = max(0, (ends_ts - now)) // 60
+            left = f"{left_min // 60}h {left_min % 60}m" if left_min >= 60 else f"{left_min}m"
+            buy = f"https://t.me/{TRADE}?start=buy_{ca}" if ca else HUB
+            lines.append(f"🔥  <b>{name}</b> — {left} left")
+            if url:
+                lines.append(f"📈 <a href=\"{_esc(url)}\">Chart</a>")
+            lines.append(f"⚡ <a href=\"{_esc(buy)}\">Buy</a>\n")
+            btn_rows.append([InlineKeyboardButton(f"Buy {(tag or ca or 'token')[:16]}", url=buy)])
+        lines.append("<i>See it. Ape it. Send it.</i>")
+        text = "\n".join(lines)
+        kb = InlineKeyboardMarkup(btn_rows[:8])
+    if mid:
+        try:
+            await bot.edit_message_text(
+                chat_id=TRENDING_CH, message_id=int(mid[0]), text=text,
+                parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True,
+            )
+            return ""
+        except Exception:
+            try:
+                await bot.edit_message_caption(
+                    chat_id=TRENDING_CH, message_id=int(mid[0]), caption=text, parse_mode="HTML", reply_markup=kb
+                )
+                return ""
+            except Exception as exc:
+                log.warning("trending board edit %s", exc)
+                try:
+                    await bot.delete_message(TRENDING_CH, int(mid[0]))
+                except Exception:
+                    pass
+    try:
+        msg = await bot.send_message(
+            TRENDING_CH, text, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True
+        )
+        con = _db()
+        con.execute("INSERT OR REPLACE INTO kv(k,v) VALUES('trending_board_msg',?)", (str(msg.message_id),))
+        con.commit()
+        con.close()
+        try:
+            await bot.pin_chat_message(TRENDING_CH, msg.message_id, disable_notification=True)
+        except Exception:
+            pass
+        return ""
+    except Exception as exc:
+        log.warning("trending board post %s", exc)
+        return str(exc)
+
+
+def _boost_chain_buttons(kind: str) -> list:
+    return [
+        [InlineKeyboardButton("BNB Smart Chain", callback_data=f"bst:{kind}:chain:bsc")],
+        [InlineKeyboardButton("Ethereum", callback_data=f"bst:{kind}:chain:eth")],
+        [InlineKeyboardButton("Base", callback_data=f"bst:{kind}:chain:base")],
+        [InlineKeyboardButton("Arbitrum One", callback_data=f"bst:{kind}:chain:arb")],
+        [InlineKeyboardButton("Solana", callback_data=f"bst:{kind}:chain:sol")],
+        [InlineKeyboardButton("❌ Cancel", callback_data=f"bst:{kind}:x:0")],
+    ]
 
 
 async def marketing_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.effective_message.reply_text(
-        "📣 Ferzan promotion\n\nChoose the chain you want to pay on:",
-        reply_markup=InlineKeyboardMarkup(PAY_CHAINS),
+        "📣 Ferzan promotion — pick what you want to boost:",
+        reply_markup=InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("🚀 Raid Leaderboard boost", callback_data="mk:go:raid")],
+                [InlineKeyboardButton("🔥 Trending boost", callback_data="mk:go:trending")],
+                [InlineKeyboardButton("📊 Buy-card button ad", callback_data="mk:go:ads")],
+                [InlineKeyboardButton("❌ Cancel", callback_data="mk:go:x")],
+            ]
+        ),
     )
 
 
 async def marketing_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
     await q.answer()
-    key = (q.data or "").split(":")[-1]
+    parts = (q.data or "").split(":")
+    key = parts[-1]
     if key == "x":
         await q.edit_message_text("Cancelled.")
         return
-    if key.startswith("svc"):
-        kind = key.split("-")[-1]
-        chain = context.user_data.get("mk_chain", "sol")
-        pay = TREASURY_SOL if chain == "sol" else TREASURY_EVM
-        label = {
-            "trend": "Trending 24h · 12 SOL / 0.5 ETH",
-            "ads": "Button ad 24h · 2.7 SOL",
-            "max": "Max pack · 14 SOL",
-        }.get(kind, kind)
+    if key == "ads":
+        await _start_ads_flow(q, context, edit=True)
+        return
+    if key in ("raid", "trending"):
+        label = "Raid Leaderboard boost" if key == "raid" else "Trending boost"
         await q.edit_message_text(
-            f"✅ {label}\nPay on {chain.upper()}\nTreasury:\n`{pay or 'set FEE_WALLET in .env'}`\n\n"
-            "Send payment then /paid <txhash> <CA>",
-            parse_mode="Markdown",
+            f"🚀 {label} — pick your token's chain:",
+            reply_markup=InlineKeyboardMarkup(_boost_chain_buttons(key)),
         )
         return
-    context.user_data["mk_chain"] = key
-    await q.edit_message_text(
-        f"📣 Marketing on {key.upper()}\n\nChoose a service:",
-        reply_markup=InlineKeyboardMarkup(
-            [
-                [InlineKeyboardButton("📈 Trending", callback_data="mk:svc-trend")],
-                [InlineKeyboardButton("📊 Buy-card button ads", callback_data="mk:svc-ads")],
-                [InlineKeyboardButton("🚀 Maximum exposure", callback_data="mk:svc-max")],
-                [InlineKeyboardButton("❌ Cancel", callback_data="mk:x")],
-            ]
-        ),
-    )
 
 
 async def trending_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.effective_message.reply_text(
-        "🔥 List on Trending\nPosted in https://t.me/Ferzan_Trending after payment.\n\nFirst, choose your token's CHAIN:",
-        reply_markup=InlineKeyboardMarkup(
-            [
-                [InlineKeyboardButton("BNB Smart Chain", callback_data="td:bsc")],
-                [InlineKeyboardButton("Ethereum", callback_data="td:eth")],
-                [InlineKeyboardButton("Base", callback_data="td:base")],
-                [InlineKeyboardButton("Arbitrum One", callback_data="td:arb")],
-                [InlineKeyboardButton("Solana", callback_data="td:sol")],
-                [InlineKeyboardButton("❌ Cancel", callback_data="td:x")],
-            ]
-        ),
+        "🔥 Trending boost — featured on the live board in https://t.me/Ferzan_Trending\n\n"
+        "Pick your token's chain:",
+        reply_markup=InlineKeyboardMarkup(_boost_chain_buttons("trending")),
     )
 
 
-async def trending_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def raidboost_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.effective_message.reply_text(
+        "🚀 Raid Leaderboard boost — featured on the live board in https://t.me/Ferzan_Raid\n\n"
+        "Pick your token's chain:",
+        reply_markup=InlineKeyboardMarkup(_boost_chain_buttons("raid")),
+    )
+
+
+async def boost_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
     await q.answer()
-    key = (q.data or "").split(":")[-1]
-    if key == "x":
+    parts = (q.data or "").split(":")
+    if len(parts) < 3:
+        return
+    _, kind, step = parts[0], parts[1], parts[2]
+    if step == "x":
+        context.user_data.pop("boost_pending", None)
         await q.edit_message_text("Cancelled.")
         return
-    context.user_data["td_chain"] = key
-    await q.edit_message_text(
-        f"🌐 Chain: {key.upper()}\n\nSend the contract address of the token to list.\n"
-        "Then /paid <txhash> after you pay treasury."
+    if step == "chain":
+        chain = parts[3] if len(parts) > 3 else "sol"
+        context.user_data["boost_pending"] = {"kind": kind, "chain": chain}
+        label = "Raid Leaderboard boost" if kind == "raid" else "Trending boost"
+        rows = [
+            [InlineKeyboardButton(line, callback_data=f"bst:{kind}:tier:{hours}")]
+            for (hours, _usd), line in zip(BOOST_TIERS.get(kind, []), _tier_lines(kind, chain))
+        ]
+        rows.append([InlineKeyboardButton("❌ Cancel", callback_data=f"bst:{kind}:x:0")])
+        await q.edit_message_text(
+            f"🚀 {label} — {chain.upper()}\n\nPick a duration:",
+            reply_markup=InlineKeyboardMarkup(rows),
+        )
+        return
+    if step == "tier":
+        hours = float(parts[3]) if len(parts) > 3 else 24.0
+        pending = context.user_data.get("boost_pending") or {"kind": kind, "chain": "sol"}
+        if kind == "ads":
+            amt = next((a for h, a in ADS_TIERS_SOL if h == hours), None)
+            pending.update(hours=hours, native_amt=amt)
+            context.user_data["boost_pending"] = pending
+            await q.edit_message_text(
+                f"✅ {_tier_label(hours)} · {amt} SOL\n\nNow send the destination URL for the button ad."
+            )
+            return
+        usd = next((u for h, u in BOOST_TIERS.get(kind, []) if h == hours), None)
+        pending.update(hours=hours, usd=usd)
+        context.user_data["boost_pending"] = pending
+        await q.edit_message_text(
+            f"✅ {_tier_label(hours)} · ${usd:.0f}\n\nNow send the token contract address / mint you want boosted."
+        )
+        return
+    if step == "renew":
+        bid = int(parts[3]) if len(parts) > 3 else 0
+        con = _db()
+        row = con.execute(
+            "SELECT kind, cashtag, ca, url, chain, hours_granted FROM boosts WHERE id=?", (bid,)
+        ).fetchone()
+        con.close()
+        if not row:
+            await q.edit_message_text("That boost record is gone — start fresh with /trending, /raidboost, or /ads.")
+            return
+        bkind, tag, ca, url, chain, hours = row
+        if bkind == "ads":
+            amt = next((a for h, a in ADS_TIERS_SOL if h == hours), ADS_TIERS_SOL[0][1])
+            context.user_data["boost_pending"] = {
+                "kind": "ads", "chain": "sol", "hours": hours, "native_amt": amt,
+                "ca": "", "cashtag": tag, "url": url, "target_set": True,
+            }
+            await q.edit_message_text(
+                f"🔁 Renew button ad — {tag or url}\nDuration: {_tier_label(hours)} · {amt} SOL\n\n"
+                f"Pay to:\n{TREASURY_SOL or 'set FEE_WALLET_SOL in .env'}\n\nThen /paid <txhash>.",
+            )
+            return
+        tiers = BOOST_TIERS.get(bkind, [])
+        usd = next((u for h, u in tiers if h == hours), None)
+        if usd is None and tiers:
+            usd = min(tiers, key=lambda t: abs(t[0] - hours))[1]
+        context.user_data["boost_pending"] = {
+            "kind": bkind, "chain": chain, "hours": hours, "usd": usd,
+            "ca": ca, "cashtag": tag, "url": url, "target_set": True,
+        }
+        sol_usd, eth_usd = _get_usd_prices()
+        is_sol = chain in ("sol", "solana")
+        price = sol_usd if is_sol else eth_usd
+        sym = "SOL" if is_sol else "ETH"
+        amt_disp = f"{usd / price:.4f} {sym}" if price else "(price feed down)"
+        wallet = TREASURY_SOL if is_sol else TREASURY_EVM
+        label = "Raid Leaderboard boost" if bkind == "raid" else "Trending boost"
+        await q.edit_message_text(
+            f"🔁 Renew {label} — {tag or ca}\nDuration: {_tier_label(hours)} · ${usd:.0f} ≈ {amt_disp}\n\n"
+            f"Pay to:\n{wallet or 'set FEE_WALLET in .env'}\n\nThen /paid <txhash> to activate.",
+        )
+        return
+
+
+async def _finalize_boost_target(msg, context: ContextTypes.DEFAULT_TYPE, raw_text: str) -> None:
+    """Second step of a boost purchase — token CA for raid/trending, destination URL for ads."""
+    pending = context.user_data.get("boost_pending") or {}
+    kind = pending.get("kind", "trending")
+    hours = pending.get("hours") or 24.0
+
+    if kind == "ads":
+        url = raw_text.strip()
+        if not (url.startswith("http://") or url.startswith("https://") or url.startswith("t.me/")):
+            await msg.reply_text("That doesn't look like a URL. Send the full destination link (https://...).")
+            return
+        native_amt = pending.get("native_amt") or ADS_TIERS_SOL[0][1]
+        pending.update(ca="", cashtag=url[:40], url=url, target_set=True)
+        context.user_data["boost_pending"] = pending
+        await msg.reply_text(
+            f"📊 Buy-card button ad — {url}\n"
+            f"Duration: {_tier_label(hours)} · {native_amt} SOL\n\n"
+            f"Pay to:\n<code>{html.escape(TREASURY_SOL or 'set FEE_WALLET_SOL in .env')}</code>\n\n"
+            f"Then send <code>/paid &lt;txhash&gt;</code> to activate it. Underpay and you still get boosted "
+            f"time — just prorated to what you actually sent.",
+            parse_mode="HTML",
+        )
+        return
+
+    ca = raw_text
+    chain = pending.get("chain", "sol")
+    usd = pending.get("usd") or (BOOST_TIERS.get(kind, [(24, 0)])[0][1])
+    pair = _ds(ca, chain) or {}
+    tag = "$" + ((pair.get("baseToken") or {}).get("symbol") or "")
+    if tag == "$":
+        tag = ""
+    pending.update(ca=ca, cashtag=tag, url=pair.get("url") or "", target_set=True)
+    context.user_data["boost_pending"] = pending
+    sol_usd, eth_usd = _get_usd_prices()
+    is_sol = chain in ("sol", "solana")
+    price = sol_usd if is_sol else eth_usd
+    sym = "SOL" if is_sol else "ETH"
+    amt = f"{usd / price:.4f} {sym}" if price else "(price feed down — contact support before paying)"
+    wallet = TREASURY_SOL if is_sol else TREASURY_EVM
+    label = "Raid Leaderboard boost" if kind == "raid" else "Trending boost"
+    await msg.reply_text(
+        f"🚀 {label} — {tag or ca}\n"
+        f"Duration: {_tier_label(hours)} · ${usd:.0f} ≈ {amt}\n\n"
+        f"Pay to:\n<code>{html.escape(wallet or 'set FEE_WALLET in .env')}</code>\n\n"
+        f"Then send <code>/paid &lt;txhash&gt;</code> to activate it. Underpay and you still get boosted "
+        f"time — just prorated to what you actually sent.",
+        parse_mode="HTML",
     )
+
+
+async def _start_ads_flow(target, context: ContextTypes.DEFAULT_TYPE, edit: bool) -> None:
+    context.user_data["boost_pending"] = {"kind": "ads", "chain": "sol"}
+    rows = [
+        [InlineKeyboardButton(f"{_tier_label(h)}  {a} SOL", callback_data=f"bst:ads:tier:{h}")]
+        for h, a in ADS_TIERS_SOL
+    ]
+    rows.append([InlineKeyboardButton("❌ Cancel", callback_data="bst:ads:x:0")])
+    text = (
+        "📊 BUY-CARD BUTTON AD\n\nYour link sits on Ferzan buy alerts for the term you pay.\n\nPick a duration:"
+    )
+    kb = InlineKeyboardMarkup(rows)
+    if edit:
+        await target.edit_message_text(text, reply_markup=kb)
+    else:
+        await target.reply_text(text, reply_markup=kb)
 
 
 async def ads_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.effective_message.reply_text(
-        "📢 BUY-CARD BUTTON AD\n\n"
-        "Your link sits on Ferzan buy alerts for the term you pay.\n\n"
-        "24 hours  2.7 SOL\n"
-        "3 days    6.3 SOL\n"
-        "7 days    13.5 SOL\n\n"
-        "Include destination URL in /paid.\n\n"
-        + _pay_box(),
-        parse_mode="Markdown",
-        disable_web_page_preview=True,
-    )
+    await _start_ads_flow(update.effective_message, context, edit=False)
 
 
 async def paid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     args = context.args or []
     if not args:
-        await update.effective_message.reply_text("Usage: /paid <txhash> [CA or url]")
+        await update.effective_message.reply_text("Usage: /paid <txhash>")
         return
-    tx = args[0]
-    extra = " ".join(args[1:])
-    log.info("PAID claim uid=%s tx=%s extra=%s", update.effective_user.id, tx, extra)
-    await update.effective_message.reply_text(
-        "Got it. Treasury will confirm the tx.\n"
-        f"Tx: `{tx}`\n{extra}\n"
-        f"If it is not confirmed in a bit, ping {CHAT}",
-        parse_mode="Markdown",
-        disable_web_page_preview=True,
-    )
-    try:
-        await context.bot.send_message(
-            TRENDING_CH,
-            f"🔥 TRENDING REQUEST\nTx `{tx}`\n{extra or '—'}\nfrom {update.effective_user.mention_html()}",
-            parse_mode="HTML",
+    tx = args[0].strip()
+    pending = context.user_data.get("boost_pending")
+    if not pending or not pending.get("target_set") or not pending.get("hours"):
+        extra = " ".join(args[1:])
+        log.info("PAID legacy/untracked claim uid=%s tx=%s extra=%s", update.effective_user.id, tx, extra)
+        await update.effective_message.reply_text(
+            "Got it, but there's no pending boost purchase tied to your account.\n"
+            "Run /trending, /raidboost, or /ads first to pick a duration and target, then /paid <txhash>.",
+            disable_web_page_preview=True,
         )
+        return
+    kind = pending["kind"]
+    chain = pending.get("chain", "sol")
+    is_sol = chain in ("sol", "solana") or kind == "ads"
+    ok, amount, err = _verify_sol_tx(tx) if is_sol else _verify_evm_tx(tx, chain)
+    if not ok:
+        await update.effective_message.reply_text(
+            f"❌ Couldn't verify that payment: {err}\nDouble-check the hash, and if it's still confirming, retry in a minute."
+        )
+        return
+    con = _db()
+    dup = con.execute("SELECT 1 FROM boosts WHERE tx_hash=?", (tx,)).fetchone()
+    con.close()
+    if dup:
+        await update.effective_message.reply_text("That transaction has already been used for a boost.")
+        return
+    hours_full = pending.get("hours") or 24.0
+    sol_usd, eth_usd = _get_usd_prices()
+    if kind == "ads":
+        target_native = pending.get("native_amt") or ADS_TIERS_SOL[0][1]
+        full_hit = amount >= target_native
+        hours_granted = hours_full if full_hit else _prorate_native(ADS_TIERS_SOL, ADS_MIN_SOL, amount)
+        usd_paid = amount * sol_usd if sol_usd else 0.0
+        note = "" if full_hit else f" (prorated — {amount:.4f} SOL of the {target_native} SOL tier)"
+        too_small = hours_granted <= 0
+        below_min_text = (
+            f"Payment received ({amount:.4f} SOL) but that's below the {ADS_MIN_SOL} SOL minimum to activate "
+            f"any boost time. Send the difference and /paid again with the new tx."
+        )
+    else:
+        price = sol_usd if is_sol else eth_usd
+        usd_paid = amount * price if price else 0.0
+        target_usd = pending.get("usd") or 0.0
+        full_hit = usd_paid >= target_usd
+        hours_granted = hours_full if full_hit else _prorate_hours(kind, usd_paid)
+        note = "" if full_hit else f" (prorated — ${usd_paid:.2f} of the ${target_usd:.0f} tier)"
+        too_small = hours_granted <= 0
+        below_min_text = (
+            f"Payment received (${usd_paid:.2f}) but that's below the ${BOOST_MIN_USD:.0f} minimum to activate "
+            f"any boost time. Send the difference and /paid again with the new tx."
+        )
+    if too_small:
+        await update.effective_message.reply_text(below_min_text)
+        return
+    _starts, ends = _grant_boost(
+        kind, update.effective_chat.id, pending.get("cashtag") or "", pending.get("ca") or "",
+        pending.get("url") or "", update.effective_user.id, chain, tx, usd_paid, hours_granted,
+    )
+    context.user_data.pop("boost_pending", None)
+    until = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(ends))
+    await update.effective_message.reply_text(f"✅ Boost active — {hours_granted:.1f}h{note}\nExpires: {until}")
+    try:
+        if kind == "raid":
+            tag = pending.get("cashtag") or ""
+            if tag:
+                con2 = _db()
+                con2.execute(
+                    "INSERT OR IGNORE INTO raid_tokens(cashtag, chat_id, ca, pts) VALUES(?,?,?,0)",
+                    (tag, update.effective_chat.id, pending.get("ca") or ""),
+                )
+                con2.commit()
+                con2.close()
+            await _post_board(context.bot)
+        elif kind == "trending":
+            await _post_trending_board(context.bot)
+        # ads has no board — injecting the paid link into live buy cards is a separate feature,
+        # not built yet; the purchase is tracked and verified but the link isn't auto-placed.
     except Exception as exc:
-        log.warning("trending mirror %s: %s", TRENDING_CH, exc)
+        log.warning("board refresh after paid %s", exc)
+
+
+async def boosts_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    now = int(time.time())
+    con = _db()
+    rows = con.execute(
+        "SELECT id, kind, cashtag, ca, chain, usd_paid, hours_granted, ends_ts FROM boosts "
+        "WHERE status='active' AND ends_ts>? ORDER BY kind, ends_ts",
+        (now,),
+    ).fetchall()
+    con.close()
+    if not rows:
+        await update.effective_message.reply_text("No active boosts right now.")
+        return
+    lines = ["🚀 Active boosts"]
+    for bid, kind, tag, ca, chain, usd_paid, hours, ends_ts in rows:
+        left_min = max(0, (ends_ts - now)) // 60
+        left = f"{left_min // 60}h {left_min % 60}m" if left_min >= 60 else f"{left_min}m"
+        lines.append(f"• #{bid} {kind.upper()} — {tag or ca} ({chain}) — {left} left — paid ${usd_paid:.2f}")
+    await update.effective_message.reply_text("\n".join(lines)[:3800])
+
+
+async def refundboost_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_user.id not in OWNER_IDS:
+        return
+    if not context.args or not context.args[0].isdigit():
+        await update.effective_message.reply_text("Usage: /refundboost <id>  (see /boosts for ids)")
+        return
+    bid = int(context.args[0])
+    con = _db()
+    row = con.execute("SELECT kind FROM boosts WHERE id=? AND status='active'", (bid,)).fetchone()
+    if not row:
+        con.close()
+        await update.effective_message.reply_text("No active boost with that id.")
+        return
+    con.execute("UPDATE boosts SET status='refunded' WHERE id=?", (bid,))
+    con.commit()
+    con.close()
+    kind = row[0]
+    await update.effective_message.reply_text(f"Voided boost #{bid} ({kind}).")
+    try:
+        if kind == "raid":
+            await _post_board(context.bot)
+        elif kind == "trending":
+            await _post_trending_board(context.bot)
+    except Exception as exc:
+        log.warning("board refresh after refund %s", exc)
+
+
+async def revenue_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_user.id not in OWNER_IDS:
+        return
+    now = int(time.time())
+    week_ago = now - 7 * 86400
+    month_ago = now - 30 * 86400
+    con = _db()
+
+    def _sum(since: int, kind: str | None = None):
+        if kind:
+            return con.execute(
+                "SELECT COALESCE(SUM(usd_paid),0), COUNT(*) FROM boosts "
+                "WHERE created_ts>=? AND kind=? AND status!='refunded'",
+                (since, kind),
+            ).fetchone()
+        return con.execute(
+            "SELECT COALESCE(SUM(usd_paid),0), COUNT(*) FROM boosts WHERE created_ts>=? AND status!='refunded'",
+            (since,),
+        ).fetchone()
+
+    w_total, w_n = _sum(week_ago)
+    m_total, m_n = _sum(month_ago)
+    lines = [
+        "💰 Revenue (excludes refunded)",
+        f"7d: ${w_total:.2f} ({w_n} boosts)",
+        f"30d: ${m_total:.2f} ({m_n} boosts)",
+    ]
+    for kind in ("raid", "trending", "ads"):
+        kt, kn = _sum(month_ago, kind)
+        lines.append(f"  {kind}: ${kt:.2f} ({kn}) — 30d")
+    con.close()
+    await update.effective_message.reply_text("\n".join(lines))
+
+
+async def linkwallet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    args = context.args or []
+    if len(args) < 2 or args[0].lower() not in ("sol", "solana", "evm", "eth", "base", "bsc", "arb"):
+        await update.effective_message.reply_text(
+            "Usage: /linkwallet sol <address>   or   /linkwallet evm <0xaddress>\n"
+            "Links a wallet to your Telegram account for raid-points payouts."
+        )
+        return
+    kind = "sol" if args[0].lower() in ("sol", "solana") else "evm"
+    addr = args[1].strip()
+    pattern = WALLET_RE["sol"] if kind == "sol" else WALLET_RE["evm"]
+    if not pattern.match(addr):
+        await update.effective_message.reply_text(
+            "That doesn't look like a valid "
+            + ("Solana" if kind == "sol" else "EVM")
+            + " address. Check it and try again."
+        )
+        return
+    u = update.effective_user
+    con = _db()
+    con.execute(
+        "INSERT OR REPLACE INTO user_wallets(user_id, chain, address, updated) VALUES(?,?,?,?)",
+        (u.id, kind, addr, int(time.time())),
+    )
+    con.commit()
+    con.close()
+    await update.effective_message.reply_text(f"✅ {kind.upper()} wallet linked: `{addr}`", parse_mode="Markdown")
+
+
+async def mywallet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    con = _db()
+    rows = con.execute(
+        "SELECT chain, address FROM user_wallets WHERE user_id=?", (update.effective_user.id,)
+    ).fetchall()
+    con.close()
+    if not rows:
+        await update.effective_message.reply_text("No wallet linked yet. /linkwallet sol <address>")
+        return
+    lines = [f"{c.upper()}: `{a}`" for c, a in rows]
+    await update.effective_message.reply_text("Your linked wallets\n" + "\n".join(lines), parse_mode="Markdown")
+
+
+async def unlinkwallet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    args = context.args or []
+    kind = "sol" if (args[0].lower() in ("sol", "solana") if args else False) else ("evm" if args and args[0].lower() == "evm" else None)
+    con = _db()
+    if kind:
+        con.execute("DELETE FROM user_wallets WHERE user_id=? AND chain=?", (update.effective_user.id, kind))
+    else:
+        con.execute("DELETE FROM user_wallets WHERE user_id=?", (update.effective_user.id,))
+    con.commit()
+    con.close()
+    await update.effective_message.reply_text("Wallet(s) unlinked.")
+
+
+async def blacklist_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _is_chat_admin(update):
+        await update.effective_message.reply_text("Admins only.")
+        return
+    args = context.args or []
+    sub = (args[0].lower() if args else "list")
+    con = _db()
+    if sub == "list":
+        rows = con.execute(
+            "SELECT user_id, name FROM raid_blacklist WHERE chat_id=?", (update.effective_chat.id,)
+        ).fetchall()
+        con.close()
+        if not rows:
+            await update.effective_message.reply_text("No blacklisted users in this chat.")
+            return
+        lines = [f"• {n or uid} (`{uid}`)" for uid, n in rows]
+        await update.effective_message.reply_text("🚫 Blacklisted from raid points\n" + "\n".join(lines), parse_mode="Markdown")
+        return
+    target_id = None
+    target_name = ""
+    reply = update.effective_message.reply_to_message
+    if reply and reply.from_user:
+        target_id = reply.from_user.id
+        target_name = reply.from_user.full_name or reply.from_user.username or str(target_id)
+    elif len(args) >= 2 and args[1].isdigit():
+        target_id = int(args[1])
+        target_name = args[1]
+    if not target_id:
+        await update.effective_message.reply_text(
+            "Usage: /blacklist add <user_id>  (or reply to their message)\n"
+            "/blacklist remove <user_id>\n/blacklist list"
+        )
+        con.close()
+        return
+    if sub == "add":
+        con.execute(
+            "INSERT OR REPLACE INTO raid_blacklist(chat_id, user_id, name, added_by, added_ts) VALUES(?,?,?,?,?)",
+            (update.effective_chat.id, target_id, target_name, update.effective_user.id, int(time.time())),
+        )
+        con.commit()
+        con.close()
+        await update.effective_message.reply_text(f"🚫 {target_name} blacklisted from raid points here.")
+    elif sub == "remove":
+        con.execute(
+            "DELETE FROM raid_blacklist WHERE chat_id=? AND user_id=?", (update.effective_chat.id, target_id)
+        )
+        con.commit()
+        con.close()
+        await update.effective_message.reply_text(f"✅ {target_name} removed from blacklist.")
+    else:
+        con.close()
+        await update.effective_message.reply_text("Usage: /blacklist add|remove|list")
+
+
+async def exportpoints_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _is_chat_admin(update):
+        await update.effective_message.reply_text("Admins only.")
+        return
+    con = _db()
+    rows = con.execute(
+        "SELECT user_id, name, pts FROM raid_scores WHERE chat_id=? ORDER BY pts DESC",
+        (update.effective_chat.id,),
+    ).fetchall()
+    con.close()
+    if not rows:
+        await update.effective_message.reply_text("No raid points logged in this chat yet.")
+        return
+    import csv
+    from io import BytesIO, StringIO
+
+    buf = StringIO()
+    w = csv.writer(buf)
+    w.writerow(["user_id", "name", "points", "sol_wallet", "evm_wallet"])
+    con2 = _db()
+    for uid, name, pts in rows:
+        wr = con2.execute("SELECT chain, address FROM user_wallets WHERE user_id=?", (uid,)).fetchall()
+        wmap = {c: a for c, a in wr}
+        w.writerow([uid, name, pts, wmap.get("sol", ""), wmap.get("evm", "")])
+    con2.close()
+    bio = BytesIO(buf.getvalue().encode("utf-8"))
+    bio.name = f"raid_points_{update.effective_chat.id}.csv"
+    await update.effective_message.reply_document(bio, caption=f"📊 {len(rows)} raiders exported.")
+
+
+async def addtag_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _is_chat_admin(update):
+        await update.effective_message.reply_text("Admins only.")
+        return
+    args = context.args or []
+    if len(args) < 5 or not all(a.isdigit() for a in args[1:5]):
+        await update.effective_message.reply_text(
+            "Usage: /addtag <name> <likes> <reposts> <replies> <minutes>\n"
+            "Example: /addtag quick 5 5 2 30"
+        )
+        return
+    name = args[0].lower()
+    con = _db()
+    con.execute(
+        "INSERT OR REPLACE INTO raid_presets(chat_id, name, likes_t, rt_t, re_t, mins) VALUES(?,?,?,?,?,?)",
+        (update.effective_chat.id, name, int(args[1]), int(args[2]), int(args[3]), int(args[4])),
+    )
+    con.commit()
+    con.close()
+    await update.effective_message.reply_text(
+        f"✅ Preset '{name}' saved — {args[1]} likes / {args[2]} reposts / {args[3]} replies / {args[4]}m\n"
+        f"Use it with: /raid <link> {name}"
+    )
+
+
+async def tags_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    con = _db()
+    rows = con.execute(
+        "SELECT name, likes_t, rt_t, re_t, mins FROM raid_presets WHERE chat_id=?",
+        (update.effective_chat.id,),
+    ).fetchall()
+    con.close()
+    if not rows:
+        await update.effective_message.reply_text("No presets saved yet. /addtag <name> <likes> <rt> <re> <mins>")
+        return
+    lines = [f"• {n} — {lt}👍 {rt}🔁 {re}💬 · {m}m" for n, lt, rt, re, m in rows]
+    await update.effective_message.reply_text("🏷 Raid presets\n" + "\n".join(lines))
+
+
+async def season_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _is_chat_admin(update):
+        await update.effective_message.reply_text("Admins only.")
+        return
+    con = _db()
+    rows = con.execute(
+        "SELECT name, pts FROM raid_scores WHERE chat_id=? ORDER BY pts DESC LIMIT 25",
+        (update.effective_chat.id,),
+    ).fetchall()
+    if not rows:
+        con.close()
+        await update.effective_message.reply_text("No points to close out yet.")
+        return
+    import json
+
+    snapshot = json.dumps([{"name": n, "pts": p} for n, p in rows])
+    con.execute(
+        "INSERT INTO raid_seasons(chat_id, ended_ts, snapshot) VALUES(?,?,?)",
+        (update.effective_chat.id, int(time.time()), snapshot),
+    )
+    con.execute("DELETE FROM raid_scores WHERE chat_id=?", (update.effective_chat.id,))
+    con.commit()
+    con.close()
+    top = rows[0]
+    lines = [f"{i+1}. {n}  {p}" for i, (n, p) in enumerate(rows[:5])]
+    await update.effective_message.reply_text(
+        f"🏁 Season closed — 🏆 {top[0]} takes it with {top[1]} pts!\n\n" + "\n".join(lines) +
+        "\n\nLeaderboard reset to 0. /lastseason to look this back up."
+    )
+
+
+async def lastseason_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    con = _db()
+    row = con.execute(
+        "SELECT ended_ts, snapshot FROM raid_seasons WHERE chat_id=? ORDER BY id DESC LIMIT 1",
+        (update.effective_chat.id,),
+    ).fetchone()
+    con.close()
+    if not row:
+        await update.effective_message.reply_text("No past seasons recorded yet. /season to close one out.")
+        return
+    import json
+
+    ended, snap = row
+    data = json.loads(snap or "[]")
+    when = time.strftime("%Y-%m-%d", time.localtime(ended))
+    lines = [f"{i+1}. {d['name']}  {d['pts']}" for i, d in enumerate(data[:10])]
+    await update.effective_message.reply_text(f"📜 Last season (closed {when})\n" + "\n".join(lines))
+
+
+async def payoutpreview_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _is_chat_admin(update):
+        await update.effective_message.reply_text("Admins only.")
+        return
+    args = context.args or []
+    try:
+        rate = float(args[0]) if args else 0.0
+        assert rate > 0
+    except Exception:
+        await update.effective_message.reply_text("Usage: /payoutpreview <$ per point>\nExample: /payoutpreview 0.10")
+        return
+    con = _db()
+    rows = con.execute(
+        "SELECT name, pts FROM raid_scores WHERE chat_id=? ORDER BY pts DESC LIMIT 25",
+        (update.effective_chat.id,),
+    ).fetchall()
+    con.close()
+    if not rows:
+        await update.effective_message.reply_text("No raid points logged in this chat yet.")
+        return
+    total = sum(p for _, p in rows)
+    lines = [f"{n}  {p}pt → ${p * rate:,.2f}" for n, p in rows]
+    await update.effective_message.reply_text(
+        f"💸 Payout preview @ ${rate:.2f}/pt\nTotal owed: ${total * rate:,.2f}\n\n" + "\n".join(lines[:20])
+    )
+
+
+async def exportpayout_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _is_chat_admin(update):
+        await update.effective_message.reply_text("Admins only.")
+        return
+    args = context.args or []
+    try:
+        rate = float(args[0]) if args else 0.0
+        assert rate > 0
+    except Exception:
+        await update.effective_message.reply_text("Usage: /exportpayout <$ per point>\nExample: /exportpayout 0.10")
+        return
+    con = _db()
+    rows = con.execute(
+        "SELECT user_id, name, pts FROM raid_scores WHERE chat_id=? ORDER BY pts DESC",
+        (update.effective_chat.id,),
+    ).fetchall()
+    if not rows:
+        con.close()
+        await update.effective_message.reply_text("No raid points logged in this chat yet.")
+        return
+    import csv
+    from io import BytesIO, StringIO
+
+    buf = StringIO()
+    w = csv.writer(buf)
+    w.writerow(["user_id", "name", "points", "rate_usd", "owed_usd", "sol_wallet", "evm_wallet"])
+    for uid, name, pts in rows:
+        wr = con.execute("SELECT chain, address FROM user_wallets WHERE user_id=?", (uid,)).fetchall()
+        wmap = {c: a for c, a in wr}
+        w.writerow([uid, name, pts, f"{rate:.4f}", f"{pts * rate:.2f}", wmap.get("sol", ""), wmap.get("evm", "")])
+    con.close()
+    bio = BytesIO(buf.getvalue().encode("utf-8"))
+    bio.name = f"raid_payout_{update.effective_chat.id}.csv"
+    total = sum(p for _, _, p in rows) * rate
+    await update.effective_message.reply_document(bio, caption=f"💸 Payout sheet @ ${rate:.2f}/pt — total ${total:,.2f}")
+
+
+async def deltag_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _is_chat_admin(update):
+        await update.effective_message.reply_text("Admins only.")
+        return
+    args = context.args or []
+    if not args:
+        await update.effective_message.reply_text("Usage: /deltag <name>")
+        return
+    con = _db()
+    con.execute("DELETE FROM raid_presets WHERE chat_id=? AND name=?", (update.effective_chat.id, args[0].lower()))
+    con.commit()
+    con.close()
+    await update.effective_message.reply_text(f"Preset '{args[0].lower()}' removed.")
+
+
+async def linkgroup_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _is_chat_admin(update):
+        await update.effective_message.reply_text("Admins only.")
+        return
+    args = context.args or []
+    if not args or not args[0].lstrip("-").isdigit():
+        await update.effective_message.reply_text(
+            "Usage: /linkgroup <chat_id>\n"
+            "Run this in the HOME group for a project. <chat_id> is the sister group's ID "
+            "(the bot must already be in it — forward a message from there to @userinfobot to get its ID, "
+            "or check /linkedgroups after adding the bot).\n"
+            "Once linked, /raid in the home group also posts the same raid card into that group, "
+            "and taps there count toward the same leaderboard."
+        )
+        return
+    linked_id = int(args[0])
+    title = ""
+    try:
+        chat = await context.bot.get_chat(linked_id)
+        title = chat.title or ""
+    except Exception:
+        pass
+    con = _db()
+    con.execute(
+        "INSERT OR REPLACE INTO raid_links(chat_id, linked_chat_id, linked_title) VALUES(?,?,?)",
+        (update.effective_chat.id, linked_id, title),
+    )
+    con.commit()
+    con.close()
+    await update.effective_message.reply_text(f"✅ Linked {title or linked_id} — future /raid posts will also go there.")
+
+
+async def unlinkgroup_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _is_chat_admin(update):
+        await update.effective_message.reply_text("Admins only.")
+        return
+    args = context.args or []
+    if not args or not args[0].lstrip("-").isdigit():
+        await update.effective_message.reply_text("Usage: /unlinkgroup <chat_id>")
+        return
+    con = _db()
+    con.execute(
+        "DELETE FROM raid_links WHERE chat_id=? AND linked_chat_id=?",
+        (update.effective_chat.id, int(args[0])),
+    )
+    con.commit()
+    con.close()
+    await update.effective_message.reply_text("Unlinked.")
+
+
+async def linkedgroups_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    con = _db()
+    rows = con.execute(
+        "SELECT linked_chat_id, linked_title FROM raid_links WHERE chat_id=?", (update.effective_chat.id,)
+    ).fetchall()
+    con.close()
+    if not rows:
+        await update.effective_message.reply_text(
+            f"No sister groups linked here.\nThis chat's ID: `{update.effective_chat.id}`\n"
+            "/linkgroup <chat_id> in another group to link it to this one.",
+            parse_mode="Markdown",
+        )
+        return
+    lines = [f"• {t or cid} (`{cid}`)" for cid, t in rows]
+    await update.effective_message.reply_text(
+        f"🔗 Linked sister groups\nThis chat's ID: `{update.effective_chat.id}`\n" + "\n".join(lines),
+        parse_mode="Markdown",
+    )
 
 
 def main() -> None:
@@ -2331,6 +4084,33 @@ def main() -> None:
                 BotCommand("status", "Watching"),
                 BotCommand("untrack", "Stop alerts"),
                 BotCommand("chart", "Token chart"),
+                BotCommand("marketing", "Promotion options"),
+                BotCommand("trending", "Buy a Trending boost"),
+                BotCommand("raid", "Launch an X raid"),
+                BotCommand("raidstop", "Stop the active raid"),
+                BotCommand("raidjoin", "Log a raid point"),
+                BotCommand("raidlb", "This chat's raid leaderboard"),
+                BotCommand("raidboost", "Buy a Raid Leaderboard boost"),
+                BotCommand("raidpin", "Toggle auto-pin for raid posts"),
+                BotCommand("addtag", "Save a reusable raid preset"),
+                BotCommand("tags", "List raid presets"),
+                BotCommand("linkgroup", "Link a sister group to this raid"),
+                BotCommand("linkedgroups", "List linked raid groups"),
+                BotCommand("blacklist", "Manage the raid-points blacklist"),
+                BotCommand("exportpoints", "Export raid leaderboard as CSV"),
+                BotCommand("linkwallet", "Link your payout wallet"),
+                BotCommand("mywallet", "Show your linked wallet"),
+                BotCommand("season", "Close out the raid leaderboard"),
+                BotCommand("lastseason", "See last season's winners"),
+                BotCommand("payoutpreview", "Preview $ owed per raider"),
+                BotCommand("exportpayout", "Export a $ payout CSV"),
+                BotCommand("setwhale", "Set the whale-buy $ threshold"),
+                BotCommand("sellalerts", "Toggle sell alerts"),
+                BotCommand("setdev", "Watch a dev wallet for sells"),
+                BotCommand("alert", "DM me at a market cap target"),
+                BotCommand("topbuyers", "Top buyers leaderboard"),
+                BotCommand("paid", "Activate a boost with your txhash"),
+                BotCommand("boosts", "See active boosts"),
                 BotCommand("help", "Help"),
             ]
         )
@@ -2390,9 +4170,13 @@ def main() -> None:
     app.add_handler(CommandHandler("marketing", marketing_cmd))
     app.add_handler(CallbackQueryHandler(marketing_cb, pattern=r"^mk:"))
     app.add_handler(CommandHandler("trending", trending_cmd))
-    app.add_handler(CallbackQueryHandler(trending_cb, pattern=r"^td:"))
+    app.add_handler(CommandHandler("raidboost", raidboost_cmd))
+    app.add_handler(CallbackQueryHandler(boost_cb, pattern=r"^bst:"))
     app.add_handler(CommandHandler("ads", ads_cmd))
     app.add_handler(CommandHandler("paid", paid_cmd))
+    app.add_handler(CommandHandler("boosts", boosts_cmd))
+    app.add_handler(CommandHandler("refundboost", refundboost_cmd))
+    app.add_handler(CommandHandler("revenue", revenue_cmd))
     app.add_handler(CommandHandler("market", market_cmd))
     app.add_handler(CommandHandler("vote", vote_cmd))
     app.add_handler(CommandHandler("raid", raid_cmd))
@@ -2410,6 +4194,27 @@ def main() -> None:
     app.add_handler(CommandHandler("clb", lb_cmd))
     app.add_handler(CommandHandler("raidevent", raidevent_cmd))
     app.add_handler(CommandHandler("relb", lb_cmd))
+    app.add_handler(CommandHandler("linkwallet", linkwallet_cmd))
+    app.add_handler(CommandHandler("mywallet", mywallet_cmd))
+    app.add_handler(CommandHandler("unlinkwallet", unlinkwallet_cmd))
+    app.add_handler(CommandHandler("blacklist", blacklist_cmd))
+    app.add_handler(CommandHandler("exportpoints", exportpoints_cmd))
+    app.add_handler(CommandHandler("addtag", addtag_cmd))
+    app.add_handler(CommandHandler("tags", tags_cmd))
+    app.add_handler(CommandHandler("deltag", deltag_cmd))
+    app.add_handler(CommandHandler("linkgroup", linkgroup_cmd))
+    app.add_handler(CommandHandler("unlinkgroup", unlinkgroup_cmd))
+    app.add_handler(CommandHandler("linkedgroups", linkedgroups_cmd))
+    app.add_handler(CommandHandler("raidpin", raidpin_cmd))
+    app.add_handler(CommandHandler("season", season_cmd))
+    app.add_handler(CommandHandler("lastseason", lastseason_cmd))
+    app.add_handler(CommandHandler("payoutpreview", payoutpreview_cmd))
+    app.add_handler(CommandHandler("exportpayout", exportpayout_cmd))
+    app.add_handler(CommandHandler("setwhale", setwhale_cmd))
+    app.add_handler(CommandHandler("sellalerts", sellalerts_cmd))
+    app.add_handler(CommandHandler("setdev", setdev_cmd))
+    app.add_handler(CommandHandler("alert", alert_cmd))
+    app.add_handler(CommandHandler("topbuyers", topbuyers_cmd))
     app.job_queue.run_repeating(tick, interval=25, first=8)
     log.info("Ferzan Buy running")
     app.run_polling(drop_pending_updates=True)

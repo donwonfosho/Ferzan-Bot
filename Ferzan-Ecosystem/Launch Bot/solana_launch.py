@@ -40,6 +40,9 @@ from solders.pubkey import Pubkey
 from solders.system_program import CreateAccountParams, TransferParams, create_account, transfer
 from solders.message import Message
 from solders.transaction import Transaction
+from solders.instruction import Instruction, AccountMeta
+from solders.sysvar import RENT as SYSVAR_RENT_PUBKEY
+from solders.system_program import ID as SYS_PROGRAM_ID
 import asyncio
 from solana.rpc.async_api import AsyncClient
 
@@ -60,6 +63,38 @@ from spl.token.models import (
 
 MINT_ACCOUNT_SPACE = 82  # fixed size of an SPL Token mint account, per the SPL Token program spec
 
+METAPLEX_PROGRAM_ID = Pubkey.from_string("metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s")
+
+def _borsh_string(s: str) -> bytes:
+    b = s.encode("utf-8")
+    return len(b).to_bytes(4, "little") + b
+
+def _create_metadata_instruction(mint_pubkey, mint_authority, payer, name, symbol, uri):
+    metadata_pda, _ = Pubkey.find_program_address(
+        [b"metadata", bytes(METAPLEX_PROGRAM_ID), bytes(mint_pubkey)],
+        METAPLEX_PROGRAM_ID,
+    )
+    data = bytes([33])  # CreateMetadataAccountV3 discriminator
+    data += _borsh_string(name[:32])
+    data += _borsh_string(symbol[:10])
+    data += _borsh_string(uri[:200])
+    data += (0).to_bytes(2, "little")  # seller_fee_basis_points
+    data += bytes([0])  # creators: None
+    data += bytes([0])  # collection: None
+    data += bytes([0])  # uses: None
+    data += bytes([1])  # is_mutable: True
+    data += bytes([0])  # collection_details: None
+
+    accounts = [
+        AccountMeta(pubkey=metadata_pda, is_signer=False, is_writable=True),
+        AccountMeta(pubkey=mint_pubkey, is_signer=False, is_writable=False),
+        AccountMeta(pubkey=mint_authority, is_signer=True, is_writable=False),
+        AccountMeta(pubkey=payer, is_signer=True, is_writable=True),
+        AccountMeta(pubkey=mint_authority, is_signer=True, is_writable=False),
+        AccountMeta(pubkey=SYS_PROGRAM_ID, is_signer=False, is_writable=False),
+        AccountMeta(pubkey=SYSVAR_RENT_PUBKEY, is_signer=False, is_writable=False),
+    ]
+    return Instruction(program_id=METAPLEX_PROGRAM_ID, accounts=accounts, data=data)
 
 @dataclass
 class SolanaLaunchResult:
@@ -73,6 +108,9 @@ def build_unsigned_launch_tx(
     decimals: int,
     initial_supply_raw: int,  # already scaled by 10**decimals -- caller's responsibility, not auto-applied here
     rpc_url: str,
+    name: str = "",
+    symbol: str = "",
+    metadata_uri: str = "",
     revoke_mint_authority: bool = True,
     revoke_freeze_authority: bool = True,
 ) -> SolanaLaunchResult:
@@ -124,6 +162,10 @@ def build_unsigned_launch_tx(
             )
         ),
     ]
+    if metadata_uri:
+        instructions.append(
+            _create_metadata_instruction(mint_pubkey, creator, creator, name, symbol, metadata_uri)
+        )
 
     treasury = (os.environ.get("PLATFORM_TREASURY_SOL") or os.environ.get("TREASURY_SOL") or "").strip()
     fee_lamports = int(os.environ.get("LAUNCH_FEE_LAMPORTS") or "50000000")

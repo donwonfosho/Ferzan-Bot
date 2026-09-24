@@ -48,12 +48,18 @@ def build_unsigned_meteora_tx(
     initial_supply_raw: int,
     rpc_url: str,
     graduation_sol_lamports: int = 0,
+    name: str = "",
+    symbol: str = "",
+    metadata_uri: str = "",
 ) -> MeteoraLaunchResult:
     base = build_unsigned_launch_tx(
         creator_pubkey=creator_pubkey,
         decimals=decimals,
         initial_supply_raw=initial_supply_raw,
         rpc_url=rpc_url,
+        name=name,
+        symbol=symbol,
+        metadata_uri=metadata_uri,
     )
     config = (os.environ.get("METEORA_CONFIG") or "").strip()
     note = (

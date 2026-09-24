@@ -1,12 +1,17 @@
+# Pinned to what the droplet's SHARED venv (/opt/ferzan/.venv) actually runs.
+# Every Ferzan bot uses that venv (web3, solana, ccxt, irys-sdk live there too),
+# so never pin older versions here: `pip install -r` would downgrade them all.
 python-telegram-bot[job-queue]==21.4
-requests==2.32.3
+requests==2.34.2
 python-dotenv==1.0.1
-solders==0.21.0
-eth-account==0.13.7
-cryptography==43.0.3
+solders==0.29.0
+eth-account==0.8.0
+cryptography==50.0.1
 # internal_api.py -- referral-stats endpoint for Liq Bot's Earn screen
-fastapi==0.115.0
-uvicorn==0.30.6
-# optional: TON send
-# pytoniq
-# pytoniq-core
+fastapi==0.141.1
+uvicorn==0.52.4
+# PnL share cards (pnl_card.py)
+Pillow==12.3.0
+# TON send (ton_signer.py)
+pytoniq==0.1.43
+pytoniq-core==0.2.0

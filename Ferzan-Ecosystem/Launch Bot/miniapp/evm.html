@@ -22,7 +22,7 @@
   <div id="details">Loading launch details...</div>
   <div id="status" style="display:none"></div>
   <button id="connectBtn" class="primary" style="display:none">Connect Wallet</button>
-  <div id="kitWrap" style="display:none;margin-top:12px"><appkit-button></appkit-button></div>
+  <div id="walletChoices" style="display:none;margin-top:12px"><button id="metamaskBtn" class="primary" style="background:#f6851b">Open in MetaMask</button><button id="trustBtn" class="primary" style="background:#3375bb">Open in Trust Wallet</button><button id="coinbaseBtn" class="primary" style="background:#0052ff">Open in Coinbase Wallet</button></div>
   <button id="browserBtn" class="primary" style="display:none;background:#111">Open in Safari / Chrome</button>
   <button id="signBtn" class="primary" style="display:none">Review & Sign Transaction</button>
 
@@ -48,11 +48,9 @@
     URL and chain ID against docs.robinhood.com/chain before relying on it.
   */
 
-  import { createAppKit } from 'https://esm.sh/@reown/appkit@1?bundle';
-  import { WagmiAdapter } from 'https://esm.sh/@reown/appkit-adapter-wagmi@1?bundle';
-  import { mainnet, bsc, base } from 'https://esm.sh/@reown/appkit/networks@1?bundle';
+  import { mainnet, bsc, base } from 'https://esm.sh/viem@2/chains?bundle';
   import { defineChain } from 'https://esm.sh/viem@2?bundle';
-  import { getAccount, sendTransaction } from 'https://esm.sh/@wagmi/core@2?bundle';
+  import { createConfig, http, injected, connect, getAccount, sendTransaction } from 'https://esm.sh/@wagmi/core@2?bundle';
 
   const tg = window.Telegram?.WebApp;
   tg?.ready();
@@ -87,8 +85,7 @@
   };
 
   let launchRequest = null;
-  let wagmiAdapter = null;
-  let appKitModal = null;
+  let wagmiConfigInstance = null;
 
   function showStatus(text, kind) {
     statusEl.style.display = 'block';
@@ -126,71 +123,69 @@
     ).join('');
     connectBtn.style.display = 'block';
     document.getElementById('browserBtn').style.display = 'block';
-    try { initAppKit(); document.getElementById('kitWrap').style.display = 'block'; } catch (e) {
+    try { initWagmi(); document.getElementById('walletChoices').style.display = 'block'; } catch (e) {
       showStatus('Wallet kit failed to start: ' + e.message, 'error');
     }
   }
 
   function wagmiConfig() {
-    return wagmiAdapter?.wagmiConfig || wagmiAdapter?.config || wagmiAdapter?.adapter?.wagmiConfig;
+    return wagmiConfigInstance;
   }
 
-  function initAppKit() {
-    if (appKitModal) return;
+  function initWagmi() {
+    if (wagmiConfigInstance) return;
     const network = CHAIN_NETWORK_MAP[launchRequest.chain];
     if (!network) throw new Error(`No network configured for chain: ${launchRequest.chain}`);
 
-    wagmiAdapter = new WagmiAdapter({
-      projectId: PROJECT_ID,
-      networks: [network],
-    });
+    wagmiConfigInstance = createConfig({
+          chains: [network],
+          connectors: [injected()],
+          transports: { [network.id]: http() },
+        });
+      }
 
-    appKitModal = createAppKit({
-      adapters: [wagmiAdapter],
-      networks: [network],
-      projectId: PROJECT_ID,
-      allWallets: 'SHOW',
-      enableWalletConnect: true,
-      metadata: {
-        name: 'Ferzan Launch',
-        description: 'Launch a token',
-        url: window.location.origin,
-        icons: [],
-      },
-    });
-  }
-
-  function markConnected(address) {
+      function markConnected(address) {
     showStatus('Connected: ' + address, 'success');
     connectBtn.style.display = 'none';
     signBtn.style.display = 'block';
   }
 
   connectBtn.addEventListener('click', async () => {
-    try {
-      initAppKit();
-      document.getElementById('kitWrap').style.display = 'block';
-      document.getElementById('browserBtn').style.display = 'block';
-      showStatus('Opening wallet picker. If nothing pops up, tap Open in Safari / Chrome.');
-      try {
-        if (appKitModal && typeof appKitModal.open === 'function') {
-          await appKitModal.open({ view: 'Connect' });
+        try {
+          initWagmi();
+          document.getElementById('walletChoices').style.display = 'block';
+          document.getElementById('browserBtn').style.display = 'block';
+          showStatus('Connecting... if a wallet app does not open, pick one above, or tap Open in Safari / Chrome.');
+          try {
+            await connect(wagmiConfig(), { connector: injected() });
+          } catch (e) {
+            // no injected provider in this webview -- user will tap a deep-link button instead
+          }
+          const account = await waitForConnection(25000);
+          markConnected(account.address);
+        } catch (e) {
+          showStatus(
+            (e.message || 'Wallet connection failed') +
+            ' Tap a wallet button above to open your wallet app, approve there, then come back and tap Connect again.',
+            'error'
+          );
         }
-      } catch (e) {
-        showStatus('Modal blocked in Telegram. Use Open in Safari / Chrome.', 'error');
-      }
-      const account = await waitForConnection(25000);
-      markConnected(account.address);
-    } catch (e) {
-      showStatus(
-        (e.message || 'Wallet connection failed') +
-        ' Telegram often blocks the wallet modal. Tap Open in Safari / Chrome, then Connect again.',
-        'error'
-      );
-    }
-  });
+      });
 
-  document.getElementById('browserBtn').addEventListener('click', () => {
+      document.getElementById('metamaskBtn').addEventListener('click', () => {
+        const url = 'https://metamask.app.link/dapp/' + window.location.href.replace(/^https?:\/\//, '');
+        if (tg?.openLink) tg.openLink(url); else window.open(url, '_blank');
+      });
+      document.getElementById('trustBtn').addEventListener('click', () => {
+        const url = 'https://link.trustwallet.com/open_url?coin_id=60&url=' + encodeURIComponent(window.location.href);
+        if (tg?.openLink) tg.openLink(url); else window.open(url, '_blank');
+      });
+      document.getElementById('coinbaseBtn').addEventListener('click', () => {
+        const url = 'https://go.cb-w.com/dapp?cb_url=' + encodeURIComponent(window.location.href);
+        if (tg?.openLink) tg.openLink(url); else window.open(url, '_blank');
+      });
+
+      document.getElementById('browserBtn').addEventListener('click', () => {
     const url = window.location.href;
     if (tg?.openLink) tg.openLink(url);
     else window.open(url, '_blank');
@@ -203,7 +198,7 @@
         try {
           const cfg = wagmiConfig();
           const account = cfg ? getAccount(cfg) : {};
-          const addr = account.address || (typeof appKitModal?.getAddress === 'function' && appKitModal.getAddress());
+          const addr = account.address || '';
           if (account.isConnected || addr) {
             clearInterval(interval);
             resolve({ address: account.address || addr, isConnected: true });

@@ -404,31 +404,58 @@ def _estimate_gas(rpc: str, frm: str, to: str, data: str, value: int) -> int:
     return 550000
 
 
-def _broadcast(acct, meta: dict, to: str, data: str, value: int = 0) -> tuple[bool, str]:
+# Error text that means "try again with a bigger gas price", not "this tx is
+# broken" -- retrying on anything else (bad nonce reused wrong, insufficient
+# funds, reverts) would just resend the same failure.
+_UNDERPRICED_HINTS = (
+    "underpriced",
+    "fee too low",
+    "gas price too low",
+    "max fee per gas less than",
+    "transaction fee is too low",
+)
+
+
+def _broadcast(acct, meta: dict, to: str, data: str, value: int = 0, gas_limit: int | None = None) -> tuple[bool, str]:
     data_hex = data if str(data).startswith("0x") else "0x" + str(data)
-    raw_tx = {
-        "to": _addr(to),
-        "data": data_hex,
-        "value": int(value),
-        "chainId": int(meta["chain_id"]),
-        "gas": _estimate_gas(meta["rpc"], acct.address, to, data_hex, int(value)),
-        "gasPrice": int(_gas_price(meta["rpc"]) * 1.2),
-        "nonce": _nonce(meta["rpc"], acct.address),
-    }
-    signed = acct.sign_transaction(raw_tx)
-    raw_hex = signed.raw_transaction.hex() if hasattr(signed, "raw_transaction") else signed.rawTransaction.hex()
-    if not raw_hex.startswith("0x"):
-        raw_hex = "0x" + raw_hex
-    body = _rpc(meta["rpc"], "eth_sendRawTransaction", [raw_hex])
-    if body.get("error"):
-        err = body["error"]
-        return False, str(err.get("message") if isinstance(err, dict) else err)
-    txh = body.get("result") or ""
-    if not txh:
-        return False, "RPC accepted nothing."
-    cid = int(meta.get("chain_id") or 1)
-    exp = (meta.get("explorer_tx") or "https://basescan.org/tx/{txid}").format(txid=txh)
-    return True, exp
+    # gas_limit: callers that pre-computed the exact fee (a "send all"
+    # withdrawal) pass it so the fee we sign matches the fee they reserved.
+    gas = int(gas_limit) if gas_limit else _estimate_gas(meta["rpc"], acct.address, to, data_hex, int(value))
+    nonce = _nonce(meta["rpc"], acct.address)
+    base_gas_price = _gas_price(meta["rpc"])
+    bumps = (1.2, 1.6, 2.2)  # first try, then two retries if underpriced
+    last_err = "RPC accepted nothing."
+    for attempt, bump in enumerate(bumps):
+        raw_tx = {
+            "to": _addr(to),
+            "data": data_hex,
+            "value": int(value),
+            "chainId": int(meta["chain_id"]),
+            "gas": gas,
+            "gasPrice": int(base_gas_price * bump),
+            "nonce": nonce,
+        }
+        signed = acct.sign_transaction(raw_tx)
+        raw_hex = signed.raw_transaction.hex() if hasattr(signed, "raw_transaction") else signed.rawTransaction.hex()
+        if not raw_hex.startswith("0x"):
+            raw_hex = "0x" + raw_hex
+        body = _rpc(meta["rpc"], "eth_sendRawTransaction", [raw_hex])
+        if body.get("error"):
+            err = body["error"]
+            last_err = str(err.get("message") if isinstance(err, dict) else err)
+            if attempt < len(bumps) - 1 and any(h in last_err.lower() for h in _UNDERPRICED_HINTS):
+                log.warning("tx underpriced (attempt %s), bumping gas and retrying: %s", attempt + 1, last_err)
+                continue
+            return False, last_err
+        txh = body.get("result") or ""
+        if not txh:
+            if attempt < len(bumps) - 1:
+                continue
+            return False, last_err
+        cid = int(meta.get("chain_id") or 1)
+        exp = (meta.get("explorer_tx") or "https://basescan.org/tx/{txid}").format(txid=txh)
+        return True, exp
+    return False, last_err
 
 
 def send_native(chain: str, dest: str, key_hex: str | None = None) -> tuple[bool, str]:

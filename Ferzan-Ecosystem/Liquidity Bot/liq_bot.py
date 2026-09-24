@@ -296,7 +296,7 @@ def _wd_text() -> str:
         "🏧 <b>Withdraw</b>\n\n"
         "Ferzan Liq does <b>not</b> hold a deposit wallet.\n"
         "Balances live in <b>Ferzan Trade</b> wallets you already funded.\n\n"
-        "Open Trade → Wallets → send out.\n"
+        "Tap below to open your wallet menu directly on Ferzan Trade —\nno manual navigation needed.\n"
         "Network fee is the only amount the chain keeps.\n\n"
         f"⚡ @{TRADE}"
     )
@@ -496,12 +496,12 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     if data == "liq:earn":
         await q.edit_message_text(_earn_text(uid), parse_mode="HTML", reply_markup=_nav_kb(
-            [InlineKeyboardButton("⚡ Open Trade", url=f"https://t.me/{TRADE}?start=r-{uid}")]
+            [InlineKeyboardButton("⚡ Open Trade", url=f"https://t.me/{TRADE}?start=ref_{uid}")]
         ))
         return
     if data == "liq:wd":
         await q.edit_message_text(_wd_text(), parse_mode="HTML", reply_markup=_nav_kb(
-            [InlineKeyboardButton("⚡ Open Trade wallets", url=f"https://t.me/{TRADE}")]
+            [InlineKeyboardButton("⚡ Open Trade wallets", url=f"https://t.me/{TRADE}?start=wallet")]
         ))
         return
 
@@ -534,12 +534,12 @@ async def cmd_react(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_ref(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     uid = update.effective_user.id
     await update.effective_message.reply_text(_earn_text(uid), parse_mode="HTML", reply_markup=_nav_kb(
-        [InlineKeyboardButton("⚡ Open Trade", url=f"https://t.me/{TRADE}?start=r-{uid}")]
+        [InlineKeyboardButton("⚡ Open Trade", url=f"https://t.me/{TRADE}?start=ref_{uid}")]
     ))
 
 async def cmd_wd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.effective_message.reply_text(_wd_text(), parse_mode="HTML", reply_markup=_nav_kb(
-        [InlineKeyboardButton("⚡ Open Trade wallets", url=f"https://t.me/{TRADE}")]
+        [InlineKeyboardButton("⚡ Open Trade wallets", url=f"https://t.me/{TRADE}?start=wallet")]
     ))
 
 async def setkeys(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

@@ -1,0 +1,14 @@
+[Unit]
+Description=Ferzan Trade Desk Mini App (Telegram Web App dashboard)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/ferzan/app/Ferzan-Ecosystem/Trade Desk
+# webapp.py loads Trade Desk/.env itself (bot token for initData checks, DB path, RPC keys)
+ExecStart=/opt/ferzan/.venv/bin/uvicorn webapp:app --host 127.0.0.1 --port 8021
+Restart=always
+RestartSec=4
+
+[Install]
+WantedBy=multi-user.target

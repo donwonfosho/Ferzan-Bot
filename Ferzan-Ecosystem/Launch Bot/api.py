@@ -177,21 +177,49 @@ def build_tx(request_id: str, body: BuildTxRequest):
     try:
         if req.chain == "solana":
             if req.mode == "plain":
+                from irys_upload import upload_token_metadata
+                metadata_uri = ""
+                try:
+                    metadata_uri = upload_token_metadata(
+                        name=req.name, symbol=req.symbol,
+                        image_url=req.image_url, description=req.description or "",
+                    )
+                except Exception as e:
+                    import traceback
+                    print(f"IRYS_METADATA_UPLOAD_FAILED: {e}")
+                    traceback.print_exc()
                 result = build_solana_plain_tx(
                     creator_pubkey=body.wallet_address,
                     decimals=req.decimals,
                     initial_supply_raw=total_supply,
                     rpc_url=RPC_URLS["solana"],
+                    name=req.name,
+                    symbol=req.symbol,
+                    metadata_uri=metadata_uri,
                 )
-                unsigned_tx_hex = bytes(result.unsigned_transaction).hex()  # transport as hex; adjust to match your Mini App's deserialization
+                unsigned_tx_hex = bytes(result.unsigned_transaction).hex()
                 response = {"chain": "solana", "unsigned_transaction": unsigned_tx_hex, "mint_address": result.mint_address}
             elif req.mode in ("meteora", "pumpfun", "bonding_curve"):
+                from irys_upload import upload_token_metadata
+                metadata_uri = ""
+                try:
+                    metadata_uri = upload_token_metadata(
+                        name=req.name, symbol=req.symbol,
+                        image_url=req.image_url, description=req.description or "",
+                    )
+                except Exception as e:
+                    import traceback
+                    print(f"IRYS_METADATA_UPLOAD_FAILED: {e}")
+                    traceback.print_exc()
                 result = build_unsigned_meteora_tx(
                     creator_pubkey=body.wallet_address,
                     decimals=req.decimals,
                     initial_supply_raw=total_supply,
                     rpc_url=RPC_URLS["solana"],
                     graduation_sol_lamports=int(req.extra_params.get("graduation_eth_threshold") or 0),
+                    name=req.name,
+                    symbol=req.symbol,
+                    metadata_uri=metadata_uri,
                 )
                 unsigned_tx_hex = bytes(result.unsigned_transaction).hex()
                 response = {
@@ -345,7 +373,7 @@ def complete_request(request_id: str, body: CompleteRequest):
     safety = (
         f"🛡 *Safety card*\n"
         f"Mint revoked / fixed supply: {'✓' if mint_ok else 'curve holds remainder'}\n"
-        f"LP burn on graduate: {'✓ curve' if req.mode == 'bonding_curve' else 'use /lplock after you add LP'}\n"
+        f"LP burn on graduate: use /lplock after you add LP\n"
         f"Verify on explorer before you ape.\n"
     )
     trade = (os.environ.get("FERZAN_BOT_USERNAME") or "Ferzan_Trade_Bot").lstrip("@")
@@ -354,6 +382,7 @@ def complete_request(request_id: str, body: CompleteRequest):
         f"*{req.name}* (${req.symbol}) on {req.chain}\n"
         f"Mode: {req.mode}\n"
         f"CA: `{ca}`\n"
+        f"Verify: https://solscan.io/token/{ca}\n"
         f"Tx: `{body.tx_hash}`\n\n"
         f"{safety}\n"
         f"Trade: https://t.me/{trade}"

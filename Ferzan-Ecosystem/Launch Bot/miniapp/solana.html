@@ -48,6 +48,7 @@
   <p>Your token was created and the transaction was confirmed on-chain.</p>
   <p><strong>You're all done here — you can close this page and go back to Telegram.</strong></p>
   <button id="closeBtn" class="primary">Close this window</button>
+        <a id="returnBtn" href="https://t.me/FerzanLaunchBot" style="display:block;text-align:center;margin-top:12px;font-weight:600;color:#2481cc;text-decoration:none;">Return to Telegram</a>
   <span class="txlink" id="txlinkText"></span>
 </div>
 
@@ -95,6 +96,7 @@
     } else {
       try { window.close(); } catch (e) {}
     }
+      setTimeout(() => { window.location.href = 'https://t.me/FerzanLaunchBot'; }, 300);
   });
 
   function hexToBytes(hex) {

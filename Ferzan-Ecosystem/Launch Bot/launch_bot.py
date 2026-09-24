@@ -215,8 +215,8 @@ async def supply_entered(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"*Step 5/9 — Graduation threshold*\n\n"
             f"How much {unit} should the bonding curve collect before it \"graduates\" to a full liquidity pool?\n"
             "Typical range: 5–85 depending on how big you want the curve phase to be.\n"
-            f"Example: `5` (in {unit})  —  or type `default` for a standard threshold"
-        ,
+            f"Example: `5` (in {unit})  —  or type `default` for a standard threshold",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Use default", callback_data="grad:default")]]),
         parse_mode="Markdown")
         return ENTERING_GRAD
     await update.message.reply_text(
@@ -293,6 +293,7 @@ async def grad_entered(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Virtual native reserve sets the bonding curve's starting price — higher means a higher price at launch.\n"
         "Most launches leave this at default.\n"
         "Example: `1`  —  or type `default`",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Use default", callback_data="veth:default")]]),
         parse_mode="Markdown")
     return ENTERING_VETH
 
@@ -312,6 +313,7 @@ async def veth_entered(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Virtual token reserve controls how much supply the curve trades through before graduating.\n"
         "Most launches leave this at default (80% of total supply).\n"
         "Example: `800000000`  —  or type `default`",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Use default", callback_data="vtoken:default")]]),
         parse_mode="Markdown")
     return ENTERING_VTOKEN
 
@@ -327,7 +329,8 @@ async def vtoken_entered(update: Update, context: ContextTypes.DEFAULT_TYPE):
         val = int(int(launch["total_supply_raw"]) * 80 / 100)
     launch.setdefault("extra_params", {})["virtual_token_reserve"] = str(val)
     await update.message.reply_text(
-        "Team wallets? Format `0xabc...:500` (500 = 5%). Multiple comma-separated. Or skip"
+        "Team wallets? Format `0xabc...:500` (500 = 5%). Multiple comma-separated. Or skip",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Skip", callback_data="allocs:skip")]]),
     )
     return ENTERING_ALLOCS
 
@@ -345,6 +348,7 @@ async def allocs_entered(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Want to buy some of your own token the instant it launches, before anyone else can?\n"
         "This is optional and denominated in the chain's native currency (e.g. SOL, ETH).\n"
         "Example: `0.05`  —  or `0` to skip",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Skip", callback_data="devbuy:skip")]]),
         parse_mode="Markdown")
         return ENTERING_DEVBUY
     return await _show_confirm(update, context)
@@ -362,8 +366,8 @@ async def devbuy_entered(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Example: `10 0.2` = opens in 10 minutes, 0.2 max per wallet\n"
         "Type `0 0` for instant open with no cap\n"
         "Example: `10 0.2`  (opens in 10m, max 0.2 native)\n"
-        "Or `0 0` for instant / no cap"
-    ,
+        "Or `0 0` for instant / no cap",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Instant, no cap", callback_data="window:instant")]]),
         parse_mode="Markdown")
     return ENTERING_WINDOW
 
@@ -484,8 +488,10 @@ async def referwallet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def lplock_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(
-        "🔒 *LP lock helper (plain launches)*\n\n"
-        "Ferzan curve mode already burns LP to `0xdead` on graduation.\n"
+        "🔒 *LP lock helper*\n\n"
+        "Meteora/curve mode: pool creation and LP burn are currently *manual* — "
+        "after minting, create your pool via the Meteora dashboard, send the LP "
+        "tokens to `0x000000000000000000000000000000000000dead`, then post the burn tx.\n\n"
         "Plain mode: after you add liquidity on Uniswap / Pancake / Raydium:\n"
         "1. Find the LP token in your wallet\n"
         "2. Send the LP tokens to `0x000000000000000000000000000000000000dead`\n"
@@ -493,6 +499,104 @@ async def lplock_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Do not send the *project* token. Only the LP pair token.",
         parse_mode="Markdown",
     )
+
+
+
+async def grad_default_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    launch = context.user_data["launch"]
+    val = (50 * 10 ** 9) if launch["chain"] == "solana" else (5 * 10 ** 18)
+    launch.setdefault("extra_params", {})["graduation_eth_threshold"] = str(val)
+    await q.message.reply_text(
+        "*Step 6/9 — Starting price*\n\n"
+        "Virtual native reserve sets the bonding curve's starting price — higher means a higher price at launch.\n"
+        "Most launches leave this at default.\n"
+        "Example: `1`  —  or type `default`",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Use default", callback_data="veth:default")]]),
+    )
+    return ENTERING_VETH
+
+
+async def veth_default_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    launch = context.user_data["launch"]
+    val = (1 * 10 ** 9) if launch["chain"] == "solana" else (1 * 10 ** 18)
+    launch.setdefault("extra_params", {})["virtual_eth_reserve"] = str(val)
+    await q.message.reply_text(
+        "*Step 7/9 — Curve depth*\n\n"
+        "Virtual token reserve controls how much supply the curve trades through before graduating.\n"
+        "Most launches leave this at default (80% of total supply).\n"
+        "Example: `800000000`  —  or type `default`",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Use default", callback_data="vtoken:default")]]),
+    )
+    return ENTERING_VTOKEN
+
+
+async def vtoken_default_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    launch = context.user_data["launch"]
+    val = int(int(launch["total_supply_raw"]) * 80 / 100)
+    launch.setdefault("extra_params", {})["virtual_token_reserve"] = str(val)
+    await q.message.reply_text(
+        "Team wallets? Format `0xabc...:500` (500 = 5%). Multiple comma-separated. Or skip",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Skip", callback_data="allocs:skip")]]),
+    )
+    return ENTERING_ALLOCS
+
+
+async def allocs_skip_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    launch = context.user_data["launch"]
+    extra = launch.setdefault("extra_params", {})
+    extra["allocs"] = ""
+    ref = db.get_referrer(update.effective_user.id)
+    if ref:
+        extra["referrer_id"] = str(ref)
+    if launch["mode"] in CURVE_MODES:
+        await q.message.reply_text(
+            "*Step 9/9 — Dev buy*\n\n"
+            "Want to buy some of your own token the instant it launches, before anyone else can?\n"
+            "This is optional and denominated in the chain's native currency (e.g. SOL, ETH).\n"
+            "Example: `0.05`  —  or `0` to skip",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Skip", callback_data="devbuy:skip")]]),
+        )
+        return ENTERING_DEVBUY
+    return await _show_confirm(update, context)
+
+
+async def devbuy_skip_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    launch = context.user_data["launch"]
+    launch.setdefault("extra_params", {})["dev_buy"] = "0"
+    await q.message.reply_text(
+        "*Final step — Trading window*\n\n"
+        "Two settings, space-separated:\n"
+        "• Delay in minutes before trading opens (gives you time to prep)\n"
+        "• Max buy per wallet in native currency (limits early whales)\n"
+        "Example: `10 0.2` = opens in 10 minutes, 0.2 max per wallet\n"
+        "Type `0 0` for instant open with no cap",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Instant, no cap", callback_data="window:instant")]]),
+    )
+    return ENTERING_WINDOW
+
+
+async def window_instant_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    launch = context.user_data["launch"]
+    extra = launch.setdefault("extra_params", {})
+    extra["start_minutes"] = "0"
+    extra["max_buy"] = "0"
+    return await _show_confirm(update, context)
 
 
 def main():
@@ -518,12 +622,12 @@ def main():
             ENTERING_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, name_entered)],
             ENTERING_SYMBOL: [MessageHandler(filters.TEXT & ~filters.COMMAND, symbol_entered)],
             ENTERING_SUPPLY: [MessageHandler(filters.TEXT & ~filters.COMMAND, supply_entered)],
-            ENTERING_GRAD: [MessageHandler(filters.TEXT & ~filters.COMMAND, grad_entered)],
-            ENTERING_VETH: [MessageHandler(filters.TEXT & ~filters.COMMAND, veth_entered)],
-            ENTERING_VTOKEN: [MessageHandler(filters.TEXT & ~filters.COMMAND, vtoken_entered)],
-            ENTERING_ALLOCS: [MessageHandler(filters.TEXT & ~filters.COMMAND, allocs_entered)],
-            ENTERING_DEVBUY: [MessageHandler(filters.TEXT & ~filters.COMMAND, devbuy_entered)],
-            ENTERING_WINDOW: [MessageHandler(filters.TEXT & ~filters.COMMAND, window_entered)],
+            ENTERING_GRAD: [MessageHandler(filters.TEXT & ~filters.COMMAND, grad_entered), CallbackQueryHandler(grad_default_cb, pattern="^grad:")],
+            ENTERING_VETH: [MessageHandler(filters.TEXT & ~filters.COMMAND, veth_entered), CallbackQueryHandler(veth_default_cb, pattern="^veth:")],
+            ENTERING_VTOKEN: [MessageHandler(filters.TEXT & ~filters.COMMAND, vtoken_entered), CallbackQueryHandler(vtoken_default_cb, pattern="^vtoken:")],
+            ENTERING_ALLOCS: [MessageHandler(filters.TEXT & ~filters.COMMAND, allocs_entered), CallbackQueryHandler(allocs_skip_cb, pattern="^allocs:")],
+            ENTERING_DEVBUY: [MessageHandler(filters.TEXT & ~filters.COMMAND, devbuy_entered), CallbackQueryHandler(devbuy_skip_cb, pattern="^devbuy:")],
+            ENTERING_WINDOW: [MessageHandler(filters.TEXT & ~filters.COMMAND, window_entered), CallbackQueryHandler(window_instant_cb, pattern="^window:")],
             CONFIRMING: [CallbackQueryHandler(confirmed, pattern="^confirm:")],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
