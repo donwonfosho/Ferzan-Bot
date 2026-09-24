@@ -2503,3 +2503,96 @@ def multi_buy_slots(user_id: int) -> list[int]:
     ids = active + [i for i in multi_wallets(user_id) if i not in active]
     ids = ids[:MAX_MULTI_WALLETS]
     return ids if len(ids) >= 2 else []
+
+
+# -------------------------------------------------------------- auto-exit --
+# A user's default exit plan, attached automatically to every NEW live
+# position (bot, Mini App, sniper, copy...). auto_exit_seen remembers which
+# positions were already handled so a plan is never re-armed or forced onto
+# exits the user set by hand.
+def _ae_init(conn) -> None:
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS auto_exit (
+            user_id INTEGER PRIMARY KEY,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            tp_pct REAL, sl_pct REAL, trail_pct REAL, ladder TEXT,
+            updated_at INTEGER)"""
+    )
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS auto_exit_seen (
+            user_id INTEGER NOT NULL, mint TEXT NOT NULL,
+            applied INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL,
+            PRIMARY KEY (user_id, mint))"""
+    )
+
+
+def get_auto_exit(user_id: int) -> dict | None:
+    with get_conn() as conn:
+        _ae_init(conn)
+        row = conn.execute("SELECT * FROM auto_exit WHERE user_id = ?", (int(user_id),)).fetchone()
+        return dict(row) if row else None
+
+
+def set_auto_exit(user_id: int, updates: dict) -> dict:
+    cur = get_auto_exit(user_id) or {"enabled": 1, "tp_pct": None, "sl_pct": None, "trail_pct": None, "ladder": None}
+    for k in ("enabled", "tp_pct", "sl_pct", "trail_pct", "ladder"):
+        if k in updates:
+            cur[k] = updates[k]
+    with get_conn() as conn:
+        _ae_init(conn)
+        conn.execute(
+            """INSERT INTO auto_exit (user_id, enabled, tp_pct, sl_pct, trail_pct, ladder, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(user_id) DO UPDATE SET enabled = excluded.enabled, tp_pct = excluded.tp_pct,
+                 sl_pct = excluded.sl_pct, trail_pct = excluded.trail_pct, ladder = excluded.ladder,
+                 updated_at = excluded.updated_at""",
+            (int(user_id), int(cur["enabled"] or 0), cur["tp_pct"], cur["sl_pct"], cur["trail_pct"],
+             cur["ladder"], int(time.time())),
+        )
+        conn.commit()
+    return cur
+
+
+def clear_auto_exit(user_id: int) -> None:
+    with get_conn() as conn:
+        _ae_init(conn)
+        conn.execute("DELETE FROM auto_exit WHERE user_id = ?", (int(user_id),))
+        conn.commit()
+
+
+def auto_exit_users() -> list[dict]:
+    with get_conn() as conn:
+        _ae_init(conn)
+        return [dict(r) for r in conn.execute("SELECT * FROM auto_exit WHERE enabled = 1").fetchall()]
+
+
+def auto_exit_seen(user_id: int) -> set[str]:
+    with get_conn() as conn:
+        _ae_init(conn)
+        rows = conn.execute("SELECT mint FROM auto_exit_seen WHERE user_id = ?", (int(user_id),)).fetchall()
+        return {str(r["mint"]) for r in rows}
+
+
+def mark_auto_exit_seen(user_id: int, mints: list[str], applied: int = 0) -> None:
+    with get_conn() as conn:
+        _ae_init(conn)
+        now = int(time.time())
+        for m in mints:
+            conn.execute(
+                "INSERT OR IGNORE INTO auto_exit_seen (user_id, mint, applied, created_at) VALUES (?, ?, ?, ?)",
+                (int(user_id), str(m), int(applied), now),
+            )
+        conn.commit()
+
+
+def prune_auto_exit_seen(user_id: int, held: list[str]) -> None:
+    """Forget positions the user no longer holds, so a later re-buy of the
+    same token gets the plan again."""
+    keep = set(held)
+    with get_conn() as conn:
+        _ae_init(conn)
+        rows = conn.execute("SELECT mint FROM auto_exit_seen WHERE user_id = ?", (int(user_id),)).fetchall()
+        for r in rows:
+            if str(r["mint"]) not in keep:
+                conn.execute("DELETE FROM auto_exit_seen WHERE user_id = ? AND mint = ?", (int(user_id), str(r["mint"])))
+        conn.commit()

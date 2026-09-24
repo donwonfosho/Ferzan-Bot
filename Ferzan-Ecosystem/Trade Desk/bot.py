@@ -1017,6 +1017,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/tp 50 — auto-sell 100% when you're up 50%",
         "/sl 30 — auto-sell 100% when you're down 30%",
         "/trail 20 — sell everything if the bag's value falls 20% from its highest point since you set it",
+        "/autoexit tp 100 sl 30 — set your exits once, armed on every new buy",
         "💰 Sell initials (bag panel) — sell just enough to get your money back out",
         "/tpladder 50:25 100:25 200:50 — sell in stages: 25% of your bag at +50%, "
         "another 25% at +100%, the rest at +200% (add \"off &lt;mint&gt;\" to cancel)",
@@ -2006,6 +2007,193 @@ async def trail_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"📉 Trailing stop armed: sells everything if the bag's value falls {pct:.0f}% "
         "from its highest point from now on. The high only ratchets up."
     )
+
+
+# -------------------------------------------------------------- auto-exit --
+def _ae_parse_ladder(raw: str) -> list[tuple[float, float]]:
+    rungs = []
+    for part in str(raw or "").replace(",", " ").split():
+        if ":" not in part:
+            continue
+        g, s = part.split(":", 1)
+        try:
+            rungs.append((float(g), float(s)))
+        except ValueError:
+            continue
+    return sorted(rungs)
+
+
+def _ae_plan_text(plan: dict | None) -> str:
+    if not plan:
+        return "none"
+    bits = []
+    if plan.get("tp_pct"):
+        bits.append(f"TP +{plan['tp_pct']:g}%")
+    if plan.get("sl_pct"):
+        bits.append(f"SL -{plan['sl_pct']:g}%")
+    if plan.get("trail_pct"):
+        bits.append(f"Trail {plan['trail_pct']:g}%")
+    rungs = _ae_parse_ladder(plan.get("ladder") or "")
+    if rungs:
+        bits.append("Ladder " + ", ".join(f"+{g:g}%→{s:g}%" for g, s in rungs))
+    return " · ".join(bits) or "none"
+
+
+def _ae_arm(uid: int, mint: str, plan: dict) -> bool:
+    """Attach the plan to one position. Never touches a position that already
+    has exits (TP/SL/trail or a ladder) -- hand-set exits always win."""
+    if db.get_live_exit(uid, mint) or db.list_tp_rungs(uid, mint):
+        return False
+    tp, sl, tr = plan.get("tp_pct"), plan.get("sl_pct"), plan.get("trail_pct")
+    rungs = _ae_parse_ladder(plan.get("ladder") or "")
+    if not (tp or sl or tr or rungs):
+        return False
+    db.set_live_exit(uid, mint, tp_pct=tp or None, sl_pct=sl or None, trail_pct=tr or None)
+    if tr:
+        db.reset_live_peak(uid, mint)
+    if rungs:
+        db.set_tp_ladder(uid, mint, rungs)
+    return True
+
+
+def _ae_short(mint: str) -> str:
+    return html.escape(f"{mint[:6]}…{mint[-4:]}" if len(mint) > 12 else mint)
+
+
+async def auto_exit_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    for plan in db.auto_exit_users():
+        uid = int(plan["user_id"])
+        try:
+            held = db.live_mints(uid)
+            db.prune_auto_exit_seen(uid, held)
+            seen = db.auto_exit_seen(uid)
+            for mint in held:
+                if mint in seen:
+                    continue
+                armed = _ae_arm(uid, mint, plan)
+                db.mark_auto_exit_seen(uid, [mint], 1 if armed else 0)
+                if armed:
+                    logger.info("auto-exit armed user=%s mint=%s", uid, mint)
+                    try:
+                        await context.bot.send_message(
+                            uid,
+                            f"🤖 Auto-exit armed on <code>{_ae_short(mint)}</code>\n{html.escape(_ae_plan_text(plan))}\n"
+                            "Change this position with /tp /sl /trail /tpladder as usual.",
+                            parse_mode="HTML",
+                        )
+                    except Exception:
+                        logger.warning("auto-exit: couldn't notify user=%s", uid)
+        except Exception:
+            logger.exception("auto_exit_job failed for user=%s", uid)
+
+
+_AE_HELP = (
+    "<b>Set once:</b> <code>/autoexit tp 100 sl 30 trail 20</code>\n"
+    "<b>Ladder:</b> <code>/autoexit ladder 50:25 100:25 200:50</code> (+gain%:sell%)\n"
+    "<b>Remove one part:</b> <code>/autoexit tp 0</code>\n"
+    "<code>/autoexit off</code> · <code>/autoexit on</code> · <code>/autoexit clear</code>\n"
+    "<code>/autoexit apply</code> — also arm it on positions you hold now\n\n"
+    "Applies to every NEW buy on every chain. Positions where you already set "
+    "exits by hand are never changed."
+)
+
+
+async def autoexit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard(update):
+        return
+    uid = update.effective_user.id
+    msg = update.effective_message
+    args = [a.lower() for a in (context.args or [])]
+    plan = db.get_auto_exit(uid)
+
+    def status(p) -> str:
+        on = bool(p and p.get("enabled") and _ae_plan_text(p) != "none")
+        return (
+            f"🤖 <b>Auto-exit: {'ON' if on else 'OFF'}</b>\n"
+            f"Plan for new buys: {html.escape(_ae_plan_text(p))}\n\n" + _AE_HELP
+        )
+
+    if not args:
+        await msg.reply_text(status(plan), parse_mode="HTML")
+        return
+    if args[0] == "off":
+        if plan:
+            db.set_auto_exit(uid, {"enabled": 0})
+        await msg.reply_text("🤖 Auto-exit OFF. Exits already armed on positions stay as they are.")
+        return
+    if args[0] == "clear":
+        db.clear_auto_exit(uid)
+        await msg.reply_text("🤖 Auto-exit plan cleared. Exits already armed on positions stay as they are.")
+        return
+    if args[0] in ("on", "apply"):
+        if not plan or _ae_plan_text(plan) == "none":
+            await msg.reply_text("Set a plan first, e.g. /autoexit tp 100 sl 30", parse_mode=None)
+            return
+        if not plan.get("enabled"):
+            db.mark_auto_exit_seen(uid, db.live_mints(uid), 0)  # new buys only
+            plan = db.set_auto_exit(uid, {"enabled": 1})
+        if args[0] == "apply":
+            n = 0
+            for mint in db.live_mints(uid):
+                if _ae_arm(uid, mint, plan):
+                    n += 1
+                db.mark_auto_exit_seen(uid, [mint], 1)
+            await msg.reply_text(
+                f"🤖 Auto-exit ON and armed on {n} current position(s). "
+                "Ones that already had exits were left alone."
+            )
+            return
+        await msg.reply_text(status(plan), parse_mode="HTML")
+        return
+
+    updates: dict = {}
+    i = 0
+    try:
+        while i < len(args):
+            key = args[i]
+            if key == "ladder":
+                j = i + 1
+                rungs = []
+                while j < len(args) and ":" in args[j]:
+                    g, s = args[j].split(":", 1)
+                    g, s = float(g.lstrip("+")), float(s.rstrip("%"))
+                    if g <= 0 or not 0 < s <= 100:
+                        raise ValueError("ladder")
+                    rungs.append((g, s))
+                    j += 1
+                if not rungs and j < len(args) and args[j] in ("0", "off"):
+                    updates["ladder"] = None
+                    j += 1
+                elif not rungs or len(rungs) > 6:
+                    raise ValueError("ladder")
+                else:
+                    updates["ladder"] = ",".join(f"{g:g}:{s:g}" for g, s in sorted(rungs))
+                i = j
+                continue
+            if key in ("tp", "sl", "trail") and i + 1 < len(args):
+                val = abs(float(args[i + 1].strip("%+")))
+                if val == 0:
+                    updates[f"{key}_pct"] = None
+                elif key == "sl" and not 1 <= val <= 99:
+                    raise ValueError("sl")
+                elif key == "trail" and not 1 <= val <= 90:
+                    raise ValueError("trail")
+                else:
+                    updates[f"{key}_pct"] = val
+                i += 2
+                continue
+            raise ValueError(key)
+    except ValueError:
+        await msg.reply_text(_AE_HELP, parse_mode="HTML")
+        return
+    if not updates:
+        await msg.reply_text(_AE_HELP, parse_mode="HTML")
+        return
+    if not (plan and plan.get("enabled")):
+        db.mark_auto_exit_seen(uid, db.live_mints(uid), 0)  # new buys only
+    updates["enabled"] = 1
+    plan = db.set_auto_exit(uid, updates)
+    await msg.reply_text(status(plan), parse_mode="HTML")
 
 
 async def stake_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -6967,6 +7155,7 @@ def main() -> None:
     app.add_handler(CommandHandler("tpladder", tpladder_cmd))
     app.add_handler(CommandHandler("dca", dca_cmd))
     app.add_handler(CommandHandler("trail", trail_cmd))
+    app.add_handler(CommandHandler("autoexit", autoexit_cmd))
     app.add_handler(CommandHandler("stake", stake_cmd))
     app.add_handler(CommandHandler("lpguard", lpguard_cmd))
     app.add_handler(CommandHandler("buylimit", buylimit_cmd))
@@ -7009,6 +7198,7 @@ def main() -> None:
         jq.run_repeating(drawdown_job, interval=DRAWDOWN_POLL_SECONDS, first=55)
         jq.run_repeating(snipe_job, interval=SNIPE_POLL_SECONDS, first=18)
         jq.run_repeating(live_exit_job, interval=45, first=50)
+        jq.run_repeating(auto_exit_job, interval=20, first=30)
         jq.run_repeating(lp_watch_job, interval=40, first=70)
         jq.run_repeating(buy_limit_job, interval=35, first=80)
         jq.run_repeating(launch_feed_job, interval=LAUNCH_FEED_SECONDS, first=35)
