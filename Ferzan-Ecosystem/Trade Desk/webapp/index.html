@@ -408,7 +408,12 @@
       if (px) {
         const v = Math.min(n * px, cap || Infinity);
         q += cap && n * px > cap ? ` (≈ $${cap.toFixed(0)} — capped per trade)` : ` (≈ $${v.toFixed(2)})`;
-        if (wallets > 1) q += ` in each of ${wallets} wallets — about $${(v * wallets).toFixed(2)} total`;
+        if (wallets > 1) {
+          const total = v * wallets;
+          q += cap && total > cap
+            ? ` in ${wallets} wallets — capped at $${cap.toFixed(0)} total (≈ $${(cap / wallets).toFixed(2)} each)`
+            : ` in each of ${wallets} wallets — about $${total.toFixed(2)} total`;
+        }
       } else if (wallets > 1) q += ` in each of ${wallets} wallets`;
       order({ side: "buy", mint: token.mint, chain: token.chain, amount: n, unit: "native", multi: wallets > 1 }, q + "?");
       return;

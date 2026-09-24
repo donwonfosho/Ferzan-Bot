@@ -1276,13 +1276,14 @@ def _default_buy_usd(uid: int) -> float:
 def _live_buy(
     uid: int, card, query: str, force: bool, usd_override: float | None = None,
     secrets_override: tuple[str, str] | None = None, record_basis: bool = True,
+    gates_checked: bool = False,
 ) -> tuple[bool, str]:
     """Blocking — call via _off(). Returns (ok, message). Guard refusals
     return their original text (other code matches on those prefixes);
     actual sends come back in the shared _trade_result layout."""
     if not signer.live_enabled():
         return False, "Live buys are off. LIVE_BUYS=0 on the server."
-    if db.flag_on(uid, "score_gate", 0) and not force:
+    if db.flag_on(uid, "score_gate", 0) and not force and not gates_checked:
         floor = int((db.get_user(uid) or {}).get("min_confluence") or 0)
         if getattr(card, "score", 100) < floor:
             return False, f"Blocked by your score floor ({card.score} < {floor}). /settings floor or tap Override."
@@ -1298,7 +1299,7 @@ def _live_buy(
             chain = chain or "solana"
     if not mint:
         return False, "Live: no mint on this card. Paste the full CA, then Buy."
-    blocked = _rug_block(uid, card, mint)
+    blocked = "" if gates_checked else _rug_block(uid, card, mint)
     if blocked:
         return False, blocked
     usd = _default_buy_usd(uid)
@@ -1347,9 +1348,13 @@ def _live_buy(
 
 
 def _live_buy_followup(
-    uid: int, card, query: str, paper_ok: bool, force: bool, usd_override: float | None = None
+    uid: int, card, query: str, paper_ok: bool, force: bool, usd_override: float | None = None,
+    multi: bool = False,
 ) -> str:
-    if db.multi_buy_slots(uid):
+    # multi=True ONLY from a manual tap (/buy, Buy X, card buttons, app).
+    # DCA, launch-feed auto-buys and paste-to-buy stay single-wallet so
+    # turning multi-buy on can never quietly multiply automated spending.
+    if multi and db.multi_buy_slots(uid):
         return _multi_buy(uid, card, query, force, usd_override)[1]
     return _live_buy(uid, card, query, force, usd_override)[1]
 
@@ -1357,9 +1362,16 @@ def _live_buy_followup(
 def _multi_buy(
     uid: int, card, query: str, force: bool, usd_override: float | None = None
 ) -> tuple[bool, str]:
-    """Blocking (runs under the user's lock via _off). Buys the same size in
-    every multi-buy wallet at once: active wallet first (its buy is the one
-    that counts for PnL / exit rules), each through the normal safety gates."""
+    """Blocking (runs under the user's lock via _off). Buys in every
+    multi-buy wallet at once, active wallet first.
+      * SIGNER_MAX_USD caps the WHOLE tap: if size x wallets exceeds it, each
+        wallet's size is scaled down so the total fits.
+      * Score floor + rug/honeypot gates run ONCE for the token, before any
+        wallet buys (no wallet can slip past a gate another hit).
+      * Cost basis (PnL, TP/SL/trail) is recorded for ONE bag: the first
+        wallet that filled, in active-first order, which is the same wallet
+        the exit engine finds first."""
+    import re
     from concurrent.futures import ThreadPoolExecutor
 
     ids = db.multi_buy_slots(uid)
@@ -1367,26 +1379,50 @@ def _multi_buy(
     chosen = [(sid, *wallets[sid]) for sid in ids if sid in wallets]
     if len(chosen) < 2:
         return _live_buy(uid, card, query, force, usd_override)
+    if db.flag_on(uid, "score_gate", 0) and not force:
+        floor = int((db.get_user(uid) or {}).get("min_confluence") or 0)
+        if getattr(card, "score", 100) < floor:
+            return False, f"Blocked by your score floor ({card.score} < {floor}). /settings floor or tap Override."
+    snap = card.snapshot
+    raw = (query or "").strip()
+    mint = (snap.token_address or "").strip() or (raw if len(raw) >= 32 else "")
+    blocked = _rug_block(uid, card, mint) if mint else ""
+    if blocked:
+        return False, blocked
+    cap = float(signer.max_usd())
+    each = min(cap, max(1.0, float(usd_override if usd_override is not None else _default_buy_usd(uid))))
+    scaled = each * len(chosen) > cap
+    if scaled:
+        each = max(1.0, cap / len(chosen))
 
-    def one(i_row):
-        i, (sid, label, sol, evm) = i_row
+    def one(row):
+        sid, label, sol, evm = row
         try:
-            ok, msg = _live_buy(uid, card, query, force, usd_override,
-                                secrets_override=(sol, evm), record_basis=(i == 0))
+            ok, msg = _live_buy(uid, card, query, True, each, secrets_override=(sol, evm),
+                                record_basis=False, gates_checked=True)
         except Exception as exc:
             logger.exception("multi-buy wallet %s failed", sid)
             ok, msg = False, f"Buy failed: {exc}"
         return label, ok, msg
 
     with ThreadPoolExecutor(max_workers=len(chosen)) as pool:
-        results = list(pool.map(one, enumerate(chosen)))
+        results = list(pool.map(one, chosen))
+    first_ok = next((label for label, ok, _m in results if ok), None)
+    if first_ok and mint:
+        db.add_live_cost(uid, mint, each)
+        if not mint.startswith(("EQ", "UQ", "kQ", "T")):
+            db.set_lp_mark(uid, mint, float(snap.liquidity_usd or 0))
     won = sum(1 for _l, ok, _m in results if ok)
-    lines = [f"👥 Multi-buy · {won}/{len(results)} wallets filled"]
+    lines = [f"👥 Multi-buy · {won}/{len(results)} wallets filled · ${each:.2f} each"]
+    if scaled:
+        lines.append(f"(scaled down so the tap stays under your ${cap:.0f} per-trade cap)")
     for label, ok, msg in results:
-        first = (msg or "").strip().splitlines()
-        detail = " · ".join(ln for ln in first[:3] if ln)[:300]
-        lines.append(f"\n{'✅' if ok else '🔴'} {label}\n{detail}")
-    lines.append("\nPnL and exit rules follow your active wallet's bag.")
+        text = (msg or "").strip()
+        link = next(iter(re.findall(r"https://\S+", text)), "")
+        first = next((ln for ln in text.splitlines() if ln.strip() and not ln.startswith("http")), "")[:110]
+        lines.append(f"{'✅' if ok else '🔴'} {label}: {first}" + (f"\n{link}" if link else ""))
+    if first_ok:
+        lines.append(f"PnL and exit rules follow the {first_ok} bag.")
     return won > 0, "\n".join(lines)
 
 
@@ -1553,7 +1589,7 @@ async def buy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     except PriceFetchError as exc:
         await _done(context.bot, chat_id, status, str(exc))
         return
-    live_msg = await _off(uid, _live_buy_followup, uid, card, query, True, False, _busy=BUSY_MSG)
+    live_msg = await _off(uid, _live_buy_followup, uid, card, query, True, False, multi=True, _busy=BUSY_MSG)
     await _done(context.bot, chat_id, status, live_msg or "Buy sent.")
 
 
@@ -2917,31 +2953,58 @@ async def wallet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 async def _multi_callback(query, context, uid: int, data: str) -> None:
-    if data.startswith("mwt:"):
-        # Toggle from a buy card. First switch-on with nothing ticked ticks
-        # every other wallet (up to the cap) so it works in one tap.
-        q = data[4:]
-        on = not db.flag_on(uid, "multi_buy", 0)
-        db.set_flag(uid, "multi_buy", on)
-        if on and not db.multi_wallets(uid):
-            others = [s["id"] for s in db.list_wallet_slots(uid) if not s["active"]]
-            db.set_multi_wallets(uid, others)
-        n = len(db.multi_buy_slots(uid))
+    async def rerender(q: str, confirm_n: int = 0) -> None:
         try:
             card = await asyncio.to_thread(analyze, q)
             kb = card_keyboard(card.snapshot.query or q, card.score, ca=card.snapshot.token_address or q,
                                chain=card.snapshot.chain or "", uid=uid)
         except Exception:
             kb = card_keyboard(q, 0, ca=q, uid=uid)
+        if confirm_n:
+            rows = [list(r) for r in kb.inline_keyboard]
+            rows = [r for r in rows if not any((b.callback_data or "").startswith("mwt:") for b in r)]
+            rows.insert(0, [
+                InlineKeyboardButton(f"✅ Confirm multi-buy ×{confirm_n}", callback_data=f"mwy:{q}"[:64]),
+                InlineKeyboardButton("✖ Cancel", callback_data=f"mwn:{q}"[:64]),
+            ])
+            kb = InlineKeyboardMarkup(rows)
         try:
             await query.edit_message_reply_markup(reply_markup=kb)
         except Exception:
             pass
-        await context.bot.send_message(
-            uid,
-            f"👥 Multi-buy ON — each buy button now buys in {n} wallets (×{n} the size shown per wallet). "
-            "Pick wallets: /wallets → 👥 Multi-buy wallets." if n else "👤 Multi-buy OFF — buys use your active wallet only.",
-        )
+
+    if data.startswith(("mwt:", "mwy:", "mwn:")):
+        q = data[4:]
+        on_now = bool(db.multi_buy_slots(uid))
+        if data.startswith("mwt:") and on_now:
+            db.set_flag(uid, "multi_buy", False)
+            await rerender(q)
+            await context.bot.send_message(uid, "👤 Multi-buy OFF — buys use your active wallet only.")
+            return
+        if data.startswith("mwn:"):
+            await rerender(q)
+            return
+        # Turning ON. First time with nothing ticked: tick the other wallets.
+        if not db.multi_wallets(uid):
+            db.set_multi_wallets(uid, [w["id"] for w in db.list_wallet_slots(uid) if not w["active"]])
+        active = [w["id"] for w in db.list_wallet_slots(uid) if w["active"]]
+        n = len((active + [i for i in db.multi_wallets(uid) if i not in active])[: db.MAX_MULTI_WALLETS])
+        if n < 2:
+            db.set_flag(uid, "multi_buy", False)
+            await context.bot.send_message(uid, "👥 Multi-buy needs at least 2 wallets. Add one in /wallets → ➕ New wallet.")
+            return
+        if data.startswith("mwt:"):
+            await rerender(q, confirm_n=n)
+            await context.bot.send_message(
+                uid,
+                f"👥 Multi-buy spends in {n} wallets per tap. Each wallet buys the size on the button, and your "
+                f"per-trade cap (${float(signer.max_usd()):.0f}) covers the WHOLE tap — sizes shrink to fit. "
+                "DCA, auto-buys and copy-trades stay single-wallet. Tap ✅ Confirm on the card to switch it on.",
+            )
+            return
+        db.set_flag(uid, "multi_buy", True)  # mwy: confirmed
+        await rerender(q)
+        await context.bot.send_message(uid, f"👥 Multi-buy ON · {n} wallets. Change wallets: /wallets → 👥 Multi-buy wallets.")
         return
     if data.startswith("mws:"):
         try:
@@ -3963,7 +4026,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         except Exception:
             px = 0
         usd_o = amt * px if px > 0 else _default_buy_usd(uid)
-        live_msg = await _off(uid, _live_buy_followup, uid, card, pending, True, True, usd_override=usd_o, _busy=BUSY_MSG)
+        live_msg = await _off(uid, _live_buy_followup, uid, card, pending, True, True, usd_override=usd_o, multi=True, _busy=BUSY_MSG)
         await _done(context.bot, chat_id, status, f"{amt:g} native ≈ ${usd_o:.2f}\n{live_msg}")
         return
     if len(text) > 80:
@@ -4861,7 +4924,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await _safe_answer(query, "Following")
         await context.bot.send_message(uid, f"👁 Now following {w['label']} ({w['chain']}). DM ping when it moves.")
         return
-    if data.startswith("mwt:") or data in ("mwp", "mwo") or data.startswith("mws:"):
+    if data.startswith(("mwt:", "mwy:", "mwn:", "mws:")) or data in ("mwp", "mwo"):
         await _multi_callback(query, context, uid, data)
         return
     if data.startswith("bnv:"):
@@ -4891,7 +4954,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             px = 0
         usd_o = amt * px if px > 0 else _default_buy_usd(uid)
         usd_o = min(signer.max_usd(), max(1.0, usd_o))
-        live_msg = await _off(uid, _live_buy_followup, uid, card, name, True, True, usd_override=usd_o, _busy=BUSY_MSG)
+        live_msg = await _off(uid, _live_buy_followup, uid, card, name, True, True, usd_override=usd_o, multi=True, _busy=BUSY_MSG)
         await _done(context.bot, uid, status, f"{amt:g} native ≈ ${usd_o:.2f}\n{live_msg or ''}")
         return
     if data.startswith("buyz:"):
@@ -4906,7 +4969,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         except PriceFetchError as exc:
             await _done(context.bot, uid, status, str(exc))
             return
-        live_msg = await _off(uid, _live_buy_followup, uid, card, name, True, True, usd_override=usd_o, _busy=BUSY_MSG)
+        live_msg = await _off(uid, _live_buy_followup, uid, card, name, True, True, usd_override=usd_o, multi=True, _busy=BUSY_MSG)
         await _done(context.bot, uid, status, live_msg or "Buy sent.")
         return
     if data.startswith("buy:") or data.startswith("force:"):
@@ -4918,7 +4981,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         except PriceFetchError as exc:
             await _done(context.bot, uid, status, str(exc))
             return
-        live_msg = await _off(uid, _live_buy_followup, uid, card, name, True, force, _busy=BUSY_MSG)
+        live_msg = await _off(uid, _live_buy_followup, uid, card, name, True, force, multi=True, _busy=BUSY_MSG)
         await _done(context.bot, uid, status, live_msg or "Buy sent.")
         return
     if data.startswith("close:"):
@@ -4952,9 +5015,13 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         db.set_chain_trade(uid, cid, gas=nxt)
         await _safe_answer(query, f"{cid.upper()} gas tip {nxt}")
         if cid == "sol":
-            route = "Jito tip (Anti-MEV on)" if signer.exec_opts(uid)["anti_mev"] else "priority fee (Anti-MEV off)"
             shown = f"{nxt} SOL" if nxt else "default 0.001 SOL"
-            await context.bot.send_message(uid, f"⛽ SOL speed → {shown} per trade, paid as {route}.")
+            if signer.exec_opts(uid)["anti_mev"]:
+                note = ("paid as your Anti-MEV tip. Helius Sender's minimum tip is 0.001 SOL, "
+                        "so anything lower is raised to 0.001 (+ a 0.00001 SOL priority fee).")
+            else:
+                note = "paid as the priority fee (+ a 0.000005 SOL Helius Sender tip)."
+            await context.bot.send_message(uid, f"⛽ SOL speed → {shown} per trade, {note}")
         else:
             await context.bot.send_message(
                 uid, f"⛽ {cid.upper()} tip → {nxt}. (Applies to Solana trades; EVM gas is priced automatically.)"

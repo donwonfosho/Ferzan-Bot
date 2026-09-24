@@ -59,7 +59,7 @@ def fees(mev_protect: bool, user_fee: int) -> tuple[int, int]:
     the tip (>= Sender's 0.001 floor) plus a small priority fee. Normal: the
     gas is the priority fee and the tip is Sender's tiny swqos floor."""
     if mev_protect:
-        prio = int(os.getenv("SENDER_MEV_PRIORITY_LAMPORTS", "100000"))
+        prio = int(os.getenv("SENDER_MEV_PRIORITY_LAMPORTS", "10000"))
         return max(1_000, prio), max(FULL_TIP_MIN, int(user_fee))
     return max(1_000, int(user_fee)), SWQOS_TIP_MIN
 
@@ -167,7 +167,9 @@ def simulate(rpc: str, wire: str) -> str | None:
         res = _rpc_call(
             rpc,
             "simulateTransaction",
-            [wire, {"encoding": "base64", "sigVerify": False, "replaceRecentBlockhash": False, "commitment": "processed"}],
+            # replaceRecentBlockhash: a load-balanced RPC may answer from a node
+            # that hasn't seen our fresh blockhash yet -- don't fail on that.
+            [wire, {"encoding": "base64", "sigVerify": False, "replaceRecentBlockhash": True, "commitment": "processed"}],
             timeout=12,
         ) or {}
     except Exception as exc:
@@ -180,9 +182,17 @@ def simulate(rpc: str, wire: str) -> str | None:
     return f"{val['err']}" + (f" — {logs[-1][:160]}" if logs else "")
 
 
-def send(wire: str, mev_protect: bool) -> tuple[bool, str]:
-    """(accepted, error). A network error is reported as accepted=True
-    ("maybe sent"): the caller then checks the chain, never blindly rebuilds."""
+# Error text that proves Sender rejected the tx BEFORE forwarding it. Only
+# these let the caller fall back to another route; anything else might have
+# been forwarded, so the caller checks the chain instead of re-building.
+_REFUSED_HINTS = ("tip", "compute unit price", "computeunitprice", "priority fee", "rate limit",
+                  "too many requests", "invalid", "malformed", "decode", "deserial", "too large")
+
+
+def send(wire: str, mev_protect: bool) -> tuple[str, str]:
+    """("sent" | "refused" | "uncertain", detail). "refused" = provably not
+    forwarded (safe to try another route). "uncertain" = may have gone out:
+    the caller must check the chain, never blindly rebuild."""
     try:
         r = requests.post(
             url(mev_protect),
@@ -190,10 +200,18 @@ def send(wire: str, mev_protect: bool) -> tuple[bool, str]:
                   "params": [wire, {"encoding": "base64", "skipPreflight": True, "maxRetries": 0}]},
             timeout=10,
         )
+        if r.status_code == 429:
+            return "refused", "rate limited"
         body = r.json() if r.content else {}
+        if not isinstance(body, dict):
+            return "uncertain", f"odd reply ({r.status_code})"
+        if body.get("error"):
+            err = body["error"]
+            msg = str(err.get("message") if isinstance(err, dict) else err)[:200]
+            low = msg.lower()
+            return ("refused" if any(h in low for h in _REFUSED_HINTS) else "uncertain"), msg
+        if r.status_code >= 400:
+            return "uncertain", f"HTTP {r.status_code}"
+        return "sent", ""
     except Exception as exc:
-        return True, f"send uncertain: {exc}"
-    if body.get("error"):
-        err = body["error"]
-        return False, str(err.get("message") if isinstance(err, dict) else err)[:200]
-    return True, ""
+        return "uncertain", f"send uncertain: {str(exc)[:160]}"

@@ -237,14 +237,15 @@ def _swap_send_sender(quote: dict, kp, opts: dict, _retry: bool = True) -> tuple
     why_fail = sender.simulate(rpc, wire)
     if why_fail:
         return False, f"Swap would fail right now — nothing sent.\n{why_fail}"
-    ok_send, err = sender.send(wire, mev)
-    if not ok_send:
-        log.warning("sender refused tx (nothing sent), using fallback route: %s", err)
+    verdict, err = sender.send(wire, mev)
+    if verdict == "refused":
+        log.warning("sender refused tx (not forwarded), using fallback route: %s", err)
         return None
     opts["route_used"] = "Helius Sender · MEV-protect" if mev else "Helius Sender"
-    log.info("sender tx %s mev=%s prio=%s tip=%s %s", sig, mev, prio, tip, err or "")
-    # Rebroadcast the SAME signed tx for a few seconds (one signature lands
-    # at most once, so this is always safe), then wait for a verdict.
+    log.info("sender tx %s mev=%s prio=%s tip=%s %s %s", sig, mev, prio, tip, verdict, err or "")
+    # From here the tx may be out: never fall back to a fresh build unless
+    # the chain PROVES it expired. Rebroadcast the SAME signed tx for a few
+    # seconds (one signature lands at most once, so that's always safe).
     for i in range(8):
         _t.sleep(1.5)
         state, detail = _status(sig)
@@ -253,7 +254,10 @@ def _swap_send_sender(quote: dict, kp, opts: dict, _retry: bool = True) -> tuple
         if state == "err":
             return False, f"Failed on-chain: {detail}\nhttps://solscan.io/tx/{sig}"
         if i % 2 == 1:
-            sender.send(wire, mev)
+            try:
+                sender.send(wire, mev)
+            except Exception:
+                pass
     landed, why = _confirm(sig, last_valid)
     if landed:
         return True, sig
