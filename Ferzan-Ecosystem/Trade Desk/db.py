@@ -2012,20 +2012,21 @@ def set_sell_presets(user_id: int, values: list[int]) -> None:
 WEBAPP_ORDER_TTL_S = 45  # a queued order older than this never executes
 
 
-def add_webapp_order(user_id: int, side: str, mint: str, chain: str, amount: float, unit: str) -> int:
+def add_webapp_order(user_id: int, side: str, mint: str, chain: str, amount: float, unit: str,
+                     multi: bool = False) -> int:
     """Returns the new id, or 0 if this user already has an order in flight
     (checked in the same statement, so two fast taps can't both queue)."""
     now = int(time.time())
     with get_conn() as conn:
         cur = conn.execute(
             """
-            INSERT INTO webapp_orders (user_id, side, mint, chain, amount, unit, status, created_at, updated_at)
-            SELECT ?, ?, ?, ?, ?, ?, 'pending', ?, ?
+            INSERT INTO webapp_orders (user_id, side, mint, chain, amount, unit, multi, status, created_at, updated_at)
+            SELECT ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?
             WHERE NOT EXISTS (
                 SELECT 1 FROM webapp_orders WHERE user_id = ? AND status IN ('pending', 'running')
             )
             """,
-            (int(user_id), side, mint, chain or "", float(amount), unit, now, now, int(user_id)),
+            (int(user_id), side, mint, chain or "", float(amount), unit, 1 if multi else 0, now, now, int(user_id)),
         )
         conn.commit()
         return int(cur.lastrowid) if cur.rowcount == 1 else 0
@@ -2348,6 +2349,12 @@ def count_watched_wallets(user_id: int) -> int:
 
 
 def _init_v5(conn) -> None:
+    ucols = {r[1] for r in conn.execute("PRAGMA table_info(users)").fetchall()}
+    if "multi_wallets" not in ucols:
+        conn.execute("ALTER TABLE users ADD COLUMN multi_wallets TEXT")
+    ocols = {r[1] for r in conn.execute("PRAGMA table_info(webapp_orders)").fetchall()}
+    if "multi" not in ocols:
+        conn.execute("ALTER TABLE webapp_orders ADD COLUMN multi INTEGER NOT NULL DEFAULT 0")
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS card_requests (
@@ -2464,3 +2471,35 @@ def claim_card_requests(limit: int = 20) -> list[dict]:
         conn.execute("DELETE FROM card_requests WHERE created_at < ?", (now - 7 * 86400,))
         conn.commit()
         return out
+
+
+MAX_MULTI_WALLETS = 5
+
+
+def multi_wallets(user_id: int) -> list[int]:
+    """Wallet slot ids ticked for multi-buy that still exist (active wallet
+    NOT implied here; callers always add it). Order = slot order."""
+    row = get_user(int(user_id)) or {}
+    raw = str(row.get("multi_wallets") or "")
+    want = {int(x) for x in raw.split(",") if x.strip().isdigit()}
+    return [s["id"] for s in list_wallet_slots(int(user_id)) if s["id"] in want]
+
+
+def set_multi_wallets(user_id: int, slot_ids: list[int]) -> list[int]:
+    valid = [s["id"] for s in list_wallet_slots(int(user_id)) if s["id"] in set(slot_ids)][:MAX_MULTI_WALLETS]
+    if not get_user(int(user_id)):
+        ensure_user(int(user_id), None)
+    update_user(int(user_id), multi_wallets=",".join(str(i) for i in valid))
+    return valid
+
+
+def multi_buy_slots(user_id: int) -> list[int]:
+    """Slots a multi-buy would use: the active wallet first, then ticked
+    ones, capped at MAX_MULTI_WALLETS. [] when multi-buy is off or <2."""
+    if not flag_on(int(user_id), "multi_buy", 0):
+        return []
+    slots = list_wallet_slots(int(user_id))
+    active = [s["id"] for s in slots if s["active"]]
+    ids = active + [i for i in multi_wallets(user_id) if i not in active]
+    ids = ids[:MAX_MULTI_WALLETS]
+    return ids if len(ids) >= 2 else []

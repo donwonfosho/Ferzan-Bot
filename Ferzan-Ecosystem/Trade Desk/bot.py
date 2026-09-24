@@ -533,15 +533,22 @@ def card_keyboard(
         "arb": "ETH", "avax": "AVAX", "pol": "POL", "hood": "ETH",
     }.get(cid, "ETH")
     presets = db.buy_presets(uid, cid)
+    multi_n = len(db.multi_buy_slots(uid)) if uid else 0
+    times = f" ×{multi_n}" if multi_n else ""
     buy_btns = [
-        InlineKeyboardButton(f"🟢 {v:g} {unit}", callback_data=f"bnv:{v:g}:{q}") for v in presets
+        InlineKeyboardButton(f"🟢 {v:g} {unit}{times}", callback_data=f"bnv:{v:g}:{q}") for v in presets
     ]
     rows = [buy_btns[i : i + 3] for i in range(0, len(buy_btns), 3)]
+    if uid and len(db.list_wallet_slots(uid)) >= 2:
+        rows.append([InlineKeyboardButton(
+            f"👥 Multi-buy ON · {multi_n} wallets" if multi_n else "👤 Multi-buy OFF",
+            callback_data=f"mwt:{q}"[:64],
+        )])
     default_usd = _default_buy_usd(uid) if uid else 25.0
     rows += [
         [
             InlineKeyboardButton(f"✏️ Buy X {unit}", callback_data=f"buyx:{q}"),
-            InlineKeyboardButton(f"💵 Buy ${default_usd:g}", callback_data=f"buyz:{default_usd:g}:{q}"),
+            InlineKeyboardButton(f"💵 Buy ${default_usd:g}{times}", callback_data=f"buyz:{default_usd:g}:{q}"),
         ],
         [
             InlineKeyboardButton(
@@ -1267,7 +1274,8 @@ def _default_buy_usd(uid: int) -> float:
 
 
 def _live_buy(
-    uid: int, card, query: str, force: bool, usd_override: float | None = None
+    uid: int, card, query: str, force: bool, usd_override: float | None = None,
+    secrets_override: tuple[str, str] | None = None, record_basis: bool = True,
 ) -> tuple[bool, str]:
     """Blocking — call via _off(). Returns (ok, message). Guard refusals
     return their original text (other code matches on those prefixes);
@@ -1297,7 +1305,7 @@ def _live_buy(
     if usd_override is not None:
         usd = min(signer.max_usd(), max(1.0, float(usd_override)))
     try:
-        sol_secret, evm_secret = user_wallets.secrets(uid)
+        sol_secret, evm_secret = secrets_override or user_wallets.secrets(uid)
     except Exception as exc:
         return False, f"Live: open /wallet first.\n{exc}"
     liq_mark = True
@@ -1324,9 +1332,13 @@ def _live_buy(
         label = "SOL"
         ok, msg = signer.buy_sol(mint, usd, secret=sol_secret, slip_bps=_slip_bps(uid, "buy"), user_id=uid)
     if ok:
-        db.add_live_cost(uid, mint, usd)
+        # Cost basis (PnL, TP/SL/trail) tracks ONE bag per token: only the
+        # active wallet's buy counts toward it. A multi-wallet buy's extra
+        # wallets pass record_basis=False so exits can't misfire.
+        if record_basis:
+            db.add_live_cost(uid, mint, usd)
         _log_trade_safe(uid, "buy", mint, label, usd)
-        if liq_mark:
+        if liq_mark and record_basis:
             db.set_lp_mark(uid, mint, float(card.snapshot.liquidity_usd or 0))
         extra = db.credit_desk_share(uid, usd)
         if extra:
@@ -1337,7 +1349,45 @@ def _live_buy(
 def _live_buy_followup(
     uid: int, card, query: str, paper_ok: bool, force: bool, usd_override: float | None = None
 ) -> str:
+    if db.multi_buy_slots(uid):
+        return _multi_buy(uid, card, query, force, usd_override)[1]
     return _live_buy(uid, card, query, force, usd_override)[1]
+
+
+def _multi_buy(
+    uid: int, card, query: str, force: bool, usd_override: float | None = None
+) -> tuple[bool, str]:
+    """Blocking (runs under the user's lock via _off). Buys the same size in
+    every multi-buy wallet at once: active wallet first (its buy is the one
+    that counts for PnL / exit rules), each through the normal safety gates."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    ids = db.multi_buy_slots(uid)
+    wallets = {sid: (label, sol, evm) for sid, label, sol, evm in user_wallets.all_secrets(uid)}
+    chosen = [(sid, *wallets[sid]) for sid in ids if sid in wallets]
+    if len(chosen) < 2:
+        return _live_buy(uid, card, query, force, usd_override)
+
+    def one(i_row):
+        i, (sid, label, sol, evm) = i_row
+        try:
+            ok, msg = _live_buy(uid, card, query, force, usd_override,
+                                secrets_override=(sol, evm), record_basis=(i == 0))
+        except Exception as exc:
+            logger.exception("multi-buy wallet %s failed", sid)
+            ok, msg = False, f"Buy failed: {exc}"
+        return label, ok, msg
+
+    with ThreadPoolExecutor(max_workers=len(chosen)) as pool:
+        results = list(pool.map(one, enumerate(chosen)))
+    won = sum(1 for _l, ok, _m in results if ok)
+    lines = [f"👥 Multi-buy · {won}/{len(results)} wallets filled"]
+    for label, ok, msg in results:
+        first = (msg or "").strip().splitlines()
+        detail = " · ".join(ln for ln in first[:3] if ln)[:300]
+        lines.append(f"\n{'✅' if ok else '🔴'} {label}\n{detail}")
+    lines.append("\nPnL and exit rules follow your active wallet's bag.")
+    return won > 0, "\n".join(lines)
 
 
 def _mint_from_position(pos: dict) -> str:
@@ -2866,6 +2916,80 @@ async def wallet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     )
 
 
+async def _multi_callback(query, context, uid: int, data: str) -> None:
+    if data.startswith("mwt:"):
+        # Toggle from a buy card. First switch-on with nothing ticked ticks
+        # every other wallet (up to the cap) so it works in one tap.
+        q = data[4:]
+        on = not db.flag_on(uid, "multi_buy", 0)
+        db.set_flag(uid, "multi_buy", on)
+        if on and not db.multi_wallets(uid):
+            others = [s["id"] for s in db.list_wallet_slots(uid) if not s["active"]]
+            db.set_multi_wallets(uid, others)
+        n = len(db.multi_buy_slots(uid))
+        try:
+            card = await asyncio.to_thread(analyze, q)
+            kb = card_keyboard(card.snapshot.query or q, card.score, ca=card.snapshot.token_address or q,
+                               chain=card.snapshot.chain or "", uid=uid)
+        except Exception:
+            kb = card_keyboard(q, 0, ca=q, uid=uid)
+        try:
+            await query.edit_message_reply_markup(reply_markup=kb)
+        except Exception:
+            pass
+        await context.bot.send_message(
+            uid,
+            f"👥 Multi-buy ON — each buy button now buys in {n} wallets (×{n} the size shown per wallet). "
+            "Pick wallets: /wallets → 👥 Multi-buy wallets." if n else "👤 Multi-buy OFF — buys use your active wallet only.",
+        )
+        return
+    if data.startswith("mws:"):
+        try:
+            sid = int(data[4:])
+        except ValueError:
+            return
+        picked = db.multi_wallets(uid)
+        if sid in picked:
+            picked.remove(sid)
+        elif len(picked) + 1 < db.MAX_MULTI_WALLETS:  # +1: the active wallet always joins
+            picked.append(sid)
+        else:
+            await context.bot.send_message(uid, f"Max {db.MAX_MULTI_WALLETS} wallets per multi-buy.")
+        db.set_multi_wallets(uid, picked)
+    elif data == "mwo":
+        db.set_flag(uid, "multi_buy", not db.flag_on(uid, "multi_buy", 0))
+    text, kb = _multi_panel(uid)
+    try:
+        await query.edit_message_text(text, parse_mode="HTML", reply_markup=kb)
+    except Exception:
+        await context.bot.send_message(uid, text, parse_mode="HTML", reply_markup=kb)
+
+
+def _multi_panel(uid: int) -> tuple[str, InlineKeyboardMarkup]:
+    """Pick which wallets join a multi-buy (active one always does)."""
+    slots = db.list_wallet_slots(uid)
+    picked = set(db.multi_wallets(uid))
+    on = db.flag_on(uid, "multi_buy", 0)
+    n = len(db.multi_buy_slots(uid)) if on else 0
+    lines = [
+        "👥 <b>Multi-buy wallets</b>",
+        "When multi-buy is ON, one tap buys the same size in every ticked wallet at once "
+        f"(max {db.MAX_MULTI_WALLETS}). Your ✅ active wallet always joins, and its bag is the one "
+        "PnL and exit rules (TP / SL / trail) follow.",
+        f"\nStatus: {'ON · ' + str(n) + ' wallets' if n else 'OFF'}",
+    ]
+    rows = []
+    for r in slots:
+        if r["active"]:
+            rows.append([InlineKeyboardButton(f"✅ {r['label'][:20]} (active, always in)", callback_data="mwp")])
+        else:
+            tick = "☑️" if r["id"] in picked else "⬜"
+            rows.append([InlineKeyboardButton(f"{tick} {r['label'][:24]}", callback_data=f"mws:{r['id']}")])
+    rows.append([InlineKeyboardButton("👤 Turn multi-buy OFF" if on else "👥 Turn multi-buy ON", callback_data="mwo")])
+    rows.append([InlineKeyboardButton("↩️ Wallets", callback_data="go:wallets")])
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
 def _mywallets_panel(uid: int) -> tuple[str, InlineKeyboardMarkup]:
     slots = db.list_wallet_slots(uid)
     lines = ["👛 <b>Your wallets</b>", "Buys use the ✅ active wallet. Sells find whichever wallet holds the token.\n"]
@@ -2878,6 +3002,8 @@ def _mywallets_panel(uid: int) -> tuple[str, InlineKeyboardMarkup]:
             rows.append([InlineKeyboardButton(f"Use {r['label'][:20]}", callback_data=f"wsl:use:{r['id']}")])
     if len(slots) < db.MAX_WALLETS:
         rows.append([InlineKeyboardButton("➕ New wallet", callback_data="wsl:new")])
+    if len(slots) >= 2:
+        rows.append([InlineKeyboardButton("👥 Multi-buy wallets", callback_data="mwp")])
     rows.append([InlineKeyboardButton("📥 Import into new wallet", callback_data="wi:imp")])
     rows.append([InlineKeyboardButton("↩️ Chains", callback_data="wi:chains")])
     lines.append(f"\n{len(slots)}/{db.MAX_WALLETS} · rename the active one: /walletname Sniper")
@@ -3047,6 +3173,7 @@ _FLAG_DEFAULTS = {
     "auto_buy": 0,
     "copy_live": 0,
     "daily_recap": 1,
+    "multi_buy": 0,
 }
 
 
@@ -4734,6 +4861,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await _safe_answer(query, "Following")
         await context.bot.send_message(uid, f"👁 Now following {w['label']} ({w['chain']}). DM ping when it moves.")
         return
+    if data.startswith("mwt:") or data in ("mwp", "mwo") or data.startswith("mws:"):
+        await _multi_callback(query, context, uid, data)
+        return
     if data.startswith("bnv:"):
         _tag, amt_s, name = data.split(":", 2)
         try:
@@ -5712,6 +5842,8 @@ def _webapp_trade(uid: int, o: dict) -> tuple[bool, str]:
             return False, "Couldn't price the native coin right now — nothing sent."
         usd = float(o["amount"]) * px
     usd = min(signer.max_usd(), max(1.0, usd))
+    if o.get("multi") and db.multi_buy_slots(uid):
+        return _multi_buy(uid, card, mint, True, usd)
     return _live_buy(uid, card, mint, True, usd)
 
 

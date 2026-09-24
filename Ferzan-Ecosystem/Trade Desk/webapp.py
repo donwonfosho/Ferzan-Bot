@@ -92,6 +92,7 @@ def build_portfolio(uid: int) -> dict:
     data = portfolio.build_portfolio(uid)
     data["bot"] = _bot_username()
     data["presets"] = {"sol": db.buy_presets(uid, "sol"), "sell": db.sell_presets(uid)}
+    data["multi"] = len(db.multi_buy_slots(uid))
     return data
 
 
@@ -296,7 +297,8 @@ async def api_order(request: Request) -> JSONResponse:
         raise HTTPException(status_code=409, detail="You already have a trade running — wait for it to land.")
     if db.recent_webapp_orders(uid, 60) >= MAX_ORDERS_PER_MIN:
         raise HTTPException(status_code=429, detail="Too many orders this minute — slow down.")
-    oid = db.add_webapp_order(uid, side, mint, chain, amount, unit)
+    multi = side == "buy" and bool(body.get("multi")) and bool(db.multi_buy_slots(uid))
+    oid = db.add_webapp_order(uid, side, mint, chain, amount, unit, multi=multi)
     if not oid:
         raise HTTPException(status_code=409, detail="You already have a trade running — wait for it to land.")
     return JSONResponse({"id": oid, "status": "pending"})

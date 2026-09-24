@@ -30,6 +30,8 @@ def _jito_headers() -> dict:
     """Jito auth key (JITO_AUTH_UUID in .env), sent on every Jito call when set."""
     uid = (os.getenv("JITO_AUTH_UUID") or "").strip()
     return {"x-jito-auth": uid} if uid else {}
+
+
 DEFAULT_FEE_LAMPORTS = 1_000_000  # 0.001 SOL — what the bot always spent
 
 
@@ -191,6 +193,14 @@ def _swap_send_with_retry(quote: dict, kp, opts: dict | None = None) -> tuple[bo
     Returns (ok, signature) — ok only once the swap is CONFIRMED on-chain."""
     opts = opts if opts is not None else exec_opts(None)
     fee = int(opts["fee_lamports"])
+    import sender
+
+    if sender.enabled():
+        res = _swap_send_sender(quote, kp, opts)
+        if res is not None:
+            return res
+        # Sender couldn't build or refused before sending: nothing went out,
+        # so the older route below is a safe fallback.
     if not opts.get("anti_mev"):
         opts["route_used"] = "priority fee"
         return _swap_send_rpc(quote, kp, fee)
@@ -207,6 +217,56 @@ def _swap_send_with_retry(quote: dict, kp, opts: dict | None = None) -> tuple[bo
         return False, res + "\nFallback re-quote failed — nothing else sent."
     opts["route_used"] = "priority fee (Jito didn't land, resent)"
     return _swap_send_rpc(fresh, kp, fee)
+
+
+def _swap_send_sender(quote: dict, kp, opts: dict, _retry: bool = True) -> tuple[bool, str] | None:
+    """Helius Sender route. None = nothing was sent (build failed or Sender
+    refused up front) -> caller uses the older route. Otherwise (ok, sig|msg)."""
+    import time as _t
+
+    import sender
+
+    mev = bool(opts.get("anti_mev"))
+    prio, tip = sender.fees(mev, int(opts["fee_lamports"]))
+    rpc = _rpc()
+    try:
+        wire, sig, last_valid = sender.build(quote, kp, rpc, prio, tip)
+    except Exception as exc:
+        log.warning("sender build failed, using fallback route: %s", exc)
+        return None
+    why_fail = sender.simulate(rpc, wire)
+    if why_fail:
+        return False, f"Swap would fail right now — nothing sent.\n{why_fail}"
+    ok_send, err = sender.send(wire, mev)
+    if not ok_send:
+        log.warning("sender refused tx (nothing sent), using fallback route: %s", err)
+        return None
+    opts["route_used"] = "Helius Sender · MEV-protect" if mev else "Helius Sender"
+    log.info("sender tx %s mev=%s prio=%s tip=%s %s", sig, mev, prio, tip, err or "")
+    # Rebroadcast the SAME signed tx for a few seconds (one signature lands
+    # at most once, so this is always safe), then wait for a verdict.
+    for i in range(8):
+        _t.sleep(1.5)
+        state, detail = _status(sig)
+        if state == "ok":
+            return True, sig
+        if state == "err":
+            return False, f"Failed on-chain: {detail}\nhttps://solscan.io/tx/{sig}"
+        if i % 2 == 1:
+            sender.send(wire, mev)
+    landed, why = _confirm(sig, last_valid)
+    if landed:
+        return True, sig
+    if landed is False and "Expired" in why and _retry:
+        # Provably dropped (blockhash expired, nothing on-chain): a fresh
+        # build can't double-trade. One more try at the current price.
+        log.warning("sender tx %s expired unlanded; rebuilding once", sig)
+        fresh = _requote(quote)
+        if fresh is not None:
+            again = _swap_send_sender(fresh, kp, opts, _retry=False)
+            if again is not None:
+                return again
+    return False, f"{why}\nhttps://solscan.io/tx/{sig}"
 
 
 _JITO_EXPIRED = "Expired without landing"
