@@ -1020,6 +1020,8 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/autoexit tp 100 sl 30 — set your exits once, armed on every new buy",
         "/history — your recent live trades with profit/loss on each sell",
         "/pnl — realized profit today, 7d, 30d, all time + win rate",
+        "/panic — sell 100% of EVERY open position from every wallet (asks to confirm)",
+        "/sellall <token> — sell 100% of one token from every wallet that holds it",
         "💰 Sell initials (bag panel) — sell just enough to get your money back out",
         "/tpladder 50:25 100:25 200:50 — sell in stages: 25% of your bag at +50%, "
         "another 25% at +100%, the rest at +200% (add \"off &lt;mint&gt;\" to cancel)",
@@ -2316,6 +2318,124 @@ async def pnl_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         lines.append(f"\n<i>{unknown} sell(s) without a recorded value (e.g. from before PnL tracking) aren't counted.</i>")
     lines.append("Open bags: /recap · Trade list: /history")
     await update.effective_message.reply_text("\n".join(lines), parse_mode="HTML")
+
+
+# ------------------------------------------------ panic sell / sell-all --
+# Sells 100% from EVERY wallet that holds a token (same multi-wallet seller
+# the TP/SL exits use), with the same cost-basis + PnL bookkeeping.
+_PANIC_RUNNING: set = set()
+
+
+async def _sell_everywhere(uid: int, mint: str, source: str) -> tuple[str, str]:
+    """-> (status, detail). status: 'sold' | 'partial' | 'failed' | 'empty'."""
+    try:
+        holdings = await asyncio.to_thread(_exit_holdings, uid, mint)
+    except Exception as exc:
+        return "failed", f"balance read failed: {str(exc)[:80]}"
+    if not holdings:
+        return "empty", "nothing held"
+    try:
+        px = float(await asyncio.to_thread(_token_mark_usd, mint) or 0)
+    except Exception:
+        px = 0.0
+    worth = sum(float(h[3]) for h in holdings) * px
+    try:
+        ok, msg, share = await _off(uid, _exit_sell_all, uid, mint, holdings, 100)
+    except Exception as exc:
+        return "failed", str(exc)[:120]
+    if share > 0:
+        _log_trade_safe(uid, "sell", mint, "", worth * share, source)
+        try:
+            if ok:
+                db.clear_live_cost(uid, mint)
+                db.clear_live_exit(uid, mint)
+            else:
+                db.reduce_live_cost_pct(uid, mint, 100.0 * share)
+        except Exception:
+            logger.exception("%s: cost-basis update failed for %s", source, mint)
+    if ok:
+        return "sold", f"{len(holdings)} wallet(s)"
+    if share > 0:
+        return "partial", str(msg)[:120]
+    return "failed", str(msg)[:120]
+
+
+def _mint_label(mint: str) -> str:
+    return html.escape(f"{mint[:5]}…{mint[-4:]}" if len(mint) > 11 else mint)
+
+
+async def panic_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard(update):
+        return
+    uid = update.effective_user.id
+    mints = db.live_mints(uid)
+    if not mints:
+        await update.effective_message.reply_text("No open live positions to sell.")
+        return
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton(f"🚨 Yes, sell ALL {len(mints)}", callback_data="pnc:go"),
+        InlineKeyboardButton("Cancel", callback_data="pnc:no"),
+    ]])
+    listed = "\n".join(f"• <code>{_mint_label(m)}</code>" for m in mints[:25])
+    more = f"\n…and {len(mints) - 25} more" if len(mints) > 25 else ""
+    await update.effective_message.reply_text(
+        f"🚨 <b>Panic sell</b>\nSells <b>100%</b> of every open position, from <b>every</b> wallet, "
+        f"on every chain:\n{listed}{more}\n\nThis can't be undone.",
+        parse_mode="HTML",
+        reply_markup=kb,
+    )
+
+
+async def panic_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    uid = q.from_user.id
+    if q.data == "pnc:no":
+        await q.answer("Cancelled")
+        await q.edit_message_text("Panic sell cancelled — nothing was sold.")
+        return
+    if uid in _PANIC_RUNNING:
+        await q.answer("Already selling…", show_alert=True)
+        return
+    _PANIC_RUNNING.add(uid)
+    try:
+        await q.answer("Selling everything…")
+        mints = db.live_mints(uid)
+        await q.edit_message_text(f"🚨 Selling {len(mints)} position(s)…")
+        lines, sold, failed = [], 0, 0
+        for i, mint in enumerate(mints, 1):
+            status, detail = await _sell_everywhere(uid, mint, "panic")
+            icon = {"sold": "✅", "partial": "⚠️", "failed": "❌", "empty": "▫️"}[status]
+            if status == "sold":
+                sold += 1
+            elif status in ("failed", "partial"):
+                failed += 1
+            lines.append(f"{icon} <code>{_mint_label(mint)}</code> {html.escape(detail)}")
+            if i % 3 == 0 and i < len(mints):
+                try:
+                    await q.edit_message_text(f"🚨 Selling… {i}/{len(mints)} done")
+                except Exception:
+                    pass
+        head = f"🚨 <b>Panic sell done</b> — {sold} sold" + (f", {failed} need attention" if failed else "")
+        tail = "\n\nRetry anything marked ❌/⚠️ with /sellall &lt;token&gt; or from 📊 Bag." if failed else ""
+        await q.edit_message_text(head + "\n" + "\n".join(lines[:40]) + tail, parse_mode="HTML")
+    finally:
+        _PANIC_RUNNING.discard(uid)
+
+
+async def sellall_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard(update):
+        return
+    uid = update.effective_user.id
+    if not context.args:
+        await update.effective_message.reply_text(
+            "Usage: /sellall <token address>\nSells 100% of that token from every wallet that holds it."
+        )
+        return
+    mint = context.args[0].strip()
+    msg = await update.effective_message.reply_text("Selling from every wallet…")
+    status, detail = await _sell_everywhere(uid, mint, "sellall")
+    icon = {"sold": "✅ Sold", "partial": "⚠️ Partly sold", "failed": "❌ Sell failed", "empty": "▫️ Nothing held"}[status]
+    await msg.edit_text(f"{icon} <code>{_mint_label(mint)}</code>\n{html.escape(detail)}", parse_mode="HTML")
 
 
 async def stake_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -7281,6 +7401,9 @@ def main() -> None:
     app.add_handler(CommandHandler("autoexit", autoexit_cmd))
     app.add_handler(CommandHandler("history", history_cmd))
     app.add_handler(CommandHandler("pnl", pnl_cmd))
+    app.add_handler(CommandHandler("panic", panic_cmd))
+    app.add_handler(CommandHandler("sellall", sellall_cmd))
+    app.add_handler(CallbackQueryHandler(panic_cb, pattern=r"^pnc:"), group=-1)
     app.add_handler(CommandHandler("stake", stake_cmd))
     app.add_handler(CommandHandler("lpguard", lpguard_cmd))
     app.add_handler(CommandHandler("buylimit", buylimit_cmd))
