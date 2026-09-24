@@ -24,6 +24,12 @@ USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 # never touches the public path where it could be sandwiched.
 JITO_TX = os.getenv("JITO_BLOCK_ENGINE", "https://mainnet.block-engine.jito.wtf") + "/api/v1/transactions?bundleOnly=true"
 JITO_MIN_TIP = 1_000  # lamports, Jito's floor
+
+
+def _jito_headers() -> dict:
+    """Jito auth key (JITO_AUTH_UUID in .env), sent on every Jito call when set."""
+    uid = (os.getenv("JITO_AUTH_UUID") or "").strip()
+    return {"x-jito-auth": uid} if uid else {}
 DEFAULT_FEE_LAMPORTS = 1_000_000  # 0.001 SOL — what the bot always spent
 
 
@@ -238,7 +244,7 @@ def _jito_bundle_status(bundle_id: str) -> str:
     payload = {"jsonrpc": "2.0", "id": 1, "method": "getInflightBundleStatuses", "params": [[bundle_id]]}
     for path in ("/api/v1/getInflightBundleStatuses", "/api/v1/bundles"):
         try:
-            r = requests.post(base + path, json=payload, timeout=8)
+            r = requests.post(base + path, json=payload, headers=_jito_headers(), timeout=8)
             if r.status_code == 404:
                 continue
             body = r.json() if r.content else {}
@@ -303,6 +309,7 @@ def _swap_send_jito(quote: dict, kp, tip: int, opts: dict | None = None) -> tupl
             resp = requests.post(
                 JITO_TX,
                 json={"jsonrpc": "2.0", "id": 1, "method": "sendTransaction", "params": [wire, {"encoding": "base64"}]},
+                headers=_jito_headers(),
                 timeout=20,
             )
             body = resp.json() if resp.content else {}
