@@ -73,6 +73,8 @@ def _db() -> sqlite3.Connection:
         con.execute("ALTER TABLE settings ADD COLUMN captcha_on INTEGER DEFAULT 0")
     if "captcha_timeout" not in scols:
         con.execute(f"ALTER TABLE settings ADD COLUMN captcha_timeout INTEGER DEFAULT {CAPTCHA_TIMEOUT_DEFAULT}")
+    if "clean_service" not in scols:
+        con.execute("ALTER TABLE settings ADD COLUMN clean_service INTEGER DEFAULT 1")
     con.execute(
         """CREATE TABLE IF NOT EXISTS pending_captcha (
             chat_id INTEGER, user_id INTEGER, message_id INTEGER, deadline INTEGER,
@@ -87,13 +89,15 @@ def _get_settings(con: sqlite3.Connection, chat_id: int) -> dict:
     con.execute("INSERT OR IGNORE INTO settings(chat_id) VALUES(?)", (chat_id,))
     con.commit()
     row = con.execute(
-        "SELECT welcome_on, welcome_text, captcha_on, captcha_timeout FROM settings WHERE chat_id=?", (chat_id,)
+        "SELECT welcome_on, welcome_text, captcha_on, captcha_timeout, clean_service FROM settings WHERE chat_id=?",
+        (chat_id,),
     ).fetchone()
     return {
         "welcome_on": bool(row[0]) if row and row[0] is not None else True,
         "welcome_text": (row[1] if row else None) or DEFAULT_WELCOME,
         "captcha_on": bool(row[2]) if row else False,
         "captcha_timeout": int(row[3]) if row and row[3] else CAPTCHA_TIMEOUT_DEFAULT,
+        "clean_service": bool(row[4]) if row and row[4] is not None else True,
     }
 
 
@@ -168,6 +172,8 @@ async def gmenu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/testwelcome — preview it now\n"
         f"/captcha on|off [seconds] — tap-to-verify before a new member can chat "
         f"({'ON, ' + str(s['captcha_timeout']) + 's' if s['captcha_on'] else 'OFF'})\n\n"
+        f"/cleanservice on|off — auto-delete \"joined/left\" messages ({'ON' if s['clean_service'] else 'OFF'})\n"
+        "/purge — reply to a message, then /purge to wipe from there to now (max 200)\n\n"
         "Leave me admin. I already watch joins for fake admin names.",
         parse_mode="HTML",
     )
@@ -375,6 +381,85 @@ async def captcha_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
     else:
         await update.effective_message.reply_text("🔐 Captcha OFF.")
+
+
+async def cleanservice_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _require_admin(update, context):
+        return
+    arg = (context.args[0].lower() if context.args else "")
+    if arg not in ("on", "off"):
+        con = _db()
+        s = _get_settings(con, update.effective_chat.id)
+        con.close()
+        await update.effective_message.reply_text(
+            "Usage: /cleanservice on  or  /cleanservice off\n"
+            "Auto-deletes Telegram's own \"X joined/left the group\" messages "
+            f"(currently {'ON' if s['clean_service'] else 'OFF'})."
+        )
+        return
+    con = _db()
+    con.execute("INSERT OR IGNORE INTO settings(chat_id) VALUES(?)", (update.effective_chat.id,))
+    con.execute(
+        "UPDATE settings SET clean_service=? WHERE chat_id=?", (1 if arg == "on" else 0, update.effective_chat.id)
+    )
+    con.commit()
+    con.close()
+    await update.effective_message.reply_text(f"🧹 Join/leave service messages: {'auto-deleted' if arg == 'on' else 'left alone'}.")
+
+
+async def on_service_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    msg = update.effective_message
+    if not msg:
+        return
+    con = _db()
+    s = _get_settings(con, update.effective_chat.id)
+    con.close()
+    if s["clean_service"]:
+        try:
+            await msg.delete()
+        except TelegramError:
+            pass
+
+
+PURGE_MAX = 200
+
+
+async def purge_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _require_admin(update, context):
+        return
+    msg = update.effective_message
+    if not msg.reply_to_message:
+        await msg.reply_text("Reply to the message you want to purge FROM (the oldest one to delete), then send /purge.")
+        return
+    start_id = msg.reply_to_message.message_id
+    end_id = msg.message_id
+    if end_id <= start_id:
+        await msg.reply_text("Nothing to purge there.")
+        return
+    span = end_id - start_id + 1
+    if span > PURGE_MAX:
+        await msg.reply_text(f"That's {span} messages — /purge handles at most {PURGE_MAX} at a time. Reply closer to now and run it again (it chains fine).")
+        return
+    chat_id = update.effective_chat.id
+    deleted = 0
+    for mid in range(start_id, end_id + 1):
+        try:
+            await context.bot.delete_message(chat_id, mid)
+            deleted += 1
+        except TelegramError:
+            pass  # already gone, too old, or not a deletable message type -- skip it
+    note = await context.bot.send_message(chat_id, f"🧹 Purged {deleted} message(s).")
+    context.job_queue.run_once(
+        _purge_note_cleanup, 8, data={"chat_id": chat_id, "message_id": note.message_id}, name=f"purgenote:{chat_id}:{note.message_id}"
+    )
+
+
+async def _purge_note_cleanup(context: ContextTypes.DEFAULT_TYPE) -> None:
+    d = context.job.data or {}
+    try:
+        await context.bot.delete_message(d["chat_id"], d["message_id"])
+    except TelegramError:
+        pass
 
 
 async def _start_captcha(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user, timeout: int) -> None:
@@ -596,8 +681,13 @@ def main() -> None:
     app.add_handler(CommandHandler("setwelcome", setwelcome_cmd))
     app.add_handler(CommandHandler("testwelcome", testwelcome_cmd))
     app.add_handler(CommandHandler("captcha", captcha_cmd))
+    app.add_handler(CommandHandler("cleanservice", cleanservice_cmd))
+    app.add_handler(CommandHandler("purge", purge_cmd))
     app.add_handler(CallbackQueryHandler(captcha_verify_cb, pattern=r"^cap:"))
     app.add_handler(ChatMemberHandler(on_member, ChatMemberHandler.CHAT_MEMBER))
+    app.add_handler(
+        MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS | filters.StatusUpdate.LEFT_CHAT_MEMBER, on_service_message)
+    )
     app.add_handler(MessageHandler(filters.TEXT | filters.CAPTION, on_text))
 
     async def _post(application):
@@ -614,6 +704,8 @@ def main() -> None:
             BotCommand("setwelcome", "Set the welcome message"),
             BotCommand("testwelcome", "Preview the welcome message"),
             BotCommand("captcha", "Toggle tap-to-verify for new members"),
+            BotCommand("cleanservice", "Toggle auto-delete of join/leave messages"),
+            BotCommand("purge", "Reply to a message to delete from there to now"),
         ]
         await application.bot.set_my_commands(cmds)
 
