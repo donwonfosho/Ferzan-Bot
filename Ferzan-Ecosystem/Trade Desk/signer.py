@@ -180,7 +180,7 @@ def _swap_send_with_retry(quote: dict, kp, opts: dict | None = None) -> tuple[bo
         opts["route_used"] = "priority fee"
         return _swap_send_rpc(quote, kp, fee)
     opts["route_used"] = "Jito · MEV-protected"
-    ok, res = _swap_send_jito(quote, kp, fee)
+    ok, res = _swap_send_jito(quote, kp, fee, opts)
     if ok or not res.startswith(_JITO_EXPIRED) or not _jito_fallback_on():
         return ok, res
     # The Jito tx PROVABLY can't land any more (blockhash expired, full-history
@@ -269,7 +269,7 @@ def _sign(raw_tx: str, kp) -> tuple[str, str]:
     return base64.b64encode(bytes(signed)).decode(), str(signed.signatures[0])
 
 
-def _swap_send_jito(quote: dict, kp, tip: int) -> tuple[bool, str]:
+def _swap_send_jito(quote: dict, kp, tip: int, opts: dict | None = None) -> tuple[bool, str]:
     import time as _t
 
     try:
@@ -319,11 +319,60 @@ def _swap_send_jito(quote: dict, kp, tip: int) -> tuple[bool, str]:
         break
     if not maybe_sent:
         return False, (last_err or "Jito accepted nothing.") + " — nothing sent, safe to retry."
+    # Give Jito a few seconds alone (MEV-protected). If it hasn't landed by
+    # then, broadcast the SAME signed tx through the normal RPC as well: one
+    # signature can only ever land once, so this can't double-trade -- it just
+    # stops a dropped bundle from costing the user the whole ~40s expiry wait.
+    solo = _jito_solo_s()
+    if solo > 0:
+        end = _t.monotonic() + solo
+        while _t.monotonic() < end:
+            _t.sleep(1.5)
+            state, detail = _status(sig)
+            if state == "ok":
+                return True, sig
+            if state == "err":
+                return False, f"Failed on-chain: {detail}\nhttps://solscan.io/tx/{sig}"
+        ok_b, err_b = _rpc_broadcast(wire)
+        if ok_b:
+            log.info("jito tx %s not landed after %ss; same tx also sent via RPC", sig, solo)
+            if opts is not None:
+                opts["route_used"] = "Jito tip + RPC backup"
+        else:
+            log.warning("jito tx %s not landed after %ss; RPC backup refused: %s", sig, solo, err_b)
     landed, why = _confirm(sig, swap.get("lastValidBlockHeight"))
     if landed:
         return True, sig
     log.warning("jito tx %s not landed (%s); jito says: %s", sig, why, _jito_bundle_status(bundle_id))
     return False, f"{why}\nhttps://solscan.io/tx/{sig}"
+
+
+def _jito_solo_s() -> float:
+    """Seconds Jito gets alone before the same tx also goes out via RPC.
+    JITO_SOLO_S=0 keeps anti-MEV Jito-only (then the expiry fallback)."""
+    try:
+        return max(0.0, min(30.0, float(os.getenv("JITO_SOLO_S", "6"))))
+    except ValueError:
+        return 6.0
+
+
+def _rpc_broadcast(wire: str) -> tuple[bool, str]:
+    """Send an already-signed tx through the normal RPC. Preflight stays on:
+    a swap that would fail is refused here instead of burning a fee."""
+    try:
+        r = requests.post(
+            _rpc(),
+            json={"jsonrpc": "2.0", "id": 1, "method": "sendTransaction",
+                  "params": [wire, {"encoding": "base64", "skipPreflight": False, "maxRetries": 5}]},
+            timeout=15,
+        )
+        body = r.json() if r.content else {}
+    except Exception as exc:
+        return False, str(exc)[:200]
+    if body.get("error"):
+        err = body["error"]
+        return False, str(err.get("message") if isinstance(err, dict) else err)[:300]
+    return True, ""
 
 
 def _swap_send_rpc(quote: dict, kp, base_fee: int) -> tuple[bool, str]:
