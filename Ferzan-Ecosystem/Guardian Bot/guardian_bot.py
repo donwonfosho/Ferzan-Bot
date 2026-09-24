@@ -173,8 +173,20 @@ async def gmenu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+def _is_anon_admin(update: Update) -> bool:
+    """True when this message was posted as the group's "Remain Anonymous"
+    admin identity. Telegram delivers those with sender_chat == the group
+    itself and effective_user as a GroupAnonymousBot placeholder that isn't
+    in the member list -- only an admin can send that way, so it's a valid
+    admin signal on its own, no member lookup needed (or possible)."""
+    msg = update.effective_message
+    sender_chat = getattr(msg, "sender_chat", None) if msg else None
+    chat = update.effective_chat
+    return bool(sender_chat and chat and sender_chat.id == chat.id)
+
+
 async def _is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    if update.effective_chat.type == "private":
+    if update.effective_chat.type == "private" or _is_anon_admin(update):
         return True
     member = await context.bot.get_chat_member(update.effective_chat.id, update.effective_user.id)
     return member.status in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER)
@@ -183,7 +195,7 @@ async def _is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
 async def _require_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     """Same admin check, but never silent: replies with what Telegram
     actually reported so a "nothing happened" report is self-diagnosing."""
-    if update.effective_chat.type == "private":
+    if update.effective_chat.type == "private" or _is_anon_admin(update):
         return True
     try:
         member = await context.bot.get_chat_member(update.effective_chat.id, update.effective_user.id)
@@ -194,8 +206,8 @@ async def _require_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return True
     await update.effective_message.reply_text(
         f"Admins only for that one — Telegram has you as \"{member.status}\" in this chat, not admin.\n"
-        "If you were just promoted, leave and rejoin the chat once, or wait a minute — Telegram's admin "
-        "list can lag a bit right after a promotion."
+        "If you're posting as \"Remain Anonymous\", that should already work — if it still doesn't, "
+        "double-check Guardian can see the group's admin list (re-add it as admin)."
     )
     return False
 
@@ -539,6 +551,8 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     user = update.effective_user
     if not user:
+        return
+    if _is_anon_admin(update):
         return
     try:
         member = await context.bot.get_chat_member(update.effective_chat.id, user.id)
