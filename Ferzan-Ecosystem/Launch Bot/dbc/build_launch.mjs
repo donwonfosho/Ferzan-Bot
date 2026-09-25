@@ -16,6 +16,21 @@ try {
     const config = new PublicKey(inp.config)
     const baseMint = Keypair.generate()
     const devBuy = new BN(String(Math.max(0, Math.floor(Number(inp.devBuyLamports || 0)))))
+    const fee = Math.max(0, Math.floor(Number(inp.feeLamports || 0)))
+    const RENT = 30_000_000 // ~0.03 SOL: new token + pool accounts + network fees
+    const needed = Number(devBuy.toString()) + fee + RENT
+    const sol = (l) => (l / 1e9).toFixed(3).replace(/\.?0+$/, '')
+    const costText = `You'll pay about ${sol(needed)} SOL: ` +
+        (devBuy.gtn(0) ? `${sol(Number(devBuy.toString()))} SOL dev buy + ` : '') +
+        `${sol(fee)} SOL launch fee + ~0.03 SOL network rent/fees.`
+    if (!inp.skipBalanceCheck) {
+        const bal = await conn.getBalance(creator)
+        if (bal < needed) {
+            throw new Error(`This launch needs about ${sol(needed)} SOL ` +
+                `(${devBuy.gtn(0) ? sol(Number(devBuy.toString())) + ' dev buy + ' : ''}${sol(fee)} launch fee + ~0.03 rent/fees). ` +
+                `Your wallet has ${sol(bal)} SOL — add SOL or lower the dev buy.`)
+        }
+    }
 
     const tx = await client.creator.createPoolWithFirstBuy({
         createPoolParam: {
@@ -28,7 +43,6 @@ try {
             ? { buyer: creator, receiver: creator, buyAmount: devBuy, minimumAmountOut: new BN(0), referralTokenAccount: null }
             : undefined,
     })
-    const fee = Math.max(0, Math.floor(Number(inp.feeLamports || 0)))
     if (inp.treasury && fee > 0) {
         tx.add(SystemProgram.transfer({ fromPubkey: creator, toPubkey: new PublicKey(inp.treasury), lamports: fee }))
     }
@@ -41,6 +55,8 @@ try {
         mint: baseMint.publicKey.toBase58(),
         pool: deriveDbcPoolAddress(NATIVE_MINT, baseMint.publicKey, config).toBase58(),
         size: raw.length,
+        cost_text: costText,
+        needed_lamports: needed,
     }
     if (inp.simulate) {
         const sim = await simulate(conn, tx)

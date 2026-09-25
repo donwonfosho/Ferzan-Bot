@@ -230,6 +230,7 @@ def build_tx(request_id: str, body: BuildTxRequest):
                     "mint_address": result.mint_address,
                     "program_id": result.program_id,
                     "note": result.note,
+                    "cost_text": getattr(result, "cost_text", ""),
                 }
             else:
                 raise HTTPException(400, f"Unknown Solana mode: {req.mode}")
@@ -393,6 +394,78 @@ def complete_request(request_id: str, body: CompleteRequest):
     if channel:
         _notify_telegram(channel, text)
     return {"status": "ok"}
+
+
+class SolBroadcastBody(BaseModel):
+    signed_tx_b64: str
+
+
+class SolConfirmBody(BaseModel):
+    signature: str
+
+
+async def _sol_rpc(method: str, params: list, timeout: int = 20) -> dict:
+    import asyncio
+
+    def call():
+        r = requests.post(
+            RPC_URLS["solana"],
+            json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params},
+            timeout=timeout,
+        )
+        return r.json() if r.content else {}
+
+    return await asyncio.to_thread(call)
+
+
+async def _require_launch_request(request_id: str) -> None:
+    import inspect
+
+    res = get_request(request_id)  # raises 404 for unknown/expired requests
+    if inspect.isawaitable(res):
+        await res
+
+
+@app.post("/api/launch-requests/{request_id}/sol-broadcast")
+async def sol_broadcast(request_id: str, body: SolBroadcastBody):
+    """For wallets that can only SIGN: the Mini App hands us the signed tx and
+    we send it through our own Solana RPC (the key never reaches the browser)."""
+    await _require_launch_request(request_id)
+    out = await _sol_rpc(
+        "sendTransaction",
+        [body.signed_tx_b64, {"encoding": "base64", "preflightCommitment": "confirmed", "maxRetries": 5}],
+        timeout=30,
+    )
+    if out.get("error"):
+        err = out["error"]
+        msg = err.get("message") if isinstance(err, dict) else str(err)
+        raise HTTPException(400, f"Solana rejected the launch: {str(msg)[:300]}")
+    return {"signature": out.get("result")}
+
+
+@app.post("/api/launch-requests/{request_id}/sol-confirm")
+async def sol_confirm(request_id: str, body: SolConfirmBody):
+    """pending | confirmed | failed (+ a readable reason from the tx logs)."""
+    await _require_launch_request(request_id)
+    out = await _sol_rpc("getSignatureStatuses", [[body.signature], {"searchTransactionHistory": True}])
+    st = (((out.get("result") or {}).get("value")) or [None])[0]
+    if not st:
+        return {"status": "pending"}
+    if st.get("err"):
+        reason = ""
+        try:
+            tx = await _sol_rpc("getTransaction", [body.signature, {"encoding": "json", "maxSupportedTransactionVersion": 0}])
+            logs = (((tx.get("result") or {}).get("meta") or {}).get("logMessages")) or []
+            hits = [l for l in logs if "insufficient" in l.lower() or "error" in l.lower() or "failed" in l.lower()]
+            reason = (hits[0] if hits else "")[:200]
+        except Exception:
+            pass
+        if "insufficient lamports" in reason:
+            reason = "not enough SOL in the wallet for this launch"
+        return {"status": "failed", "err": st.get("err"), "reason": reason or str(st.get("err"))[:200]}
+    if st.get("confirmationStatus") in ("confirmed", "finalized"):
+        return {"status": "confirmed"}
+    return {"status": "pending"}
 
 
 @app.post("/api/launch-requests/{request_id}/fail")

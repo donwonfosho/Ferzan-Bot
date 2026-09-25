@@ -38,6 +38,7 @@ class MeteoraLaunchResult:
     program_id: str
     config: str
     note: str
+    cost_text: str = ""
 
 
 def _fail(msg: str):
@@ -53,7 +54,7 @@ def _dev_buy_lamports(raw) -> int:
     """'0.5', '0.5 SOL', 1, None -> lamports. Anything unreadable -> 0."""
     if raw is None:
         return 0
-    m = re.search(r"\d+(?:\.\d+)?", str(raw).replace(",", ""))
+    m = re.search(r"\d*\.\d+|\d+", str(raw).replace(",", ""))
     if not m:
         return 0
     sol = float(m.group(0))
@@ -111,6 +112,8 @@ def build_unsigned_meteora_tx(
     if proc.returncode != 0 or out.get("error") or not out.get("tx_hex"):
         detail = out.get("error") or (proc.stderr or "").strip()[-300:] or "unknown error"
         print(f"METEORA_BUILD_FAILED: {detail}")
+        if "needs about" in detail:  # balance check: show it to the launcher as-is
+            raise _fail(detail[:300])
         raise _fail(f"Couldn't build the Meteora launch: {detail[:200]}")
     return MeteoraLaunchResult(
         unsigned_transaction=bytes.fromhex(out["tx_hex"]),
@@ -119,4 +122,5 @@ def build_unsigned_meteora_tx(
         program_id=str(METEORA_DBC),
         config=config,
         note=f"Meteora bonding curve · pool {out.get('pool', '')} · {out.get('size', '?')} bytes",
+        cost_text=out.get("cost_text", ""),
     )

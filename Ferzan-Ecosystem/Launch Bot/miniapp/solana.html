@@ -10,14 +10,18 @@
     color: var(--tg-theme-text-color, #000); padding: 16px; margin: 0; }
   button { width: 100%; padding: 14px; font-size: 16px; border-radius: 10px; border: none;
     margin-top: 12px; cursor: pointer; background: var(--tg-theme-button-color, #2481cc); color: var(--tg-theme-button-text-color, #fff); }
+  button:disabled { opacity: .55; cursor: default; }
   .primary { background: #f5f5f5; color: #111; border-radius: 8px; font-size: 14px; }
-  .wallet-btn { display:flex; align-items:center; justify-content:center; gap:10px; background:#111; color:#fff; font-weight:600; }
-  #status { margin-top: 16px; padding: 12px; border-radius: 8px; display:none; }
+  .wallet-btn { display:flex; align-items:center; justify-content:center; gap:10px; background:#111; color:#fff; font-weight:600; margin-top:8px; }
+  #status { margin-top: 16px; padding: 12px; border-radius: 8px; display:none; line-height:1.4; word-break: break-word; }
+  #status a { color: inherit; font-weight: 600; }
   .error { background: #fde8e8 !important; color: #a00; }
   .success { background: #e6f7e6 !important; color: #060; }
   .hint { background:#eef4fb !important; color:#1a5591; }
-  .detail-row { display: flex; justify-content: space-between; padding: 6px 0; font-size: 14px; border-bottom: 1px solid #eee; }
+  .detail-row { display: flex; justify-content: space-between; gap: 12px; padding: 6px 0; font-size: 14px; border-bottom: 1px solid #eee; }
+  .detail-row b { text-align: right; }
   #walletChoices { display:none; margin-top:8px; }
+  #walletChoices .sub { font-size: 13px; color: #888; margin: 10px 0 2px; text-align:center; }
   #successScreen { display:none; text-align:center; padding: 40px 16px; }
   #successScreen .check { font-size: 64px; line-height: 1; margin-bottom: 16px; }
   #successScreen h2 { margin: 0 0 12px; }
@@ -35,8 +39,14 @@
 <button id="connectBtn" class="primary" style="display:none">Connect Wallet</button>
 
 <div id="walletChoices">
-  <button id="phantomBtn" class="wallet-btn">Continue with Phantom</button>
-  <button id="solflareBtn" class="wallet-btn">Continue with Solflare</button>
+  <div class="sub">Open this launch in your Solana wallet:</div>
+  <button class="wallet-btn" data-wallet="phantom">Phantom</button>
+  <button class="wallet-btn" data-wallet="solflare">Solflare</button>
+  <button class="wallet-btn" data-wallet="trust">Trust Wallet</button>
+  <button class="wallet-btn" data-wallet="backpack">Backpack</button>
+  <button class="wallet-btn" data-wallet="okx">OKX Wallet</button>
+  <button class="wallet-btn" data-wallet="coinbase">Coinbase Wallet</button>
+  <button class="wallet-btn" data-wallet="metamask">MetaMask (Solana)</button>
 </div>
 
 <button id="signBtn" class="primary" style="display:none">Review & Sign Transaction</button>
@@ -48,8 +58,8 @@
   <p>Your token was created and the transaction was confirmed on-chain.</p>
   <p><strong>You're all done here — you can close this page and go back to Telegram.</strong></p>
   <button id="closeBtn" class="primary">Close this window</button>
-        <a id="returnBtn" href="https://t.me/FerzanLaunchBot" style="display:block;text-align:center;margin-top:12px;font-weight:600;color:#2481cc;text-decoration:none;">Return to Telegram</a>
-  <span class="txlink" id="txlinkText"></span>
+  <a id="returnBtn" href="https://t.me/FerzanLaunchBot" style="display:block;text-align:center;margin-top:12px;font-weight:600;color:#2481cc;text-decoration:none;">Return to Telegram</a>
+  <a class="txlink" id="txlinkText" target="_blank" rel="noopener"></a>
 </div>
 
 <script type="module">
@@ -72,31 +82,29 @@
   const connectBtn = document.getElementById('connectBtn');
   const signBtn = document.getElementById('signBtn');
   const walletChoices = document.getElementById('walletChoices');
-  const phantomBtn = document.getElementById('phantomBtn');
-  const solflareBtn = document.getElementById('solflareBtn');
 
   let connectedAddress = null;
   let walletProvider = null;
+  let launchReq = null;
 
-  function showStatus(text, kind) {
+  function showStatus(text, kind, html) {
     statusEl.style.display = 'block';
-    statusEl.textContent = text;
+    if (html) statusEl.innerHTML = text; else statusEl.textContent = text;
     statusEl.className = kind || '';
   }
+
+  function solscan(sig) { return `https://solscan.io/tx/${sig}`; }
 
   function showSuccess(signature) {
     mainContent.classList.add('hidden');
     successScreen.style.display = 'block';
-    txlinkText.textContent = signature ? `Tx: ${signature}` : '';
+    if (signature) { txlinkText.textContent = `View on Solscan: ${signature}`; txlinkText.href = solscan(signature); }
   }
 
   closeBtn.addEventListener('click', () => {
-    if (tg?.close) {
-      tg.close();
-    } else {
-      try { window.close(); } catch (e) {}
-    }
-      setTimeout(() => { window.location.href = 'https://t.me/FerzanLaunchBot'; }, 300);
+    if (tg?.close) tg.close();
+    else { try { window.close(); } catch (e) {} }
+    setTimeout(() => { window.location.href = 'https://t.me/FerzanLaunchBot'; }, 300);
   });
 
   function hexToBytes(hex) {
@@ -106,30 +114,119 @@
     return out;
   }
 
-  function getSolanaProvider() {
-    if (window.phantom?.solana?.isPhantom) return window.phantom.solana;
-    if (window.solflare?.isSolflare) return window.solflare;
-    if (window.solana) return window.solana;
+  function bytesToB64(bytes) {
+    let s = '';
+    for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+    return btoa(s);
+  }
+
+  const B58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+  function base58(bytes) {
+    let n = 0n;
+    for (const b of bytes) n = n * 256n + BigInt(b);
+    let out = '';
+    while (n > 0n) { out = B58[Number(n % 58n)] + out; n = n / 58n; }
+    for (const b of bytes) { if (b === 0) out = '1' + out; else break; }
+    return out;
+  }
+
+  function txBytes(tx) {
+    return tx instanceof VersionedTransaction ? tx.serialize() : tx.serialize({ requireAllSignatures: false, verifySignatures: false });
+  }
+
+  // ---------- wallet detection ----------
+  // 1) wallets that inject a classic provider in their own browser
+  function legacyProvider() {
+    const w = window;
+    const list = [
+      ['Phantom', w.phantom?.solana?.isPhantom ? w.phantom.solana : null],
+      ['Solflare', w.solflare?.isSolflare ? w.solflare : null],
+      ['Backpack', w.backpack?.isBackpack ? w.backpack : null],
+      ['OKX Wallet', w.okxwallet?.solana || null],
+      ['Trust Wallet', w.trustwallet?.solana || null],
+      ['Coinbase Wallet', w.coinbaseSolana || null],
+      ['Bitget Wallet', w.bitkeep?.solana || null],
+      ['Wallet', w.solana || null],
+    ];
+    for (const [name, p] of list) if (p && typeof p.connect === 'function') return { name, p, kind: 'legacy' };
     return null;
   }
 
-  function currentUrl() {
-    return window.location.href;
+  // 2) any wallet using the Solana Wallet Standard (MetaMask, Backpack, newer wallets)
+  async function standardProvider() {
+    try {
+      const { getWallets } = await import('https://esm.sh/@wallet-standard/app@1?bundle');
+      const api = getWallets();
+      const pick = () => api.get().find(w =>
+        (w.chains || []).some(c => String(c).startsWith('solana:')) && w.features?.['standard:connect'] &&
+        (w.features['solana:signAndSendTransaction'] || w.features['solana:signTransaction']));
+      let w = pick();
+      if (!w) { await new Promise(r => setTimeout(r, 600)); w = pick(); }
+      if (!w) return null;
+      let account = null;
+      const chain = 'solana:mainnet';
+      const p = {
+        async connect() {
+          const r = await w.features['standard:connect'].connect();
+          account = (r?.accounts || w.accounts || [])[0];
+          if (!account) throw new Error('No Solana account shared by the wallet');
+          return { publicKey: { toString: () => account.address } };
+        },
+      };
+      if (w.features['solana:signAndSendTransaction']) {
+        p.signAndSendTransaction = async (tx) => {
+          const [r] = await w.features['solana:signAndSendTransaction'].signAndSendTransaction({ account, chain, transaction: txBytes(tx) });
+          return { signature: base58(r.signature) };
+        };
+      }
+      if (w.features['solana:signTransaction']) {
+        p.signTransaction = async (tx) => {
+          const [r] = await w.features['solana:signTransaction'].signTransaction({ account, chain, transaction: txBytes(tx) });
+          return r.signedTransaction;
+        };
+      }
+      return { name: w.name, p, kind: 'standard' };
+    } catch (e) {
+      return null;
+    }
   }
 
-  function openInPhantom() {
-    const url = currentUrl();
-    const link = `https://phantom.app/ul/browse/${encodeURIComponent(url)}?ref=${encodeURIComponent(window.location.origin)}`;
-    if (tg?.openLink) tg.openLink(link);
-    else window.open(link, '_blank');
+  async function detectWallet() {
+    return legacyProvider() || (await standardProvider());
   }
 
-  function openInSolflare() {
-    const url = currentUrl();
-    const link = `https://solflare.com/ul/v1/browse/${encodeURIComponent(url)}?ref=${encodeURIComponent(window.location.origin)}`;
-    if (tg?.openLink) tg.openLink(link);
-    else window.open(link, '_blank');
+  // ---------- open this page inside a wallet's own browser ----------
+  function walletLink(id) {
+    const url = window.location.href;
+    const u = encodeURIComponent(url);
+    const ref = encodeURIComponent(window.location.origin);
+    switch (id) {
+      case 'phantom': return `https://phantom.app/ul/browse/${u}?ref=${ref}`;
+      case 'solflare': return `https://solflare.com/ul/v1/browse/${u}?ref=${ref}`;
+      case 'trust': return `https://link.trustwallet.com/open_url?coin_id=501&url=${u}`;
+      case 'backpack': return `https://backpack.app/ul/v1/browse/${u}?ref=${ref}`;
+      case 'okx': return 'https://web3.okx.com/download?deeplink=' + encodeURIComponent('okx://wallet/dapp/url?dappUrl=' + u);
+      case 'coinbase': return `https://go.cb-w.com/dapp?cb_url=${u}`;
+      case 'metamask': return 'https://metamask.app.link/dapp/' + url.replace(/^https?:\/\//, '');
+    }
+    return null;
   }
+
+  walletChoices.querySelectorAll('[data-wallet]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const link = walletLink(btn.dataset.wallet);
+      if (!link) return;
+      if (tg?.openLink) tg.openLink(link); else window.open(link, '_blank');
+    });
+  });
+
+  function showWalletChoices() {
+    showStatus('Choose your wallet — this launch opens inside that wallet’s app so it can sign.', 'hint');
+    walletChoices.style.display = 'block';
+  }
+
+  // ---------- review screen ----------
+  function cleanNum(v) { const m = String(v ?? '').replace(/,/g, '').match(/\d*\.\d+|\d+/); return m ? m[0] : ''; }
 
   async function loadRequest() {
     if (!requestId) {
@@ -142,43 +239,45 @@
       return;
     }
     const req = await res.json();
+    launchReq = req;
     const extra = req.extra_params || {};
+    const curve = ['meteora', 'pumpfun', 'bonding_curve'].includes(req.mode);
+    const dev = cleanNum(extra.dev_buy);
     const rows = [
       ['Name', req.name],
       ['Symbol', req.symbol],
       ['Chain', 'Solana'],
-      ['Mode', req.mode],
-      ['Supply', req.supply_display || req.total_supply],
+      ['Mode', curve ? 'Bonding curve (Meteora)' : req.mode],
+      ['Supply', curve ? '1,000,000,000 (fixed for bonding-curve launches)' : (req.supply_display || req.total_supply)],
     ];
-    if (req.mode === 'meteora') rows.push(['Pool', 'Meteora bonding curve — fee on every trade']);
+    if (curve) {
+      rows.push(['Trading', '1% fee per trade · anti-sniper fee for the first 60s']);
+      rows.push(['Graduates', 'to a Meteora pool at ~84 SOL raised, liquidity locked']);
+      rows.push(['Dev buy', dev && Number(dev) > 0 ? `${dev} SOL (bought first, same transaction)` : 'None']);
+    }
     if (extra.allocs) rows.push(['Team wallets', extra.allocs]);
-    rows.push(['Fee', 'SOL launch fee bundled in the tx']);
+    rows.push(['Cost', 'Exact total is shown before you sign']);
     detailsEl.innerHTML = rows.map(([k, v]) =>
-      `<div class="detail-row"><span>${k}</span><b>${String(v ?? '').slice(0, 80)}</b></div>`
+      `<div class="detail-row"><span>${k}</span><b>${String(v ?? '').replace(/</g, '&lt;').slice(0, 90)}</b></div>`
     ).join('');
 
-    const existing = getSolanaProvider();
-    if (existing) {
+    const found = await detectWallet();
+    if (found) {
+      connectBtn.textContent = `Connect ${found.name}`;
       connectBtn.style.display = 'block';
     } else {
-      showStatus('Choose your wallet to continue — it will open in the wallet\u2019s own browser.', 'hint');
-      walletChoices.style.display = 'block';
+      showWalletChoices();
     }
   }
 
-  phantomBtn.addEventListener('click', openInPhantom);
-  solflareBtn.addEventListener('click', openInSolflare);
-
   connectBtn.addEventListener('click', async () => {
     try {
-      walletProvider = getSolanaProvider();
-      if (!walletProvider) {
-        showStatus('Choose your wallet to continue — it will open in the wallet\u2019s own browser.', 'hint');
-        walletChoices.style.display = 'block';
-        return;
-      }
+      const found = await detectWallet();
+      if (!found) { showWalletChoices(); return; }
+      walletProvider = found.p;
       const resp = await walletProvider.connect();
       connectedAddress = resp?.publicKey?.toString() || walletProvider.publicKey?.toString() || '';
+      if (!connectedAddress) throw new Error('the wallet did not share an address');
       showStatus(`Connected: ${connectedAddress}`, 'success');
       connectBtn.style.display = 'none';
       walletChoices.style.display = 'none';
@@ -188,58 +287,72 @@
     }
   });
 
+  async function api(path, body) {
+    const r = await fetch(`${API_BASE}/launch-requests/${requestId}/${path}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}),
+    });
+    let data = {};
+    try { data = await r.json(); } catch (e) {}
+    if (!r.ok) throw new Error(data.detail || `server error ${r.status}`);
+    return data;
+  }
+
+  async function waitForConfirm(signature) {
+    const until = Date.now() + 90000;
+    while (Date.now() < until) {
+      await new Promise(r => setTimeout(r, 2000));
+      let st;
+      try { st = await api('sol-confirm', { signature }); } catch (e) { continue; }
+      if (st.status === 'confirmed') return { ok: true };
+      if (st.status === 'failed') return { ok: false, reason: st.reason || JSON.stringify(st.err || {}) };
+    }
+    return { ok: null };
+  }
+
   signBtn.addEventListener('click', async () => {
+    signBtn.disabled = true;
+    let signature = '';
     try {
       showStatus('Building transaction...', 'hint');
-      const buildRes = await fetch(`${API_BASE}/launch-requests/${requestId}/build-tx`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ wallet_address: connectedAddress }),
-      });
-      if (!buildRes.ok) {
-        const err = await buildRes.json();
-        throw new Error(err.detail || 'Failed to build transaction');
-      }
-      const built = await buildRes.json();
-      const unsigned_transaction = built.unsigned_transaction;
+      const built = await api('build-tx', { wallet_address: connectedAddress });
       const mint_address = built.mint_address || '';
+      const tx = (() => {
+        const b = hexToBytes(built.unsigned_transaction);
+        try { return Transaction.from(b); } catch (e) { return VersionedTransaction.deserialize(b); }
+      })();
 
-      const txBytes = hexToBytes(unsigned_transaction);
-      let tx;
-      try {
-        tx = VersionedTransaction.deserialize(txBytes);
-      } catch (e) {
-        tx = Transaction.from(txBytes);
-      }
+      showStatus((built.cost_text ? built.cost_text + '\n\n' : '') + 'Please review and approve in your wallet...', 'hint');
+      if (!walletProvider) throw new Error('No Solana wallet connected. Reconnect your wallet.');
 
-      showStatus('Please review and approve in your wallet...', 'hint');
-      if (!walletProvider) throw new Error('No Solana provider. Reconnect your wallet.');
-
-      let sent;
       if (typeof walletProvider.signAndSendTransaction === 'function') {
-        sent = await walletProvider.signAndSendTransaction(tx);
+        const sent = await walletProvider.signAndSendTransaction(tx);
+        const s = typeof sent === 'string' ? sent : (sent?.signature ?? sent?.txid ?? sent);
+        signature = s instanceof Uint8Array ? base58(s) : String(s || '');
       } else if (typeof walletProvider.signTransaction === 'function') {
-        await walletProvider.signTransaction(tx);
-        throw new Error('Wallet signed but cannot send. Try Phantom or Solflare.');
+        const signed = await walletProvider.signTransaction(tx);
+        const bytes = signed instanceof Uint8Array ? signed : txBytes(signed);
+        showStatus('Signed. Sending to Solana...', 'hint');
+        signature = (await api('sol-broadcast', { signed_tx_b64: bytesToB64(bytes) })).signature;
       } else {
-        throw new Error('This wallet does not support signAndSendTransaction.');
+        throw new Error('This wallet cannot sign Solana transactions here. Try another wallet from the list.');
       }
-      const signature = typeof sent === 'string' ? sent : (sent?.signature || sent?.txid || sent);
+      if (!signature) throw new Error('The wallet did not return a transaction signature.');
 
-      await fetch(`${API_BASE}/launch-requests/${requestId}/complete`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ tx_hash: signature, result_token_address: mint_address || '' }),
-      });
+      showStatus(`Sent. Waiting for Solana to confirm...<br><a href="${solscan(signature)}" target="_blank" rel="noopener">View on Solscan</a>`, 'hint', true);
+      const res = await waitForConfirm(signature);
+      if (res.ok === null) {
+        showStatus(`Sent, but not confirmed after 90 seconds. Check it here before trying again:<br><a href="${solscan(signature)}" target="_blank" rel="noopener">View on Solscan</a>`, 'hint', true);
+        signBtn.disabled = false;
+        return;
+      }
+      if (!res.ok) throw new Error(`the launch failed on Solana — ${res.reason}`);
 
+      await api('complete', { tx_hash: signature, result_token_address: mint_address || '' });
       showSuccess(signature);
     } catch (e) {
       showStatus(`Failed: ${e.message}`, 'error');
-      await fetch(`${API_BASE}/launch-requests/${requestId}/fail`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ tx_hash: e.message }),
-      }).catch(() => {});
+      signBtn.disabled = false;
+      api('fail', { tx_hash: signature || String(e.message).slice(0, 300) }).catch(() => {});
     }
   });
 
