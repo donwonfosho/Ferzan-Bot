@@ -1,35 +1,33 @@
 """
-Meteora Dynamic Bonding Curve launch builder.
+Meteora Dynamic Bonding Curve launch builder (real pool, not a placeholder).
 
-Program (mainnet + devnet):
-  dbcij3LWUppWqq96dh6gJWwBifmcGfLSB5D4DuSMaqN
-Pool authority:
-  FhVo3mqL8PW5pH5U2CN4XE33DokiyZnUwuGpH2hmHLuM
+Program: dbcij3LWUppWqq96dh6gJWwBifmcGfLSB5D4DuSMaqN
+Ferzan partner config: METEORA_CONFIG in /opt/ferzan/.env (created once with
+dbc/create_config.mjs): 1B supply / 6 decimals, 1% fee split 50/50 creator /
+Ferzan treasury, 50% -> 1% anti-sniper fee over the first 60s, graduates to
+Meteora DAMM v2 at ~84 SOL raised with all LP permanently locked.
 
-This module:
-  1. Builds the same SPL mint + ATA + supply + authority revoke as solana_launch
-  2. Adds an atomic SOL fee to PLATFORM_TREASURY_SOL
-  3. If METEORA_CONFIG is set, appends a DBC initialize instruction
-     using the published program id (partner config PDA from Meteora dashboard)
-
-Full account graphs for initialize_virtual_pool_with_spl_token should be
-built with @meteora-ag/dynamic-bonding-curve-sdk when you wire the Node
-helper. Until METEORA_CONFIG is a real partner config pubkey, we still
-return a signable mint+fee transaction so the Mini App can launch the
-token and you can attach the pool from the Meteora UI.
+Each launch is ONE transaction built by dbc/build_launch.mjs (Meteora's SDK):
+create pool + the creator's dev buy (same tx, so nobody can buy before the
+creator) + the Ferzan launch fee transfer. The new token's mint key signs here;
+the creator's wallet adds its signature in the Mini App and sends it.
 """
 
 from __future__ import annotations
 
+import json
 import os
+import re
+import subprocess
 from dataclasses import dataclass
+from pathlib import Path
 
 from solders.pubkey import Pubkey
 
-from solana_launch import SolanaLaunchResult, build_unsigned_launch_tx
-
 METEORA_DBC = Pubkey.from_string("dbcij3LWUppWqq96dh6gJWwBifmcGfLSB5D4DuSMaqN")
 METEORA_POOL_AUTH = Pubkey.from_string("FhVo3mqL8PW5pH5U2CN4XE33DokiyZnUwuGpH2hmHLuM")
+HELPER = Path(__file__).resolve().parent / "dbc" / "build_launch.mjs"
+MAX_DEV_BUY_SOL = float(os.environ.get("MAX_DEV_BUY_SOL") or "50")
 
 
 @dataclass
@@ -42,6 +40,28 @@ class MeteoraLaunchResult:
     note: str
 
 
+def _fail(msg: str):
+    try:
+        from fastapi import HTTPException
+
+        return HTTPException(400, msg)
+    except Exception:
+        return RuntimeError(msg)
+
+
+def _dev_buy_lamports(raw) -> int:
+    """'0.5', '0.5 SOL', 1, None -> lamports. Anything unreadable -> 0."""
+    if raw is None:
+        return 0
+    m = re.search(r"\d+(?:\.\d+)?", str(raw).replace(",", ""))
+    if not m:
+        return 0
+    sol = float(m.group(0))
+    if sol > MAX_DEV_BUY_SOL:
+        raise _fail(f"Dev buy is capped at {MAX_DEV_BUY_SOL:g} SOL.")
+    return int(round(sol * 1_000_000_000))
+
+
 def build_unsigned_meteora_tx(
     creator_pubkey: str,
     decimals: int,
@@ -51,32 +71,52 @@ def build_unsigned_meteora_tx(
     name: str = "",
     symbol: str = "",
     metadata_uri: str = "",
+    dev_buy=None,
 ) -> MeteoraLaunchResult:
-    base = build_unsigned_launch_tx(
-        creator_pubkey=creator_pubkey,
-        decimals=decimals,
-        initial_supply_raw=initial_supply_raw,
-        rpc_url=rpc_url,
-        name=name,
-        symbol=symbol,
-        metadata_uri=metadata_uri,
-    )
+    # decimals / supply / graduation come from the Ferzan partner config
+    # (1B supply, 6 decimals, ~84 SOL graduation), so the args are ignored.
     config = (os.environ.get("METEORA_CONFIG") or "").strip()
-    note = (
-        "Mint + Ferzan launch fee are in this tx. "
-        "Set METEORA_CONFIG to your partner config from docs.meteora.ag "
-        "then rebuild to attach initialize_virtual_pool_with_spl_token."
-    )
-    if config:
-        note = (
-            f"DBC program {METEORA_DBC} / config {config}. "
-            "Confirm the initialize ix against the current Meteora SDK before mainnet volume."
+    if not config:
+        raise _fail("Solana bonding-curve launches aren't set up yet (METEORA_CONFIG missing).")
+    if not HELPER.exists():
+        raise _fail("Launch helper missing (dbc/build_launch.mjs).")
+    payload = {
+        "creator": creator_pubkey,
+        "name": name,
+        "symbol": symbol,
+        "uri": metadata_uri or "",
+        "devBuyLamports": _dev_buy_lamports(dev_buy),
+        "config": config,
+        "rpc": rpc_url,
+        "treasury": (os.environ.get("PLATFORM_TREASURY_SOL") or os.environ.get("TREASURY_SOL") or "").strip(),
+        "feeLamports": int(os.environ.get("LAUNCH_FEE_LAMPORTS") or "50000000"),
+    }
+    try:
+        proc = subprocess.run(
+            ["node", str(HELPER)],
+            input=json.dumps(payload),
+            capture_output=True,
+            text=True,
+            timeout=90,
+            cwd=str(HELPER.parent),
         )
+    except subprocess.TimeoutExpired:
+        raise _fail("Building the launch timed out — try again.")
+    stdout = proc.stdout or ""
+    start = stdout.find("{")
+    try:
+        out = json.loads(stdout[start:]) if start >= 0 else {}
+    except ValueError:
+        out = {}
+    if proc.returncode != 0 or out.get("error") or not out.get("tx_hex"):
+        detail = out.get("error") or (proc.stderr or "").strip()[-300:] or "unknown error"
+        print(f"METEORA_BUILD_FAILED: {detail}")
+        raise _fail(f"Couldn't build the Meteora launch: {detail[:200]}")
     return MeteoraLaunchResult(
-        unsigned_transaction=base.unsigned_transaction,
-        mint_address=base.mint_address,
-        associated_token_account=base.associated_token_account,
+        unsigned_transaction=bytes.fromhex(out["tx_hex"]),
+        mint_address=out["mint"],
+        associated_token_account="",
         program_id=str(METEORA_DBC),
         config=config,
-        note=note,
+        note=f"Meteora bonding curve · pool {out.get('pool', '')} · {out.get('size', '?')} bytes",
     )

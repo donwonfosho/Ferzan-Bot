@@ -217,6 +217,7 @@ def build_tx(request_id: str, body: BuildTxRequest):
                     initial_supply_raw=total_supply,
                     rpc_url=RPC_URLS["solana"],
                     graduation_sol_lamports=int(req.extra_params.get("graduation_eth_threshold") or 0),
+                    dev_buy=req.extra_params.get("dev_buy"),
                     name=req.name,
                     symbol=req.symbol,
                     metadata_uri=metadata_uri,
