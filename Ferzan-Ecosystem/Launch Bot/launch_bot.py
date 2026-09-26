@@ -1266,17 +1266,70 @@ async def feed_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [_page_button("🆕 New launches", f"{base}?sort=new", private)],
         [_page_button("👑 King of the Hill", f"{base}?sort=koth", private),
          _page_button("📈 Top volume", f"{base}?sort=volume", private)],
+        [_page_button("🔥 Trending now", f"{base}?sort=trending", private)],
         [_page_button("🏆 Top creators", f"{MINI_APP_BASE_URL}/leaderboard.html", private)],
     ]
     await update.effective_message.reply_text(
         "🚀 <b>Ferzan launches</b>\n\n"
         "🆕 <b>New</b>: the latest tokens on every chain.\n"
         "👑 <b>King of the Hill</b>: the curves closest to graduating.\n"
-        "📈 <b>Top volume</b>: most traded in the last 24 hours.\n\n"
+        "📈 <b>Top volume</b>: most traded in the last 24 hours.\n"
+        "🔥 <b>Trending</b>: the most action in the last hour.\n\n"
         "Every token shows its creator's track record.",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(rows),
     )
+
+
+async def revenue_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not user or user.id not in _admin_ids():
+        return  # admins only; stay silent for everyone else
+    msg = await update.effective_message.reply_text("⏳ Adding up platform revenue…")
+
+    def fetch():
+        import json as _json
+        import urllib.request as _ur
+        req = _ur.Request("http://127.0.0.1:8000/internal/revenue",
+                          headers={"X-Ferzan-Internal": (os.environ.get("INTERNAL_API_TOKEN") or "").strip()})
+        with _ur.urlopen(req, timeout=120) as r:
+            return _json.loads(r.read())
+
+    try:
+        d = await asyncio.to_thread(fetch)
+    except Exception as e:
+        await msg.edit_text(f"Couldn't load revenue: {e}")
+        return
+    usd = lambda v: f"${v:,.2f}" if v < 1000 else f"${v:,.0f}"
+    t, s = d["totals_usd"], d["by_source_usd"]
+    sym = {"bsc": "BNB", "base": "ETH", "ethereum": "ETH", "robinhood": "ETH", "solana": "SOL"}
+    name = {"bsc": "BNB", "base": "Base", "ethereum": "Ethereum", "robinhood": "Robinhood", "solana": "Solana"}
+    lines = [
+        "💰 <b>Ferzan platform revenue</b>", "",
+        f"24h <b>{usd(t['24h'])}</b> · 7d <b>{usd(t['7d'])}</b> · 30d <b>{usd(t['30d'])}</b>",
+        f"All-time <b>{usd(t['all'])}</b>", "",
+        "<b>Last 30 days by source</b>",
+        f"📈 Curve trading fees: {usd(s['30d']['curve'])}",
+        f"🚀 Launch fees: {usd(s['30d']['launch'])} ({d['launches_30d']} launches)",
+        f"⚡ Trade Bot ({d['desk_fee_bps'] / 100:.2f}% of {usd(d['desk_volume_usd']['30d'])} volume): {usd(s['30d']['desk'])}",
+    ]
+    bc = d.get("by_chain_30d_native") or {}
+    if bc:
+        lines += ["", "<b>30 days by chain</b> (curve + launch fees)"]
+        for ch, v in sorted(bc.items(), key=lambda kv: -(kv[1]["curve"] + kv[1]["launch"]) * d["native_usd"].get(kv[0], 0)):
+            tot = v["curve"] + v["launch"]
+            lines.append(f"• {name.get(ch, ch)}: {tot:.4g} {sym.get(ch, '')} ({usd(tot * d['native_usd'].get(ch, 0))})")
+    if d.get("unclaimed_sol") is not None:
+        lines += ["", f"🪐 Solana trading fees waiting to be claimed: <b>{d['unclaimed_sol']:.4f} SOL</b> ({usd(d['unclaimed_sol_usd'])})"]
+    bal = {k: v for k, v in (d.get("treasury_balances") or {}).items() if v is not None}
+    if bal:
+        lines += ["", "<b>Treasury wallets hold</b>"]
+        lines.append(" · ".join(f"{name.get(k, k)} {v:.4g} {sym.get(k, '')}" for k, v in bal.items()))
+    if d.get("estimated"):
+        lines += ["", "<i>Curve fees for trades before this update are estimated from the 1% fee rule; new trades are exact.</i>"]
+    kb = InlineKeyboardMarkup([[_page_button("🏦 Claim Solana platform fees", f"{MINI_APP_BASE_URL}/claim.html?role=partner",
+                                             bool(update.effective_chat and update.effective_chat.type == "private"))]])
+    await msg.edit_text("\n".join(lines), parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True)
 
 
 async def top_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1306,18 +1359,45 @@ async def go_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def refer_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    me = (os.environ.get("LAUNCHBOT_USERNAME") or "FerzanLaunchBot").lstrip("@")
+    me = (context.bot.username or os.environ.get("LAUNCHBOT_USERNAME") or "Ferzan_Launch_Bot").lstrip("@")
     uid = update.effective_user.id
-    await update.effective_message.reply_text(
-        f"Your Ferzan launch referral:\n"
-        f"https://t.me/{me}?start=ref_{uid}\n\n"
-        "Share that link. When they tap Start we store you as their referrer.\n\n"
-        "On-chain payout needs your EVM wallet:\n"
-        "`/referwallet 0xYourAddress`\n\n"
-        "Curve buys can then send 10% of the 1% fee to that address. "
-        "The trade bot has to pass it into buy() — until that ships, "
-        "the link only tracks who referred whom."
-    )
+
+    def fetch():
+        import json as _json
+        import urllib.request as _ur
+        req = _ur.Request(f"http://127.0.0.1:8000/internal/referral-stats/{uid}",
+                          headers={"X-Ferzan-Internal": (os.environ.get("INTERNAL_API_TOKEN") or "").strip()})
+        with _ur.urlopen(req, timeout=20) as r:
+            return _json.loads(r.read())
+
+    try:
+        st = await asyncio.to_thread(fetch)
+    except Exception:
+        st = {}
+    wallet = st.get("wallet") or ""
+    lines = [
+        "🤝 <b>Refer & earn</b>", "",
+        f"Your link: https://t.me/{me}?start=ref_{uid}", "",
+        "Everyone who starts Ferzan through your link is yours for good. Whenever they buy a Ferzan "
+        "curve token with @Ferzan_Trade_Bot, the contract sends <b>10% of the trading fee straight to your wallet</b> "
+        "— instantly, on-chain, no claiming.", "",
+        "On a token's trade page, connect your wallet and tap <b>Share & earn</b> to get a link that pays you "
+        "for anyone who buys through it.", "",
+    ]
+    if wallet:
+        lines.append(f"💳 Payout wallet: <code>{html.escape(wallet)}</code> (change: /referwallet 0x…)")
+    else:
+        lines.append("💳 No payout wallet yet — set one: <code>/referwallet 0xYourAddress</code>")
+    if st:
+        lines += ["", f"👥 People you referred: <b>{st.get('referred', 0)}</b> · their launches: <b>{st.get('referred_launches', 0)}</b>"]
+        ch = st.get("chains") or {}
+        if ch:
+            lines.append(f"💰 Earned so far: <b>${st.get('earned_usd', 0):,.2f}</b>")
+            for k, v in ch.items():
+                lines.append(f"• {k}: {v['earned']:.5g} {v['sym']} from {v['trades']} trades")
+        else:
+            lines.append("💰 No referral trades yet.")
+    await update.effective_message.reply_text("\n".join(lines), parse_mode="HTML", disable_web_page_preview=True)
 
 
 async def referwallet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1405,6 +1485,7 @@ def main():
     app.add_handler(CommandHandler("claim", claim_cmd))
     app.add_handler(CommandHandler("new", feed_cmd))
     app.add_handler(CommandHandler("top", top_cmd))
+    app.add_handler(CommandHandler("revenue", revenue_cmd))
     app.add_handler(CallbackQueryHandler(go_feed, pattern="^go:feed$"))
     app.add_handler(CallbackQueryHandler(go_claim, pattern="^go:claim$"))
     app.add_handler(CommandHandler("timezone", timezone_cmd))

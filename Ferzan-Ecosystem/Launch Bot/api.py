@@ -794,8 +794,8 @@ async def sol_fees_confirm(body: SolConfirmBody):
 
 # --------------------------------------- curve index: chart, feed, track record --
 # curve_indexer.py (its own service) fills this read-only index from chain logs.
-_NATIVE_USD: dict = {"t": 0.0, "bsc": 0.0, "base": 0.0}
-_NATIVE_SYM = {"bsc": "BNB", "base": "ETH", "ethereum": "ETH", "robinhood": "ETH"}
+_NATIVE_USD: dict = {"t": 0.0, "bsc": 0.0, "base": 0.0, "solana": 0.0}
+_NATIVE_SYM = {"bsc": "BNB", "base": "ETH", "ethereum": "ETH", "robinhood": "ETH", "solana": "SOL"}
 
 
 def _idx_db():
@@ -814,8 +814,9 @@ def _native_usd(chain: str) -> float:
     if time.time() - _NATIVE_USD["t"] > 300:
         try:
             r = requests.get("https://api.coingecko.com/api/v3/simple/price",
-                             params={"ids": "binancecoin,ethereum", "vs_currencies": "usd"}, timeout=8).json()
-            _NATIVE_USD.update(t=time.time(), bsc=float(r["binancecoin"]["usd"]), base=float(r["ethereum"]["usd"]))
+                             params={"ids": "binancecoin,ethereum,solana", "vs_currencies": "usd"}, timeout=8).json()
+            _NATIVE_USD.update(t=time.time(), bsc=float(r["binancecoin"]["usd"]), base=float(r["ethereum"]["usd"]),
+                               solana=float(r["solana"]["usd"]))
         except Exception:
             _NATIVE_USD["t"] = time.time() - 240  # retry in a minute
     return float(_NATIVE_USD.get(chain) or 0.0)
@@ -828,14 +829,14 @@ def _launch_rows_by_curve() -> dict:
     with db._get_conn() as conn:
         rows = conn.execute(
             "SELECT extra_params, image_url, description, telegram_user_id, wallet_address FROM launch_requests "
-            "WHERE mode = 'bonding_curve' AND status = 'confirmed'").fetchall()
+            "WHERE mode IN ('bonding_curve', 'meteora') AND status = 'confirmed'").fetchall()
     for r in rows:
         try:
-            cv = (_json.loads(r[0] or "{}").get("curve_address") or "").lower()
+            cv = (_json.loads(r[0] or "{}").get("curve_address") or "").strip()
         except ValueError:
             cv = ""
         if cv:
-            out[cv] = {"image": r[1] or "", "description": r[2] or ""}
+            out[cv] = out[cv.lower()] = {"image": r[1] or "", "description": r[2] or ""}
     return out
 
 
@@ -850,6 +851,13 @@ def _creator_stats(c, creators: list) -> dict:
     return {r["creator"]: {"launches": r["n"], "graduated": r["g"] or 0, "best_mcap": r["best"] or 0} for r in rows}
 
 
+def _trade_url(chain: str, curve: str, token: str) -> str:
+    """Where to trade an indexed launch: Solana tokens trade on Jupiter, EVM curves on our trade page."""
+    if chain == "solana":
+        return f"https://jup.ag/tokens/{token}"
+    return f"{MINI_APP_BASE}/curve.html?chain={chain}&curve={curve}"
+
+
 def _curve_item(r, usd: float, extra: dict, vol24: float, stats: dict) -> dict:
     grad = int(r["grad_target"] or 0)
     prog = 100.0 if r["graduated"] else (min(100.0, int(r["real_eth"] or 0) * 100.0 / grad) if grad else 0.0)
@@ -860,7 +868,7 @@ def _curve_item(r, usd: float, extra: dict, vol24: float, stats: dict) -> dict:
         "volume_native": r["volume"] or 0, "vol24_native": vol24, "vol24_usd": vol24 * usd, "trades": r["trades"] or 0,
         "launched_ts": r["launched_ts"], "last_trade_ts": r["last_trade_ts"], "start_time": r["start_time"],
         "creator": r["creator"], "creator_stats": stats.get(r["creator"], {}),
-        "url": f"{MINI_APP_BASE}/curve.html?chain={r['chain']}&curve={r['curve']}",
+        "url": _trade_url(r["chain"], r["curve"], r["token"]),
     }
 
 
@@ -878,6 +886,28 @@ def launches_feed(sort: str = "new", limit: int = 30, chain: str = ""):
             rows = c.execute(
                 f"SELECT * FROM curves WHERE {where} AND graduated = 0 AND trades > 0 "
                 "ORDER BY CAST(real_eth AS REAL) / MAX(CAST(grad_target AS REAL), 1) DESC LIMIT ?", args + [limit]).fetchall()
+        elif sort == "trending":
+            # momentum: native volume in the last hour, in USD (EVM trades + Solana poll deltas), still on the curve
+            since = int(time.time()) - 3600
+            mom = {}
+            for ch_, cv_, v_, n_ in c.execute(
+                    "SELECT chain, curve, SUM(native), COUNT(*) FROM trades WHERE ts > ? GROUP BY chain, curve", (since,)):
+                mom[(ch_, cv_)] = [float(v_ or 0), int(n_ or 0)]
+            try:
+                for cv_, v_, n_ in c.execute("SELECT pool, SUM(vol), SUM(trades) FROM sol_vol WHERE ts > ? GROUP BY pool", (since,)):
+                    mom[("solana", cv_)] = [float(v_ or 0), int(n_ or 0)]
+            except Exception:
+                pass  # no Solana momentum table yet
+            ranked = sorted(mom.items(), key=lambda kv: (kv[1][0] * _native_usd(kv[0][0]), kv[1][1]), reverse=True)
+            rows = []
+            for (ch_, cv_), _m in ranked:
+                if chain in _NATIVE_SYM and ch_ != chain:
+                    continue
+                r_ = c.execute("SELECT * FROM curves WHERE chain = ? AND curve = ? AND graduated = 0", (ch_, cv_)).fetchone()
+                if r_:
+                    rows.append(r_)
+                if len(rows) >= limit:
+                    break
         elif sort == "volume":
             rows = c.execute(
                 f"SELECT curves.* FROM curves JOIN (SELECT chain AS vc, curve AS vv, SUM(native) AS v FROM trades "
@@ -902,7 +932,10 @@ def launches_feed(sort: str = "new", limit: int = 30, chain: str = ""):
                 "WHERE chain = 'solana' AND mode IN ('meteora', 'pumpfun') AND status = 'confirmed' "
                 "AND result_token_address IS NOT NULL ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
         from datetime import datetime as _dt
+        have = {it.get("token") for it in items}
         for r in sol:
+            if r[3] in have:  # already in the list from the curve index (Meteora launches)
+                continue
             try:
                 ts = int(_dt.fromisoformat(str(r[4]).replace("Z", "+00:00")).timestamp())
             except ValueError:
@@ -950,13 +983,176 @@ def leaderboard(period: str = "all", chain: str = "", limit: int = 50):
         if a["best"] is None or mc > a["best"]["mcap_usd"]:
             a["best"] = {"name": r["name"], "symbol": r["symbol"], "chain": r["chain"], "token": r["token"], "mcap_usd": mc,
                          "graduated": bool(r["graduated"]),
-                         "url": f"{MINI_APP_BASE}/curve.html?chain={r['chain']}&curve={r['curve']}"}
+                         "url": _trade_url(r["chain"], r["curve"], r["token"])}
     items = sorted(agg.values(), key=lambda a: (a["graduated"], a["volume_usd"], a["launches"]), reverse=True)[:limit]
     for i, a in enumerate(items, 1):
         a["rank"] = i
         a["chains"] = sorted(a["chains"])
         a["short"] = a["creator"][:6] + "…" + a["creator"][-4:]
     return {"period": period, "items": items, "now": int(time.time())}
+
+
+_EVM_LAUNCH_FEE = {"bsc": 0.015, "base": 0.003, "ethereum": 0.003, "robinhood": 0.003}  # native, fixed in the v3 factories
+_REV_RPC = {"bsc": "https://bsc-rpc.publicnode.com", "base": "https://base-rpc.publicnode.com",
+            "ethereum": "https://ethereum-rpc.publicnode.com", "robinhood": "https://rpc.mainnet.chain.robinhood.com"}
+
+
+def _env_file_value(path: str, key: str) -> str:
+    try:
+        for line in open(path):
+            if line.strip().startswith(key + "="):
+                return line.split("=", 1)[1].strip().strip('"').strip("'")
+    except OSError:
+        pass
+    return ""
+
+
+def _rpc_balance(chain: str, addr: str) -> float | None:
+    urls = [u for u in (RPC_URLS.get(chain) or "", _REV_RPC.get(chain, "")) if u]
+    for u in urls:
+        try:
+            r = requests.post(u, json={"jsonrpc": "2.0", "id": 1, "method": "eth_getBalance", "params": [addr, "latest"]}, timeout=6).json()
+            if r.get("result"):
+                return int(r["result"], 16) / 1e18
+        except Exception:
+            continue
+    return None
+
+
+@app.get("/internal/revenue")
+def internal_revenue(request: Request):
+    """Platform income by period and source (admin report). Curve trade fees are exact once recorded,
+    estimated (1% fee rule) for older trades; launch fees use the fixed factory fees; Trade Bot = volume x FEE_BPS."""
+    import json as _json
+    import sqlite3 as _sq
+    from datetime import datetime as _dt
+
+    if not _internal_ok(request):
+        raise HTTPException(403, "internal only")
+    now = int(time.time())
+    periods = {"24h": now - 86400, "7d": now - 7 * 86400, "30d": now - 30 * 86400, "all": 0}
+    px = {ch: _native_usd(ch) for ch in ("bsc", "base", "ethereum", "robinhood", "solana")}
+    rev = {p: {"curve": 0.0, "launch": 0.0, "desk": 0.0} for p in periods}
+    by_chain = {}          # 30d curve+launch income per chain, native
+    launches_30d = 0
+    estimated = False
+    # 1) curve trading fees (platform share) from the index
+    c = _idx_db()
+    if c is not None:
+        try:
+            cols = {r[1] for r in c.execute("PRAGMA table_info(trades)")}
+            exact = "fee" in cols
+            fee_expr = ("CASE WHEN fee IS NOT NULL THEN fee * (CASE WHEN referrer IS NOT NULL AND referrer NOT IN ('', "
+                        "'0x0000000000000000000000000000000000000000') AND referrer != trader THEN 0.4 ELSE 0.5 END) "
+                        "ELSE (CASE WHEN is_buy = 1 THEN native * 0.01 ELSE native / 0.99 * 0.01 END) * 0.5 END") if exact else \
+                       "(CASE WHEN is_buy = 1 THEN native * 0.01 ELSE native / 0.99 * 0.01 END) * 0.5"
+            for p, since in periods.items():
+                for ch, amt, n_est in c.execute(
+                        f"SELECT chain, SUM({fee_expr}), SUM(CASE WHEN {'fee IS NULL' if exact else '1'} THEN 1 ELSE 0 END) "
+                        f"FROM trades WHERE ts >= ? GROUP BY chain", (since,)):
+                    rev[p]["curve"] += float(amt or 0) * px.get(ch, 0)
+                    estimated = estimated or bool(n_est)
+                    if p == "30d":
+                        by_chain.setdefault(ch, {"curve": 0.0, "launch": 0.0})["curve"] += float(amt or 0)
+        finally:
+            c.close()
+    # 2) launch fees from confirmed launches
+    sol_fee = int(os.environ.get("LAUNCH_FEE_LAMPORTS") or "50000000") / 1e9
+    with db._get_conn() as conn:
+        rows = conn.execute("SELECT chain, mode, created_at FROM launch_requests WHERE status = 'confirmed'").fetchall()
+    for ch, mode, created in rows:
+        try:
+            ts = int(_dt.fromisoformat(str(created).replace("Z", "+00:00")).timestamp())
+        except ValueError:
+            continue
+        fee = sol_fee if ch == "solana" and mode == "meteora" else _EVM_LAUNCH_FEE.get(ch, 0.0)
+        if not fee:
+            continue
+        for p, since in periods.items():
+            if ts >= since:
+                rev[p]["launch"] += fee * px.get(ch, 0)
+        if ts >= periods["30d"]:
+            launches_30d += 1
+            by_chain.setdefault(ch, {"curve": 0.0, "launch": 0.0})["launch"] += fee
+    # 3) Trade Bot swap fee (FEE_BPS of live volume; curve-token trades excluded - those pay the curve fee instead)
+    desk_vol = {p: 0.0 for p in periods}
+    td = "/opt/ferzan/app/Ferzan-Ecosystem/Trade Desk/.env"
+    bps = int(_env_file_value(td, "FEE_BPS") or os.environ.get("FEE_BPS") or 50)
+    tdb = _env_file_value(td, "DB_PATH") or "/opt/ferzan/app/ferzan.db"
+    try:
+        curve_tokens = set()
+        c = _idx_db()
+        if c is not None:
+            curve_tokens = {str(r[0]).lower() for r in c.execute("SELECT token FROM curves WHERE graduated = 0")}
+            c.close()
+        k = _sq.connect(f"file:{tdb}?mode=ro", uri=True, timeout=10)
+        for ts, usd, mint in k.execute("SELECT ts, usd, mint FROM live_trades WHERE ts >= ?", (0,)):
+            if str(mint).lower() in curve_tokens:
+                continue
+            for p, since in periods.items():
+                if ts >= since:
+                    desk_vol[p] += float(usd or 0)
+        k.close()
+    except Exception as e:
+        logger.info("revenue: trade desk db not readable: %s", e)
+    for p in periods:
+        rev[p]["desk"] = desk_vol[p] * bps / 10_000
+    # 4) Solana trading fees waiting in Meteora pools + treasury balances
+    sol_treasury = (os.environ.get("PLATFORM_TREASURY_SOL") or os.environ.get("TREASURY_SOL") or "").strip()
+    unclaimed_sol = None
+    if sol_treasury:
+        try:
+            out = _run_fees({"action": "list", "role": "partner", "wallet": sol_treasury}, timeout=60)
+            unclaimed_sol = int(out.get("total_quote") or 0) / 1e9
+        except Exception as e:
+            logger.info("revenue: partner fee list failed: %s", e)
+    balances = {}
+    if PLATFORM_TREASURY_EVM:
+        for ch in ("bsc", "base", "ethereum", "robinhood"):
+            balances[ch] = _rpc_balance(ch, PLATFORM_TREASURY_EVM)
+    if sol_treasury:
+        try:
+            r = requests.post(RPC_URLS["solana"], json={"jsonrpc": "2.0", "id": 1, "method": "getBalance", "params": [sol_treasury]}, timeout=8).json()
+            balances["solana"] = int(r["result"]["value"]) / 1e9
+        except Exception:
+            balances["solana"] = None
+    totals = {p: round(sum(v.values()), 2) for p, v in rev.items()}
+    return {
+        "now": now, "totals_usd": totals, "by_source_usd": {p: {k2: round(v2, 2) for k2, v2 in v.items()} for p, v in rev.items()},
+        "by_chain_30d_native": by_chain, "launches_30d": launches_30d, "desk_volume_usd": {p: round(v, 2) for p, v in desk_vol.items()},
+        "desk_fee_bps": bps, "unclaimed_sol": unclaimed_sol, "unclaimed_sol_usd": (unclaimed_sol or 0) * px["solana"],
+        "treasury_balances": balances, "native_usd": px, "estimated": estimated,
+    }
+
+
+@app.get("/internal/referral-stats/{user_id}")
+def internal_referral_stats(user_id: int, request: Request):
+    """What a referrer has earned: people referred, their launches, and trades that paid this wallet 10% of the fee."""
+    if not _internal_ok(request):
+        raise HTTPException(403, "internal only")
+    uid = int(user_id)
+    with db._get_conn() as conn:
+        referred = conn.execute("SELECT COUNT(*) FROM referrals WHERE referrer_id = ?", (uid,)).fetchone()[0]
+        launches = conn.execute(
+            "SELECT COUNT(*) FROM launch_requests WHERE status = 'confirmed' AND extra_params LIKE ?",
+            (f'%"referrer_id": "{uid}"%',)).fetchone()[0]
+    wallet = (db.get_payout_wallet(uid) or "").strip().lower()
+    chains = {}
+    c = _idx_db()
+    if c is not None and wallet.startswith("0x"):
+        try:
+            cols = {r[1] for r in c.execute("PRAGMA table_info(trades)")}
+            if "referrer" in cols:
+                for ch, n, vol, fee in c.execute(
+                        "SELECT chain, COUNT(*), SUM(native), SUM(COALESCE(fee, 0)) FROM trades WHERE lower(referrer) = ? GROUP BY chain",
+                        (wallet,)):
+                    earned = float(fee or 0) * 0.10
+                    chains[ch] = {"trades": n, "volume": float(vol or 0), "earned": earned,
+                                  "earned_usd": earned * _native_usd(ch), "sym": _NATIVE_SYM.get(ch, "")}
+        finally:
+            c.close()
+    return {"user_id": uid, "wallet": wallet, "referred": referred, "referred_launches": launches, "chains": chains,
+            "earned_usd": round(sum(v["earned_usd"] for v in chains.values()), 2)}
 
 
 @app.get("/api/curve-chart/{curve}")
@@ -1033,7 +1229,7 @@ def curve_by_token(token: str, since: int = 0, kind: str = "buy"):
         "symbol": cv["symbol"], "graduated": bool(cv["graduated"]), "pool": cv["pool"], "native": _NATIVE_SYM.get(cv["chain"], ""),
         "native_usd": usd, "price_usd": (cv["price"] or 0) * usd, "mcap_usd": (cv["mcap"] or 0) * usd,
         "progress": 100.0 if cv["graduated"] else (min(100.0, int(cv["real_eth"] or 0) * 100.0 / grad) if grad else 0.0),
-        "url": f"{MINI_APP_BASE}/curve.html?chain={cv['chain']}&curve={cv['curve']}",
+        "url": _trade_url(cv["chain"], cv["curve"], cv["token"]),
         "trades": [{"ts": r["ts"], "native": r["native"], "tokens": r["tokens"], "usd": (r["native"] or 0) * usd,
                     "trader": r["trader"], "tx": r["tx"]} for r in rows],
     }
@@ -1058,7 +1254,7 @@ def creator_record(wallet: str):
             out["best_mcap_usd"] = max(out["best_mcap_usd"], (r["mcap"] or 0) * usd)
             out["tokens"].append({"chain": r["chain"], "symbol": r["symbol"], "name": r["name"], "graduated": bool(r["graduated"]),
                                   "mcap_usd": (r["mcap"] or 0) * usd, "launched_ts": r["launched_ts"],
-                                  "url": f"{MINI_APP_BASE}/curve.html?chain={r['chain']}&curve={r['curve']}"})
+                                  "url": _trade_url(r["chain"], r["curve"], r["token"])})
     with db._get_conn() as conn:
         n = conn.execute("SELECT COUNT(*) FROM launch_requests WHERE status = 'confirmed' AND LOWER(wallet_address) = ?",
                          (w.lower() if evm else w,)).fetchone()[0] if evm else conn.execute(

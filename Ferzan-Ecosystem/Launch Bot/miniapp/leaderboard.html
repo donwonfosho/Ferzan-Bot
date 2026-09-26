@@ -46,6 +46,7 @@
   <button data-chain="base">Base</button>
   <button data-chain="ethereum">ETH</button>
   <button data-chain="robinhood">HOOD</button>
+  <button data-chain="solana">SOL</button>
 </div>
 <div id="err"></div>
 <div id="list"></div>
@@ -55,8 +56,9 @@
   tg?.ready(); tg?.expand();
   let period = 'all', chain = '';
   const SCAN = { bsc: 'https://bscscan.com/address/', base: 'https://basescan.org/address/',
-                 ethereum: 'https://etherscan.io/address/', robinhood: 'https://robinhoodchain.blockscout.com/address/' };
-  const CHAIN_NAME = { bsc: 'BNB', base: 'Base', ethereum: 'Ethereum', robinhood: 'Robinhood' };
+                 ethereum: 'https://etherscan.io/address/', robinhood: 'https://robinhoodchain.blockscout.com/address/',
+                 solana: 'https://solscan.io/account/' };
+  const CHAIN_NAME = { bsc: 'BNB', base: 'Base', ethereum: 'Ethereum', robinhood: 'Robinhood', solana: 'Solana' };
   const esc = (t) => String(t ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   const usd = (v) => !v ? '$0' : v >= 1e9 ? '$' + (v / 1e9).toFixed(2) + 'B' : v >= 1e6 ? '$' + (v / 1e6).toFixed(2) + 'M' : v >= 1e3 ? '$' + (v / 1e3).toFixed(1) + 'K' : '$' + v.toFixed(0);
   const medal = (i) => ['🥇', '🥈', '🥉'][i - 1] || i;

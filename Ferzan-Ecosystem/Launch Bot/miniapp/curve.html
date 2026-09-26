@@ -85,6 +85,7 @@
     <button class="chip" style="width:100%;margin-top:8px;background:#111;color:#fff" data-wallet="okx">OKX Wallet</button>
   </div>
   <div id="dexBox" style="display:none"></div>
+  <div id="shareBox" style="display:none;margin-top:12px;padding:12px;border-radius:12px;background:rgba(128,128,128,.1)"></div>
   <div id="status"></div>
   <div id="tradesBox" style="display:none;margin-top:14px">
     <div style="font-weight:600;margin-bottom:4px">Recent trades</div>
@@ -311,9 +312,31 @@
       $('connectBtn').style.display = 'none';
       $('actBtn').style.display = 'block';
       statusEl.style.display = 'none';
+      showShare();
       await loadMine();
     } catch (e) { showStatus('Wallet: ' + (e?.message || e), 'error'); }
   });
+
+  function showShare() {
+    if (!account || (S && S.graduated)) return;
+    const u = new URL(location.href);
+    u.searchParams.set('ref', account);
+    const link = u.toString();
+    const box = $('shareBox');
+    box.style.display = 'block';
+    box.innerHTML = `<div style="font-weight:600">🔗 Share & earn</div>
+      <div style="font-size:13px;opacity:.75;margin:4px 0 8px">Anyone who buys or sells through your link sends you 10% of the trading fee — paid instantly on-chain.</div>
+      <div style="display:flex;gap:6px"><button class="chip" id="copyRef" style="flex:1">Copy link</button>
+      <button class="chip" id="tgRef" style="flex:1">Share in Telegram</button></div>`;
+    $('copyRef').onclick = async () => {
+      try { await navigator.clipboard.writeText(link); $('copyRef').textContent = 'Copied ✓'; }
+      catch (e) { prompt('Copy your link:', link); }
+    };
+    $('tgRef').onclick = () => {
+      const t = `https://t.me/share/url?url=${encodeURIComponent(link)}&text=${encodeURIComponent('Get in early on ' + (S.name || 'this token') + ' 🚀')}`;
+      if (tg?.openTelegramLink) tg.openTelegramLink(t); else window.open(t, '_blank');
+    };
+  }
 
   async function loadMine() {
     const [bal, lock, nat] = await Promise.all([

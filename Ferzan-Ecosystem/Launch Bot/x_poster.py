@@ -23,7 +23,8 @@ import urllib.request
 log = logging.getLogger("x_poster")
 TWEET_URL = "https://api.x.com/2/tweets"
 ME_URL = "https://api.x.com/2/users/me"
-CHAIN_NAME = {"base": "Base", "bsc": "BNB Chain", "eth": "Ethereum", "ethereum": "Ethereum", "robinhood": "Robinhood Chain"}
+CHAIN_NAME = {"base": "Base", "bsc": "BNB Chain", "eth": "Ethereum", "ethereum": "Ethereum", "robinhood": "Robinhood Chain",
+              "solana": "Solana"}
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS x_posts (key TEXT PRIMARY KEY, kind TEXT, ts INTEGER, tweet_id TEXT, status TEXT);
 """
@@ -88,12 +89,14 @@ def tweet(keys: dict, text: str) -> tuple[bool, str]:
 def _fmt(kind: str, r, base: str, extra: str = "") -> str:
     name, sym = (r["name"] or "Token")[:40], (r["symbol"] or "")[:12]
     chain = CHAIN_NAME.get(r["chain"], r["chain"])
-    url = f"{base}/curve.html?chain={r['chain']}&curve={r['curve']}"
+    url = (f"https://jup.ag/tokens/{r['token']}" if r["chain"] == "solana"
+           else f"{base}/curve.html?chain={r['chain']}&curve={r['curve']}")
     head = {
         "launch": f"🚀 New on Ferzan: {name} (${sym}) on {chain}",
         "p90": f"🚀 {name} (${sym}) is 90% of the way to graduation on {chain}{extra}",
         "koth": f"👑 New King of the Hill: {name} (${sym}) on {chain}{extra}",
-        "grad": f"🎓 {name} (${sym}) just graduated on {chain}! Liquidity is live and the LP is burned 🔥",
+        "grad": f"🎓 {name} (${sym}) just graduated on {chain}! Liquidity is live and "
+                + ("locked in a Meteora pool 🔒" if r["chain"] == "solana" else "the LP is burned 🔥"),
     }[kind]
     return f"{head}\n\nCA: {r['token']}\nTrade: {url}"
 

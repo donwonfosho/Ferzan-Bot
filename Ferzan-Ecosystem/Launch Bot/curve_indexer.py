@@ -62,7 +62,18 @@ CHAINS = {
         "block_time": 0.25, "explorer": "https://robinhoodchain.blockscout.com",
     },
 }
-CHAIN_LABEL = {"bsc": "BNB Chain", "base": "Base", "ethereum": "Ethereum", "robinhood": "Robinhood Chain"}
+CHAINS["solana"] = {  # Meteora DBC launches - read by sol_indexer.py, not by a ChainIndexer worker
+    "kind": "solana", "factory_env": "", "rpc_env": "SOLANA_RPC_URL", "sym": "SOL", "dex": "Meteora",
+    "fallback": [], "block_time": 0.4, "explorer": "https://solscan.io",
+}
+CHAIN_LABEL = {"bsc": "BNB Chain", "base": "Base", "ethereum": "Ethereum", "robinhood": "Robinhood Chain", "solana": "Solana"}
+
+
+def _trade_url(r) -> str:
+    if r["chain"] == "solana":
+        return f"https://jup.ag/tokens/{r['token']}"
+    base = (os.environ.get("MINI_APP_BASE_URL") or "https://launch.ferzaneco.com/miniapp").rstrip("/")
+    return f"{base}/curve.html?chain={r['chain']}&curve={r['curve']}"
 CONFIRMATIONS = 2
 # Free public nodes only keep recent history ("archive requests require a token"), so we follow
 # the chain from near its head and read older curves' current state straight from the contracts.
@@ -106,6 +117,11 @@ def idx_conn() -> sqlite3.Connection:
 def init_db() -> None:
     with idx_conn() as c:
         c.executescript(SCHEMA)
+        cols = {r[1] for r in c.execute("PRAGMA table_info(trades)")}
+        if "fee" not in cols:  # exact per-trade fee + referrer for the revenue report
+            c.execute("ALTER TABLE trades ADD COLUMN fee REAL")
+        if "referrer" not in cols:
+            c.execute("ALTER TABLE trades ADD COLUMN referrer TEXT")
 
 
 # ------------------------------------------------------------------ rpc --
@@ -324,10 +340,11 @@ class ChainIndexer:
         blk = int(lg["blockNumber"], 16)
         ts = self.block_ts(blk)
         cur = c.execute(
-            "INSERT OR IGNORE INTO trades (chain, curve, block, ts, tx, log_index, trader, is_buy, native, tokens, price, real_eth) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT OR IGNORE INTO trades (chain, curve, block, ts, tx, log_index, trader, is_buy, native, tokens, price, real_eth, "
+            "fee, referrer) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (self.chain, curve, blk, ts, lg["transactionHash"], int(lg["logIndex"], 16), _addr_topic(lg["topics"][1]),
-             1 if is_buy else 0, native / 1e18, tokens / 1e18, price, str(real_after)),
+             1 if is_buy else 0, native / 1e18, tokens / 1e18, price, str(real_after),
+             _word(d, 3) / 1e18, "0x" + d.replace("0x", "")[4 * 64 + 24:5 * 64].lower()),
         )
         if cur.rowcount == 0:
             return  # already indexed
@@ -426,13 +443,14 @@ def _creator_chats() -> dict:
     try:
         lc = sqlite3.connect(LAUNCH_DB, timeout=30)
         for extra, chat in lc.execute(
-                "SELECT extra_params, chat_id FROM launch_requests WHERE mode = 'bonding_curve' AND status = 'confirmed'"):
+                "SELECT extra_params, chat_id FROM launch_requests WHERE mode IN ('bonding_curve', 'meteora') AND status = 'confirmed'"):
             try:
-                cv = (json.loads(extra or "{}").get("curve_address") or "").lower()
+                cv = (json.loads(extra or "{}").get("curve_address") or "").strip()
             except ValueError:
                 cv = ""
             if cv:
-                out[cv] = chat
+                out[cv] = chat  # Solana pool addresses are case-sensitive: keep the exact form too
+                out[cv.lower()] = chat
         lc.close()
     except sqlite3.Error:
         pass
@@ -454,14 +472,14 @@ def send_graduation_alerts() -> None:
             cfg = CHAINS[r["chain"]]
             name, sym = html.escape(r["name"] or "Token"), html.escape(r["symbol"] or "")
             raised = f"{(r['grad_native'] or 0):.4g}"
-            chart = (f"https://dexscreener.com/{r['chain']}/{r['token']}" if r["chain"] in ("bsc", "base", "ethereum")
+            chart = (f"https://dexscreener.com/{r['chain']}/{r['token']}" if r["chain"] in ("bsc", "base", "ethereum", "solana")
                      else f"{cfg['explorer']}/token/{r['token']}")
             text = (
                 f"🎓 <b>{name} (${sym}) just graduated!</b>\n\n"
                 f"The curve filled at {raised} {cfg['sym']}. Liquidity is now on {cfg['dex']} "
-                f"and the LP tokens are burned 🔥\n\n"
+                f"{'(Meteora DAMM v2 pool, liquidity locked) 🔒' if r['chain'] == 'solana' else 'and the LP tokens are burned 🔥'}\n\n"
                 f"<code>{r['token']}</code>\n"
-                f'<a href="{chart}">📊 Chart</a> · <a href="{base}/curve.html?chain={r["chain"]}&curve={r["curve"]}">Trade page</a>'
+                f'<a href="{chart}">📊 Chart</a> · <a href="{_trade_url(r)}">Trade</a>'
             )
             trade = (os.environ.get("FERZAN_BOT_USERNAME") or "Ferzan_Trade_Bot").lstrip("@")
             kb = {"inline_keyboard": [[{"text": "📊 Chart", "url": chart},
@@ -481,7 +499,7 @@ def _trade_kb(r) -> dict:
     base = (os.environ.get("MINI_APP_BASE_URL") or "https://launch.ferzaneco.com/miniapp").rstrip("/")
     trade = (os.environ.get("FERZAN_BOT_USERNAME") or "Ferzan_Trade_Bot").lstrip("@")
     return {"inline_keyboard": [
-        [{"text": "📈 Buy / Sell on the curve", "url": f"{base}/curve.html?chain={r['chain']}&curve={r['curve']}"}],
+        [{"text": "🪐 Buy on Jupiter" if r["chain"] == "solana" else "📈 Buy / Sell on the curve", "url": _trade_url(r)}],
         [{"text": "⚡ Buy in Ferzan Trade Bot", "url": f"https://t.me/{trade}?start=buy_{r['token']}"}],
     ]}
 
@@ -548,7 +566,7 @@ def send_growth_alerts() -> None:
 def main() -> None:
     init_db()
     once = "--once" in sys.argv
-    workers = [ChainIndexer(ch) for ch in CHAINS]
+    workers = [ChainIndexer(ch) for ch in CHAINS if CHAINS[ch].get("kind") != "solana"]
     while True:
         busy = False
         for w in workers:
@@ -558,6 +576,11 @@ def main() -> None:
             except Exception as e:
                 log.warning("%s: pass failed: %s", w.chain, str(e)[:200])
                 w.rpc = None if "rpc" in str(e) else w.rpc
+        try:
+            import sol_indexer
+            sol_indexer.run(idx_conn, LAUNCH_DB)
+        except Exception as e:
+            log.warning("solana pass failed: %s", str(e)[:200])
         try:
             send_graduation_alerts()
         except Exception as e:
