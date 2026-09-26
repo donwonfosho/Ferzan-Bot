@@ -1035,7 +1035,11 @@ def _launch_rows_by_curve() -> dict:
         except ValueError:
             cv = ""
         if cv:
-            out[cv] = out[cv.lower()] = {"image": r[1] or "", "description": r[2] or ""}
+            try:
+                src = "site" if _json.loads(r[0] or "{}").get("source") == "site" else "telegram"
+            except ValueError:
+                src = "telegram"
+            out[cv] = out[cv.lower()] = {"image": r[1] or "", "description": r[2] or "", "source": src}
     return out
 
 
@@ -1067,12 +1071,12 @@ def _curve_item(r, usd: float, extra: dict, vol24: float, stats: dict) -> dict:
         "volume_native": r["volume"] or 0, "vol24_native": vol24, "vol24_usd": vol24 * usd, "trades": r["trades"] or 0,
         "launched_ts": r["launched_ts"], "last_trade_ts": r["last_trade_ts"], "start_time": r["start_time"],
         "creator": r["creator"], "creator_stats": stats.get(r["creator"], {}),
-        "url": _trade_url(r["chain"], r["curve"], r["token"]),
+        "url": _trade_url(r["chain"], r["curve"], r["token"]), "source": extra.get("source", "telegram"),
     }
 
 
 @app.get("/api/launches")
-def launches_feed(sort: str = "new", limit: int = 30, chain: str = ""):
+def launches_feed(sort: str = "new", limit: int = 30, chain: str = "", q: str = ""):
     """New launches (all chains), King of the Hill (closest to graduating) and top 24h volume."""
     limit = max(1, min(int(limit or 30), 60))
     c = _idx_db()
@@ -1081,7 +1085,14 @@ def launches_feed(sort: str = "new", limit: int = 30, chain: str = ""):
         where, args = "1=1", []
         if chain in _NATIVE_SYM:
             where, args = "chain = ?", [chain]
-        if sort == "koth":
+        qn = (q or "").strip().lower()[:44]
+        if qn:
+            where += " AND (LOWER(name) LIKE ? OR LOWER(symbol) LIKE ? OR LOWER(token) = ? OR LOWER(curve) = ?)"
+            args += [f"%{qn}%", f"%{qn}%", qn, qn]
+        if sort == "graduated":
+            rows = c.execute(f"SELECT * FROM curves WHERE {where} AND graduated = 1 "
+                             "ORDER BY COALESCE(grad_ts, launched_ts) DESC LIMIT ?", args + [limit]).fetchall()
+        elif sort == "koth":
             rows = c.execute(
                 f"SELECT * FROM curves WHERE {where} AND graduated = 0 AND trades > 0 "
                 "ORDER BY CAST(real_eth AS REAL) / MAX(CAST(grad_target AS REAL), 1) DESC LIMIT ?", args + [limit]).fetchall()
@@ -1103,7 +1114,8 @@ def launches_feed(sort: str = "new", limit: int = 30, chain: str = ""):
                 if chain in _NATIVE_SYM and ch_ != chain:
                     continue
                 r_ = c.execute("SELECT * FROM curves WHERE chain = ? AND curve = ? AND graduated = 0", (ch_, cv_)).fetchone()
-                if r_:
+                if r_ and (not qn or qn in (r_["name"] or "").lower() or qn in (r_["symbol"] or "").lower()
+                           or qn in (r_["token"].lower(), r_["curve"].lower())):
                     rows.append(r_)
                 if len(rows) >= limit:
                     break
@@ -1124,7 +1136,7 @@ def launches_feed(sort: str = "new", limit: int = 30, chain: str = ""):
         extra = _launch_rows_by_curve()
         items = [_curve_item(r, _native_usd(r["chain"]), extra.get(r["curve"], {}), vol.get(r["curve"], 0.0), stats) for r in rows]
         c.close()
-    if sort == "new" and chain in ("", "solana"):
+    if sort == "new" and chain in ("", "solana") and not (q or "").strip():
         with db._get_conn() as conn:
             sol = conn.execute(
                 "SELECT name, symbol, image_url, result_token_address, created_at FROM launch_requests "
@@ -1551,6 +1563,140 @@ def sol_swap(body: SolSwapBody, request: Request):
         out = {"error": (p.stderr or "no output")[-200:]}
     if out.get("error"):
         raise HTTPException(400, str(out["error"])[:300])
+    return out
+
+
+# ------------------------------------------ SITE_WALLET_BATCH18: portfolio --
+_WALLET_CACHE: dict = {}
+_TOKEN_PROGRAMS = ("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb")
+
+
+def _evm_balances(chain: str, wallet: str, tokens: list) -> dict:
+    """balanceOf(wallet) for each token, one batched call (one by one if the node refuses batches)."""
+    rpc = (RPC_URLS.get(chain) or "").strip()
+    tokens = tokens[:40]
+    if not rpc or not tokens:
+        return {}
+    data = "0x70a08231" + "0" * 24 + wallet[2:].lower()
+    calls = [{"jsonrpc": "2.0", "id": i, "method": "eth_call", "params": [{"to": t, "data": data}, "latest"]}
+             for i, t in enumerate(tokens)]
+    try:
+        res = requests.post(rpc, json=calls, timeout=12).json()
+    except Exception:
+        res = None
+    if not isinstance(res, list):
+        res = []
+        for call in calls:
+            try:
+                res.append(requests.post(rpc, json=call, timeout=8).json())
+            except Exception:
+                pass
+    out = {}
+    for r in res:
+        try:
+            out[tokens[int(r["id"])]] = int(r["result"], 16)
+        except Exception:
+            pass
+    return out
+
+
+def _sol_token_balances(wallet: str) -> dict:
+    out: dict = {}
+    for prog in _TOKEN_PROGRAMS:
+        accts = ((_sol_rpc_sync("getTokenAccountsByOwner", [wallet, {"programId": prog}, {"encoding": "jsonParsed"}])
+                  .get("result") or {}).get("value")) or []
+        for a in accts:
+            try:
+                info = a["account"]["data"]["parsed"]["info"]
+                out[info["mint"]] = out.get(info["mint"], 0) + int(info["tokenAmount"]["amount"])
+            except Exception:
+                pass
+    return out
+
+
+@app.get("/api/wallet/{wallet}")
+def wallet_portfolio(wallet: str):
+    """Coins a wallet holds (live balances), coins it launched, and the trading fees those paid it."""
+    w = (wallet or "").strip()
+    evm = bool(_re.fullmatch(r"0x[0-9a-fA-F]{40}", w))
+    if not evm and not _re.fullmatch(_B58, w):
+        raise HTTPException(400, "bad wallet address")
+    key = w.lower() if evm else w
+    hit = _WALLET_CACHE.get(key)
+    if hit and time.time() - hit[0] < 20:
+        return hit[1]
+    out = {"wallet": w, "holdings": [], "launches": [], "value_usd": 0.0, "earned_usd": 0.0, "referral_usd": 0.0,
+           "now": int(time.time())}
+    c = _idx_db()
+    if c is None:
+        return out
+    extra = _launch_rows_by_curve()
+    fees: dict = {}
+    ref: list = []
+    try:
+        if evm:
+            created = c.execute("SELECT * FROM curves WHERE creator = ? AND chain != 'solana' "
+                                "ORDER BY launched_ts DESC LIMIT 60", (key,)).fetchall()
+            touched = c.execute("SELECT DISTINCT chain, curve FROM trades WHERE trader = ? LIMIT 200", (key,)).fetchall()
+            if created:
+                q = ",".join("?" for _ in created)
+                for cv_, f_ in c.execute(f"SELECT curve, SUM(fee) FROM trades WHERE curve IN ({q}) GROUP BY curve",
+                                         [r["curve"] for r in created]):
+                    fees[cv_] = float(f_ or 0)
+            ref = c.execute("SELECT chain, SUM(fee) FROM trades WHERE referrer = ? GROUP BY chain", (key,)).fetchall()
+            pool = {(r["chain"], r["curve"]): r for r in created}
+            for ch_, cv_ in touched:
+                if (ch_, cv_) not in pool:
+                    r_ = c.execute("SELECT * FROM curves WHERE chain = ? AND curve = ?", (ch_, cv_)).fetchone()
+                    if r_:
+                        pool[(ch_, cv_)] = r_
+        else:
+            created = c.execute("SELECT * FROM curves WHERE creator = ? AND chain = 'solana' "
+                                "ORDER BY launched_ts DESC LIMIT 60", (w,)).fetchall()
+            sol_rows = {r["token"]: r for r in c.execute("SELECT * FROM curves WHERE chain = 'solana'").fetchall()}
+    finally:
+        c.close()
+
+    holdings = []
+    if evm:
+        by_chain: dict = {}
+        for r in pool.values():
+            by_chain.setdefault(r["chain"], []).append(r)
+        for ch_, rows_ in by_chain.items():
+            bals = _evm_balances(ch_, w, [r["token"] for r in rows_])
+            for r in rows_:
+                raw = bals.get(r["token"], 0)
+                if raw > 0:
+                    holdings.append((r, raw / 1e18))
+    else:
+        for mint, raw in _sol_token_balances(w).items():
+            r = sol_rows.get(mint)
+            if r and raw > 0:
+                holdings.append((r, raw / 1e6))
+
+    for r, amount in holdings:
+        usd = _native_usd(r["chain"])
+        item = _curve_item(r, usd, extra.get(r["curve"], {}), 0.0, {})
+        item["balance"] = amount
+        item["value_native"] = (r["price"] or 0) * amount
+        item["value_usd"] = item["value_native"] * usd
+        out["value_usd"] += item["value_usd"]
+        out["holdings"].append(item)
+    out["holdings"].sort(key=lambda x: x["value_usd"], reverse=True)
+
+    for r in created:
+        usd = _native_usd(r["chain"])
+        item = _curve_item(r, usd, extra.get(r["curve"], {}), 0.0, {})
+        if r["chain"] != "solana":  # EVM curves pay the creator 50% of the 1% fee on every trade, straight to the wallet
+            item["earned_native"] = fees.get(r["curve"], 0.0) * 0.5
+            item["earned_usd"] = item["earned_native"] * usd
+            out["earned_usd"] += item["earned_usd"]
+        out["launches"].append(item)
+    for ch_, f_ in ref:
+        out["referral_usd"] += float(f_ or 0) * 0.1 * _native_usd(ch_)
+    _WALLET_CACHE[key] = (time.time(), out)
+    if len(_WALLET_CACHE) > 2000:
+        _WALLET_CACHE.clear()
     return out
 
 
