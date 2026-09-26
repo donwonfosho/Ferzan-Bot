@@ -215,6 +215,9 @@ def build_tx(request_id: str, body: BuildTxRequest):
         raise HTTPException(404, "Launch request not found")
     if req.status not in ("pending", "built", "failed"):
         raise HTTPException(400, f"Request is already {req.status}, cannot rebuild")
+    _site_wallet = str((req.extra_params or {}).get("site_wallet") or "")
+    if _site_wallet and _site_wallet.lower() != (body.wallet_address or "").strip().lower():
+        raise HTTPException(400, "This launch belongs to another wallet")
 
     total_supply = int(req.total_supply)
 
@@ -395,6 +398,12 @@ def complete_request(request_id: str, body: CompleteRequest):
     req = db.get_launch_request(request_id)
     if not req:
         raise HTTPException(404, "Launch request not found")
+    if req.status == "confirmed":
+        return {"status": "ok", "already": True}  # a replayed call must not post to the channel again
+    if (req.extra_params or {}).get("source") == "site":
+        verified = _verify_site_launch(req, body)
+        body = CompleteRequest(tx_hash=body.tx_hash, result_token_address=verified.get("token", ""),
+                               curve_address=verified.get("curve", ""))
 
     token_addr = (body.result_token_address or "").strip()
     curve_addr = (body.curve_address or "").strip()
@@ -424,6 +433,192 @@ def complete_request(request_id: str, body: CompleteRequest):
         _notify_telegram(channel, text, photo=req.image_url or "",
                          markup=_growth_buttons(req, token_addr, curve_addr, trade_only=True))
     return {"status": "ok"}
+
+
+# ---- SITE_LAUNCH_BATCH16: launches from ferzan-factory.grok.me (no Telegram account needed) ----
+import base64 as _b64
+import hmac as _hmac
+import uuid as _uuid
+
+_SITE_CHAINS = {"ethereum", "bsc", "base", "robinhood", "solana"}
+_IMG_MAGIC = {"png": b"\x89PNG", "jpg": b"\xff\xd8\xff", "gif": b"GIF8", "webp": b"RIFF"}
+
+
+def _site_secret_ok(request: Request) -> bool:
+    expected = (os.environ.get("FERZAN_INGEST_SECRET") or "").strip()
+    got = (request.headers.get("x-ferzan-ingest") or "").strip()
+    return len(expected) >= 24 and _hmac.compare_digest(expected.encode(), got.encode())
+
+
+class SiteLaunchBody(BaseModel):
+    chain: str
+    name: str
+    symbol: str
+    wallet_address: str
+    description: str = ""
+    image: str = ""            # data:image/...;base64,... (the site stores images inline)
+    supply_whole: str = "1000000000"
+    grad_native: str = ""      # EVM only: native raised before graduation, e.g. "5"
+    dev_buy: str = "0"
+    max_buy: str = "0"
+    start_minutes: str = "0"
+    website: str = ""
+    x: str = ""
+    telegram: str = ""
+    validate_only: bool = False
+
+
+def _site_num(raw: str, label: str, lo: Decimal, hi: Decimal, allow_zero: bool = False) -> Decimal:
+    try:
+        v = Decimal(str(raw or "0").strip().replace(",", "") or "0")
+    except InvalidOperation:
+        raise HTTPException(400, f"{label} looks wrong")
+    if allow_zero and v == 0:
+        return v
+    if not v.is_finite() or v < lo or v > hi:
+        raise HTTPException(400, f"{label} must be between {lo} and {hi}")
+    return v
+
+
+def _site_link(raw: str, kind: str) -> str:
+    v = (raw or "").strip()[:200]
+    if not v:
+        return ""
+    if kind in ("x", "telegram") and _re.fullmatch(r"@?[A-Za-z0-9_]{3,32}", v):
+        host = "https://x.com/" if kind == "x" else "https://t.me/"
+        return host + v.lstrip("@")
+    if not _re.fullmatch(r"https://[^\s<>\"']{3,190}", v):
+        raise HTTPException(400, f"{kind} link must start with https://")
+    return v
+
+
+def _site_image(data_url: str) -> str:
+    if not data_url:
+        return ""
+    m = _re.fullmatch(r"data:image/(png|jpeg|jpg|webp|gif);base64,([A-Za-z0-9+/=\s]+)", data_url.strip())
+    if not m:
+        raise HTTPException(400, "Image must be a PNG, JPEG, WebP or GIF")
+    ext = "jpg" if m.group(1) in ("jpeg", "jpg") else m.group(1)
+    try:
+        raw = _b64.b64decode(m.group(2), validate=False)
+    except Exception:
+        raise HTTPException(400, "Image looks wrong")
+    if len(raw) > 300_000 or not raw.startswith(_IMG_MAGIC[ext]):
+        raise HTTPException(400, "Image is too big or not a real image")
+    _MEDIA_DIR.mkdir(parents=True, exist_ok=True)
+    name = f"{_uuid.uuid4().hex}.{ext}"
+    (_MEDIA_DIR / name).write_bytes(raw)
+    return f"{_PUBLIC_ORIGIN}/api/media/{name}"
+
+
+@app.post("/api/site/launch-requests")
+def site_launch(body: SiteLaunchBody, request: Request):
+    """Called server-to-server by the website (shared secret). Creates a launch request with
+    no Telegram user; the visitor's own wallet then signs the tx from /build-tx."""
+    if not _site_secret_ok(request):
+        raise HTTPException(401, "not allowed")
+    chain = (body.chain or "").strip().lower()
+    if chain not in _SITE_CHAINS:
+        raise HTTPException(400, "That chain is not open for website launches")
+    name = (body.name or "").strip()
+    symbol = (body.symbol or "").strip().upper()
+    if not (1 <= len(name) <= 32) or not _re.fullmatch(r"[A-Z0-9]{1,10}", symbol):
+        raise HTTPException(400, "Name or ticker looks wrong")
+    wallet = (body.wallet_address or "").strip()
+    if chain == "solana":
+        if not _re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{32,44}", wallet):
+            raise HTTPException(400, "Solana wallet looks wrong")
+    elif not _re.fullmatch(r"0x[0-9a-fA-F]{40}", wallet):
+        raise HTTPException(400, "Wallet looks wrong")
+    dev = _site_num(body.dev_buy, "Dev buy", Decimal("0.000001"), Decimal("100000"), allow_zero=True)
+    extra = {"source": "site", "site_wallet": wallet, "dev_buy": f"{dev:f}" if dev > 0 else "0", "allocs": ""}
+    for k in ("website", "x", "telegram"):
+        link = _site_link(getattr(body, k), k)
+        if link:
+            extra[k] = link
+    if chain == "solana":
+        mode, decimals, total_supply = "meteora", 6, str(10**9 * 10**6)  # fixed by the Ferzan Meteora config
+        if not (os.environ.get("METEORA_CONFIG") or "").strip():
+            raise HTTPException(501, "Solana curves are not configured")
+    else:
+        mode, decimals = "bonding_curve", 18
+        if not FACTORY_ADDRESSES.get(chain, {}).get("bonding_curve"):
+            raise HTTPException(501, f"Bonding curves on {chain} are not configured")
+        whole = int(_site_num(body.supply_whole, "Supply", Decimal(1), Decimal(10**15)))
+        total_supply = str(whole * 10**18)
+        grad = _site_num(body.grad_native, "Graduation", Decimal("0.001"), Decimal(1_000_000))
+        extra["graduation_eth_threshold"] = str(int(grad * 10**18))
+        extra["graduation_display"] = f"{grad.normalize():f}"
+        extra["virtual_eth_reserve"] = str(10**18)
+        extra["virtual_token_reserve"] = str(int(total_supply) * 80 // 100)
+        mb = _site_num(body.max_buy, "Max buy", Decimal("0.000001"), Decimal(1_000_000), allow_zero=True)
+        extra["max_buy"] = f"{mb:f}" if mb > 0 else "0"
+        mins = int(_site_num(body.start_minutes, "Start delay", Decimal(0), Decimal(10080), allow_zero=True))
+        if mins and dev > 0:
+            raise HTTPException(400, "A dev buy needs trading to open right away")
+        extra["start_minutes"] = str(mins)
+    description = (body.description or "").strip()[:500]
+    if body.validate_only:
+        return {"ok": True, "validated": True, "chain": chain, "mode": mode}
+    image_url = _site_image(body.image)
+    req = db.create_launch_request(
+        telegram_user_id=0, chat_id=0, chain=chain, mode=mode, name=name, symbol=symbol,
+        total_supply=total_supply, decimals=decimals, description=description,
+        image_url=image_url, extra_params=extra,
+    )
+    logger.info("site launch request %s chain=%s", req.id, chain)
+    return {"ok": True, "request_id": req.id, "image_url": image_url}
+
+
+def _verify_site_launch(req, body) -> dict:
+    """The launch tx must be confirmed on chain, sent by the request's wallet, through our factory
+    (EVM) or creating the given mint (Solana). Returns the real token/curve."""
+    wallet = str((req.extra_params or {}).get("site_wallet") or req.wallet_address or "").strip()
+    tx = (body.tx_hash or "").strip()
+    if req.chain == "solana":
+        mint = (body.result_token_address or "").strip()
+        if not _re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{32,44}", mint) or not _re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{64,90}", tx):
+            raise HTTPException(400, "Launch signature or mint looks wrong")
+        res = {}
+        for _ in range(10):
+            try:
+                res = requests.post(RPC_URLS["solana"], json={"jsonrpc": "2.0", "id": 1, "method": "getTransaction",
+                    "params": [tx, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0, "commitment": "confirmed"}]},
+                    timeout=20).json().get("result") or {}
+            except Exception:
+                res = {}
+            if res:
+                break
+            time.sleep(2)
+        if not res or (res.get("meta") or {}).get("err") is not None:
+            raise HTTPException(400, "The launch is not confirmed on Solana")
+        keys = [k.get("pubkey") if isinstance(k, dict) else k for k in (res.get("transaction") or {}).get("message", {}).get("accountKeys") or []]
+        if not keys or keys[0] != wallet or mint not in keys:
+            raise HTTPException(400, "That launch was not made by this wallet")
+        return {"token": mint}
+    if not _re.fullmatch(r"0x[0-9a-fA-F]{64}", tx):
+        raise HTTPException(400, "Launch transaction looks wrong")
+    factory = (FACTORY_ADDRESSES.get(req.chain, {}).get("bonding_curve") or "").lower()
+    rcpt = {}
+    for _ in range(12):
+        try:
+            rcpt = requests.post(RPC_URLS.get(req.chain) or "", json={"jsonrpc": "2.0", "id": 1,
+                "method": "eth_getTransactionReceipt", "params": [tx]}, timeout=20).json().get("result") or {}
+        except Exception:
+            rcpt = {}
+        if rcpt:
+            break
+        time.sleep(2)
+    if not rcpt or str(rcpt.get("status")) != "0x1":
+        raise HTTPException(400, "The launch is not confirmed on chain")
+    if str(rcpt.get("from") or "").lower() != wallet.lower() or str(rcpt.get("to") or "").lower() != factory:
+        raise HTTPException(400, "That launch was not made by this wallet through the Ferzan factory")
+    for log in rcpt.get("logs") or []:
+        t = log.get("topics") or []
+        if (str(log.get("address") or "").lower() == factory and len(t) >= 4
+                and str(t[0]).lower() == CURVE_LAUNCHED_TOPIC and _topic_addr(t[3]).lower() == wallet.lower()):
+            return {"curve": _topic_addr(t[1]), "token": _topic_addr(t[2])}
+    raise HTTPException(400, "No Ferzan launch found in that transaction")
 
 
 class SolBroadcastBody(BaseModel):
@@ -628,6 +823,8 @@ def _growth_buttons(req, token_addr: str, curve_addr: str = "", trade_only: bool
 
 
 def _notify_telegram(chat_id: int, text: str, photo: str = "", markup: dict | None = None):
+    if not chat_id:
+        return  # website launches have no Telegram chat
     if photo and TELEGRAM_BOT_TOKEN and len(text) <= 1024:
         try:
             body = {"chat_id": chat_id, "photo": photo, "caption": text, "parse_mode": "HTML"}
@@ -646,6 +843,8 @@ def _notify_telegram(chat_id: int, text: str, photo: str = "", markup: dict | No
 
 
 def _notify_text(chat_id: int, text: str, markup: dict | None = None):
+    if not chat_id:
+        return
     if not TELEGRAM_BOT_TOKEN:
         logger.warning("TELEGRAM_BOT_TOKEN not set -- cannot notify user")
         return
