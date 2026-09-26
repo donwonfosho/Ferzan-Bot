@@ -1434,6 +1434,126 @@ def curve_by_token(token: str, since: int = 0, kind: str = "buy"):
     }
 
 
+# ---- SOL_COIN_BATCH17: Solana coin pages on the website ----
+_B58 = r"[1-9A-HJ-NP-Za-km-z]{32,44}"
+
+
+def _sol_rpc_sync(method: str, params: list, timeout: int = 15) -> dict:
+    try:
+        return requests.post(RPC_URLS["solana"], json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params},
+                             timeout=timeout).json() or {}
+    except Exception:
+        return {}
+
+
+@app.get("/api/sol-coin/{mint}")
+def sol_coin(mint: str, tf: int = 300, wallet: str = ""):
+    """Chart, stats and project info for a Ferzan Meteora curve, like /api/curve-chart for EVM."""
+    if not _re.fullmatch(_B58, mint or ""):
+        raise HTTPException(404, "not found")
+    tf = tf if tf in (60, 300, 900, 3600, 14400) else 300
+    c = _idx_db()
+    if c is None:
+        return {"indexed": False}
+    try:
+        cv = c.execute("SELECT * FROM curves WHERE chain = 'solana' AND token = ?", (mint,)).fetchone()
+        if not cv:
+            return {"indexed": False}
+        px = c.execute("SELECT ts, price FROM sol_px WHERE pool = ? ORDER BY ts", (cv["curve"],)).fetchall()
+        stats = _creator_stats(c, [cv["creator"]])
+    finally:
+        c.close()
+    candles: list = []
+    last = px[0]["price"] if px else (cv["price"] or 0.0)
+    for r in px:
+        b = (r["ts"] // tf) * tf
+        if not candles or candles[-1][0] != b:
+            candles.append([b, last, max(last, r["price"]), min(last, r["price"]), r["price"], 0.0])
+        k = candles[-1]
+        k[2], k[3], k[4] = max(k[2], r["price"]), min(k[3], r["price"]), r["price"]
+        last = r["price"]
+    if not candles:
+        t0 = cv["launched_ts"] or int(time.time())
+        candles = [[(t0 // tf) * tf, last, last, last, last, 0.0]]
+    price = cv["price"] or last
+    usd = _native_usd("solana")
+    grad, real = int(cv["grad_target"] or 0), int(cv["real_eth"] or 0)
+    import json as _json
+    info = {}
+    with db._get_conn() as conn:
+        row = conn.execute(
+            "SELECT name, symbol, image_url, description, extra_params FROM launch_requests "
+            "WHERE chain = 'solana' AND result_token_address = ? ORDER BY created_at DESC LIMIT 1", (mint,)).fetchone()
+    if row:
+        try:
+            extra = _json.loads(row[4] or "{}")
+        except Exception:
+            extra = {}
+        info = {"image": row[2] or "", "description": row[3] or "",
+                "website": extra.get("website", ""), "x": extra.get("x", ""), "telegram": extra.get("telegram", "")}
+    mine = None
+    if _re.fullmatch(_B58, wallet or ""):
+        bal = ((_sol_rpc_sync("getBalance", [wallet, {"commitment": "confirmed"}]).get("result") or {}).get("value")) or 0
+        accts = ((_sol_rpc_sync("getTokenAccountsByOwner", [wallet, {"mint": mint}, {"encoding": "jsonParsed"}])
+                  .get("result") or {}).get("value")) or []
+        tok = 0
+        for a in accts:
+            try:
+                tok += int(a["account"]["data"]["parsed"]["info"]["tokenAmount"]["amount"])
+            except Exception:
+                pass
+        mine = {"sol_lamports": str(int(bal)), "token_raw": str(tok)}
+    return {
+        "indexed": True, "chain": "solana", "native": "SOL", "native_usd": usd, "mint": mint, "pool": cv["curve"],
+        "name": cv["name"], "symbol": cv["symbol"], **info, "decimals": 6, "supply": 1_000_000_000, "tf": tf,
+        "candles": candles[-400:], "price": price, "mcap_native": price * 1_000_000_000, "mcap_usd": price * 1_000_000_000 * usd,
+        "progress": 100.0 if cv["graduated"] else (min(100.0, real * 100.0 / grad) if grad else 0.0),
+        "raised_sol": real / 1e18, "grad_sol": grad / 1e18,
+        "volume_native": cv["volume"] or 0, "trades_count": cv["trades"] or 0, "graduated": bool(cv["graduated"]),
+        "creator": cv["creator"], "creator_stats": stats.get(cv["creator"], {}), "mine": mine,
+    }
+
+
+class SolSwapBody(BaseModel):
+    mint: str
+    wallet: str
+    side: str
+    amount: str
+    slippage_bps: int = 500
+    simulate: bool = False
+
+
+@app.post("/api/sol-swap")
+def sol_swap(body: SolSwapBody, request: Request):
+    """Server-to-server from the website (shared secret): an unsigned Meteora buy/sell for the visitor's wallet."""
+    import json as _json
+    import subprocess as _sp
+    if not _site_secret_ok(request):
+        raise HTTPException(401, "not allowed")
+    if not _re.fullmatch(_B58, body.mint or "") or not _re.fullmatch(_B58, body.wallet or ""):
+        raise HTTPException(400, "Mint or wallet looks wrong")
+    if body.side not in ("buy", "sell") or not _re.fullmatch(r"\d{1,20}", body.amount or "") or body.amount == "0":
+        raise HTTPException(400, "Side or amount looks wrong")
+    config = (os.environ.get("METEORA_CONFIG") or "").strip()
+    if not config:
+        raise HTTPException(501, "Solana curves are not configured")
+    script = _Path(__file__).resolve().with_name("dbc") / "build_swap.mjs"
+    try:
+        p = _sp.run(["node", str(script)], input=_json.dumps({
+            "rpc": RPC_URLS["solana"], "config": config, "mint": body.mint, "owner": body.wallet, "side": body.side,
+            "amount": body.amount, "slippageBps": max(10, min(5000, int(body.slippage_bps))), "simulate": bool(body.simulate),
+        }), capture_output=True, text=True, timeout=45, cwd=str(script.parent))
+    except _sp.TimeoutExpired:
+        raise HTTPException(504, "Solana did not answer in time")
+    try:
+        out = _json.loads(p.stdout or "{}")
+    except Exception:
+        out = {"error": (p.stderr or "no output")[-200:]}
+    if out.get("error"):
+        raise HTTPException(400, str(out["error"])[:300])
+    return out
+
+
 @app.get("/api/creator/{wallet}")
 def creator_record(wallet: str):
     w = (wallet or "").strip()

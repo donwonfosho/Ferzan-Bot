@@ -25,7 +25,9 @@ SCALE = 10**9  # lamports -> 18-decimal units
 SUPPLY_TOKENS = 1_000_000_000  # Ferzan partner config: 1B supply
 SCHEMA = ("CREATE TABLE IF NOT EXISTS sol_state (pool TEXT PRIMARY KEY, mint TEXT, last_sig TEXT, last_quote TEXT, seen_ts INTEGER);"
           "CREATE TABLE IF NOT EXISTS sol_vol (ts INTEGER, pool TEXT, vol REAL, trades INTEGER);"
-          "CREATE INDEX IF NOT EXISTS idx_sol_vol_ts ON sol_vol (ts);")
+          "CREATE INDEX IF NOT EXISTS idx_sol_vol_ts ON sol_vol (ts);"
+          "CREATE TABLE IF NOT EXISTS sol_px (ts INTEGER, pool TEXT, price REAL);"
+          "CREATE INDEX IF NOT EXISTS idx_sol_px_pool_ts ON sol_px (pool, ts);")
 _last_run = 0.0
 
 
@@ -111,6 +113,12 @@ def run(idx_conn, launch_db: str, force: bool = False) -> int:
                 "grad_target = excluded.grad_target, real_eth = excluded.real_eth, price = excluded.price, mcap = excluded.mcap",
                 (pool, mint, wallet or "", name, symbol, str(SUPPLY_TOKENS * 10**18), str(thr * SCALE), launched,
                  str(quote * SCALE), price, price * SUPPLY_TOKENS, launched))
+            # Price history for the website chart: a point on every trade, and at least every 5 minutes.
+            last_px = c.execute("SELECT MAX(ts) FROM sol_px WHERE pool = ?", (pool,)).fetchone()[0] or 0
+            if price > 0 and (first or trades > 0 or now - last_px >= 300):
+                c.execute("INSERT INTO sol_px (ts, pool, price) VALUES (?,?,?)", (now, pool, price))
+            if now % 3600 < POLL:
+                c.execute("DELETE FROM sol_px WHERE ts < ?", (now - 30 * 86400,))
             c.execute("UPDATE curves SET volume = volume + ?, trades = trades + ?, "
                       "last_trade_ts = COALESCE(?, last_trade_ts) WHERE chain = 'solana' AND curve = ?",
                       (vol, trades, last_trade, pool))
