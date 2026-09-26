@@ -400,7 +400,7 @@ def buy_evm(
         return buy_curve(
             ci["cid"],
             ci["curve"],
-            usd,
+            min(max(1.0, float(usd)), max_usd()),
             key_hex=key_hex,
             referrer=_referrer_wallet(user_id),
             slip_bps=slip_bps,
@@ -486,12 +486,7 @@ def buy_evm(
 
 
 def _nonce(rpc: str, addr: str) -> int:
-    r = requests.post(
-        rpc,
-        json={"jsonrpc": "2.0", "id": 1, "method": "eth_getTransactionCount", "params": [addr, "pending"]},
-        timeout=15,
-    )
-    data = r.json() if r.content else {}
+    data = _rpc(rpc, "eth_getTransactionCount", [addr, "pending"])
     val = data.get("result") or "0x0"
     return int(val, 16)
 
@@ -549,9 +544,53 @@ def _send_raw(meta: dict, raw_hex: str, addr: str = "", nonce=None) -> dict:
     return _rpc(meta["rpc"], "eth_sendRawTransaction", [raw_hex])
 
 
+# Free public RPCs rate-limit (mainnet.base.org especially). BASE_RPC_URL / BSC_RPC_URL in .env
+# set a preferred (e.g. paid) endpoint; if an endpoint is busy the call moves to the next one.
+_RPC_FALLBACKS = {
+    "base": ["https://base-rpc.publicnode.com", "https://mainnet.base.org", "https://base.llamarpc.com", "https://1rpc.io/base"],
+    "bsc": ["https://bsc-rpc.publicnode.com", "https://bsc-dataseed.binance.org", "https://bsc-dataseed1.defibit.io", "https://1rpc.io/bnb"],
+}
+for _cid, _env in (("base", "BASE_RPC_URL"), ("bsc", "BSC_RPC_URL")):
+    _pref = (os.getenv(_env) or "").strip()
+    if _cid in CHAINS:
+        if _pref.startswith("http"):
+            CHAINS[_cid]["rpc"] = _pref
+        elif CHAINS[_cid].get("rpc") == "https://mainnet.base.org":
+            CHAINS[_cid]["rpc"] = "https://base-rpc.publicnode.com"
+_BUSY_WORDS = ("rate", "limit", "too many", "capacity", "busy", "timeout", "unavailable", "exceeded")
+
+
+def _rpc_urls(rpc: str) -> list:
+    for cid, alts in _RPC_FALLBACKS.items():
+        if cid in CHAINS and (rpc == CHAINS[cid].get("rpc") or rpc in alts):
+            return [rpc] + [u for u in [CHAINS[cid].get("rpc")] + alts if u != rpc]
+    return [rpc]
+
+
 def _rpc(rpc: str, method: str, params: list):
-    r = requests.post(rpc, json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params}, timeout=20)
-    return r.json() if r.content else {}
+    urls = _rpc_urls(rpc)
+    last_exc = None
+    body: dict = {}
+    for i, url in enumerate(urls):
+        try:
+            r = requests.post(url, json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params}, timeout=20)
+            if r.status_code == 429 or r.status_code >= 500:
+                raise RuntimeError(f"HTTP {r.status_code}")
+            body = r.json() if r.content else {}
+        except Exception as exc:  # transport error / busy / not JSON: try the next endpoint
+            last_exc = exc
+            if i + 1 < len(urls):
+                log.info("rpc %s busy (%s) - trying next endpoint", url, exc)
+            continue
+        err = body.get("error") if isinstance(body, dict) else None
+        msg = str(err.get("message") if isinstance(err, dict) else err or "").lower()
+        if err and any(w in msg for w in _BUSY_WORDS) and "revert" not in msg and i + 1 < len(urls):
+            log.info("rpc %s busy (%s) - trying next endpoint", url, msg[:80])
+            continue
+        return body
+    if body:
+        return body
+    raise last_exc or RuntimeError("all RPC endpoints failed")
 
 
 def _gas_price(rpc: str) -> int:

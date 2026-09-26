@@ -78,6 +78,9 @@ CREATE INDEX IF NOT EXISTS idx_trades_curve ON trades (curve, ts);
 CREATE INDEX IF NOT EXISTS idx_trades_ts ON trades (ts);
 CREATE INDEX IF NOT EXISTS idx_curves_creator ON curves (creator);
 CREATE TABLE IF NOT EXISTS cursor (chain TEXT PRIMARY KEY, block INTEGER NOT NULL, rpc TEXT);
+CREATE TABLE IF NOT EXISTS alerts_sent (chain TEXT NOT NULL, curve TEXT NOT NULL, kind TEXT NOT NULL, ts INTEGER,
+    PRIMARY KEY (chain, curve, kind));
+CREATE TABLE IF NOT EXISTS alert_state (k TEXT PRIMARY KEY, v TEXT);
 """
 
 
@@ -394,14 +397,15 @@ class ChainIndexer:
 
 
 # ----------------------------------------------------------------- alerts --
-def _tg(chat_id, text: str) -> None:
+def _tg(chat_id, text: str, markup: dict | None = None) -> None:
     token = os.environ.get("LAUNCHBOT_TOKEN") or os.environ.get("TELEGRAM_BOT_TOKEN") or ""
     if not token or not chat_id:
         return
+    body = {"chat_id": chat_id, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}
+    if markup:
+        body["reply_markup"] = markup
     try:
-        requests.post(f"https://api.telegram.org/bot{token}/sendMessage",
-                      json={"chat_id": chat_id, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True},
-                      timeout=15)
+        requests.post(f"https://api.telegram.org/bot{token}/sendMessage", json=body, timeout=15)
     except requests.RequestException as e:
         log.warning("telegram send failed: %s", e)
 
@@ -447,9 +451,85 @@ def send_graduation_alerts() -> None:
                 f"<code>{r['token']}</code>\n"
                 f'<a href="{chart}">📊 Chart</a> · <a href="{base}/curve.html?chain={r["chain"]}&curve={r["curve"]}">Trade page</a>'
             )
-            _tg(chats.get(r["curve"]), text)
+            trade = (os.environ.get("FERZAN_BOT_USERNAME") or "Ferzan_Trade_Bot").lstrip("@")
+            kb = {"inline_keyboard": [[{"text": "📊 Chart", "url": chart},
+                                       {"text": "⚡ Buy in Ferzan Trade Bot", "url": f"https://t.me/{trade}?start=buy_{r['token']}"}]]}
+            _tg(chats.get(r["curve"]), text, kb)
             if channel:
-                _tg(channel, text)
+                _tg(channel, text, kb)
+
+
+# ---------------------------------------------------------- growth alerts --
+PROGRESS_STEPS = sorted({int(x) for x in (os.environ.get("FERZAN_PROGRESS_ALERTS") or "50,90").split(",") if x.strip().isdigit()})
+KOTH_MIN_PCT = float(os.environ.get("FERZAN_KOTH_MIN_PCT") or 10)
+KOTH_COOLDOWN = int(os.environ.get("FERZAN_KOTH_COOLDOWN_MIN") or 30) * 60
+
+
+def _trade_kb(r) -> dict:
+    base = (os.environ.get("MINI_APP_BASE_URL") or "https://launch.ferzaneco.com/miniapp").rstrip("/")
+    trade = (os.environ.get("FERZAN_BOT_USERNAME") or "Ferzan_Trade_Bot").lstrip("@")
+    return {"inline_keyboard": [
+        [{"text": "📈 Buy / Sell on the curve", "url": f"{base}/curve.html?chain={r['chain']}&curve={r['curve']}"}],
+        [{"text": "⚡ Buy in Ferzan Trade Bot", "url": f"https://t.me/{trade}?start=buy_{r['token']}"}],
+    ]}
+
+
+def _progress(r) -> float:
+    grad = int(r["grad_target"] or 0)
+    return min(100.0, int(r["real_eth"] or 0) * 100.0 / grad) if grad else 0.0
+
+
+def send_growth_alerts() -> None:
+    now = int(time.time())
+    channel = (os.environ.get("FERZAN_LAUNCHES_CHANNEL") or "").strip()
+    with idx_conn() as c:
+        first_run = c.execute("SELECT v FROM alert_state WHERE k = 'growth_init'").fetchone() is None
+        rows = c.execute("SELECT * FROM curves WHERE graduated = 0 AND trades > 0").fetchall()
+        sent = {(x[0], x[1], x[2]) for x in c.execute("SELECT chain, curve, kind FROM alerts_sent")}
+        chats = None
+        for r in rows:
+            prog = _progress(r)
+            new = [t for t in PROGRESS_STEPS if prog >= t and (r["chain"], r["curve"], f"p{t}") not in sent]
+            if not new:
+                continue
+            for t in new:
+                c.execute("INSERT OR IGNORE INTO alerts_sent (chain, curve, kind, ts) VALUES (?,?,?,?)",
+                          (r["chain"], r["curve"], f"p{t}", now))
+            if first_run or (r["last_trade_ts"] or 0) < now - 3600:
+                continue  # already past it before alerts existed, or stale: record silently
+            cfg = CHAINS[r["chain"]]
+            t = max(new)
+            name, sym = html.escape(r["name"] or "Token"), html.escape(r["symbol"] or "")
+            raised, target = int(r["real_eth"] or 0) / 1e18, int(r["grad_target"] or 0) / 1e18
+            fire = "🚀" if t >= 90 else "🔥"
+            text = (f"{fire} <b>{name} (${sym})</b> is {t}% of the way to graduation!\n\n"
+                    f"{raised:.4g} / {target:.4g} {cfg['sym']} raised · {r['trades']} trades\n"
+                    f"<code>{r['token']}</code>")
+            chats = chats if chats is not None else _creator_chats()
+            _tg(chats.get(r["curve"]), text, _trade_kb(r))
+            if channel:
+                _tg(channel, text, _trade_kb(r))
+        # King of the Hill: same rule as the feed (closest to graduating), with a floor and a cooldown
+        king = c.execute(
+            "SELECT * FROM curves WHERE graduated = 0 AND trades > 0 AND last_trade_ts > ? "
+            "ORDER BY CAST(real_eth AS REAL) / MAX(CAST(grad_target AS REAL), 1) DESC LIMIT 1", (now - 6 * 3600,)).fetchone()
+        st = {k: v for k, v in c.execute("SELECT k, v FROM alert_state")}
+        if king and _progress(king) >= KOTH_MIN_PCT and st.get("koth") != king["curve"]:
+            if first_run:
+                c.execute("INSERT OR REPLACE INTO alert_state (k, v) VALUES ('koth', ?)", (king["curve"],))
+            elif now - int(st.get("koth_ts") or 0) >= KOTH_COOLDOWN:
+                c.execute("INSERT OR REPLACE INTO alert_state (k, v) VALUES ('koth', ?)", (king["curve"],))
+                c.execute("INSERT OR REPLACE INTO alert_state (k, v) VALUES ('koth_ts', ?)", (str(now),))
+                cfg = CHAINS[king["chain"]]
+                name, sym = html.escape(king["name"] or "Token"), html.escape(king["symbol"] or "")
+                text = (f"👑 <b>New King of the Hill: {name} (${sym})</b> on {({'base': 'Base', 'bsc': 'BNB Chain'}).get(king['chain'], king['chain'])}\n\n"
+                        f"{_progress(king):.0f}% to graduation · {king['trades']} trades\n<code>{king['token']}</code>")
+                chats = chats if chats is not None else _creator_chats()
+                _tg(chats.get(king["curve"]), "👑 Your token is now King of the Hill!\n\n" + text, _trade_kb(king))
+                if channel:
+                    _tg(channel, text, _trade_kb(king))
+        if first_run:
+            c.execute("INSERT OR REPLACE INTO alert_state (k, v) VALUES ('growth_init', ?)", (str(now),))
 
 
 # ------------------------------------------------------------------- main --
@@ -470,6 +550,10 @@ def main() -> None:
             send_graduation_alerts()
         except Exception as e:
             log.warning("alerts failed: %s", e)
+        try:
+            send_growth_alerts()
+        except Exception as e:
+            log.warning("growth alerts failed: %s", e)
         if once:
             with idx_conn() as c:
                 for r in c.execute("SELECT chain, block, rpc FROM cursor"):

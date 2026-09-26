@@ -418,10 +418,11 @@ def complete_request(request_id: str, body: CompleteRequest):
             logger.warning("set_payout_wallet failed user=%s: %s", req.telegram_user_id, exc)
 
     text = _launch_card(req, token_addr, curve_addr, body.tx_hash)
-    _notify_telegram(req.chat_id, text, photo=req.image_url or "", markup=_growth_buttons(req, token_addr))
+    _notify_telegram(req.chat_id, text, photo=req.image_url or "", markup=_growth_buttons(req, token_addr, curve_addr))
     channel = (os.environ.get("FERZAN_LAUNCHES_CHANNEL") or "").strip()
     if channel:
-        _notify_telegram(channel, text, photo=req.image_url or "")
+        _notify_telegram(channel, text, photo=req.image_url or "",
+                         markup=_growth_buttons(req, token_addr, curve_addr, trade_only=True))
     return {"status": "ok"}
 
 
@@ -605,12 +606,21 @@ def _launch_card(req, token_addr: str, curve_addr: str, tx_hash: str) -> str:
     return "\n".join(lines)
 
 
-def _growth_buttons(req, token_addr: str):
-    """Buttons under the creator's launch card: Buy Bot (auto-tracks this token) and Guardian."""
+def _growth_buttons(req, token_addr: str, curve_addr: str = "", trade_only: bool = False):
+    """Buttons under a launch card: trade (curve page + Trade Bot), then Buy Bot and Guardian."""
     buy = (os.environ.get("FERZAN_BUY_BOT") or "Ferzan_Buy_Bot").lstrip("@")
     guard = (os.environ.get("FERZAN_GUARDIAN_BOT") or "Ferzan_Guardian_Bot").lstrip("@")
+    trade = (os.environ.get("FERZAN_BOT_USERNAME") or "Ferzan_Trade_Bot").lstrip("@")
     key = {"bsc": "bsc", "base": "base", "solana": "sol", "ethereum": "eth"}.get(req.chain)
     rows = []
+    ok_ca = bool(token_addr) and bool(_re.fullmatch(r"[0-9A-Za-z]{32,44}", token_addr.replace("0x", "", 1)))
+    if curve_addr and req.mode == "bonding_curve" and _re.fullmatch(r"0x[0-9a-fA-F]{40}", curve_addr):
+        rows.append([{"text": "📈 Buy / Sell on the curve",
+                      "url": f"{MINI_APP_BASE}/curve.html?chain={req.chain}&curve={curve_addr}"}])
+    if ok_ca:
+        rows.append([{"text": "⚡ Buy in Ferzan Trade Bot", "url": f"https://t.me/{trade}?start=buy_{token_addr}"}])
+    if trade_only:
+        return {"inline_keyboard": rows} if rows else None
     if key and token_addr and _re.fullmatch(r"[0-9A-Za-z]{32,44}", token_addr.replace("0x", "", 1)):
         rows.append([{"text": "🟢 Add Buy Bot to your group", "url": f"https://t.me/{buy}?startgroup=trk_{key}_{token_addr}"}])
     rows.append([{"text": "🛡 Add Guardian to your group", "url": f"https://t.me/{guard}?startgroup=ferzan"}])

@@ -1219,12 +1219,12 @@ def _rug_block(uid: int, card, mint: str) -> str:
     if db.flag_on(uid, "rug_buy", 1):
         liq = float(s.liquidity_usd or 0)
         dex = str(s.dex or "").lower()
-        pump = "pump" in dex or "pump" in str(mint).lower()
+        pump = "pump" in dex or "pump" in str(mint).lower() or dex == "ferzan-curve"
         if liq <= 0 and not pump:
             return "🛡 Rug guard ON: no DEX liquidity. Live buy blocked."
         if liq and liq < 15_000 and not pump:
             return "🛡 Rug guard ON: liquidity under $15k. Live buy blocked."
-    if db.flag_on(uid, "honeypot", 1) and mint.startswith("0x"):
+    if db.flag_on(uid, "honeypot", 1) and mint.startswith("0x") and str(s.dex or "").lower() != "ferzan-curve":
         sec = _security_line(s.chain, mint).lower()
         if "honeypot" in sec:
             return "🛡 Honeypot guard ON: live buy blocked."
@@ -1326,7 +1326,7 @@ def _live_buy(
         label, liq_mark = "TON", False
         ok, msg = ton_signer.buy_ton(mint, usd, secret=sol_secret)
     elif mint.startswith("0x"):
-        if not (os.getenv("ZEROX_API_KEY") or "").strip():
+        if not (os.getenv("ZEROX_API_KEY") or "").strip() and str(getattr(snap, "dex", "") or "").lower() != "ferzan-curve":
             return False, "Live: EVM needs ZEROX_API_KEY on the droplet."
         label = (resolve_chain(chain) or chain or "base").upper()
         ok, msg = evm_signer.buy_evm(

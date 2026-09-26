@@ -315,10 +315,45 @@ def _jup_snap(query: str) -> MarketSnapshot | None:
     )
 
 
+def _ferzan_curve_snap(query: str) -> MarketSnapshot | None:
+    """Ferzan launchpad token still on its bonding curve (no DEX pool until graduation)."""
+    ca = (query or "").strip()
+    if not (ca.lower().startswith("0x") and len(ca) == 42):
+        return None
+    try:
+        import evm_signer
+
+        ci = evm_signer.curve_info(ca)
+        if not ci or ci.get("graduated"):
+            return None
+        px, chain, sym, name = evm_signer.curve_meta(ca)
+        if px <= 0:
+            return None
+        rpc = evm_signer.CHAINS[chain]["rpc"]
+        er = evm_signer._call_words(rpc, ci["curve"], "0xd62ccb3f") or [0]  # ethReserve()
+        ts = evm_signer._call_words(rpc, ca, "0x18160ddd") or [0]  # totalSupply()
+        native_usd = px / ci["price_native"] if ci.get("price_native") else 0.0
+        liq = er[0] / 1e18 * native_usd
+        fdv = ts[0] / 1e18 * px
+    except Exception:
+        return None
+    return MarketSnapshot(
+        query=ca, symbol=sym or "?", name=name or sym or "Ferzan launch", chain=chain,
+        dex="ferzan-curve", pair_address=ci["curve"], token_address=ca, price_usd=px,
+        liquidity_usd=liq, volume_24h=0.0, change_5m=0.0, change_1h=0.0, change_6h=0.0,
+        change_24h=0.0, fdv=fdv, buys_h1=0, sells_h1=0, pair_created_ms=None,
+        url=f"https://launch.ferzaneco.com/miniapp/curve.html?chain={chain}&curve={ci['curve']}",
+        source="ferzan", extras={"ferzan_curve": ci["curve"]},
+    )
+
+
 def load_market(query: str) -> MarketSnapshot:
     snap = search_dex(query)
     if snap and snap.price_usd > 0:
         return snap
+    fz = _ferzan_curve_snap(query)
+    if fz:
+        return fz
     if _looks_ca(query):
         g = _gecko_snap(query)
         if g:

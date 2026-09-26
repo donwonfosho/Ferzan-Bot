@@ -97,9 +97,9 @@
 
   const q = new URLSearchParams(location.search);
   const NETWORKS = {
-    base: { id: 8453, name: 'Base', sym: 'ETH', rpc: 'https://mainnet.base.org', explorer: 'https://basescan.org', trustCoin: 8453,
+    base: { id: 8453, name: 'Base', sym: 'ETH', rpc: 'https://base-rpc.publicnode.com', rpcs: ['https://base-rpc.publicnode.com', 'https://mainnet.base.org', 'https://base.llamarpc.com', 'https://1rpc.io/base', 'https://base.drpc.org'], explorer: 'https://basescan.org', trustCoin: 8453,
             dex: (t) => `https://app.uniswap.org/swap?chain=base&outputCurrency=${t}`, dexName: 'Uniswap', presets: ['0.001', '0.005', '0.01', '0.05'] },
-    bsc: { id: 56, name: 'BNB Chain', sym: 'BNB', rpc: 'https://bsc-dataseed.binance.org', explorer: 'https://bscscan.com', trustCoin: 20000714,
+    bsc: { id: 56, name: 'BNB Chain', sym: 'BNB', rpc: 'https://bsc-rpc.publicnode.com', rpcs: ['https://bsc-rpc.publicnode.com', 'https://bsc-dataseed.binance.org', 'https://bsc-dataseed1.defibit.io', 'https://1rpc.io/bnb', 'https://bsc.drpc.org'], explorer: 'https://bscscan.com', trustCoin: 20000714,
            dex: (t) => `https://pancakeswap.finance/swap?chain=bsc&outputCurrency=${t}`, dexName: 'PancakeSwap', presets: ['0.01', '0.05', '0.1', '0.5'] },
   };
   const net = NETWORKS[q.get('chain')] || null;
@@ -150,12 +150,60 @@
     return BigInt(w || '0') * 10n ** 18n + BigInt((f + '0'.repeat(18)).slice(0, 18));
   }
 
-  async function rpc(method, params) {
-    const r = await fetch(net.rpc, { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }) });
-    const j = await r.json();
-    if (j.error) throw new Error(j.error.message || 'rpc error');
-    return j.result;
+  // Free public RPCs rate-limit, so: several endpoints per chain, rotate on any network /
+  // rate-limit failure, and send reads made in the same moment as one batch request.
+  let rpcIdx = 0;
+  const sleep = (ms) => new Promise(res => setTimeout(res, ms));
+  const isBusy = (m) => /rate|limit|too many|capacity|busy|timeout|unavailable|429|503|exceeded/i.test(m || '');
+  async function rpcPost(body) {
+    const urls = net.rpcs || [net.rpc];
+    let last;
+    for (let a = 0; a < urls.length * 2; a++) {
+      const url = urls[rpcIdx % urls.length];
+      try {
+        const ctl = new AbortController(); const to = setTimeout(() => ctl.abort(), 8000);
+        const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body), signal: ctl.signal });
+        clearTimeout(to);
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const j = await r.json();
+        const errs = (Array.isArray(j) ? j : [j]).map(x => x && x.error && x.error.message).filter(Boolean);
+        if (Array.isArray(body) && !Array.isArray(j)) throw new Error((j && j.error && j.error.message) || 'no batch support');
+        if (errs.some(isBusy)) throw new Error(errs.find(isBusy));
+        return j;
+      } catch (e) {
+        last = e; rpcIdx++;
+        if (a >= urls.length - 1) await sleep(400 * (a - urls.length + 2));
+      }
+    }
+    throw new Error('The network is busy right now, please try again in a moment (' + (last?.message || last) + ')');
+  }
+  let rpcQueue = [], rpcTimer = null;
+  async function flushRpc() {
+    const q = rpcQueue; rpcQueue = []; rpcTimer = null;
+    const body = q.map((x, i) => ({ jsonrpc: '2.0', id: i + 1, method: x.method, params: x.params }));
+    try {
+      let res;
+      try { res = q.length === 1 ? [await rpcPost(body[0])] : await rpcPost(body); }
+      catch (e) {  // batch refused everywhere: fall back to one request per call
+        if (q.length === 1) throw e;
+        res = []; for (const b of body) res.push(await rpcPost(b));
+      }
+      const byId = {}; for (const r of res) if (r) byId[r.id] = r;
+      q.forEach((x, i) => {
+        const r = byId[i + 1];
+        if (!r) x.reject(new Error('rpc: no answer'));
+        else if (r.error) x.reject(new Error(r.error.message || 'rpc error'));
+        else x.resolve(r.result);
+      });
+    } catch (e) { q.forEach(x => x.reject(e)); }
+  }
+  function rpc(method, params) {
+    return new Promise((resolve, reject) => {
+      rpcQueue.push({ method, params, resolve, reject });
+      if (rpcQueue.length >= 20) { clearTimeout(rpcTimer); flushRpc(); }
+      else if (!rpcTimer) rpcTimer = setTimeout(flushRpc, 0);
+    });
   }
   const call = (to, data) => rpc('eth_call', [{ to, data }, 'latest']);
 
@@ -375,8 +423,25 @@
     } finally { btn.disabled = false; tick(); }
   });
 
-  load().catch(e => { $('title').textContent = 'Could not load this curve'; showStatus(String(e?.message || e), 'error'); });
-  setInterval(() => { if (net && isAddr(curveAddr)) load().catch(() => {}); }, 15000);
+  let loadedOnce = false;
+  async function firstLoad(tryNo = 1) {
+    try {
+      await load(); loadedOnce = true;
+      if (statusEl.dataset.loadErr) { statusEl.style.display = 'none'; delete statusEl.dataset.loadErr; }
+    } catch (e) {
+      if (tryNo < 6) { showStatus('Loading… network is busy, retrying (' + tryNo + '/5)', ''); return setTimeout(() => firstLoad(tryNo + 1), 1500 * tryNo); }
+      $('title').textContent = 'Could not load this curve';
+      showStatus(String(e?.message || e) + ' — it will keep retrying.', 'error'); statusEl.dataset.loadErr = '1';
+    }
+  }
+  firstLoad();
+  setInterval(() => {
+    if (!net || !isAddr(curveAddr)) return;
+    load().then(() => {
+      if (!loadedOnce) { loadedOnce = true; }
+      if (statusEl.dataset.loadErr) { statusEl.style.display = 'none'; delete statusEl.dataset.loadErr; }
+    }).catch(() => {});
+  }, 15000);
 
   // ---- logo / description / links from the launch record
   async function loadInfo() {

@@ -809,6 +809,8 @@ def _card(chain: str, ca: str, tr: dict, attrs: dict, emoji: str = "🟢", tg_ur
     )
     net = GT_NET.get(chain, chain)
     ds = pair.get("url") or f"https://dexscreener.com/{net}/{ca}"
+    if not pair.get("url") and attrs.get("source") == "ferzan":
+        ds = (_ferzan_curve(ca) or {}).get("url") or ds  # still on its curve: chart lives on the trade page
     info = pair.get("info") or {}
     tg = (tg_url or "").strip()
     for s in info.get("socials") or []:
