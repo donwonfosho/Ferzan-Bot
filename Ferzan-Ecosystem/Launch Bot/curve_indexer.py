@@ -51,7 +51,18 @@ CHAINS = {
         "fallback": ["https://base-rpc.publicnode.com", "https://mainnet.base.org"],
         "block_time": 2.0, "explorer": "https://basescan.org",
     },
+    "ethereum": {
+        "factory_env": "FACTORY_ETH_CURVE", "rpc_env": "ETHEREUM_RPC_URL", "sym": "ETH", "dex": "Uniswap",
+        "fallback": ['https://ethereum-rpc.publicnode.com', 'https://eth.llamarpc.com', 'https://1rpc.io/eth', 'https://eth.drpc.org'],
+        "block_time": 12.0, "explorer": "https://etherscan.io",
+    },
+    "robinhood": {
+        "factory_env": "FACTORY_HOOD_CURVE", "rpc_env": "ROBINHOOD_RPC_URL", "sym": "ETH", "dex": "Uniswap",
+        "fallback": ['https://rpc.mainnet.chain.robinhood.com'],
+        "block_time": 0.25, "explorer": "https://robinhoodchain.blockscout.com",
+    },
 }
+CHAIN_LABEL = {"bsc": "BNB Chain", "base": "Base", "ethereum": "Ethereum", "robinhood": "Robinhood Chain"}
 CONFIRMATIONS = 2
 # Free public nodes only keep recent history ("archive requests require a token"), so we follow
 # the chain from near its head and read older curves' current state straight from the contracts.
@@ -443,7 +454,8 @@ def send_graduation_alerts() -> None:
             cfg = CHAINS[r["chain"]]
             name, sym = html.escape(r["name"] or "Token"), html.escape(r["symbol"] or "")
             raised = f"{(r['grad_native'] or 0):.4g}"
-            chart = f"https://dexscreener.com/{'bsc' if r['chain'] == 'bsc' else 'base'}/{r['token']}"
+            chart = (f"https://dexscreener.com/{r['chain']}/{r['token']}" if r["chain"] in ("bsc", "base", "ethereum")
+                     else f"{cfg['explorer']}/token/{r['token']}")
             text = (
                 f"🎓 <b>{name} (${sym}) just graduated!</b>\n\n"
                 f"The curve filled at {raised} {cfg['sym']}. Liquidity is now on {cfg['dex']} "
@@ -522,7 +534,7 @@ def send_growth_alerts() -> None:
                 c.execute("INSERT OR REPLACE INTO alert_state (k, v) VALUES ('koth_ts', ?)", (str(now),))
                 cfg = CHAINS[king["chain"]]
                 name, sym = html.escape(king["name"] or "Token"), html.escape(king["symbol"] or "")
-                text = (f"👑 <b>New King of the Hill: {name} (${sym})</b> on {({'base': 'Base', 'bsc': 'BNB Chain'}).get(king['chain'], king['chain'])}\n\n"
+                text = (f"👑 <b>New King of the Hill: {name} (${sym})</b> on {CHAIN_LABEL.get(king['chain'], king['chain'])}\n\n"
                         f"{_progress(king):.0f}% to graduation · {king['trades']} trades\n<code>{king['token']}</code>")
                 chats = chats if chats is not None else _creator_chats()
                 _tg(chats.get(king["curve"]), "👑 Your token is now King of the Hill!\n\n" + text, _trade_kb(king))
@@ -554,6 +566,13 @@ def main() -> None:
             send_growth_alerts()
         except Exception as e:
             log.warning("growth alerts failed: %s", e)
+        try:
+            import x_poster
+            with idx_conn() as c:
+                for kind, key, ok, info in x_poster.run(c):
+                    log.info("x post %s %s: %s", kind, "ok" if ok else "FAILED", info)
+        except Exception as e:
+            log.warning("x posts failed: %s", e)
         if once:
             with idx_conn() as c:
                 for r in c.execute("SELECT chain, block, rpc FROM cursor"):

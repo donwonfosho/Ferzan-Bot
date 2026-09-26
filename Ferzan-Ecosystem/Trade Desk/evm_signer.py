@@ -157,7 +157,7 @@ def _curve_for_token(token: str) -> str:
         return ""
 
 
-_CURVE_CHAINS = ("bsc", "base")
+_CURVE_CHAINS = ("bsc", "base", "eth", "hood")
 _CURVE_CACHE: dict = {}
 
 
@@ -549,8 +549,10 @@ def _send_raw(meta: dict, raw_hex: str, addr: str = "", nonce=None) -> dict:
 _RPC_FALLBACKS = {
     "base": ["https://base-rpc.publicnode.com", "https://mainnet.base.org", "https://base.llamarpc.com", "https://1rpc.io/base"],
     "bsc": ["https://bsc-rpc.publicnode.com", "https://bsc-dataseed.binance.org", "https://bsc-dataseed1.defibit.io", "https://1rpc.io/bnb"],
+    "eth": ["https://ethereum-rpc.publicnode.com", "https://eth.llamarpc.com", "https://1rpc.io/eth", "https://eth.drpc.org"],
+    "hood": ["https://rpc.mainnet.chain.robinhood.com"],
 }
-for _cid, _env in (("base", "BASE_RPC_URL"), ("bsc", "BSC_RPC_URL")):
+for _cid, _env in (("base", "BASE_RPC_URL"), ("bsc", "BSC_RPC_URL"), ("eth", "ETHEREUM_RPC_URL"), ("hood", "ROBINHOOD_RPC_URL")):
     _pref = (os.getenv(_env) or "").strip()
     if _cid in CHAINS:
         if _pref.startswith("http"):

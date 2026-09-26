@@ -30,7 +30,24 @@ CHAINS = {
         "probe": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",  # USDC: a WETH/USDC pool must exist
         "env": "FACTORY_BASE_CURVE", "explorer": "https://basescan.org/address/",
     },
+    "ethereum": {
+        "rpc": "https://ethereum-rpc.publicnode.com", "rpc_env": "ETHEREUM_RPC_URL", "chain_id": 1, "sym": "ETH",
+        "fee_wei": 3 * 10**15, "dex": "Uniswap V2", "dex_factory": "0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f",
+        "weth": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2", "weth_symbol": "WETH",
+        "probe": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",  # USDC: a WETH/USDC pool must exist
+        "env": "FACTORY_ETH_CURVE", "explorer": "https://etherscan.io/address/",
+    },
+    "robinhood": {
+        "rpc": "https://rpc.mainnet.chain.robinhood.com", "rpc_env": "ROBINHOOD_RPC_URL", "chain_id": 4663, "sym": "ETH",
+        "fee_wei": 3 * 10**15, "dex": "Uniswap V2", "dex_factory": "0x8bceaa40b9acdfaedf85adf4ff01f5ad6517937f",
+        "weth": "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73", "weth_symbol": "WETH",
+        # no well-known stable pool yet: verify via Uniswap's official Router02 (its factory() and WETH() must match)
+        "router": "0x89e5db8b5aa49aa85ac63f691524311aeb649eba",
+        "env": "FACTORY_HOOD_CURVE", "explorer": "https://robinhoodchain.blockscout.com/address/",
+    },
 }
+ROUTER_ABI = [{"name": n, "type": "function", "stateMutability": "view", "inputs": [],
+               "outputs": [{"name": "", "type": "address"}]} for n in ("factory", "WETH")]
 TOOLS = Path("/opt/ferzan/evm-tools")
 SOLC = TOOLS / "solc-0.8.24"
 LIB = TOOLS / "lib"
@@ -90,7 +107,7 @@ def deployer():
 
 def main():
     if len(sys.argv) < 3 or sys.argv[1] not in CHAINS or sys.argv[2] not in ("curve", "plain"):
-        sys.exit("usage: deploy_v3.py bsc|base curve|plain [plan|send]")
+        sys.exit("usage: deploy_v3.py bsc|base|ethereum|robinhood curve|plain [plan|send]")
     chain, kind, mode = sys.argv[1], sys.argv[2], (sys.argv[3] if len(sys.argv) > 3 else "plan")
     c = CHAINS[chain]
     rec_key = f"{chain}_{kind}_v3"
@@ -100,7 +117,11 @@ def main():
         sys.exit("ABORT: PLATFORM_TREASURY_EVM missing/invalid in /opt/ferzan/.env")
     treasury = Web3.to_checksum_address(treasury)
     record = json.loads(RECORD.read_text()) if RECORD.exists() else {}
-    w3 = Web3(Web3.HTTPProvider(c["rpc"], request_kwargs={"timeout": 30}))
+    rpc = c["rpc"]
+    if c.get("rpc_env"):  # a private endpoint (e.g. Alchemy) if one is saved
+        for p in ("/opt/ferzan/.env", str(HERE / ".env")):
+            rpc = env_file(p).get(c["rpc_env"]) or rpc
+    w3 = Web3(Web3.HTTPProvider(rpc, request_kwargs={"timeout": 30}))
     if w3.eth.chain_id != c["chain_id"]:
         sys.exit(f"ABORT: RPC is on chain {w3.eth.chain_id}, expected {c['chain_id']}")
     if rec_key in record and w3.eth.get_code(record[rec_key]) not in (b"", b"\x00"):
@@ -114,12 +135,18 @@ def main():
         sys.exit("ABORT: DEX factory or WETH has no code on this chain")
     if w3.eth.contract(address=weth, abi=ERC20_ABI).functions.symbol().call() != c["weth_symbol"]:
         sys.exit("ABORT: wrapped-native symbol mismatch")
-    probe_pair = w3.eth.contract(address=dex, abi=V2_FACTORY_ABI).functions.getPair(
-        weth, Web3.to_checksum_address(c["probe"])).call()
-    if int(probe_pair, 16) == 0:
-        sys.exit("ABORT: DEX factory has no WETH/stable pool - wrong factory?")
-    if w3.eth.contract(address=probe_pair, abi=PAIR_ABI).functions.factory().call() != dex:
-        sys.exit("ABORT: probe pool does not belong to this DEX factory")
+    if c.get("probe"):
+        probe_pair = w3.eth.contract(address=dex, abi=V2_FACTORY_ABI).functions.getPair(
+            weth, Web3.to_checksum_address(c["probe"])).call()
+        if int(probe_pair, 16) == 0:
+            sys.exit("ABORT: DEX factory has no WETH/stable pool - wrong factory?")
+        if w3.eth.contract(address=probe_pair, abi=PAIR_ABI).functions.factory().call() != dex:
+            sys.exit("ABORT: probe pool does not belong to this DEX factory")
+    else:
+        router = w3.eth.contract(address=Web3.to_checksum_address(c["router"]), abi=ROUTER_ABI)
+        if router.functions.factory().call() != dex or router.functions.WETH().call() != weth:
+            sys.exit("ABORT: official router does not point at this DEX factory / WETH")
+        probe_pair = f"router {c['router']}"
 
     abi, bytecode = compile_factory(kind)
     acct = deployer()
@@ -127,7 +154,7 @@ def main():
     Factory = w3.eth.contract(abi=abi, bytecode=bytecode)
     ctor = Factory.constructor(dex, weth, treasury, c["fee_wei"]) if kind == "curve" else Factory.constructor(treasury, c["fee_wei"])
     gas = int(ctor.estimate_gas({"from": acct.address}) * 1.2) if bal > 0 else 4_500_000
-    gas_price = w3.eth.gas_price
+    gas_price = int(w3.eth.gas_price * 1.25)  # headroom: base fee can rise before the tx lands
     cost = gas * gas_price
     print(f"Factory        : {'FerzanCurveFactoryV3' if kind == 'curve' else 'LaunchTokenFactoryV3'} (vanity addresses)")
     print(f"Chain          : {chain} ({c['chain_id']})")

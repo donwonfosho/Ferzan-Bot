@@ -101,6 +101,10 @@
             dex: (t) => `https://app.uniswap.org/swap?chain=base&outputCurrency=${t}`, dexName: 'Uniswap', presets: ['0.001', '0.005', '0.01', '0.05'] },
     bsc: { id: 56, name: 'BNB Chain', sym: 'BNB', rpc: 'https://bsc-rpc.publicnode.com', rpcs: ['https://bsc-rpc.publicnode.com', 'https://bsc-dataseed.binance.org', 'https://bsc-dataseed1.defibit.io', 'https://1rpc.io/bnb', 'https://bsc.drpc.org'], explorer: 'https://bscscan.com', trustCoin: 20000714,
            dex: (t) => `https://pancakeswap.finance/swap?chain=bsc&outputCurrency=${t}`, dexName: 'PancakeSwap', presets: ['0.01', '0.05', '0.1', '0.5'] },
+    ethereum: { id: 1, name: 'Ethereum', sym: 'ETH', rpc: 'https://ethereum-rpc.publicnode.com', rpcs: ['https://ethereum-rpc.publicnode.com', 'https://eth.llamarpc.com', 'https://1rpc.io/eth', 'https://eth.drpc.org'], explorer: 'https://etherscan.io', trustCoin: 60,
+           dex: (t) => `https://app.uniswap.org/swap?chain=mainnet&outputCurrency=${t}`, dexName: 'Uniswap', presets: ['0.005', '0.01', '0.05', '0.1'] },
+    robinhood: { id: 4663, name: 'Robinhood Chain', sym: 'ETH', rpc: 'https://rpc.mainnet.chain.robinhood.com', rpcs: ['https://rpc.mainnet.chain.robinhood.com'], explorer: 'https://robinhoodchain.blockscout.com', trustCoin: 60,
+           dex: (t) => `https://app.uniswap.org/swap?outputCurrency=${t}`, dexName: 'Uniswap', presets: ['0.001', '0.005', '0.01', '0.05'] },
   };
   const net = NETWORKS[q.get('chain')] || null;
   const curveAddr = (q.get('curve') || '').toLowerCase();

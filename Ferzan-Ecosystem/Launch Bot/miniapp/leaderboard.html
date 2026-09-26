@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ferzan Top Creators</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  body { font-family: -apple-system, sans-serif; background: var(--tg-theme-bg-color, #fff);
+         color: var(--tg-theme-text-color, #000); padding: 12px 16px 24px; margin: 0; }
+  h2 { margin: 4px 0 4px; display: flex; justify-content: space-between; align-items: center; }
+  h2 a { font-size: 14px; font-weight: 500; text-decoration: none; color: var(--tg-theme-link-color, #2481cc); }
+  .sub { font-size: 13px; opacity: .65; margin-bottom: 10px; }
+  .tabs, .chains { display: flex; gap: 6px; }
+  .chains { margin-top: 8px; }
+  .tabs button, .chains button { flex: 1; border: none; border-radius: 10px; padding: 10px 4px; font-size: 14px;
+         background: rgba(128,128,128,.14); color: inherit; cursor: pointer; }
+  .chains button { padding: 6px 4px; font-size: 13px; }
+  .tabs button.on, .chains button.on { background: var(--tg-theme-button-color, #2481cc); color: var(--tg-theme-button-text-color, #fff); }
+  .row { display: flex; gap: 12px; padding: 12px 0; border-bottom: 1px solid rgba(128,128,128,.2); align-items: center; }
+  .rank { width: 34px; flex: none; text-align: center; font-weight: 700; font-size: 18px; }
+  .main { flex: 1; min-width: 0; }
+  .who { font-family: ui-monospace, Menlo, monospace; font-size: 14px; font-weight: 600; }
+  .who a { color: inherit; text-decoration: none; }
+  .meta { font-size: 12px; opacity: .7; margin-top: 3px; }
+  .best { font-size: 12px; margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .best a { color: var(--tg-theme-link-color, #2481cc); text-decoration: none; }
+  .stat { text-align: right; flex: none; }
+  .big { font-weight: 700; }
+  .small { font-size: 12px; opacity: .65; }
+  #empty { text-align: center; opacity: .6; padding: 40px 0; display: none; }
+  #err { color: #c0392b; font-size: 14px; display: none; margin-top: 10px; }
+</style>
+</head>
+<body>
+<h2>🏆 Top creators <a href="launches.html">🚀 Launches</a></h2>
+<div class="sub">Ranked by tokens graduated, then trading volume on their curves.</div>
+<div class="tabs">
+  <button data-period="7d">7 days</button>
+  <button data-period="30d">30 days</button>
+  <button data-period="all" class="on">All time</button>
+</div>
+<div class="chains">
+  <button data-chain="" class="on">All</button>
+  <button data-chain="bsc">BNB</button>
+  <button data-chain="base">Base</button>
+  <button data-chain="ethereum">ETH</button>
+  <button data-chain="robinhood">HOOD</button>
+</div>
+<div id="err"></div>
+<div id="list"></div>
+<div id="empty">No creators here yet — be the first to launch.</div>
+<script>
+  const tg = window.Telegram?.WebApp;
+  tg?.ready(); tg?.expand();
+  let period = 'all', chain = '';
+  const SCAN = { bsc: 'https://bscscan.com/address/', base: 'https://basescan.org/address/',
+                 ethereum: 'https://etherscan.io/address/', robinhood: 'https://robinhoodchain.blockscout.com/address/' };
+  const CHAIN_NAME = { bsc: 'BNB', base: 'Base', ethereum: 'Ethereum', robinhood: 'Robinhood' };
+  const esc = (t) => String(t ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const usd = (v) => !v ? '$0' : v >= 1e9 ? '$' + (v / 1e9).toFixed(2) + 'B' : v >= 1e6 ? '$' + (v / 1e6).toFixed(2) + 'M' : v >= 1e3 ? '$' + (v / 1e3).toFixed(1) + 'K' : '$' + v.toFixed(0);
+  const medal = (i) => ['🥇', '🥈', '🥉'][i - 1] || i;
+  function row(a) {
+    const scan = (SCAN[a.chains[0]] || SCAN.base) + a.creator;
+    const best = a.best ? `<div class="best">Best: <a href="${esc(a.best.url)}">${esc(a.best.name)} ($${esc(a.best.symbol)})</a>
+       ${a.best.graduated ? '🎓' : ''} · ${usd(a.best.mcap_usd)} mcap</div>` : '';
+    return `<div class="row"><div class="rank">${medal(a.rank)}</div><div class="main">
+      <div class="who"><a href="${esc(scan)}" data-ext="1">${esc(a.short)}</a></div>
+      <div class="meta">${a.launches} launch${a.launches === 1 ? '' : 'es'} · ${a.graduated} graduated · ${a.trades} trades · ${a.chains.map(c => CHAIN_NAME[c] || c).join(', ')}</div>
+      ${best}</div>
+      <div class="stat"><div class="big">${a.graduated ? '🎓 ' + a.graduated : usd(a.volume_usd)}</div>
+      <div class="small">${a.graduated ? usd(a.volume_usd) + ' vol' : 'volume'}</div></div></div>`;
+  }
+  async function load() {
+    const err = document.getElementById('err');
+    err.style.display = 'none';
+    try {
+      const r = await fetch(`/api/leaderboard?period=${period}&chain=${chain}`);
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const d = await r.json();
+      document.getElementById('list').innerHTML = d.items.map(row).join('');
+      document.getElementById('empty').style.display = d.items.length ? 'none' : 'block';
+    } catch (e) {
+      err.textContent = 'Could not load the leaderboard: ' + (e.message || e);
+      err.style.display = 'block';
+    }
+  }
+  document.addEventListener('click', (e) => {
+    const a = e.target.closest('a[data-ext="1"]');
+    if (a && tg?.openLink) { e.preventDefault(); tg.openLink(a.href); }
+  });
+  document.querySelectorAll('.tabs button').forEach(b => b.onclick = () => {
+    period = b.dataset.period;
+    document.querySelectorAll('.tabs button').forEach(x => x.classList.toggle('on', x === b));
+    load();
+  });
+  document.querySelectorAll('.chains button').forEach(b => b.onclick = () => {
+    chain = b.dataset.chain;
+    document.querySelectorAll('.chains button').forEach(x => x.classList.toggle('on', x === b));
+    load();
+  });
+  load();
+  setInterval(load, 60000);
+</script>
+</body>
+</html>

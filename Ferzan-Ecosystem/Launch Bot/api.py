@@ -795,7 +795,7 @@ async def sol_fees_confirm(body: SolConfirmBody):
 # --------------------------------------- curve index: chart, feed, track record --
 # curve_indexer.py (its own service) fills this read-only index from chain logs.
 _NATIVE_USD: dict = {"t": 0.0, "bsc": 0.0, "base": 0.0}
-_NATIVE_SYM = {"bsc": "BNB", "base": "ETH"}
+_NATIVE_SYM = {"bsc": "BNB", "base": "ETH", "ethereum": "ETH", "robinhood": "ETH"}
 
 
 def _idx_db():
@@ -810,6 +810,7 @@ def _idx_db():
 
 
 def _native_usd(chain: str) -> float:
+    chain = "base" if chain in ("ethereum", "robinhood") else chain  # all ETH-gas chains share the ETH price
     if time.time() - _NATIVE_USD["t"] > 300:
         try:
             r = requests.get("https://api.coingecko.com/api/v3/simple/price",
@@ -912,6 +913,50 @@ def launches_feed(sort: str = "new", limit: int = 30, chain: str = ""):
         items.sort(key=lambda x: x.get("launched_ts") or 0, reverse=True)
         items = items[:limit]
     return {"sort": sort, "items": items, "now": int(time.time())}
+
+
+@app.get("/api/leaderboard")
+def leaderboard(period: str = "all", chain: str = "", limit: int = 50):
+    """Top creators: graduations first, then trading volume on their curves (USD)."""
+    limit = max(1, min(int(limit or 50), 100))
+    cutoff = {"7d": 7, "30d": 30}.get(period, 0)
+    c = _idx_db()
+    if c is None:
+        return {"period": period, "items": [], "now": int(time.time())}
+    try:
+        where, args = "1=1", []
+        if cutoff:
+            where, args = "launched_ts > ?", [int(time.time()) - cutoff * 86400]
+        if chain in _NATIVE_SYM:
+            where += " AND chain = ?"
+            args.append(chain)
+        rows = c.execute(f"SELECT chain, curve, token, name, symbol, creator, graduated, mcap, volume, trades "
+                         f"FROM curves WHERE {where}", args).fetchall()
+    finally:
+        c.close()
+    agg: dict = {}
+    for r in rows:
+        if not r["creator"]:
+            continue
+        px = _native_usd(r["chain"])
+        a = agg.setdefault(r["creator"], {"creator": r["creator"], "launches": 0, "graduated": 0, "volume_usd": 0.0,
+                                          "trades": 0, "best": None, "chains": set()})
+        a["launches"] += 1
+        a["graduated"] += int(r["graduated"] or 0)
+        a["volume_usd"] += float(r["volume"] or 0) * px
+        a["trades"] += int(r["trades"] or 0)
+        a["chains"].add(r["chain"])
+        mc = float(r["mcap"] or 0) * px
+        if a["best"] is None or mc > a["best"]["mcap_usd"]:
+            a["best"] = {"name": r["name"], "symbol": r["symbol"], "chain": r["chain"], "token": r["token"], "mcap_usd": mc,
+                         "graduated": bool(r["graduated"]),
+                         "url": f"{MINI_APP_BASE}/curve.html?chain={r['chain']}&curve={r['curve']}"}
+    items = sorted(agg.values(), key=lambda a: (a["graduated"], a["volume_usd"], a["launches"]), reverse=True)[:limit]
+    for i, a in enumerate(items, 1):
+        a["rank"] = i
+        a["chains"] = sorted(a["chains"])
+        a["short"] = a["creator"][:6] + "…" + a["creator"][-4:]
+    return {"period": period, "items": items, "now": int(time.time())}
 
 
 @app.get("/api/curve-chart/{curve}")

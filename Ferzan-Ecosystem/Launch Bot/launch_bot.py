@@ -61,7 +61,7 @@ NATIVE = {"ethereum": "ETH", "bsc": "BNB", "base": "ETH", "robinhood": "ETH", "a
 # env-var prefix used by api.py for factory addresses
 FACTORY_KEY = {"ethereum": "ETH", "bsc": "BSC", "base": "BASE", "robinhood": "HOOD"}
 # the plain factories' fixed launch fee (set in the contract at deploy time)
-PLAIN_FEE_TEXT = {"bsc": "0.015 BNB", "base": "0.003 ETH"}
+PLAIN_FEE_TEXT = {"bsc": "0.015 BNB", "base": "0.003 ETH", "ethereum": "0.003 ETH", "robinhood": "0.003 ETH"}
 
 # quick-pick presets
 SUPPLY_PRESETS = [("1M", 10**6), ("100M", 10**8), ("1B", 10**9), ("10B", 10**10), ("100B", 10**11), ("1T", 10**12)]
@@ -1266,6 +1266,7 @@ async def feed_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [_page_button("🆕 New launches", f"{base}?sort=new", private)],
         [_page_button("👑 King of the Hill", f"{base}?sort=koth", private),
          _page_button("📈 Top volume", f"{base}?sort=volume", private)],
+        [_page_button("🏆 Top creators", f"{MINI_APP_BASE_URL}/leaderboard.html", private)],
     ]
     await update.effective_message.reply_text(
         "🚀 <b>Ferzan launches</b>\n\n"
@@ -1275,6 +1276,17 @@ async def feed_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Every token shows its creator's track record.",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(rows),
+    )
+
+
+async def top_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    private = bool(chat and chat.type == "private")
+    await update.effective_message.reply_text(
+        "🏆 <b>Top creators</b>\n\nRanked by tokens graduated, then trading volume on their curves. "
+        "Launch, build a community, graduate - and climb.",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([[_page_button("🏆 Open the leaderboard", f"{MINI_APP_BASE_URL}/leaderboard.html", private)]]),
     )
 
 
@@ -1392,6 +1404,7 @@ def main():
     app.add_handler(CommandHandler("drafts", drafts_cmd))
     app.add_handler(CommandHandler("claim", claim_cmd))
     app.add_handler(CommandHandler("new", feed_cmd))
+    app.add_handler(CommandHandler("top", top_cmd))
     app.add_handler(CallbackQueryHandler(go_feed, pattern="^go:feed$"))
     app.add_handler(CallbackQueryHandler(go_claim, pattern="^go:claim$"))
     app.add_handler(CommandHandler("timezone", timezone_cmd))
@@ -1405,6 +1418,7 @@ def main():
                 BotCommand("start", "Ferzan Launch home"),
                 BotCommand("launch", "Launch a token"),
                 BotCommand("new", "New launches & King of the Hill"),
+                BotCommand("top", "Top creators leaderboard"),
                 BotCommand("history", "Your launches"),
                 BotCommand("drafts", "Scheduled launches"),
                 BotCommand("claim", "Claim your trading fees"),

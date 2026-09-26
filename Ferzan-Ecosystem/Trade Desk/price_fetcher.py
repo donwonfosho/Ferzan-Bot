@@ -342,7 +342,7 @@ def _ferzan_curve_snap(query: str) -> MarketSnapshot | None:
         dex="ferzan-curve", pair_address=ci["curve"], token_address=ca, price_usd=px,
         liquidity_usd=liq, volume_24h=0.0, change_5m=0.0, change_1h=0.0, change_6h=0.0,
         change_24h=0.0, fdv=fdv, buys_h1=0, sells_h1=0, pair_created_ms=None,
-        url=f"https://launch.ferzaneco.com/miniapp/curve.html?chain={chain}&curve={ci['curve']}",
+        url=f"https://launch.ferzaneco.com/miniapp/curve.html?chain={ {'eth': 'ethereum', 'hood': 'robinhood'}.get(chain, chain)}&curve={ci['curve']}",
         source="ferzan", extras={"ferzan_curve": ci["curve"]},
     )
 
