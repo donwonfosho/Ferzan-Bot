@@ -505,18 +505,24 @@ def _site_image(data_url: str) -> str:
         raise HTTPException(400, "Image looks wrong")
     if len(raw) > 300_000 or not raw.startswith(_IMG_MAGIC[ext]):
         raise HTTPException(400, "Image is too big or not a real image")
+    import hashlib as _hashlib
+    import shutil as _shutil
     _MEDIA_DIR.mkdir(parents=True, exist_ok=True)
-    name = f"{_uuid.uuid4().hex}.{ext}"
-    (_MEDIA_DIR / name).write_bytes(raw)
+    name = f"{_hashlib.sha256(raw).hexdigest()[:32]}.{ext}"
+    target = _MEDIA_DIR / name
+    if not target.exists():
+        if _shutil.disk_usage(_MEDIA_DIR).free < 1_000_000_000:
+            logger.warning("media disk nearly full; launch saved without its picture")
+            return ""
+        target.write_bytes(raw)
     return f"{_PUBLIC_ORIGIN}/api/media/{name}"
 
 
 @app.post("/api/site/launch-requests")
 def site_launch(body: SiteLaunchBody, request: Request):
-    """Called server-to-server by the website (shared secret). Creates a launch request with
-    no Telegram user; the visitor's own wallet then signs the tx from /build-tx."""
-    if not _site_secret_ok(request):
-        raise HTTPException(401, "not allowed")
+    """Called by the website (SITE_OPEN_BATCH19: no shared key). Creates a launch request with
+    no Telegram user; the visitor's own wallet then signs the tx from /build-tx. Nothing is posted
+    anywhere until /complete has verified the launch on chain."""
     chain = (body.chain or "").strip().lower()
     if chain not in _SITE_CHAINS:
         raise HTTPException(400, "That chain is not open for website launches")
@@ -1526,6 +1532,10 @@ def sol_coin(mint: str, tf: int = 300, wallet: str = ""):
     }
 
 
+import threading as _threading
+_SWAP_SLOTS = _threading.BoundedSemaphore(int(os.environ.get("SOL_SWAP_PARALLEL") or "8"))
+
+
 class SolSwapBody(BaseModel):
     mint: str
     wallet: str
@@ -1537,11 +1547,9 @@ class SolSwapBody(BaseModel):
 
 @app.post("/api/sol-swap")
 def sol_swap(body: SolSwapBody, request: Request):
-    """Server-to-server from the website (shared secret): an unsigned Meteora buy/sell for the visitor's wallet."""
+    """For the website: an unsigned Meteora buy/sell for the visitor's wallet (their wallet must sign it)."""
     import json as _json
     import subprocess as _sp
-    if not _site_secret_ok(request):
-        raise HTTPException(401, "not allowed")
     if not _re.fullmatch(_B58, body.mint or "") or not _re.fullmatch(_B58, body.wallet or ""):
         raise HTTPException(400, "Mint or wallet looks wrong")
     if body.side not in ("buy", "sell") or not _re.fullmatch(r"\d{1,20}", body.amount or "") or body.amount == "0":
@@ -1550,6 +1558,8 @@ def sol_swap(body: SolSwapBody, request: Request):
     if not config:
         raise HTTPException(501, "Solana curves are not configured")
     script = _Path(__file__).resolve().with_name("dbc") / "build_swap.mjs"
+    if not _SWAP_SLOTS.acquire(timeout=30):
+        raise HTTPException(503, "Busy right now. Try again in a few seconds.")
     try:
         p = _sp.run(["node", str(script)], input=_json.dumps({
             "rpc": RPC_URLS["solana"], "config": config, "mint": body.mint, "owner": body.wallet, "side": body.side,
@@ -1557,6 +1567,8 @@ def sol_swap(body: SolSwapBody, request: Request):
         }), capture_output=True, text=True, timeout=45, cwd=str(script.parent))
     except _sp.TimeoutExpired:
         raise HTTPException(504, "Solana did not answer in time")
+    finally:
+        _SWAP_SLOTS.release()
     try:
         out = _json.loads(p.stdout or "{}")
     except Exception:
