@@ -2,10 +2,10 @@
 pragma solidity ^0.8.24;
 
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
-import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
-/// @notice Fixed-supply ERC-20. No mint function exists after construction.
-contract LaunchToken is ERC20, Ownable {
+/// @notice Fixed-supply ERC-20. No mint function exists after construction,
+/// and there is no owner/admin role at all.
+contract LaunchToken is ERC20 {
     string public projectUrl;
     uint8 private immutable _tokenDecimals;
 
@@ -15,7 +15,7 @@ contract LaunchToken is ERC20, Ownable {
         uint256 totalSupply_,
         address initialOwner_,
         string memory projectUrl_
-    ) ERC20(name_, symbol_) Ownable(initialOwner_) {
+    ) ERC20(name_, symbol_) {
         require(initialOwner_ != address(0), "owner=0");
         require(totalSupply_ > 0, "supply=0");
         projectUrl = projectUrl_;

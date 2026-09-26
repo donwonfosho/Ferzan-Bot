@@ -184,6 +184,9 @@ def parse_native_amount(raw: str, decimals: int = 18) -> int:
         return 0
 
 
+_FEE_ABI = [{"name": "launchFeeWei", "type": "function", "stateMutability": "view", "inputs": [], "outputs": [{"name": "", "type": "uint256"}]}]
+
+
 class UnsupportedChainError(Exception):
     pass
 
@@ -241,15 +244,21 @@ class EvmLaunchTxBuilder:
         bps = list(alloc_bps or [])
         use_alloc = bool(wallets) and len(wallets) == len(bps)
         try:
-            fee_wei = launch_fee_units(self.chain_key)
-            if use_alloc:
-                gas_estimate = self.factory.functions.launchTokenWithAlloc(
-                    name, symbol, total_supply, project_url, wallets, bps
-                ).estimate_gas({"from": creator, "value": fee_wei})
-            else:
-                gas_estimate = self.factory.functions.launchToken(
-                    name, symbol, total_supply, project_url
-                ).estimate_gas({"from": creator, "value": fee_wei})
+            try:  # each factory has its own fixed fee (0.003 ETH on Base, 0.015 BNB on BNB...)
+                fee_wei = self.w3.eth.contract(address=self.factory.address, abi=_FEE_ABI).functions.launchFeeWei().call()
+            except Exception:
+                fee_wei = launch_fee_units(self.chain_key)
+            fn = (
+                self.factory.functions.launchTokenWithAlloc(name, symbol, total_supply, project_url, wallets, bps)
+                if use_alloc
+                else self.factory.functions.launchToken(name, symbol, total_supply, project_url)
+            )
+            try:
+                from vanity import evm_plain_salted
+                fn = evm_plain_salted(self, creator, name, symbol, total_supply, project_url, wallets, bps, use_alloc) or fn
+            except Exception as ve:  # vanity is a bonus: never block a launch over it
+                print(f"VANITY_SKIPPED plain: {ve}")
+            gas_estimate = fn.estimate_gas({"from": creator, "value": fee_wei})
         except Exception as e:
             # Common causes: factory address wrong for this chain, or the
             # call would revert (e.g. bad params) -- surface this clearly
@@ -265,13 +274,6 @@ class EvmLaunchTxBuilder:
         except Exception as e:
             raise ConnectionError(f"Could not fetch gas price from {self.chain.name}: {e}") from e
 
-        fn = (
-            self.factory.functions.launchTokenWithAlloc(
-                name, symbol, total_supply, project_url, wallets, bps
-            )
-            if use_alloc
-            else self.factory.functions.launchToken(name, symbol, total_supply, project_url)
-        )
         tx = fn.build_transaction({
             "from": creator,
             "nonce": nonce,
@@ -370,3 +372,99 @@ class EvmBondingCurveTxBuilder(EvmLaunchTxBuilder):
             "gas": int(gas_estimate * 1.2),
             "gasPrice": base_fee,
         })
+
+
+# ---------------------------------------------------------------------------
+# Ferzan curve v2 (FerzanCurveFactory): price-matched graduation, pool lock,
+# team tokens locked until graduation. launch(tuple) payable = fee + dev buy.
+# ---------------------------------------------------------------------------
+FERZAN_CURVE_FACTORY_ABI = [
+    {
+        "name": "launch", "type": "function", "stateMutability": "payable",
+        "inputs": [{
+            "name": "p", "type": "tuple",
+            "components": [
+                {"name": "name", "type": "string"},
+                {"name": "symbol", "type": "string"},
+                {"name": "totalSupply", "type": "uint256"},
+                {"name": "gradTarget", "type": "uint256"},
+                {"name": "startTime", "type": "uint256"},
+                {"name": "maxBuyPerWallet", "type": "uint256"},
+                {"name": "allocWallets", "type": "address[]"},
+                {"name": "allocBps", "type": "uint256[]"},
+            ],
+        }],
+        "outputs": [{"name": "curveAddress", "type": "address"}, {"name": "tokenAddress", "type": "address"}],
+    },
+    {"name": "launchFeeWei", "type": "function", "stateMutability": "view", "inputs": [],
+     "outputs": [{"name": "", "type": "uint256"}]},
+    {"name": "platformTreasury", "type": "function", "stateMutability": "view", "inputs": [],
+     "outputs": [{"name": "", "type": "address"}]},
+]
+
+
+class FerzanCurveTxBuilder:
+    """Builds the unsigned launch tx for a deployed FerzanCurveFactory."""
+
+    def __init__(self, chain_key: str, factory_address: str, rpc_url: Optional[str] = None):
+        if chain_key not in CHAIN_CONFIGS or chain_key == "arc":
+            raise UnsupportedChainError(f"Bonding curves are not available on '{chain_key}' yet.")
+        self.chain_key = chain_key
+        self.chain = CHAIN_CONFIGS[chain_key]
+        rpc = rpc_url or self.chain.default_rpc
+        if not rpc:
+            raise ValueError(f"No RPC URL for {self.chain.name} -- pass one explicitly.")
+        self.w3 = Web3(Web3.HTTPProvider(rpc, request_kwargs={"timeout": 30}))
+        self.factory = self.w3.eth.contract(
+            address=Web3.to_checksum_address(factory_address), abi=FERZAN_CURVE_FACTORY_ABI
+        )
+
+    def build(
+        self,
+        creator_address: str,
+        name: str,
+        symbol: str,
+        total_supply: int,
+        grad_target_wei: int,
+        start_time: int = 0,
+        max_buy_wei: int = 0,
+        dev_buy_wei: int = 0,
+        alloc_wallets: list | None = None,
+        alloc_bps: list | None = None,
+    ) -> dict:
+        creator = Web3.to_checksum_address(creator_address)
+        if int(grad_target_wei) <= 0:
+            raise ValueError("Graduation amount is missing -- start the launch again.")
+        fee_wei = int(self.factory.functions.launchFeeWei().call())
+        value = fee_wei + int(dev_buy_wei or 0)
+        params = (
+            name, symbol, int(total_supply), int(grad_target_wei), int(start_time or 0),
+            int(max_buy_wei or 0), list(alloc_wallets or []), list(alloc_bps or []),
+        )
+        try:
+            nonce = self.w3.eth.get_transaction_count(creator, "pending")
+        except Exception as e:
+            raise ConnectionError(f"Could not reach {self.chain.name} RPC to fetch nonce: {e}") from e
+        fn = self.factory.functions.launch(params)
+        try:
+            from vanity import evm_curve_salted
+            fn = evm_curve_salted(self, creator, params) or fn
+        except Exception as ve:  # vanity is a bonus: never block a launch over it
+            print(f"VANITY_SKIPPED curve: {ve}")
+        try:
+            gas_estimate = fn.estimate_gas({"from": creator, "value": value})
+        except Exception as e:
+            raise ValueError(
+                f"Gas estimation failed -- the launch would revert on {self.chain.name}: {e}"
+            ) from e
+        tx = fn.build_transaction({
+            "from": creator,
+            "nonce": nonce,
+            "chainId": self.chain.chain_id,
+            "value": value,
+            "gas": int(gas_estimate * 1.25),
+            "gasPrice": self.w3.eth.gas_price,
+        })
+        tx["launch_fee_wei"] = str(fee_wei)
+        tx["dev_buy_wei"] = str(int(dev_buy_wei or 0))
+        return tx

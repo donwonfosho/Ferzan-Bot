@@ -1626,7 +1626,10 @@ async def buy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update):
         return
     if not context.args:
-        await update.effective_message.reply_text("Usage: /buy sol")
+        await update.effective_message.reply_text(
+            "Usage: /buy <token address or name>  e.g. /buy sol\n"
+            "To add funds with a card or cash out: /fund"
+        )
         return
     query = " ".join(context.args)
     uid = update.effective_user.id
@@ -1698,6 +1701,19 @@ async def positions_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     )
 
 
+def _curve_token_meta(mint: str, out: dict) -> dict:
+    """Ferzan curve tokens have no DEX pool until they graduate: price them from the curve."""
+    if not str(mint).startswith("0x"):
+        return out
+    try:
+        px, chain, sym, name = evm_signer.curve_meta(mint)
+        if px > 0:
+            out.update(px=px, chain=chain, symbol=sym or out.get("symbol", ""), name=name or out.get("name", ""))
+    except Exception:
+        pass
+    return out
+
+
 def _token_meta(mint: str) -> dict:
     out = {"px": 0.0, "symbol": "", "name": "", "chain": ""}
     try:
@@ -1707,7 +1723,7 @@ def _token_meta(mint: str) -> dict:
         )
         pairs = (r.json() or {}).get("pairs") or []
         if not pairs:
-            return out
+            return _curve_token_meta(mint, out)
         p = pairs[0]
         base = p.get("baseToken") or {}
         out["px"] = float(p.get("priceUsd") or 0)
@@ -3295,7 +3311,7 @@ def buy_fiat_keyboard(uid: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(buttons)
 
 
-async def buy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def fiat_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update):
         return
     uid = update.effective_user.id
@@ -4998,7 +5014,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 uid, _bridge_text(uid, st), parse_mode="HTML", reply_markup=_bridge_kb(st, uid)
             )
         elif kind == "buy":
-            await buy_cmd(update, context)
+            await fiat_cmd(update, context)
         elif kind == "bag":
             await bag_cmd(update, context)
         elif kind == "settings":
@@ -7377,10 +7393,10 @@ def main() -> None:
     app.add_handler(CommandHandler("killswitch", killswitch_cmd))
     app.add_handler(CommandHandler("wallet", wallet_cmd))
     app.add_handler(CommandHandler("walletname", walletname_cmd))
-    app.add_handler(CommandHandler("buy", buy_cmd))
-    app.add_handler(CommandHandler("onramp", buy_cmd))
-    app.add_handler(CommandHandler("cashout", buy_cmd))
-    app.add_handler(CommandHandler("offramp", buy_cmd))
+    app.add_handler(CommandHandler("onramp", fiat_cmd))
+    app.add_handler(CommandHandler("cashout", fiat_cmd))
+    app.add_handler(CommandHandler("offramp", fiat_cmd))
+    app.add_handler(CommandHandler("fund", fiat_cmd))
     app.add_handler(CommandHandler("importsol", importsol_cmd))
     app.add_handler(CommandHandler("importevm", importevm_cmd))
     app.add_handler(CommandHandler("collectsol", collectsol_cmd))

@@ -22,6 +22,11 @@ Telegram Mini Apps require the page to be served over HTTPS.)
 import os
 import logging
 import time
+import html as _html
+import re as _re
+from pathlib import Path as _Path
+from fastapi.responses import FileResponse
+from decimal import Decimal, InvalidOperation
 
 import requests
 from fastapi import FastAPI, HTTPException, Request
@@ -44,7 +49,10 @@ from ton_launch import build_unsigned_launch_tx as build_ton_fee_tx
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_BOT_TOKEN = os.environ.get("LAUNCHBOT_TOKEN") or os.environ.get("TELEGRAM_BOT_TOKEN", "")
+MINI_APP_BASE = (os.environ.get("MINI_APP_BASE_URL") or "https://launch.ferzaneco.com/miniapp").rstrip("/")
+_PUBLIC_ORIGIN = (_re.match(r"(https?://[^/]+)", MINI_APP_BASE) or _re.match(r"(.*)", "https://launch.ferzaneco.com")).group(1)
+_MEDIA_DIR = _Path(__file__).resolve().with_name("media")
 
 # Deployed contract addresses, per chain -- fill these in after you
 # deploy LaunchTokenFactory.sol / BondingCurveFactory.sol per Part 2 of
@@ -161,7 +169,43 @@ def get_metadata(request_id: str):
         "symbol": req.symbol,
         "description": req.description or "",
         "image": req.image_url or "",
+        "external_url": (req.extra_params or {}).get("website", ""),
+        "extensions": {k: v for k, v in (req.extra_params or {}).items() if k in ("website", "x", "telegram") and v},
     }
+
+
+@app.get("/api/media/{name}")
+def get_media(name: str):
+    """Token logos saved by the bot (random file names, images only)."""
+    m = _re.fullmatch(r"[0-9a-f]{32}\.(jpg|png|webp|gif)", name or "")
+    p = _MEDIA_DIR / name if m else None
+    if not p or not p.is_file():
+        raise HTTPException(404, "not found")
+    mt = {"jpg": "image/jpeg", "png": "image/png", "webp": "image/webp", "gif": "image/gif"}[m.group(1)]
+    return FileResponse(p, media_type=mt, headers={"Cache-Control": "public, max-age=86400"})
+
+
+@app.get("/api/curve-info/{curve}")
+def _curve_info(curve: str):
+    """Public token info for the trade page: name, logo, links (no private data)."""
+    if not _re.fullmatch(r"0x[0-9a-fA-F]{40}", curve or ""):
+        raise HTTPException(404, "not found")
+    with db._get_conn() as conn:
+        rows = conn.execute(
+            "SELECT id FROM launch_requests WHERE extra_params LIKE ? ORDER BY created_at DESC LIMIT 20",
+            (f"%{curve[2:]}%",),
+        ).fetchall()
+    for row in rows:
+        req = db.get_launch_request(row[0])
+        extra = (req.extra_params or {}) if req else {}
+        if req and str(extra.get("curve_address") or "").lower() == curve.lower():
+            return {
+                "name": req.name, "symbol": req.symbol, "chain": req.chain,
+                "token": req.result_token_address or "", "image": req.image_url or "",
+                "description": req.description or "",
+                "website": extra.get("website", ""), "x": extra.get("x", ""), "telegram": extra.get("telegram", ""),
+            }
+    raise HTTPException(404, "not found")
 
 
 @app.post("/api/launch-requests/{request_id}/build-tx")
@@ -188,6 +232,8 @@ def build_tx(request_id: str, body: BuildTxRequest):
                     import traceback
                     print(f"IRYS_METADATA_UPLOAD_FAILED: {e}")
                     traceback.print_exc()
+                if not metadata_uri:
+                    metadata_uri = f"{_PUBLIC_ORIGIN}/api/metadata/{request_id}"
                 result = build_solana_plain_tx(
                     creator_pubkey=body.wallet_address,
                     decimals=req.decimals,
@@ -211,6 +257,8 @@ def build_tx(request_id: str, body: BuildTxRequest):
                     import traceback
                     print(f"IRYS_METADATA_UPLOAD_FAILED: {e}")
                     traceback.print_exc()
+                if not metadata_uri:
+                    metadata_uri = f"{_PUBLIC_ORIGIN}/api/metadata/{request_id}"
                 result = build_unsigned_meteora_tx(
                     creator_pubkey=body.wallet_address,
                     decimals=req.decimals,
@@ -298,24 +346,24 @@ def build_tx(request_id: str, body: BuildTxRequest):
             elif req.mode == "bonding_curve":
                 factory_addr = FACTORY_ADDRESSES[req.chain]["bonding_curve"]
                 if not factory_addr:
-                    raise HTTPException(500, f"No bonding-curve factory address configured for {req.chain}")
-                builder = EvmBondingCurveTxBuilder(req.chain, factory_addr, rpc_url=rpc)
+                    raise HTTPException(501, f"Bonding curves on {req.chain} are coming soon")
+                from evm_launch import FerzanCurveTxBuilder
                 extra = req.extra_params or {}
-                dec = 6 if req.chain == "arc" else 18
                 aw, ab = parse_allocs(extra.get("allocs") or "")
                 mins = int(float(str(extra.get("start_minutes") or "0") or 0))
                 start_time = int(time.time()) + mins * 60 if mins > 0 else 0
-                tx = builder.build_unsigned_curve_launch_tx(
+                start_at = int(float(str(extra.get("start_at") or "0") or 0))
+                if start_at:
+                    start_time = start_at if start_at > time.time() + 30 else 0
+                tx = FerzanCurveTxBuilder(req.chain, factory_addr, rpc_url=rpc).build(
                     creator_address=body.wallet_address,
                     name=req.name,
                     symbol=req.symbol,
                     total_supply=total_supply,
-                    graduation_eth_threshold=int(extra.get("graduation_eth_threshold", 0)),
-                    virtual_eth_reserve=int(extra.get("virtual_eth_reserve", 0)),
-                    virtual_token_reserve=int(extra.get("virtual_token_reserve", 0)),
-                    dev_buy_wei=parse_native_amount(extra.get("dev_buy"), dec),
+                    grad_target_wei=int(extra.get("graduation_eth_threshold") or 0),
                     start_time=start_time,
-                    max_buy_wei=parse_native_amount(extra.get("max_buy"), dec),
+                    max_buy_wei=_wei(extra.get("max_buy")),
+                    dev_buy_wei=_wei(extra.get("dev_buy")),
                     alloc_wallets=aw,
                     alloc_bps=ab,
                 )
@@ -369,30 +417,11 @@ def complete_request(request_id: str, body: CompleteRequest):
         except Exception as exc:
             logger.warning("set_payout_wallet failed user=%s: %s", req.telegram_user_id, exc)
 
-    ca = body.result_token_address or "see transaction"
-    extra = req.extra_params or {}
-    mint_ok = req.chain == "solana" or req.mode == "plain"
-    safety = (
-        f"🛡 *Safety card*\n"
-        f"Mint revoked / fixed supply: {'✓' if mint_ok else 'curve holds remainder'}\n"
-        f"LP burn on graduate: use /lplock after you add LP\n"
-        f"Verify on explorer before you ape.\n"
-    )
-    trade = (os.environ.get("FERZAN_BOT_USERNAME") or "Ferzan_Trade_Bot").lstrip("@")
-    text = (
-        f"🚀 *New Ferzan launch*\n"
-        f"*{req.name}* (${req.symbol}) on {req.chain}\n"
-        f"Mode: {req.mode}\n"
-        f"CA: `{ca}`\n"
-        f"Verify: https://solscan.io/token/{ca}\n"
-        f"Tx: `{body.tx_hash}`\n\n"
-        f"{safety}\n"
-        f"Trade: https://t.me/{trade}"
-    )
-    _notify_telegram(req.chat_id, text)
+    text = _launch_card(req, token_addr, curve_addr, body.tx_hash)
+    _notify_telegram(req.chat_id, text, photo=req.image_url or "", markup=_growth_buttons(req, token_addr))
     channel = (os.environ.get("FERZAN_LAUNCHES_CHANNEL") or "").strip()
     if channel:
-        _notify_telegram(channel, text)
+        _notify_telegram(channel, text, photo=req.image_url or "")
     return {"status": "ok"}
 
 
@@ -477,7 +506,7 @@ def fail_request(request_id: str, body: CompleteRequest):
     db.update_status(request_id, "failed", error_message=body.tx_hash)  # tx_hash field reused as message here
     _notify_telegram(
         chat_id=req.chat_id,
-        text=f"⚠️ Launch of *{req.name}* failed or was cancelled in your wallet.",
+        text=f"⚠️ Launch of <b>{_html.escape(req.name)}</b> failed or was cancelled in your wallet.",
     )
     return {"status": "ok"}
 
@@ -525,18 +554,462 @@ def _parse_launch_receipt(chain: str, tx_hash: str, tries: int = 12) -> dict:
     return out
 
 
-def _notify_telegram(chat_id: int, text: str):
+def _wei(raw) -> int:
+    try:
+        v = Decimal(str(raw or "0").strip().replace(",", "") or "0")
+    except InvalidOperation:
+        return 0
+    return int(v * 10**18) if v > 0 else 0
+
+
+_EXPLORER = {
+    "solana": "https://solscan.io/token/", "bsc": "https://bscscan.com/token/",
+    "base": "https://basescan.org/token/", "ethereum": "https://etherscan.io/token/",
+}
+_CHAIN_NAME = {"solana": "Solana", "bsc": "BNB Chain", "base": "Base", "ethereum": "Ethereum", "robinhood": "Robinhood Chain"}
+
+
+def _launch_card(req, token_addr: str, curve_addr: str, tx_hash: str) -> str:
+    esc = _html.escape
+    mode_txt = {"plain": "Standard token", "meteora": "Meteora bonding curve",
+                "bonding_curve": "Bonding curve"}.get(req.mode, req.mode)
+    if req.mode == "bonding_curve":
+        safety = ("Fixed supply, no owner. Trades on the curve, then moves to a DEX pool at the same price "
+                  "and the pool liquidity is burned forever. Team tokens stay locked until graduation.")
+    elif req.mode == "meteora":
+        safety = "Meteora curve with anti-sniper fee; moves to a Meteora DAMM v2 pool when it fills."
+    else:
+        safety = "Fixed supply, no owner, can never be minted again. Use /lplock after you add liquidity."
+    lines = [
+        "🚀 <b>New Ferzan launch</b>",
+        f"<b>{esc(req.name)}</b> (${esc(req.symbol)}) on {esc(_CHAIN_NAME.get(req.chain, req.chain))}",
+        f"Type: {esc(mode_txt)}",
+        f"CA: <code>{esc(token_addr or 'see transaction')}</code>",
+    ]
+    if token_addr and req.chain in _EXPLORER:
+        lines.append(f"Explorer: {_EXPLORER[req.chain]}{esc(token_addr)}")
+    if curve_addr and req.mode == "bonding_curve":
+        url = f"{MINI_APP_BASE}/curve.html?chain={req.chain}&curve={curve_addr}"
+        lines.append(f"📈 Buy / sell on the curve: {esc(url)}")
+    else:
+        trade = (os.environ.get("FERZAN_BOT_USERNAME") or "Ferzan_Trade_Bot").lstrip("@")
+        lines.append(f"Trade: https://t.me/{esc(trade)}")
+    extra = req.extra_params or {}
+    links = [f'<a href="{esc(extra[k])}">{n}</a>' for k, n in (("website", "Website"), ("x", "X"), ("telegram", "Telegram"))
+             if str(extra.get(k) or "").startswith("https://")]
+    if links:
+        lines.append("🔗 " + " · ".join(links))
+    if req.description:
+        lines.append(f"<i>{esc(req.description[:200])}</i>")
+    lines += [f"Tx: <code>{esc(tx_hash or '')}</code>", "", f"🛡 {esc(safety)}"]
+    return "\n".join(lines)
+
+
+def _growth_buttons(req, token_addr: str):
+    """Buttons under the creator's launch card: Buy Bot (auto-tracks this token) and Guardian."""
+    buy = (os.environ.get("FERZAN_BUY_BOT") or "Ferzan_Buy_Bot").lstrip("@")
+    guard = (os.environ.get("FERZAN_GUARDIAN_BOT") or "Ferzan_Guardian_Bot").lstrip("@")
+    key = {"bsc": "bsc", "base": "base", "solana": "sol", "ethereum": "eth"}.get(req.chain)
+    rows = []
+    if key and token_addr and _re.fullmatch(r"[0-9A-Za-z]{32,44}", token_addr.replace("0x", "", 1)):
+        rows.append([{"text": "🟢 Add Buy Bot to your group", "url": f"https://t.me/{buy}?startgroup=trk_{key}_{token_addr}"}])
+    rows.append([{"text": "🛡 Add Guardian to your group", "url": f"https://t.me/{guard}?startgroup=ferzan"}])
+    return {"inline_keyboard": rows}
+
+
+def _notify_telegram(chat_id: int, text: str, photo: str = "", markup: dict | None = None):
+    if photo and TELEGRAM_BOT_TOKEN and len(text) <= 1024:
+        try:
+            body = {"chat_id": chat_id, "photo": photo, "caption": text, "parse_mode": "HTML"}
+            if markup:
+                body["reply_markup"] = markup
+            r = requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto",
+                json=body,
+                timeout=15,
+            )
+            if r.ok:
+                return
+        except requests.RequestException:
+            pass
+    _notify_text(chat_id, text, markup)
+
+
+def _notify_text(chat_id: int, text: str, markup: dict | None = None):
     if not TELEGRAM_BOT_TOKEN:
         logger.warning("TELEGRAM_BOT_TOKEN not set -- cannot notify user")
         return
     try:
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"},
+            json={"chat_id": chat_id, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True,
+                  **({"reply_markup": markup} if markup else {})},
             timeout=10,
         )
     except requests.RequestException as e:
         logger.error(f"Failed to notify Telegram chat {chat_id}: {e}")
+
+
+# ------------------------------------------------ Solana fee claiming --
+# Meteora DBC keeps each pool's trading fees in the pool until they're claimed:
+# the creator's share by the creator wallet, the platform share by the partner
+# fee wallet. We only build unsigned transactions; the claiming wallet signs.
+_FEES_HELPER = _Path(__file__).resolve().parent / "dbc" / "fees.mjs"
+_DBC_PROGRAM = "dbcij3LWUppWqq96dh6gJWwBifmcGfLSB5D4DuSMaqN"
+_B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+_FEE_CACHE: dict = {}
+
+
+def _b58decode(s: str) -> bytes:
+    n = 0
+    for ch in s:
+        n = n * 58 + _B58.index(ch)
+    raw = n.to_bytes((n.bit_length() + 7) // 8, "big") if n else b""
+    return b"\x00" * (len(s) - len(s.lstrip("1"))) + raw
+
+
+def _sol_addr_ok(a: str) -> bool:
+    return bool(_re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{32,44}", a or ""))
+
+
+def _run_fees(payload: dict, timeout: int = 90) -> dict:
+    import json as _json
+    import subprocess as _sp
+
+    if not _FEES_HELPER.exists():
+        raise HTTPException(503, "Fee claiming isn't installed (dbc/fees.mjs missing).")
+    payload = {**payload, "rpc": RPC_URLS["solana"], "config": (os.environ.get("METEORA_CONFIG") or "").strip()}
+    try:
+        proc = _sp.run(["node", str(_FEES_HELPER)], input=_json.dumps(payload), capture_output=True,
+                       text=True, timeout=timeout, cwd=str(_FEES_HELPER.parent))
+    except _sp.TimeoutExpired:
+        raise HTTPException(504, "Solana was slow to answer - try again in a minute.")
+    out_s = proc.stdout or ""
+    start = out_s.find("{")
+    try:
+        out = _json.loads(out_s[start:]) if start >= 0 else {}
+    except ValueError:
+        out = {}
+    if proc.returncode != 0 or out.get("error"):
+        detail = out.get("error") or (proc.stderr or "").strip()[-300:] or "unknown error"
+        logger.warning("SOL_FEES_FAILED: %s", detail)
+        raise HTTPException(400, str(detail)[:300])
+    return out
+
+
+def _token_names(mints: list) -> dict:
+    mints = [m for m in mints if m][:500]
+    if not mints:
+        return {}
+    q = ",".join("?" for _ in mints)
+    with db._get_conn() as conn:
+        rows = conn.execute(
+            f"SELECT result_token_address, name, symbol FROM launch_requests WHERE result_token_address IN ({q})",
+            mints,
+        ).fetchall()
+    return {r[0]: {"name": r[1], "symbol": r[2]} for r in rows}
+
+
+@app.get("/api/sol-fees")
+def sol_fees(wallet: str, role: str = "creator"):
+    role = "partner" if role == "partner" else "creator"
+    if not _sol_addr_ok(wallet):
+        raise HTTPException(400, "That isn't a Solana wallet address.")
+    key = (role, wallet)
+    hit = _FEE_CACHE.get(key)
+    if hit and time.time() - hit[0] < 15:
+        return hit[1]
+    out = _run_fees({"action": "list", "role": role, "wallet": wallet})
+    names = _token_names([p.get("mint") for p in out.get("pools", [])])
+    for p in out.get("pools", []):
+        n = names.get(p.get("mint")) or {}
+        p["name"], p["symbol"] = n.get("name", ""), n.get("symbol", "")
+        p["sol"] = int(p.get("quote_fee") or 0) / 1e9
+    out["total_sol"] = int(out.get("total_quote") or 0) / 1e9
+    _FEE_CACHE[key] = (time.time(), out)
+    return out
+
+
+class SolFeesBuildBody(BaseModel):
+    wallet: str
+    role: str = "creator"
+    pools: list = []
+
+
+@app.post("/api/sol-fees/build")
+def sol_fees_build(body: SolFeesBuildBody):
+    role = "partner" if body.role == "partner" else "creator"
+    pools = [str(p) for p in (body.pools or []) if _sol_addr_ok(str(p))][:12]
+    if not _sol_addr_ok(body.wallet) or not pools:
+        raise HTTPException(400, "Nothing to claim.")
+    _FEE_CACHE.pop((role, body.wallet), None)
+    return _run_fees({"action": "build", "role": role, "wallet": body.wallet, "pools": pools})
+
+
+@app.post("/api/sol-fees/send")
+async def sol_fees_send(body: SolBroadcastBody):
+    """Relay a wallet-signed claim tx through our RPC (only Meteora DBC claims)."""
+    import base64 as _b64
+
+    try:
+        raw = _b64.b64decode(body.signed_tx_b64, validate=True)
+    except Exception:
+        raise HTTPException(400, "Bad transaction encoding.")
+    if len(raw) > 1232 or _b58decode(_DBC_PROGRAM) not in raw:
+        raise HTTPException(400, "Only fee-claim transactions can be sent here.")
+    out = await _sol_rpc(
+        "sendTransaction",
+        [body.signed_tx_b64, {"encoding": "base64", "preflightCommitment": "confirmed", "maxRetries": 5}],
+        timeout=30,
+    )
+    if out.get("error"):
+        err = out["error"]
+        msg = err.get("message") if isinstance(err, dict) else str(err)
+        raise HTTPException(400, f"Solana rejected the claim: {str(msg)[:300]}")
+    return {"signature": out.get("result")}
+
+
+@app.post("/api/sol-fees/confirm")
+async def sol_fees_confirm(body: SolConfirmBody):
+    out = await _sol_rpc("getSignatureStatuses", [[body.signature], {"searchTransactionHistory": True}])
+    st = (((out.get("result") or {}).get("value")) or [None])[0]
+    if not st:
+        return {"status": "pending"}
+    if st.get("err"):
+        return {"status": "failed", "reason": str(st.get("err"))[:200]}
+    if st.get("confirmationStatus") in ("confirmed", "finalized"):
+        return {"status": "confirmed"}
+    return {"status": "pending"}
+
+
+# --------------------------------------- curve index: chart, feed, track record --
+# curve_indexer.py (its own service) fills this read-only index from chain logs.
+_NATIVE_USD: dict = {"t": 0.0, "bsc": 0.0, "base": 0.0}
+_NATIVE_SYM = {"bsc": "BNB", "base": "ETH"}
+
+
+def _idx_db():
+    import sqlite3 as _sq
+
+    path = os.environ.get("CURVE_INDEX_DB") or os.path.join(os.path.dirname(db.DB_PATH) or ".", "curve_index.db")
+    if not os.path.exists(path):
+        return None
+    c = _sq.connect(f"file:{path}?mode=ro", uri=True, timeout=10)
+    c.row_factory = _sq.Row
+    return c
+
+
+def _native_usd(chain: str) -> float:
+    if time.time() - _NATIVE_USD["t"] > 300:
+        try:
+            r = requests.get("https://api.coingecko.com/api/v3/simple/price",
+                             params={"ids": "binancecoin,ethereum", "vs_currencies": "usd"}, timeout=8).json()
+            _NATIVE_USD.update(t=time.time(), bsc=float(r["binancecoin"]["usd"]), base=float(r["ethereum"]["usd"]))
+        except Exception:
+            _NATIVE_USD["t"] = time.time() - 240  # retry in a minute
+    return float(_NATIVE_USD.get(chain) or 0.0)
+
+
+def _launch_rows_by_curve() -> dict:
+    import json as _json
+
+    out = {}
+    with db._get_conn() as conn:
+        rows = conn.execute(
+            "SELECT extra_params, image_url, description, telegram_user_id, wallet_address FROM launch_requests "
+            "WHERE mode = 'bonding_curve' AND status = 'confirmed'").fetchall()
+    for r in rows:
+        try:
+            cv = (_json.loads(r[0] or "{}").get("curve_address") or "").lower()
+        except ValueError:
+            cv = ""
+        if cv:
+            out[cv] = {"image": r[1] or "", "description": r[2] or ""}
+    return out
+
+
+def _creator_stats(c, creators: list) -> dict:
+    creators = list({x for x in creators if x})[:200]
+    if not creators or c is None:
+        return {}
+    q = ",".join("?" for _ in creators)
+    rows = c.execute(
+        f"SELECT creator, COUNT(*) AS n, SUM(graduated) AS g, MAX(mcap) AS best, MAX(chain) AS chain "
+        f"FROM curves WHERE creator IN ({q}) GROUP BY creator", creators).fetchall()
+    return {r["creator"]: {"launches": r["n"], "graduated": r["g"] or 0, "best_mcap": r["best"] or 0} for r in rows}
+
+
+def _curve_item(r, usd: float, extra: dict, vol24: float, stats: dict) -> dict:
+    grad = int(r["grad_target"] or 0)
+    prog = 100.0 if r["graduated"] else (min(100.0, int(r["real_eth"] or 0) * 100.0 / grad) if grad else 0.0)
+    return {
+        "chain": r["chain"], "curve": r["curve"], "token": r["token"], "name": r["name"], "symbol": r["symbol"],
+        "image": extra.get("image", ""), "progress": round(prog, 2), "graduated": bool(r["graduated"]),
+        "mcap_native": r["mcap"] or 0, "mcap_usd": (r["mcap"] or 0) * usd, "native": _NATIVE_SYM.get(r["chain"], ""),
+        "volume_native": r["volume"] or 0, "vol24_native": vol24, "vol24_usd": vol24 * usd, "trades": r["trades"] or 0,
+        "launched_ts": r["launched_ts"], "last_trade_ts": r["last_trade_ts"], "start_time": r["start_time"],
+        "creator": r["creator"], "creator_stats": stats.get(r["creator"], {}),
+        "url": f"{MINI_APP_BASE}/curve.html?chain={r['chain']}&curve={r['curve']}",
+    }
+
+
+@app.get("/api/launches")
+def launches_feed(sort: str = "new", limit: int = 30, chain: str = ""):
+    """New launches (all chains), King of the Hill (closest to graduating) and top 24h volume."""
+    limit = max(1, min(int(limit or 30), 60))
+    c = _idx_db()
+    items: list = []
+    if c is not None:
+        where, args = "1=1", []
+        if chain in _NATIVE_SYM:
+            where, args = "chain = ?", [chain]
+        if sort == "koth":
+            rows = c.execute(
+                f"SELECT * FROM curves WHERE {where} AND graduated = 0 AND trades > 0 "
+                "ORDER BY CAST(real_eth AS REAL) / MAX(CAST(grad_target AS REAL), 1) DESC LIMIT ?", args + [limit]).fetchall()
+        elif sort == "volume":
+            rows = c.execute(
+                f"SELECT curves.* FROM curves JOIN (SELECT chain AS vc, curve AS vv, SUM(native) AS v FROM trades "
+                f"WHERE ts > ? GROUP BY chain, curve) ON vc = curves.chain AND vv = curves.curve WHERE {where} "
+                "ORDER BY v DESC LIMIT ?", [int(time.time()) - 86400] + args + [limit]).fetchall()
+        else:
+            rows = c.execute(f"SELECT * FROM curves WHERE {where} ORDER BY launched_ts DESC LIMIT ?", args + [limit]).fetchall()
+        vol = {}
+        if rows:
+            q = ",".join("?" for _ in rows)
+            for v in c.execute(f"SELECT curve, SUM(native) FROM trades WHERE ts > ? AND curve IN ({q}) GROUP BY curve",
+                               [int(time.time()) - 86400] + [r["curve"] for r in rows]):
+                vol[v[0]] = v[1] or 0.0
+        stats = _creator_stats(c, [r["creator"] for r in rows])
+        extra = _launch_rows_by_curve()
+        items = [_curve_item(r, _native_usd(r["chain"]), extra.get(r["curve"], {}), vol.get(r["curve"], 0.0), stats) for r in rows]
+        c.close()
+    if sort == "new" and chain in ("", "solana"):
+        with db._get_conn() as conn:
+            sol = conn.execute(
+                "SELECT name, symbol, image_url, result_token_address, created_at FROM launch_requests "
+                "WHERE chain = 'solana' AND mode IN ('meteora', 'pumpfun') AND status = 'confirmed' "
+                "AND result_token_address IS NOT NULL ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+        from datetime import datetime as _dt
+        for r in sol:
+            try:
+                ts = int(_dt.fromisoformat(str(r[4]).replace("Z", "+00:00")).timestamp())
+            except ValueError:
+                ts = 0
+            items.append({"chain": "solana", "token": r[3], "name": r[0], "symbol": r[1], "image": r[2] or "",
+                          "launched_ts": ts, "native": "SOL", "progress": None, "graduated": False,
+                          "url": f"https://jup.ag/tokens/{r[3]}"})
+        items.sort(key=lambda x: x.get("launched_ts") or 0, reverse=True)
+        items = items[:limit]
+    return {"sort": sort, "items": items, "now": int(time.time())}
+
+
+@app.get("/api/curve-chart/{curve}")
+def curve_chart(curve: str, tf: int = 300):
+    curve = (curve or "").lower()
+    if not _re.fullmatch(r"0x[0-9a-f]{40}", curve):
+        raise HTTPException(400, "bad curve address")
+    tf = tf if tf in (60, 300, 900, 3600, 14400) else 300
+    c = _idx_db()
+    if c is None:
+        return {"candles": [], "trades": [], "indexed": False}
+    try:
+        cv = c.execute("SELECT * FROM curves WHERE curve = ?", (curve,)).fetchone()
+        if not cv:
+            return {"candles": [], "trades": [], "indexed": False}
+        rows = c.execute("SELECT ts, price, native, is_buy, tokens, trader, tx FROM trades WHERE curve = ? ORDER BY ts, block, log_index",
+                         (curve,)).fetchall()
+        stats = _creator_stats(c, [cv["creator"]])
+    finally:
+        c.close()
+    candles: list = []
+    last = int(cv["v_eth"] or 0) / max(int(cv["v_token"] or 1), 1)
+    if not cv["launched_block"]:  # picked up after launch: start from what we know, not the launch price
+        last = rows[0]["price"] if rows else (cv["price"] or last)
+    first_ts = (cv["launched_ts"] or (rows[0]["ts"] if rows else int(time.time())))
+    for r in rows:
+        b = (r["ts"] // tf) * tf
+        if not candles or candles[-1][0] != b:
+            candles.append([b, last, max(last, r["price"]), min(last, r["price"]), r["price"], 0.0])
+        k = candles[-1]
+        k[2], k[3], k[4] = max(k[2], r["price"]), min(k[3], r["price"]), r["price"]
+        k[5] += r["native"] or 0.0
+        last = r["price"]
+    if not candles:
+        candles = [[(first_ts // tf) * tf, last, last, last, last, 0.0]]
+    supply = int(cv["total_supply"] or 0) / 1e18
+    usd = _native_usd(cv["chain"])
+    grad = int(cv["grad_target"] or 0)
+    return {
+        "indexed": True, "chain": cv["chain"], "native": _NATIVE_SYM.get(cv["chain"], ""), "native_usd": usd,
+        "supply": supply, "tf": tf, "candles": candles[-400:],
+        "price": last, "mcap_native": last * supply, "mcap_usd": last * supply * usd,
+        "progress": 100.0 if cv["graduated"] else (min(100.0, int(cv["real_eth"] or 0) * 100.0 / grad) if grad else 0.0),
+        "volume_native": cv["volume"] or 0, "trades_count": cv["trades"] or 0, "graduated": bool(cv["graduated"]),
+        "creator": cv["creator"], "creator_stats": stats.get(cv["creator"], {}),
+        "trades": [{"ts": r["ts"], "buy": bool(r["is_buy"]), "native": r["native"], "tokens": r["tokens"],
+                    "trader": r["trader"], "tx": r["tx"]} for r in rows[-25:]][::-1],
+    }
+
+
+@app.get("/api/curve-by-token/{token}")
+def curve_by_token(token: str, since: int = 0, kind: str = "buy"):
+    """For the Buy Bot: a Ferzan curve token's recent curve trades (buys or sells) after `since`."""
+    token = (token or "").lower()
+    if not _re.fullmatch(r"0x[0-9a-f]{40}", token):
+        return {"found": False}
+    c = _idx_db()
+    if c is None:
+        return {"found": False}
+    try:
+        cv = c.execute("SELECT * FROM curves WHERE token = ?", (token,)).fetchone()
+        if not cv:
+            return {"found": False}
+        rows = c.execute(
+            "SELECT ts, native, tokens, trader, tx, price FROM trades WHERE curve = ? AND ts > ? AND is_buy = ? "
+            "ORDER BY ts, block, log_index LIMIT 50",
+            (cv["curve"], int(since or 0), 0 if kind == "sell" else 1)).fetchall()
+    finally:
+        c.close()
+    usd = _native_usd(cv["chain"])
+    grad = int(cv["grad_target"] or 0)
+    return {
+        "found": True, "chain": cv["chain"], "curve": cv["curve"], "token": cv["token"], "name": cv["name"],
+        "symbol": cv["symbol"], "graduated": bool(cv["graduated"]), "pool": cv["pool"], "native": _NATIVE_SYM.get(cv["chain"], ""),
+        "native_usd": usd, "price_usd": (cv["price"] or 0) * usd, "mcap_usd": (cv["mcap"] or 0) * usd,
+        "progress": 100.0 if cv["graduated"] else (min(100.0, int(cv["real_eth"] or 0) * 100.0 / grad) if grad else 0.0),
+        "url": f"{MINI_APP_BASE}/curve.html?chain={cv['chain']}&curve={cv['curve']}",
+        "trades": [{"ts": r["ts"], "native": r["native"], "tokens": r["tokens"], "usd": (r["native"] or 0) * usd,
+                    "trader": r["trader"], "tx": r["tx"]} for r in rows],
+    }
+
+
+@app.get("/api/creator/{wallet}")
+def creator_record(wallet: str):
+    w = (wallet or "").strip()
+    evm = bool(_re.fullmatch(r"0x[0-9a-fA-F]{40}", w))
+    if not evm and not _sol_addr_ok(w):
+        raise HTTPException(400, "bad wallet address")
+    out = {"wallet": w, "launches": 0, "graduated": 0, "best_mcap_usd": 0.0, "tokens": []}
+    c = _idx_db()
+    if evm and c is not None:
+        try:
+            rows = c.execute("SELECT * FROM curves WHERE creator = ? ORDER BY launched_ts DESC LIMIT 50", (w.lower(),)).fetchall()
+        finally:
+            c.close()
+        for r in rows:
+            usd = _native_usd(r["chain"])
+            out["graduated"] += 1 if r["graduated"] else 0
+            out["best_mcap_usd"] = max(out["best_mcap_usd"], (r["mcap"] or 0) * usd)
+            out["tokens"].append({"chain": r["chain"], "symbol": r["symbol"], "name": r["name"], "graduated": bool(r["graduated"]),
+                                  "mcap_usd": (r["mcap"] or 0) * usd, "launched_ts": r["launched_ts"],
+                                  "url": f"{MINI_APP_BASE}/curve.html?chain={r['chain']}&curve={r['curve']}"})
+    with db._get_conn() as conn:
+        n = conn.execute("SELECT COUNT(*) FROM launch_requests WHERE status = 'confirmed' AND LOWER(wallet_address) = ?",
+                         (w.lower() if evm else w,)).fetchone()[0] if evm else conn.execute(
+            "SELECT COUNT(*) FROM launch_requests WHERE status = 'confirmed' AND wallet_address = ?", (w,)).fetchone()[0]
+    out["launches"] = max(int(n or 0), len(out["tokens"]))
+    return out
 
 
 @app.on_event("startup")

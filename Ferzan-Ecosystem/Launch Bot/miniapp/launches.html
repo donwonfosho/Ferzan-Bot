@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ferzan Launches</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  body { font-family: -apple-system, sans-serif; background: var(--tg-theme-bg-color, #fff);
+         color: var(--tg-theme-text-color, #000); padding: 12px 16px 24px; margin: 0; }
+  h2 { margin: 4px 0 10px; }
+  .tabs, .chains { display: flex; gap: 6px; }
+  .chains { margin-top: 8px; }
+  .tabs button, .chains button { flex: 1; border: none; border-radius: 10px; padding: 10px 4px; font-size: 14px;
+         background: rgba(128,128,128,.14); color: inherit; cursor: pointer; }
+  .chains button { padding: 6px 4px; font-size: 13px; }
+  .tabs button.on, .chains button.on { background: var(--tg-theme-button-color, #2481cc); color: var(--tg-theme-button-text-color, #fff); }
+  .card { display: flex; gap: 12px; padding: 12px 0; border-bottom: 1px solid rgba(128,128,128,.2); text-decoration: none; color: inherit; }
+  .logo { width: 48px; height: 48px; border-radius: 12px; object-fit: cover; flex: none; background: rgba(128,128,128,.18);
+          display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 20px; }
+  .main { flex: 1; min-width: 0; }
+  .top { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
+  .name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .sym { opacity: .6; font-weight: 400; }
+  .mc { font-weight: 600; white-space: nowrap; }
+  .meta { font-size: 12px; opacity: .65; margin-top: 3px; }
+  .badge { font-size: 11px; padding: 1px 6px; border-radius: 6px; background: rgba(128,128,128,.16); margin-right: 4px; }
+  .bar { height: 6px; background: rgba(128,128,128,.2); border-radius: 3px; overflow: hidden; margin-top: 6px; }
+  .fill { height: 100%; background: linear-gradient(90deg, #2ecc71, #16a34a); }
+  .crown { color: #d4a017; }
+  #empty { text-align: center; opacity: .6; padding: 40px 0; display: none; }
+  #err { color: #c0392b; font-size: 14px; display: none; margin-top: 10px; }
+</style>
+</head>
+<body>
+<h2>🚀 Ferzan launches</h2>
+<div class="tabs">
+  <button data-sort="new" class="on">🆕 New</button>
+  <button data-sort="koth">👑 King</button>
+  <button data-sort="volume">📈 Volume</button>
+</div>
+<div class="chains">
+  <button data-chain="" class="on">All</button>
+  <button data-chain="bsc">BNB</button>
+  <button data-chain="base">Base</button>
+  <button data-chain="solana">Solana</button>
+</div>
+<div id="err"></div>
+<div id="list"></div>
+<div id="empty">Nothing here yet.</div>
+<script>
+  const tg = window.Telegram?.WebApp;
+  tg?.ready(); tg?.expand();
+  const params = new URLSearchParams(location.search);
+  let sort = ['new', 'koth', 'volume'].includes(params.get('sort')) ? params.get('sort') : 'new';
+  let chain = '';
+  const CHAIN_NAME = { bsc: 'BNB', base: 'Base', solana: 'Solana' };
+  const esc = (t) => String(t ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const usd = (v) => !v ? '' : v >= 1e9 ? '$' + (v / 1e9).toFixed(2) + 'B' : v >= 1e6 ? '$' + (v / 1e6).toFixed(2) + 'M' : v >= 1e3 ? '$' + (v / 1e3).toFixed(1) + 'K' : '$' + v.toFixed(0);
+  const ago = (ts) => {
+    if (!ts) return '';
+    const s = Math.max(0, Math.floor(Date.now() / 1000 - ts));
+    return s < 60 ? s + 's ago' : s < 3600 ? Math.floor(s / 60) + 'm ago' : s < 86400 ? Math.floor(s / 3600) + 'h ago' : Math.floor(s / 86400) + 'd ago';
+  };
+
+  function card(it, i) {
+    const img = /^https:\/\//.test(it.image || '')
+      ? `<img class="logo" src="${esc(it.image)}" alt="" loading="lazy">`
+      : `<div class="logo">${esc((it.symbol || '?').slice(0, 1).toUpperCase())}</div>`;
+    const crown = sort === 'koth' && i === 0 ? '<span class="crown">👑 </span>' : '';
+    const bits = [`<span class="badge">${esc(CHAIN_NAME[it.chain] || it.chain)}</span>`];
+    if (it.graduated) bits.push('🎓 graduated');
+    else if (it.progress != null) bits.push(`${it.progress.toFixed(1)}% to graduation`);
+    if (sort === 'volume' && it.vol24_usd) bits.push(`24h vol ${usd(it.vol24_usd)}`);
+    else if (it.trades) bits.push(`${it.trades} trade${it.trades === 1 ? '' : 's'}`);
+    bits.push(ago(it.launched_ts));
+    const st = it.creator_stats || {};
+    const dev = st.launches > 1 ? `<div class="meta">👤 dev: ${st.launches} launches · ${st.graduated || 0} graduated</div>` : '';
+    const opens = it.start_time && it.start_time > Date.now() / 1000 ? `<div class="meta">⏳ opens ${new Date(it.start_time * 1000).toLocaleString([], { weekday: 'short', hour: 'numeric', minute: '2-digit' })}</div>` : '';
+    const bar = it.progress != null && !it.graduated ? `<div class="bar"><div class="fill" style="width:${Math.min(100, it.progress)}%"></div></div>` : '';
+    return `<a class="card" href="${esc(it.url)}" data-ext="${it.chain === 'solana' ? 1 : 0}">${img}<div class="main">
+      <div class="top"><div class="name">${crown}${esc(it.name)} <span class="sym">$${esc(it.symbol)}</span></div><div class="mc">${usd(it.mcap_usd)}</div></div>
+      <div class="meta">${bits[0]}${bits.slice(1).filter(Boolean).join(' · ')}</div>${bar}${dev}${opens}</div></a>`;
+  }
+
+  async function load() {
+    try {
+      const r = await fetch(new URL(`/api/launches?sort=${sort}&chain=${chain}&limit=40`, location.origin));
+      if (!r.ok) throw new Error('server error ' + r.status);
+      const d = await r.json();
+      const items = d.items || [];
+      document.getElementById('list').innerHTML = items.map(card).join('');
+      document.getElementById('empty').style.display = items.length ? 'none' : 'block';
+      document.getElementById('empty').textContent = sort === 'koth' ? 'No curve is trading yet — launch one with /launch.' : 'Nothing here yet.';
+      document.getElementById('err').style.display = 'none';
+    } catch (e) {
+      const el = document.getElementById('err'); el.textContent = "Couldn't load launches: " + e.message; el.style.display = 'block';
+    }
+  }
+
+  document.getElementById('list').addEventListener('click', (e) => {
+    const a = e.target.closest('a.card');
+    if (a && a.dataset.ext === '1' && tg?.openLink) { e.preventDefault(); tg.openLink(a.href); }
+  });
+  document.querySelectorAll('.tabs button').forEach(b => {
+    b.classList.toggle('on', b.dataset.sort === sort);
+    b.addEventListener('click', () => {
+      sort = b.dataset.sort;
+      document.querySelectorAll('.tabs button').forEach(x => x.classList.toggle('on', x === b));
+      load();
+    });
+  });
+  document.querySelectorAll('.chains button').forEach(b => b.addEventListener('click', () => {
+    chain = b.dataset.chain;
+    document.querySelectorAll('.chains button').forEach(x => x.classList.toggle('on', x === b));
+    load();
+  }));
+  load();
+  setInterval(load, 20000);
+</script>
+</body>
+</html>

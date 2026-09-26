@@ -157,6 +157,134 @@ def _curve_for_token(token: str) -> str:
         return ""
 
 
+_CURVE_CHAINS = ("bsc", "base")
+_CURVE_CACHE: dict = {}
+
+
+def _u256(n: int) -> str:
+    return int(n).to_bytes(32, "big").hex()
+
+
+def _call_words(rpc: str, to: str, data: str) -> list | None:
+    body = _rpc(rpc, "eth_call", [{"to": to, "data": data}, "latest"])
+    raw = str((body or {}).get("result") or "")
+    if not raw.startswith("0x") or len(raw) < 66:
+        return None
+    h = raw[2:]
+    return [int(h[i:i + 64], 16) for i in range(0, len(h) // 64 * 64, 64)]
+
+
+def curve_info(token: str) -> dict:
+    """{} for normal tokens; for Ferzan curve tokens:
+    {'curve', 'cid', 'graduated', 'price_native'} (cached 30s)."""
+    import time as _t
+
+    try:
+        token = _addr(token)
+    except Exception:
+        return {}
+    key = token.lower()
+    hit = _CURVE_CACHE.get(key)
+    if hit and _t.time() - hit[0] < 30:
+        return hit[1]
+    info: dict = {}
+    curve = _curve_for_token(token)
+    if curve:
+        curve = _addr(curve)
+        for cid in _CURVE_CHAINS:
+            meta = CHAINS.get(cid)
+            if not meta:
+                continue
+            try:
+                g = _call_words(meta["rpc"], curve, "0xe7c2b772")  # graduated()
+                if g is None:
+                    continue
+                er = _call_words(meta["rpc"], curve, "0xd62ccb3f")  # ethReserve()
+                tr = _call_words(meta["rpc"], curve, "0xcbcb3171")  # tokenReserve()
+                info = {
+                    "curve": curve, "cid": cid, "graduated": bool(g[0]),
+                    "price_native": (er[0] / tr[0]) if er and tr and tr[0] else 0.0,
+                }
+                break
+            except Exception as exc:
+                log.warning("curve probe failed %s on %s: %s", curve, cid, exc)
+    _CURVE_CACHE[key] = (_t.time(), info)
+    return info
+
+
+def curve_meta(token: str) -> tuple[float, str, str, str]:
+    """(price_usd, chain, symbol, name) for a curve token still on its curve, else (0, '', '', '')."""
+    ci = curve_info(token)
+    if not ci or ci.get("graduated") or not ci.get("price_native"):
+        return 0.0, "", "", ""
+    cid = ci["cid"]
+    try:
+        from price_fetcher import get_price_usd
+
+        px = float(get_price_usd(NATIVE_CG.get(cid, "ethereum")) or 0)
+    except Exception:
+        px = 0.0
+    if px <= 0:
+        px = 600.0 if cid == "bsc" else 3000.0
+    sym = name = ""
+    try:
+        for sel, attr in (("0x95d89b41", "sym"), ("0x06fdde03", "name")):
+            body = _rpc(CHAINS[cid]["rpc"], "eth_call", [{"to": _addr(token), "data": sel}, "latest"])
+            h = str((body or {}).get("result") or "")[2:]
+            if len(h) >= 128:
+                ln = int(h[64:128], 16)
+                val = bytes.fromhex(h[128:128 + ln * 2]).decode("utf-8", "ignore")
+                if attr == "sym":
+                    sym = val
+                else:
+                    name = val
+    except Exception:
+        pass
+    return ci["price_native"] * px, cid, sym, name
+
+
+def sell_curve(cid: str, meta: dict, acct, token: str, curve: str, amount: int, slip_bps: int = 500) -> tuple[bool, str]:
+    """Sell `amount` (raw units) of a Ferzan curve token back to its curve."""
+    import time as _t
+
+    owner = acct.address
+    locked = _call_words(meta["rpc"], token, "0x1ef4cb94" + owner[2:].lower().zfill(64))  # lockedUntilGraduation
+    if locked and locked[0]:
+        bal = _erc20_balance(meta["rpc"], token, owner)
+        amount = min(amount, max(0, bal - locked[0]))
+        if amount <= 0:
+            return False, "These are team tokens - they stay locked until the curve graduates."
+    note = ""
+    allow_data = "0xdd62ed3e" + owner[2:].lower().zfill(64) + curve[2:].lower().zfill(64)
+    al = _call_words(meta["rpc"], token, allow_data)
+    if not al or al[0] < amount:
+        ok, msg = _broadcast(acct, meta, token, "0x095ea7b3" + curve[2:].lower().zfill(64) + ("f" * 64), 0)
+        if not ok:
+            return False, f"Approve failed: {msg}"
+        note = f"Approved curve\n{msg}\n"
+        for _ in range(30):
+            _t.sleep(2)
+            al = _call_words(meta["rpc"], token, allow_data)
+            if al and al[0] >= amount:
+                break
+        else:
+            return False, note + "Approval not confirmed yet - try the sell again in a minute."
+    q = _call_words(meta["rpc"], curve, "0xa64190c4" + _u256(amount))  # quoteSell(uint256)
+    if not q:
+        return False, note + "Curve quote failed - it may have just graduated. Try again."
+    min_out = q[0] * (10_000 - max(1, min(int(slip_bps), 4900))) // 10_000
+    data = "0xd04c6983" + _u256(amount) + _u256(min_out) + "0" * 64  # sell(amount, minOut, referrer=0)
+    sim = _rpc(meta["rpc"], "eth_call", [{"from": owner, "to": curve, "data": data}, "latest"])
+    if isinstance(sim, dict) and sim.get("error"):
+        err = sim["error"]
+        why = str(err.get("message") if isinstance(err, dict) else err).replace("execution reverted:", "").strip()
+        return False, note + f"Curve sell would fail: {why or 'reverted'}"
+    ok, msg = _broadcast(acct, meta, curve, data, 0)
+    if not ok:
+        return False, note + f"Curve sell failed: {msg}"
+    return True, note + f"Live {cid.upper()} curve sell\n{msg}"
+
+
 def _encode_curve_buy(min_out: int, referrer: str) -> str:
     from eth_hash.auto import keccak
 
@@ -175,7 +303,8 @@ def _quote_curve_tokens(rpc: str, curve: str, wei: int) -> int:
     try:
         body = _rpc(rpc, "eth_call", [{"to": curve, "data": data}, "latest"])
         raw = str((body or {}).get("result") or "0x0")
-        return int(raw, 16)
+        h = raw[2:66] if raw.startswith("0x") else ""
+        return int(h, 16) if h else 0
     except Exception:
         return 0
 
@@ -211,12 +340,17 @@ def buy_curve(
     slip = int(slip_bps if slip_bps is not None else 1000)
     min_out = 0 if quoted <= 0 else max(1, quoted * (10_000 - max(1, min(slip, 4900))) // 10_000)
     data = _encode_curve_buy(min_out, referrer)
+    sim = _rpc(meta["rpc"], "eth_call", [{"from": acct.address, "to": curve, "data": data, "value": hex(wei)}, "latest"])
+    if isinstance(sim, dict) and sim.get("error"):
+        err = sim["error"]
+        why = str(err.get("message") if isinstance(err, dict) else err).replace("execution reverted:", "").strip()
+        return False, f"Curve buy would fail: {why or 'reverted'}"
     raw_tx = {
         "to": curve,
         "data": data,
         "value": wei,
         "chainId": int(meta["chain_id"]),
-        "gas": 350000,
+        "gas": _estimate_gas(meta["rpc"], acct.address, curve, data, wei),
         "gasPrice": _gas_price(meta["rpc"]),
         "nonce": _nonce_guarded(meta, acct.address),
     }
@@ -261,11 +395,11 @@ def buy_evm(
     token = (buy_token or "").strip()
     if not token.startswith("0x") or len(token) != 42:
         return False, "Need a 0x contract."
-    curve = _curve_for_token(token)
-    if curve:
+    ci = curve_info(token)
+    if ci and not ci.get("graduated"):
         return buy_curve(
-            cid,
-            curve,
+            ci["cid"],
+            ci["curve"],
             usd,
             key_hex=key_hex,
             referrer=_referrer_wallet(user_id),
@@ -566,6 +700,9 @@ def sell_evm(chain: str, sell_token: str, key_hex: str | None = None, pct: int =
             f"Wallet {acct.address}\n"
             f"https://basescan.org/token/{token}?a={acct.address}"
         )
+    ci = curve_info(token)
+    if ci and not ci.get("graduated") and ci.get("cid") == cid:
+        return sell_curve(cid, meta, acct, token, ci["curve"], bal)
     headers = {
         "0x-api-key": os.getenv("ZEROX_API_KEY", "").strip(),
         "0x-version": "v2",

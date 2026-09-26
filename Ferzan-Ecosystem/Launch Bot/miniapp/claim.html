@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Claim Fees</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  body { font-family: -apple-system, sans-serif; background: var(--tg-theme-bg-color, #fff);
+    color: var(--tg-theme-text-color, #000); padding: 16px; margin: 0; }
+  h2 { margin: 0 0 6px; }
+  .sub { color: #888; font-size: 14px; line-height: 1.4; margin-bottom: 10px; }
+  button { width: 100%; padding: 14px; font-size: 16px; border-radius: 10px; border: none;
+    margin-top: 12px; cursor: pointer; background: var(--tg-theme-button-color, #2481cc); color: var(--tg-theme-button-text-color, #fff); }
+  button:disabled { opacity: .55; cursor: default; }
+  .wallet-btn { background:#111; color:#fff; font-weight:600; margin-top:8px; }
+  #status { margin-top: 14px; padding: 12px; border-radius: 8px; display:none; line-height:1.4; word-break: break-word; }
+  #status a { color: inherit; font-weight: 600; }
+  .error { background: #fde8e8 !important; color: #a00; }
+  .success { background: #e6f7e6 !important; color: #060; }
+  .hint { background:#eef4fb !important; color:#1a5591; }
+  .row { display:flex; justify-content:space-between; gap:12px; padding:9px 0; border-bottom:1px solid rgba(128,128,128,.2); font-size:14px; }
+  .row b { white-space:nowrap; }
+  .row small { color:#888; }
+  .total { font-size: 22px; font-weight: 700; margin: 12px 0 4px; }
+  #walletChoices { display:none; margin-top:8px; }
+</style>
+</head>
+<body>
+<h2 id="title">Claim your trading fees</h2>
+<div class="sub" id="intro">Solana (Meteora) tokens you launched earn half of every 1% trading fee. It waits in the pool until you claim it — connect the wallet you launched with.</div>
+<div id="status"></div>
+<button id="connectBtn" style="display:none">Connect Wallet</button>
+<div id="walletChoices">
+  <div class="sub" style="text-align:center;margin-top:10px">Open this page in your Solana wallet:</div>
+  <button class="wallet-btn" data-wallet="phantom">Phantom</button>
+  <button class="wallet-btn" data-wallet="solflare">Solflare</button>
+  <button class="wallet-btn" data-wallet="trust">Trust Wallet</button>
+  <button class="wallet-btn" data-wallet="backpack">Backpack</button>
+  <button class="wallet-btn" data-wallet="okx">OKX Wallet</button>
+  <button class="wallet-btn" data-wallet="coinbase">Coinbase Wallet</button>
+  <button class="wallet-btn" data-wallet="metamask">MetaMask (Solana)</button>
+</div>
+<div id="summary" style="display:none">
+  <div class="total" id="total"></div>
+  <div class="sub" id="totalNote"></div>
+  <div id="list"></div>
+  <button id="claimBtn" style="display:none">Claim</button>
+  <button id="refreshBtn" style="background:#f0f0f0;color:#111">Refresh</button>
+</div>
+
+<script type="module">
+  import { Transaction, VersionedTransaction } from 'https://esm.sh/@solana/web3.js@1?bundle';
+
+  const tg = window.Telegram?.WebApp;
+  tg?.ready(); tg?.expand();
+  const params = new URLSearchParams(window.location.search);
+  const role = params.get('role') === 'partner' ? 'partner' : 'creator';
+  const API = 'https://launch.ferzaneco.com/api';
+  const $ = (id) => document.getElementById(id);
+  const statusEl = $('status'), connectBtn = $('connectBtn'), walletChoices = $('walletChoices');
+  const claimBtn = $('claimBtn');
+  const MIN_LAMPORTS = 100000n;  // skip dust below 0.0001 SOL (not worth the network fee)
+  let wallet = null, provider = null, claimable = [];
+
+  if (role === 'partner') {
+    $('title').textContent = 'Claim platform fees';
+    $('intro').textContent = 'The platform share of Meteora trading fees across every Ferzan launch. Only the platform fee wallet can claim it — connect that wallet.';
+  }
+
+  const esc = (s) => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const sol = (lamports) => (Number(lamports) / 1e9).toLocaleString(undefined, { maximumFractionDigits: 4 });
+  const short = (a) => a ? `${a.slice(0, 4)}…${a.slice(-4)}` : '';
+  const solscan = (sig) => `https://solscan.io/tx/${sig}`;
+  function showStatus(text, kind, html) {
+    statusEl.style.display = 'block';
+    if (html) statusEl.innerHTML = text; else statusEl.textContent = text;
+    statusEl.className = kind || '';
+  }
+
+  function bytesToB64(bytes) { let s = ''; for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]); return btoa(s); }
+  function b64ToBytes(b64) { const s = atob(b64); const o = new Uint8Array(s.length); for (let i = 0; i < s.length; i++) o[i] = s.charCodeAt(i); return o; }
+  const B58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+  function base58(bytes) {
+    let n = 0n; for (const b of bytes) n = n * 256n + BigInt(b);
+    let out = ''; while (n > 0n) { out = B58[Number(n % 58n)] + out; n = n / 58n; }
+    for (const b of bytes) { if (b === 0) out = '1' + out; else break; }
+    return out;
+  }
+  function txBytes(tx) {
+    return tx instanceof VersionedTransaction ? tx.serialize() : tx.serialize({ requireAllSignatures: false, verifySignatures: false });
+  }
+
+  // ---------- wallets (same detection as the launch page) ----------
+  function legacyProvider() {
+    const w = window;
+    const list = [
+      ['Phantom', w.phantom?.solana?.isPhantom ? w.phantom.solana : null],
+      ['Solflare', w.solflare?.isSolflare ? w.solflare : null],
+      ['Backpack', w.backpack?.isBackpack ? w.backpack : null],
+      ['OKX Wallet', w.okxwallet?.solana || null],
+      ['Trust Wallet', w.trustwallet?.solana || null],
+      ['Coinbase Wallet', w.coinbaseSolana || null],
+      ['Bitget Wallet', w.bitkeep?.solana || null],
+      ['Wallet', w.solana || null],
+    ];
+    for (const [name, p] of list) if (p && typeof p.connect === 'function') return { name, p };
+    return null;
+  }
+  async function standardProvider() {
+    try {
+      const { getWallets } = await import('https://esm.sh/@wallet-standard/app@1?bundle');
+      const api = getWallets();
+      const pick = () => api.get().find(w =>
+        (w.chains || []).some(c => String(c).startsWith('solana:')) && w.features?.['standard:connect'] &&
+        (w.features['solana:signAndSendTransaction'] || w.features['solana:signTransaction']));
+      let w = pick();
+      if (!w) { await new Promise(r => setTimeout(r, 600)); w = pick(); }
+      if (!w) return null;
+      let account = null;
+      const chain = 'solana:mainnet';
+      const p = {
+        async connect() {
+          const r = await w.features['standard:connect'].connect();
+          account = (r?.accounts || w.accounts || [])[0];
+          if (!account) throw new Error('No Solana account shared by the wallet');
+          return { publicKey: { toString: () => account.address } };
+        },
+      };
+      if (w.features['solana:signAndSendTransaction']) {
+        p.signAndSendTransaction = async (tx) => {
+          const [r] = await w.features['solana:signAndSendTransaction'].signAndSendTransaction({ account, chain, transaction: txBytes(tx) });
+          return { signature: base58(r.signature) };
+        };
+      }
+      if (w.features['solana:signTransaction']) {
+        p.signTransaction = async (tx) => {
+          const [r] = await w.features['solana:signTransaction'].signTransaction({ account, chain, transaction: txBytes(tx) });
+          return r.signedTransaction;
+        };
+      }
+      return { name: w.name, p };
+    } catch (e) { return null; }
+  }
+  async function detectWallet() { return legacyProvider() || (await standardProvider()); }
+
+  function walletLink(id) {
+    const url = window.location.href, u = encodeURIComponent(url), ref = encodeURIComponent(window.location.origin);
+    switch (id) {
+      case 'phantom': return `https://phantom.app/ul/browse/${u}?ref=${ref}`;
+      case 'solflare': return `https://solflare.com/ul/v1/browse/${u}?ref=${ref}`;
+      case 'trust': return `https://link.trustwallet.com/open_url?coin_id=501&url=${u}`;
+      case 'backpack': return `https://backpack.app/ul/v1/browse/${u}?ref=${ref}`;
+      case 'okx': return 'https://web3.okx.com/download?deeplink=' + encodeURIComponent('okx://wallet/dapp/url?dappUrl=' + u);
+      case 'coinbase': return `https://go.cb-w.com/dapp?cb_url=${u}`;
+      case 'metamask': return 'https://metamask.app.link/dapp/' + url.replace(/^https?:\/\//, '');
+    }
+    return null;
+  }
+  walletChoices.querySelectorAll('[data-wallet]').forEach(btn => btn.addEventListener('click', () => {
+    const link = walletLink(btn.dataset.wallet);
+    if (link) { if (tg?.openLink) tg.openLink(link); else window.open(link, '_blank'); }
+  }));
+
+  async function get(path) {
+    const r = await fetch(`${API}${path}`);
+    let d = {}; try { d = await r.json(); } catch (e) {}
+    if (!r.ok) throw new Error(d.detail || `server error ${r.status}`);
+    return d;
+  }
+  async function post(path, body) {
+    const r = await fetch(`${API}${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
+    let d = {}; try { d = await r.json(); } catch (e) {}
+    if (!r.ok) throw new Error(d.detail || `server error ${r.status}`);
+    return d;
+  }
+
+  // ---------- list ----------
+  async function load() {
+    showStatus('Checking your pools on Solana…', 'hint');
+    const d = await get(`/sol-fees?wallet=${encodeURIComponent(wallet)}&role=${role}`);
+    const pools = d.pools || [];
+    claimable = pools.filter(p => BigInt(p.quote_fee || '0') >= MIN_LAMPORTS || BigInt(p.base_fee || '0') > 0n);
+    const total = claimable.reduce((a, p) => a + BigInt(p.quote_fee || '0'), 0n);
+    $('summary').style.display = 'block';
+    $('total').textContent = `${sol(total)} SOL ready to claim`;
+    const notes = [];
+    if (claimable.length) notes.push(`${claimable.length} pool${claimable.length === 1 ? '' : 's'}`);
+    if (pools.length > claimable.length) notes.push(`${pools.length - claimable.length} with dust skipped`);
+    if (claimable.length > 12) notes.push('the 12 largest are claimed first — claim again for the rest');
+    $('totalNote').textContent = notes.join(' · ');
+    $('list').innerHTML = claimable.slice(0, 50).map(p => {
+      const label = p.name ? `${esc(p.name)} <small>$${esc(p.symbol)}</small>` : `<small>${esc(short(p.mint))}</small>`;
+      return `<div class="row"><span>${label}${p.kind === 'damm' ? ' <small>· LP fees after graduation</small>' : p.migrated ? ' <small>· graduated</small>' : ''}</span><b>${sol(p.quote_fee)} SOL</b></div>`;
+    }).join('');
+    if (role === 'partner' && !d.wallet_can_claim) {
+      showStatus(`This wallet isn't the platform fee wallet. Connect ${esc(short(d.fee_claimer))} to claim.`, 'error', true);
+      claimBtn.style.display = 'none';
+      return;
+    }
+    if (!claimable.length) {
+      showStatus(role === 'partner' ? 'Nothing to claim right now.' : 'Nothing to claim yet. Fees build up as people trade your tokens.', 'hint');
+      claimBtn.style.display = 'none';
+      return;
+    }
+    statusEl.style.display = 'none';
+    claimBtn.textContent = `Claim ${sol(claimable.slice(0, 12).reduce((a, p) => a + BigInt(p.quote_fee || '0'), 0n))} SOL`;
+    claimBtn.style.display = 'block';
+    claimBtn.disabled = false;
+  }
+
+  async function waitForConfirm(signature) {
+    const until = Date.now() + 90000;
+    while (Date.now() < until) {
+      await new Promise(r => setTimeout(r, 2000));
+      let st; try { st = await post('/sol-fees/confirm', { signature }); } catch (e) { continue; }
+      if (st.status === 'confirmed') return { ok: true };
+      if (st.status === 'failed') return { ok: false, reason: st.reason };
+    }
+    return { ok: null };
+  }
+
+  async function signAndSend(tx) {
+    if (typeof provider.signAndSendTransaction === 'function') {
+      const sent = await provider.signAndSendTransaction(tx);
+      const s = typeof sent === 'string' ? sent : (sent?.signature ?? sent?.txid ?? sent);
+      return s instanceof Uint8Array ? base58(s) : String(s || '');
+    }
+    if (typeof provider.signTransaction === 'function') {
+      const signed = await provider.signTransaction(tx);
+      const bytes = signed instanceof Uint8Array ? signed : txBytes(signed);
+      return (await post('/sol-fees/send', { signed_tx_b64: bytesToB64(bytes) })).signature;
+    }
+    throw new Error('This wallet cannot sign Solana transactions here. Try another wallet from the list.');
+  }
+
+  claimBtn.addEventListener('click', async () => {
+    claimBtn.disabled = true;
+    const links = [];
+    try {
+      showStatus('Building the claim…', 'hint');
+      const built = await post('/sol-fees/build', { wallet, role, pools: claimable.slice(0, 12).map(p => p.pool) });
+      const txs = built.txs || [];
+      for (let i = 0; i < txs.length; i++) {
+        const b = b64ToBytes(txs[i].tx_b64);
+        let tx; try { tx = Transaction.from(b); } catch (e) { tx = VersionedTransaction.deserialize(b); }
+        const step = txs.length > 1 ? ` (${i + 1} of ${txs.length})` : '';
+        showStatus(`Approve the claim in your wallet${step}: ${sol(txs[i].quote)} SOL`, 'hint');
+        const sig = await signAndSend(tx);
+        if (!sig) throw new Error('The wallet did not return a transaction signature.');
+        showStatus(`Sent${step}. Waiting for Solana to confirm…<br><a href="${solscan(sig)}" target="_blank" rel="noopener">View on Solscan</a>`, 'hint', true);
+        const res = await waitForConfirm(sig);
+        if (res.ok === false) throw new Error(`the claim failed on Solana — ${res.reason}`);
+        links.push(`<a href="${solscan(sig)}" target="_blank" rel="noopener">${res.ok ? 'Claimed' : 'Sent (still confirming)'}${step}</a>`);
+      }
+      await load();
+      showStatus(`✅ Done — the SOL is in your wallet.<br>${links.join('<br>')}`, 'success', true);
+    } catch (e) {
+      showStatus(`Claim failed: ${esc(e.message)}${links.length ? '<br>' + links.join('<br>') : ''}`, 'error', true);
+      claimBtn.disabled = false;
+    }
+  });
+
+  $('refreshBtn').addEventListener('click', () => load().catch(e => showStatus(`Couldn't load fees: ${e.message}`, 'error')));
+
+  connectBtn.addEventListener('click', async () => {
+    try {
+      const found = await detectWallet();
+      if (!found) { walletChoices.style.display = 'block'; return; }
+      provider = found.p;
+      const resp = await provider.connect();
+      wallet = resp?.publicKey?.toString() || provider.publicKey?.toString() || '';
+      if (!wallet) throw new Error('the wallet did not share an address');
+      connectBtn.style.display = 'none';
+      walletChoices.style.display = 'none';
+      $('intro').textContent += ` Connected: ${short(wallet)}`;
+      await load();
+    } catch (e) {
+      showStatus(`Couldn't connect: ${e.message}`, 'error');
+    }
+  });
+
+  (async () => {
+    const found = await detectWallet();
+    if (found) { connectBtn.textContent = `Connect ${found.name}`; connectBtn.style.display = 'block'; }
+    else { showStatus('Choose your wallet — this page opens inside that wallet’s app so it can sign.', 'hint'); walletChoices.style.display = 'block'; }
+  })();
+</script>
+</body>
+</html>

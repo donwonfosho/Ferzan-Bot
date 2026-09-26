@@ -1,0 +1,521 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ferzan Curve</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  body { font-family: -apple-system, sans-serif; background: var(--tg-theme-bg-color, #fff);
+         color: var(--tg-theme-text-color, #000); padding: 16px; margin: 0; }
+  h2 { margin: 0 0 4px; }
+  .sub { color: #888; font-size: 13px; word-break: break-all; }
+  button { width: 100%; padding: 14px; font-size: 16px; border-radius: 10px; border: none; margin-top: 10px; cursor: pointer; }
+  button:disabled { opacity: .5; cursor: default; }
+  .primary { background: var(--tg-theme-button-color, #2481cc); color: var(--tg-theme-button-text-color, #fff); }
+  .sell { background: #c0392b; color: #fff; }
+  .chip { width: auto; flex: 1; padding: 10px 6px; font-size: 14px; margin-top: 0; background: #eef1f5; color: #111; }
+  .chips { display: flex; gap: 6px; margin-top: 8px; }
+  .tabs { display: flex; gap: 6px; margin-top: 14px; }
+  .tab { flex: 1; margin-top: 0; background: #eef1f5; color: #111; }
+  .tab.on { background: #111; color: #fff; }
+  .bar { height: 12px; background: #e6e6e6; border-radius: 6px; overflow: hidden; margin: 8px 0 4px; }
+  .fill { height: 100%; background: linear-gradient(90deg, #2ecc71, #27ae60); width: 0; }
+  .row { display: flex; justify-content: space-between; padding: 6px 0; font-size: 14px; border-bottom: 1px solid #eee; gap: 12px; }
+  .row b { text-align: right; }
+  input { width: 100%; box-sizing: border-box; padding: 12px; font-size: 18px; border-radius: 10px; border: 1px solid #ccc; margin-top: 10px; }
+  #status { margin-top: 14px; padding: 12px; border-radius: 8px; background: #f5f5f5; color: #111; font-size: 14px; line-height: 1.4; word-break: break-word; display: none; }
+  #status a { color: inherit; font-weight: 600; }
+  .error { background: #fde8e8 !important; color: #a00 !important; }
+  .success { background: #e6f7e6 !important; color: #060 !important; }
+  .hint { background: #eef4fb !important; color: #1a5591 !important; }
+  .quote { font-size: 13px; color: #666; margin-top: 6px; min-height: 18px; }
+</style>
+</head>
+<body>
+  <div style="display:flex;gap:12px;align-items:center">
+    <img id="logo" alt="" style="display:none;width:52px;height:52px;border-radius:12px;object-fit:cover;flex:none">
+    <h2 id="title" style="margin:0">Loading…</h2>
+  </div>
+  <div class="sub" id="desc" style="margin-top:6px;color:inherit;opacity:.8"></div>
+  <div id="links" style="margin-top:6px;font-size:14px"></div>
+  <div id="countdown" style="display:none;margin-top:10px;padding:12px;border-radius:10px;background:#fff4e0;color:#8a5300;font-weight:600;text-align:center"></div>
+  <div class="sub" id="ca"></div>
+  <div class="bar"><div class="fill" id="fill"></div></div>
+  <div class="sub" id="progressText"></div>
+  <div id="stats" style="margin-top:8px"></div>
+  <div id="creatorBox" class="sub" style="margin-top:8px;word-break:normal"></div>
+  <div id="chartBox" style="display:none;margin-top:12px">
+    <div class="chips" id="tfChips">
+      <button class="chip" data-tf="60">1m</button><button class="chip" data-tf="300">5m</button>
+      <button class="chip" data-tf="900">15m</button><button class="chip" data-tf="3600">1h</button>
+    </div>
+    <canvas id="chart" style="width:100%;height:220px;display:block;margin-top:8px"></canvas>
+    <div class="sub" id="chartNote" style="text-align:right"></div>
+  </div>
+
+  <div id="tradeBox" style="display:none">
+    <div class="tabs">
+      <button class="tab on" id="tabBuy">Buy</button>
+      <button class="tab" id="tabSell">Sell</button>
+    </div>
+    <div id="buyBox">
+      <input id="buyAmt" type="text" inputmode="decimal" placeholder="Amount">
+      <div class="chips" id="buyChips"></div>
+      <div class="quote" id="buyQuote"></div>
+    </div>
+    <div id="sellBox" style="display:none">
+      <div class="sub" id="myBal" style="margin-top:10px"></div>
+      <div class="chips">
+        <button class="chip" data-pct="25">25%</button>
+        <button class="chip" data-pct="50">50%</button>
+        <button class="chip" data-pct="75">75%</button>
+        <button class="chip" data-pct="100">100%</button>
+      </div>
+      <div class="quote" id="sellQuote"></div>
+    </div>
+    <button id="connectBtn" class="primary">Connect wallet</button>
+    <button id="actBtn" class="primary" style="display:none">Buy</button>
+  </div>
+  <div id="walletChoices" style="display:none;margin-top:8px">
+    <div class="sub" style="text-align:center">Open this page in your wallet app:</div>
+    <button class="chip" style="width:100%;margin-top:8px;background:#111;color:#fff" data-wallet="metamask">MetaMask</button>
+    <button class="chip" style="width:100%;margin-top:8px;background:#111;color:#fff" data-wallet="trust">Trust Wallet</button>
+    <button class="chip" style="width:100%;margin-top:8px;background:#111;color:#fff" data-wallet="coinbase">Coinbase Wallet</button>
+    <button class="chip" style="width:100%;margin-top:8px;background:#111;color:#fff" data-wallet="okx">OKX Wallet</button>
+  </div>
+  <div id="dexBox" style="display:none"></div>
+  <div id="status"></div>
+  <div id="tradesBox" style="display:none;margin-top:14px">
+    <div style="font-weight:600;margin-bottom:4px">Recent trades</div>
+    <div id="tradesList"></div>
+  </div>
+
+<script type="module">
+  const tg = window.Telegram?.WebApp;
+  tg?.ready(); tg?.expand();
+
+  const q = new URLSearchParams(location.search);
+  const NETWORKS = {
+    base: { id: 8453, name: 'Base', sym: 'ETH', rpc: 'https://mainnet.base.org', explorer: 'https://basescan.org', trustCoin: 8453,
+            dex: (t) => `https://app.uniswap.org/swap?chain=base&outputCurrency=${t}`, dexName: 'Uniswap', presets: ['0.001', '0.005', '0.01', '0.05'] },
+    bsc: { id: 56, name: 'BNB Chain', sym: 'BNB', rpc: 'https://bsc-dataseed.binance.org', explorer: 'https://bscscan.com', trustCoin: 20000714,
+           dex: (t) => `https://pancakeswap.finance/swap?chain=bsc&outputCurrency=${t}`, dexName: 'PancakeSwap', presets: ['0.01', '0.05', '0.1', '0.5'] },
+  };
+  const net = NETWORKS[q.get('chain')] || null;
+  const curveAddr = (q.get('curve') || '').toLowerCase();
+  const refParam = (q.get('ref') || '').toLowerCase();
+  const SLIPPAGE_BPS = 500n; // 5%
+  const ZERO = '0x' + '0'.repeat(40);
+
+  const $ = (id) => document.getElementById(id);
+  const statusEl = $('status');
+  function showStatus(text, kind, html) {
+    statusEl.style.display = 'block';
+    if (html) statusEl.innerHTML = text; else statusEl.textContent = text;
+    statusEl.className = kind || '';
+  }
+  const isAddr = (a) => /^0x[0-9a-f]{40}$/.test(a);
+  const pad = (hex) => hex.replace(/^0x/, '').padStart(64, '0');
+  const encU = (n) => pad(BigInt(n).toString(16));
+  const encA = (a) => pad(a.toLowerCase());
+  const word = (hex, i) => BigInt('0x' + (hex.replace(/^0x/, '').slice(i * 64, i * 64 + 64) || '0'));
+  const addrWord = (hex, i) => '0x' + hex.replace(/^0x/, '').slice(i * 64 + 24, i * 64 + 64);
+  function decodeString(hex) {
+    const h = hex.replace(/^0x/, '');
+    try {
+      const off = Number(BigInt('0x' + h.slice(0, 64))) * 2;
+      const len = Number(BigInt('0x' + h.slice(off, off + 64)));
+      const bytes = h.slice(off + 64, off + 64 + len * 2).match(/../g) || [];
+      return new TextDecoder().decode(new Uint8Array(bytes.map(b => parseInt(b, 16))));
+    } catch (e) { return ''; }
+  }
+  function fmt(v, dec = 18, max = 6) {
+    const neg = v < 0n; if (neg) v = -v;
+    const base = 10n ** BigInt(dec);
+    const whole = v / base; let frac = (v % base).toString().padStart(dec, '0').slice(0, max).replace(/0+$/, '');
+    return (neg ? '-' : '') + whole.toLocaleString('en-US') + (frac ? '.' + frac : '');
+  }
+  function fmtBig(v) { // whole tokens, compact
+    const n = Number(v / 10n ** 18n);
+    if (n >= 1e9) return (n / 1e9).toFixed(2).replace(/\.?0+$/, '') + 'B';
+    if (n >= 1e6) return (n / 1e6).toFixed(2).replace(/\.?0+$/, '') + 'M';
+    if (n >= 1e3) return (n / 1e3).toFixed(2).replace(/\.?0+$/, '') + 'K';
+    return fmt(v, 18, 2);
+  }
+  function parseUnits(s) {
+    s = String(s || '').trim().replace(/,/g, '');
+    if (!/^\d*\.?\d+$/.test(s)) return 0n;
+    const [w, f = ''] = s.split('.');
+    return BigInt(w || '0') * 10n ** 18n + BigInt((f + '0'.repeat(18)).slice(0, 18));
+  }
+
+  async function rpc(method, params) {
+    const r = await fetch(net.rpc, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }) });
+    const j = await r.json();
+    if (j.error) throw new Error(j.error.message || 'rpc error');
+    return j.result;
+  }
+  const call = (to, data) => rpc('eth_call', [{ to, data }, 'latest']);
+
+  let S = {}; // curve state
+  let provider = null, account = '', mode = 'buy', sellAmount = 0n;
+
+  async function load() {
+    if (!net || !isAddr(curveAddr)) { $('title').textContent = 'Invalid link'; return; }
+    const [tok, grad, real, sold, gradd, start, maxb, er, tr, supplyC] = await Promise.all([
+      call(curveAddr, '0xfc0c546a'), call(curveAddr, '0x9a3a8ee1'), call(curveAddr, '0x7a2a2a2b'),
+      call(curveAddr, '0x518ab2a8'), call(curveAddr, '0xe7c2b772'), call(curveAddr, '0x78e97925'),
+      call(curveAddr, '0x8cadf61d'), call(curveAddr, '0xd62ccb3f'), call(curveAddr, '0xcbcb3171'),
+      call(curveAddr, '0x2138a4c0'),
+    ]);
+    S.token = addrWord(tok, 0);
+    S.grad = word(grad, 0); S.real = word(real, 0); S.sold = word(sold, 0);
+    S.graduated = word(gradd, 0) === 1n; S.start = Number(word(start, 0)); S.maxBuy = word(maxb, 0);
+    S.ethRes = word(er, 0); S.tokRes = word(tr, 0); S.curveSupply = word(supplyC, 0);
+    if (!S.name) {
+      const [nm, sy, ts] = await Promise.all([call(S.token, '0x06fdde03'), call(S.token, '0x95d89b41'), call(S.token, '0x18160ddd')]);
+      S.name = decodeString(nm); S.symbol = decodeString(sy); S.totalSupply = word(ts, 0);
+    }
+    render();
+    if (account) await loadMine();
+  }
+
+  function render() {
+    $('title').textContent = `${S.name} ($${S.symbol})`;
+    $('ca').innerHTML = `CA: <a href="${net.explorer}/token/${S.token}" target="_blank" rel="noopener">${S.token}</a> · ${net.name}`;
+    const pct = S.graduated ? 100 : Number((S.real * 10000n) / S.grad) / 100;
+    $('fill').style.width = pct + '%';
+    $('progressText').textContent = S.graduated
+      ? `🎓 Graduated — trading on ${net.dexName}`
+      : `${pct.toFixed(2)}% to graduation · ${fmt(S.real, 18, 4)} / ${fmt(S.grad, 18, 4)} ${net.sym}`;
+    const price = S.tokRes > 0n ? (S.ethRes * 10n ** 18n) / S.tokRes : 0n; // wei per whole token
+    const mcap = (price * S.totalSupply) / 10n ** 18n;
+    const rows = [
+      ['Price', `${fmt(price, 18, 12)} ${net.sym}`],
+      ['Market cap', `${fmt(mcap, 18, 3)} ${net.sym}`],
+      ['Sold on curve', `${fmtBig(S.sold)} of ${fmtBig((S.curveSupply * 8000n) / 10000n)}`],
+      ['Trading fee', '1% (half to the creator)'],
+    ];
+    if (S.maxBuy > 0n && !S.graduated) rows.push(['Max buy', `${fmt(S.maxBuy)} ${net.sym} per wallet`]);
+    const now = Date.now() / 1000;
+    if (!S.graduated && S.start > now) rows.push(['Opens', new Date(S.start * 1000).toLocaleString([], { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })]);
+    tick();
+    $('stats').innerHTML = rows.map(([k, v]) => `<div class="row"><span>${k}</span><b>${v}</b></div>`).join('');
+    if (S.graduated) {
+      $('tradeBox').style.display = 'none';
+      $('dexBox').style.display = 'block';
+      $('dexBox').innerHTML = `<a href="${net.dex(S.token)}" target="_blank" rel="noopener"><button class="primary">Trade on ${net.dexName}</button></a>`;
+    } else {
+      $('tradeBox').style.display = 'block';
+    }
+  }
+
+  // ------------------------------------------------------------ wallet
+  const announced = [];
+  window.addEventListener('eip6963:announceProvider', (e) => { if (e?.detail?.provider) announced.push(e.detail); });
+  window.dispatchEvent(new Event('eip6963:requestProvider'));
+  async function findProvider() {
+    await new Promise(r => setTimeout(r, 300));
+    if (announced.length) return announced[0].provider;
+    return window.ethereum || window.okxwallet || null;
+  }
+  function walletLink(id) {
+    const url = location.href, u = encodeURIComponent(url);
+    return {
+      metamask: 'https://metamask.app.link/dapp/' + url.replace(/^https?:\/\//, ''),
+      trust: `https://link.trustwallet.com/open_url?coin_id=${net.trustCoin}&url=${u}`,
+      coinbase: `https://go.cb-w.com/dapp?cb_url=${u}`,
+      okx: 'https://web3.okx.com/download?deeplink=' + encodeURIComponent('okx://wallet/dapp/url?dappUrl=' + u),
+    }[id];
+  }
+  document.querySelectorAll('[data-wallet]').forEach(b => b.addEventListener('click', () => {
+    const l = walletLink(b.dataset.wallet); if (tg?.openLink) tg.openLink(l); else window.open(l, '_blank');
+  }));
+  async function ensureNetwork() {
+    const onNet = async () => { try { return Number(BigInt(await provider.request({ method: 'eth_chainId' }))) === net.id; } catch (e) { return false; } };
+    if (await onNet()) return;
+    const want = '0x' + net.id.toString(16);
+    try {
+      await provider.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: want }] });
+    } catch (e) {
+      if (e?.code === 4902) {
+        await provider.request({ method: 'wallet_addEthereumChain', params: [{ chainId: want, chainName: net.name, rpcUrls: [net.rpc],
+          nativeCurrency: { name: net.sym, symbol: net.sym, decimals: 18 }, blockExplorerUrls: [net.explorer] }] });
+      }
+    }
+    for (let i = 0; i < 16; i++) { if (await onNet()) return; await new Promise(r => setTimeout(r, 500)); }
+    throw new Error(`switch your wallet to ${net.name}, then try again`);
+  }
+  $('connectBtn').addEventListener('click', async () => {
+    try {
+      provider = await findProvider();
+      if (!provider) { $('walletChoices').style.display = 'block'; showStatus('Pick your wallet — this page opens inside its app.', 'hint'); return; }
+      const accts = await provider.request({ method: 'eth_requestAccounts' });
+      account = String(accts?.[0] || '').toLowerCase();
+      if (!account) throw new Error('no address shared');
+      await ensureNetwork();
+      $('connectBtn').style.display = 'none';
+      $('actBtn').style.display = 'block';
+      statusEl.style.display = 'none';
+      await loadMine();
+    } catch (e) { showStatus('Wallet: ' + (e?.message || e), 'error'); }
+  });
+
+  async function loadMine() {
+    const [bal, lock, nat] = await Promise.all([
+      call(S.token, '0x70a08231' + encA(account)), call(S.token, '0x1ef4cb94' + encA(account)),
+      rpc('eth_getBalance', [account, 'latest']),
+    ]);
+    S.myBal = word(bal, 0); S.myLocked = word(lock, 0); S.myNative = BigInt(nat);
+    S.mySellable = S.myBal > S.myLocked ? S.myBal - S.myLocked : 0n;
+    $('myBal').textContent = `You hold ${fmtBig(S.myBal)} ${S.symbol}` + (S.myLocked > 0n ? ` (${fmtBig(S.myLocked)} team tokens locked until graduation)` : '');
+  }
+
+  // ------------------------------------------------------------- trade UI
+  function setMode(m) {
+    mode = m;
+    $('tabBuy').classList.toggle('on', m === 'buy'); $('tabSell').classList.toggle('on', m === 'sell');
+    $('buyBox').style.display = m === 'buy' ? 'block' : 'none';
+    $('sellBox').style.display = m === 'sell' ? 'block' : 'none';
+    $('actBtn').textContent = m === 'buy' ? 'Buy' : 'Sell';
+    $('actBtn').className = m === 'buy' ? 'primary' : 'sell';
+  }
+  $('tabBuy').onclick = () => setMode('buy');
+  $('tabSell').onclick = () => setMode('sell');
+  if (net) $('buyChips').innerHTML = net.presets.map(p => `<button class="chip" data-amt="${p}">${p} ${net.sym}</button>`).join('');
+  $('buyChips').addEventListener('click', (e) => { const a = e.target?.dataset?.amt; if (a) { $('buyAmt').value = a; quoteBuy(); } });
+  $('buyAmt').addEventListener('input', () => quoteBuy());
+  document.querySelectorAll('[data-pct]').forEach(b => b.addEventListener('click', () => {
+    if (!account) { showStatus('Connect your wallet first.', 'hint'); return; }
+    sellAmount = (S.mySellable * BigInt(b.dataset.pct)) / 100n;
+    quoteSell();
+  }));
+
+  async function quoteBuy() {
+    const v = parseUnits($('buyAmt').value);
+    if (v <= 0n) { $('buyQuote').textContent = ''; return null; }
+    try {
+      const r = await call(curveAddr, '0x4beb394c' + encU(v));
+      const out = word(r, 0), used = word(r, 1), refund = word(r, 2);
+      $('buyQuote').textContent = `≈ ${fmtBig(out)} ${S.symbol}` + (refund > 0n ? ` · completes the curve, ${fmt(refund)} ${net.sym} refunded` : '');
+      return { v, out, used };
+    } catch (e) { $('buyQuote').textContent = 'Quote unavailable'; return null; }
+  }
+  async function quoteSell() {
+    if (sellAmount <= 0n) { $('sellQuote').textContent = 'Nothing to sell.'; return null; }
+    try {
+      const r = await call(curveAddr, '0xa64190c4' + encU(sellAmount));
+      const out = word(r, 0);
+      $('sellQuote').textContent = `Sell ${fmtBig(sellAmount)} ${S.symbol} → ≈ ${fmt(out)} ${net.sym}`;
+      return { out };
+    } catch (e) { $('sellQuote').textContent = 'Quote unavailable'; return null; }
+  }
+
+  async function waitTx(hash) {
+    for (let i = 0; i < 60; i++) {
+      await new Promise(r => setTimeout(r, 2000));
+      let rc = null;
+      try { rc = await provider.request({ method: 'eth_getTransactionReceipt', params: [hash] }); } catch (e) {}
+      if (!rc) { try { rc = await rpc('eth_getTransactionReceipt', [hash]); } catch (e) {} }
+      if (rc) {
+        if (String(rc.status) !== '0x1' && String(rc.status) !== '1') throw new Error('the transaction failed on-chain');
+        return rc;
+      }
+    }
+    throw new Error('not confirmed yet — check the transaction');
+  }
+  const link = (h) => `<a href="${net.explorer}/tx/${h}" target="_blank" rel="noopener">View transaction</a>`;
+
+  $('actBtn').addEventListener('click', async () => {
+    const btn = $('actBtn'); btn.disabled = true;
+    try {
+      await ensureNetwork();
+      await load();
+      if (S.graduated) throw new Error(`this curve graduated — trade it on ${net.dexName}`);
+      const ref = isAddr(refParam) && refParam !== account ? refParam : ZERO;
+      if (mode === 'buy') {
+        const qb = await quoteBuy();
+        if (!qb) throw new Error('enter an amount');
+        if (qb.v > S.myNative) throw new Error(`not enough ${net.sym} in this wallet`);
+        const minOut = (qb.out * (10000n - SLIPPAGE_BPS)) / 10000n;
+        const data = '0x7deb6025' + encU(minOut) + encA(ref);
+        showStatus('Approve the buy in your wallet…', 'hint');
+        const hash = await provider.request({ method: 'eth_sendTransaction', params: [{ from: account, to: curveAddr, data, value: '0x' + qb.v.toString(16) }] });
+        showStatus(`Buying… ${link(hash)}`, 'hint', true);
+        await waitTx(hash);
+        await load();
+        showStatus(`✅ Bought ${S.symbol}! ${link(hash)}`, 'success', true);
+      } else {
+        if (sellAmount <= 0n) throw new Error('pick how much to sell');
+        const alw = word(await call(S.token, '0xdd62ed3e' + encA(account) + encA(curveAddr)), 0);
+        if (alw < sellAmount) {
+          showStatus('Step 1/2: approve the curve to take your tokens…', 'hint');
+          const ah = await provider.request({ method: 'eth_sendTransaction', params: [{ from: account, to: S.token,
+            data: '0x095ea7b3' + encA(curveAddr) + encU(sellAmount) }] });
+          await waitTx(ah);
+        }
+        const qs = await quoteSell();
+        if (!qs) throw new Error('could not get a quote');
+        const minOut = (qs.out * (10000n - SLIPPAGE_BPS)) / 10000n;
+        showStatus('Approve the sell in your wallet…', 'hint');
+        const hash = await provider.request({ method: 'eth_sendTransaction', params: [{ from: account, to: curveAddr,
+          data: '0xd04c6983' + encU(sellAmount) + encU(minOut) + encA(ref) }] });
+        showStatus(`Selling… ${link(hash)}`, 'hint', true);
+        await waitTx(hash);
+        sellAmount = 0n;
+        $('sellQuote').textContent = '';
+        await load();
+        showStatus(`✅ Sold! ${link(hash)}`, 'success', true);
+      }
+    } catch (e) {
+      const m = e?.code === 4001 ? 'you rejected it in your wallet' : (e?.message || String(e));
+      showStatus('Failed: ' + m.replace(/execution reverted:?\s*/i, ''), 'error');
+    } finally { btn.disabled = false; tick(); }
+  });
+
+  load().catch(e => { $('title').textContent = 'Could not load this curve'; showStatus(String(e?.message || e), 'error'); });
+  setInterval(() => { if (net && isAddr(curveAddr)) load().catch(() => {}); }, 15000);
+
+  // ---- logo / description / links from the launch record
+  async function loadInfo() {
+    try {
+      const r = await fetch(new URL('/api/curve-info/' + curveAddr, location.origin));
+      if (!r.ok) return;
+      const info = await r.json();
+      if (info.image && /^https:\/\//.test(info.image)) { const im = $('logo'); im.src = info.image; im.style.display = 'block'; }
+      if (info.description) $('desc').textContent = info.description;
+      const links = [['website', 'Website'], ['x', 'X'], ['telegram', 'Telegram']]
+        .filter(([k]) => /^https:\/\//.test(info[k] || ''))
+        .map(([k, n]) => { const a = document.createElement('a'); a.href = info[k]; a.target = '_blank'; a.rel = 'noopener'; a.textContent = n; a.style.marginRight = '12px'; return a; });
+      $('links').replaceChildren(...links);
+    } catch (e) {}
+  }
+  if (net && isAddr(curveAddr)) loadInfo();
+
+  // ---- countdown until trading opens
+  let wasClosed = false;
+  function tick() {
+    const box = $('countdown'), btn = $('actBtn');
+    const left = Math.floor((S.start || 0) - Date.now() / 1000);
+    if (!S.graduated && left > 0) {
+      const d = Math.floor(left / 86400), h = Math.floor(left % 86400 / 3600), m = Math.floor(left % 3600 / 60), sec = left % 60;
+      const txt = (d ? d + 'd ' : '') + (d || h ? h + 'h ' : '') + m + 'm ' + String(sec).padStart(2, '0') + 's';
+      box.textContent = '⏳ Trading opens in ' + txt;
+      box.style.display = 'block';
+      btn.disabled = true;
+      btn.dataset.closed = '1';
+      wasClosed = true;
+    } else {
+      box.style.display = 'none';
+      if (btn.dataset.closed) { delete btn.dataset.closed; btn.disabled = false; }
+      if (wasClosed) { wasClosed = false; load().catch(() => {}); }
+    }
+  }
+  setInterval(tick, 1000);
+
+  // ---- price chart, recent trades and creator record (from the Ferzan curve index)
+  let TF = 300, CH = null;
+  const cssVar = (n, d) => getComputedStyle(document.body).getPropertyValue(n).trim() || d;
+  const compact = (v) => {
+    const a = Math.abs(v);
+    if (a >= 1e9) return (v / 1e9).toFixed(2) + 'B';
+    if (a >= 1e6) return (v / 1e6).toFixed(2) + 'M';
+    if (a >= 1e3) return (v / 1e3).toFixed(1) + 'K';
+    if (a >= 1) return v.toFixed(2);
+    return v.toPrecision(3);
+  };
+  const ago = (ts) => {
+    const s = Math.max(0, Math.floor(Date.now() / 1000 - ts));
+    return s < 60 ? s + 's' : s < 3600 ? Math.floor(s / 60) + 'm' : s < 86400 ? Math.floor(s / 3600) + 'h' : Math.floor(s / 86400) + 'd';
+  };
+  const shortA = (a) => a ? a.slice(0, 6) + '…' + a.slice(-4) : '';
+  const escH = (t) => String(t ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+  function drawChart() {
+    const cv = $('chart');
+    if (!CH || !CH.candles?.length) return;
+    const dpr = window.devicePixelRatio || 1, W = cv.clientWidth, H = cv.clientHeight;
+    cv.width = W * dpr; cv.height = H * dpr;
+    const g = cv.getContext('2d');
+    g.scale(dpr, dpr);
+    const usd = CH.native_usd > 0, mult = CH.supply * (usd ? CH.native_usd : 1);
+    // fill quiet intervals with flat candles so time runs evenly, newest on the right
+    const slots = Math.max(24, Math.floor((W - 56) / 8)), byT = new Map(CH.candles.map(k => [k[0], k]));
+    const nowB = Math.floor(Date.now() / 1000 / CH.tf) * CH.tf, firstB = CH.candles[0][0];
+    let last = CH.candles[0][1];
+    const ks = [];
+    for (let t = Math.max(firstB, nowB - (slots - 1) * CH.tf); t <= Math.max(nowB, CH.candles[CH.candles.length - 1][0]); t += CH.tf) {
+      const k = byT.get(t);
+      if (k) { ks.push(k); last = k[4]; } else {
+        const prev = CH.candles.filter(c => c[0] < t).pop();
+        if (prev) last = prev[4];
+        ks.push([t, last, last, last, last, 0]);
+      }
+    }
+    let lo = Infinity, hi = -Infinity;
+    for (const k of ks) { lo = Math.min(lo, k[3]); hi = Math.max(hi, k[2]); }
+    if (hi <= lo) { hi = lo * 1.05 || 1; lo = lo * 0.95; }
+    const pad = (hi - lo) * 0.08; lo -= pad; hi += pad;
+    const plotW = W - 56, y = (v) => 8 + (H - 24) * (1 - (v - lo) / (hi - lo));
+    const ink = cssVar('--tg-theme-hint-color', '#8a8a8a');
+    g.font = '11px -apple-system, sans-serif'; g.fillStyle = ink; g.strokeStyle = 'rgba(128,128,128,.18)'; g.lineWidth = 1;
+    for (let i = 0; i <= 3; i++) {
+      const v = lo + (hi - lo) * i / 3, yy = Math.round(y(v)) + .5;
+      g.beginPath(); g.moveTo(0, yy); g.lineTo(plotW, yy); g.stroke();
+      g.fillText((usd ? '$' : '') + compact(v * mult), plotW + 6, yy + 4);
+    }
+    const step = plotW / slots, bw = Math.max(2, Math.min(9, step * 0.7)), off = slots - ks.length;
+    ks.forEach((k, i) => {
+      const x = (i + off) * step + step / 2, up = k[4] >= k[1];
+      g.strokeStyle = g.fillStyle = up ? '#16a34a' : '#dc2626';
+      g.beginPath(); g.moveTo(Math.round(x) + .5, y(k[2])); g.lineTo(Math.round(x) + .5, y(k[3])); g.stroke();
+      const top = y(Math.max(k[1], k[4])), h = Math.max(1.5, Math.abs(y(k[1]) - y(k[4])));
+      g.fillRect(x - bw / 2, top, bw, h);
+    });
+    g.fillStyle = ink;
+    const t0 = new Date(ks[0][0] * 1000), t1 = new Date(ks[ks.length - 1][0] * 1000);
+    const f = (d) => d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    const t0s = f(t0), t1s = f(t1), w1 = g.measureText(t1s).width;
+    g.fillText(t1s, plotW - w1 - 2, H - 3);
+    if (off * step + g.measureText(t0s).width + 12 < plotW - w1) g.fillText(t0s, off * step + 2, H - 3);
+    $('chartNote').textContent = usd ? 'Market cap (USD)' : `Market cap (${CH.native})`;
+  }
+
+  function renderTrades() {
+    const list = (CH?.trades || []).slice(0, 15);
+    $('tradesBox').style.display = list.length ? 'block' : 'none';
+    $('tradesList').innerHTML = list.map(t =>
+      `<div class="row"><span style="color:${t.buy ? '#16a34a' : '#dc2626'};font-weight:600;min-width:34px">${t.buy ? 'Buy' : 'Sell'}</span>` +
+      `<span style="flex:1">${compact(t.native)} ${escH(CH.native)}</span>` +
+      `<a href="${net.explorer}/tx/${escH(t.tx)}" target="_blank" rel="noopener" style="color:inherit;opacity:.7">${escH(shortA(t.trader))} · ${ago(t.ts)}</a></div>`
+    ).join('');
+  }
+
+  function renderCreator() {
+    if (!CH?.creator) return;
+    const st = CH.creator_stats || {};
+    const n = st.launches || 0, gr = st.graduated || 0;
+    const record = n > 1 ? ` · ${n} launches · ${gr} graduated` : ' · first launch';
+    $('creatorBox').innerHTML = `👤 Creator <a href="${net.explorer}/address/${escH(CH.creator)}" target="_blank" rel="noopener">${escH(shortA(CH.creator))}</a>${record}`;
+  }
+
+  async function loadChart() {
+    try {
+      const r = await fetch(new URL(`/api/curve-chart/${curveAddr}?tf=${TF}`, location.origin));
+      if (!r.ok) return;
+      const d = await r.json();
+      if (!d.indexed) return;
+      CH = d;
+      $('chartBox').style.display = 'block';
+      document.querySelectorAll('#tfChips .chip').forEach(b => { const on = Number(b.dataset.tf) === TF; b.style.background = on ? '#111' : ''; b.style.color = on ? '#fff' : ''; });
+      drawChart(); renderTrades(); renderCreator();
+    } catch (e) {}
+  }
+  document.querySelectorAll('#tfChips .chip').forEach(b => b.addEventListener('click', () => { TF = Number(b.dataset.tf); loadChart(); }));
+  window.addEventListener('resize', drawChart);
+  if (net && isAddr(curveAddr)) { loadChart(); setInterval(loadChart, 15000); }
+</script>
+</body>
+</html>

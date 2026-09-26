@@ -81,7 +81,13 @@ def build_unsigned_meteora_tx(
         raise _fail("Solana bonding-curve launches aren't set up yet (METEORA_CONFIG missing).")
     if not HELPER.exists():
         raise _fail("Launch helper missing (dbc/build_launch.mjs).")
+    try:  # branded mint address from the pre-ground pool, else build_launch.mjs makes one
+        from vanity import sol_take_mint
+        _mint_secret = sol_take_mint()
+    except Exception:
+        _mint_secret = None
     payload = {
+        "mintSecret": _mint_secret,
         "creator": creator_pubkey,
         "name": name,
         "symbol": symbol,

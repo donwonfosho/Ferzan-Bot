@@ -14,7 +14,9 @@ try {
     const client = new DynamicBondingCurveClient(conn, 'confirmed')
     const creator = new PublicKey(inp.creator)
     const config = new PublicKey(inp.config)
-    const baseMint = Keypair.generate()
+    const baseMint = Array.isArray(inp.mintSecret) && inp.mintSecret.length === 64
+        ? Keypair.fromSecretKey(Uint8Array.from(inp.mintSecret))
+        : Keypair.generate()
     const devBuy = new BN(String(Math.max(0, Math.floor(Number(inp.devBuyLamports || 0)))))
     const fee = Math.max(0, Math.floor(Number(inp.feeLamports || 0)))
     const RENT = 30_000_000 // ~0.03 SOL: new token + pool accounts + network fees

@@ -9,12 +9,18 @@
   body { font-family: -apple-system, sans-serif; background: var(--tg-theme-bg-color, #fff);
          color: var(--tg-theme-text-color, #000); padding: 16px; margin: 0; }
   button { width: 100%; padding: 14px; font-size: 16px; border-radius: 10px; border: none;
-            margin-top: 12px; cursor: pointer; }
+           margin-top: 12px; cursor: pointer; }
+  button:disabled { opacity: .55; cursor: default; }
   .primary { background: var(--tg-theme-button-color, #2481cc); color: var(--tg-theme-button-text-color, #fff); }
-  #status { margin-top: 16px; padding: 12px; border-radius: 8px; background: #f5f5f5; font-size: 14px; }
-  .error { background: #fde8e8 !important; color: #a00; }
-  .success { background: #e6f7e6 !important; color: #060; }
-  .detail-row { display: flex; justify-content: space-between; padding: 6px 0; font-size: 14px; border-bottom: 1px solid #eee; }
+  .wallet-btn { background:#111; color:#fff; font-weight:600; margin-top:8px; }
+  #status { margin-top: 16px; padding: 12px; border-radius: 8px; background: #f5f5f5; color:#111; font-size: 14px; line-height:1.4; word-break: break-word; }
+  #status a { color: inherit; font-weight: 600; }
+  .error { background: #fde8e8 !important; color: #a00 !important; }
+  .success { background: #e6f7e6 !important; color: #060 !important; }
+  .hint { background:#eef4fb !important; color:#1a5591 !important; }
+  .detail-row { display: flex; justify-content: space-between; gap: 12px; padding: 6px 0; font-size: 14px; border-bottom: 1px solid #eee; }
+  .detail-row b { text-align: right; }
+  #walletChoices .sub { font-size: 13px; color: #888; margin: 10px 0 2px; text-align:center; }
 </style>
 </head>
 <body>
@@ -22,36 +28,17 @@
   <div id="details">Loading launch details...</div>
   <div id="status" style="display:none"></div>
   <button id="connectBtn" class="primary" style="display:none">Connect Wallet</button>
-  <div id="walletChoices" style="display:none;margin-top:12px"><button id="metamaskBtn" class="primary" style="background:#f6851b">Open in MetaMask</button><button id="trustBtn" class="primary" style="background:#3375bb">Open in Trust Wallet</button><button id="coinbaseBtn" class="primary" style="background:#0052ff">Open in Coinbase Wallet</button></div>
-  <button id="browserBtn" class="primary" style="display:none;background:#111">Open in Safari / Chrome</button>
+  <div id="walletChoices" style="display:none;margin-top:8px">
+    <div class="sub">Open this launch in your wallet app:</div>
+    <button class="wallet-btn" data-wallet="metamask">MetaMask</button>
+    <button class="wallet-btn" data-wallet="trust">Trust Wallet</button>
+    <button class="wallet-btn" data-wallet="coinbase">Coinbase Wallet</button>
+    <button class="wallet-btn" data-wallet="okx">OKX Wallet</button>
+    <button class="wallet-btn" data-wallet="browser" style="background:#444">Open in Safari / Chrome</button>
+  </div>
   <button id="signBtn" class="primary" style="display:none">Review & Sign Transaction</button>
 
 <script type="module">
-  /*
-    ============================================================
-    CONFIDENCE NOTE (updated after verifying against Reown's live docs)
-    ============================================================
-    This rewrite follows the ACTUAL current example code from
-    docs.reown.com (found via search during development, not assumed) --
-    createAppKit + WagmiAdapter is Reown's own documented "quick
-    integration" path, meaningfully more likely to be correct than a
-    guessed Ethers-adapter approach. Still genuinely untested: no
-    browser, no real wallet, no real RPC endpoint touched this code.
-    Test against a real Reown Project ID and a real testnet wallet
-    before trusting any of it.
-
-    TESTNET config below -- Sepolia / BSC testnet / Base Sepolia.
-    Robinhood Chain testnet needs a CUSTOM network definition since it
-    won't be in @reown/appkit/networks' predefined list (too new) --
-    see the robinhoodTestnet object below, built with viem's defineChain
-    per Reown's documented "custom networks" pattern. Confirm the RPC
-    URL and chain ID against docs.robinhood.com/chain before relying on it.
-  */
-
-  import { mainnet, bsc, base } from 'https://esm.sh/viem@2/chains?bundle';
-  import { defineChain } from 'https://esm.sh/viem@2?bundle';
-  import { createConfig, http, injected, connect, getAccount, sendTransaction } from 'https://esm.sh/@wagmi/core@2?bundle';
-
   const tg = window.Telegram?.WebApp;
   tg?.ready();
   tg?.expand();
@@ -64,250 +51,266 @@
   const statusEl = document.getElementById('status');
   const connectBtn = document.getElementById('connectBtn');
   const signBtn = document.getElementById('signBtn');
+  const walletChoices = document.getElementById('walletChoices');
 
-  const PROJECT_ID = 'b38b9588c0f613335d830056007e771e';
-
-  // Custom network definition for Robinhood Chain testnet -- verified
-  // chain ID (46630) during project research; confirm RPC URL is still
-  // current before use.
-  const robinhoodMainnet = defineChain({
-    id: 4663,
-    name: 'Robinhood Chain',
-    nativeCurrency: { name: 'ETH', symbol: 'ETH', decimals: 18 },
-    rpcUrls: { default: { http: ['https://rpc.mainnet.chain.robinhood.com'] } },
-  });
-
-  const CHAIN_NETWORK_MAP = {
-    ethereum: mainnet,
-    bsc: bsc,
-    base: base,
-    robinhood: robinhoodMainnet,
+  // Networks the Launch Bot supports, in the wallet's own format.
+  const NETWORKS = {
+    base:      { id: 8453, name: 'Base', sym: 'ETH', rpc: 'https://mainnet.base.org', explorer: 'https://basescan.org', trustCoin: 8453 },
+    bsc:       { id: 56, name: 'BNB Chain', sym: 'BNB', rpc: 'https://bsc-dataseed.binance.org', explorer: 'https://bscscan.com', trustCoin: 20000714 },
+    ethereum:  { id: 1, name: 'Ethereum', sym: 'ETH', rpc: 'https://ethereum.publicnode.com', explorer: 'https://etherscan.io', trustCoin: 60 },
+    robinhood: { id: 4663, name: 'Robinhood Chain', sym: 'ETH', rpc: 'https://rpc.mainnet.chain.robinhood.com', explorer: '', trustCoin: 60 },
   };
+  // Event ids used to find the new token in the receipt.
+  const TOKEN_TOPIC = '0x1a8ab442384acdb09c73bc5f71549c099dad32203f07e1655e0ebce05831f749';
+  const TRANSFER_TOPIC = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
+  const ZERO_TOPIC = '0x' + '0'.repeat(64);
 
-  let launchRequest = null;
-  let wagmiConfigInstance = null;
+  let launchReq = null;
+  let net = null;
+  let provider = null;
+  let account = '';
 
-  function showStatus(text, kind) {
+  function showStatus(text, kind, html) {
     statusEl.style.display = 'block';
-    statusEl.textContent = text;
+    if (html) statusEl.innerHTML = text; else statusEl.textContent = text;
     statusEl.className = kind || '';
   }
+  function txLink(hash) { return net?.explorer ? `${net.explorer}/tx/${hash}` : ''; }
+  function linkHtml(hash, label) {
+    const u = txLink(hash);
+    return u ? `<a href="${u}" target="_blank" rel="noopener">${label}</a>` : hash;
+  }
+  const hex = (n) => '0x' + BigInt(n).toString(16);
+  function fmtSupply(raw, dec) {
+    try {
+      const d = BigInt(dec || 0), v = BigInt(String(raw));
+      const whole = (d > 0n && v % (10n ** d) === 0n) ? v / (10n ** d) : v;
+      return whole.toLocaleString('en-US');
+    } catch (e) { return String(raw ?? ''); }
+  }
+  function fmtNative(wei) {
+    const s = (Number(BigInt(wei)) / 1e18).toFixed(6).replace(/\.?0+$/, '');
+    return `${s || '0'} ${net?.sym || ''}`;
+  }
 
+  // ---------- find a wallet inside this page (EIP-6963, then window.ethereum) ----------
+  const announced = [];
+  window.addEventListener('eip6963:announceProvider', (e) => { if (e?.detail?.provider) announced.push(e.detail); });
+  window.dispatchEvent(new Event('eip6963:requestProvider'));
+  async function findProvider() {
+    await new Promise(r => setTimeout(r, 300));
+    if (announced.length) return { p: announced[0].provider, name: announced[0].info?.name || 'Wallet' };
+    if (window.ethereum) {
+      const e = window.ethereum;
+      const name = e.isMetaMask ? 'MetaMask' : e.isTrust || e.isTrustWallet ? 'Trust Wallet' : e.isCoinbaseWallet ? 'Coinbase Wallet' : e.isOkxWallet ? 'OKX Wallet' : 'Wallet';
+      return { p: e, name };
+    }
+    if (window.okxwallet) return { p: window.okxwallet, name: 'OKX Wallet' };
+    return null;
+  }
+
+  function walletLink(id) {
+    const url = window.location.href;
+    const u = encodeURIComponent(url);
+    switch (id) {
+      case 'metamask': return 'https://metamask.app.link/dapp/' + url.replace(/^https?:\/\//, '');
+      case 'trust': return `https://link.trustwallet.com/open_url?coin_id=${net?.trustCoin || 60}&url=${u}`;
+      case 'coinbase': return `https://go.cb-w.com/dapp?cb_url=${u}`;
+      case 'okx': return 'https://web3.okx.com/download?deeplink=' + encodeURIComponent('okx://wallet/dapp/url?dappUrl=' + u);
+      case 'browser': return url;
+    }
+    return null;
+  }
+  walletChoices.querySelectorAll('[data-wallet]').forEach(btn => btn.addEventListener('click', () => {
+    const link = walletLink(btn.dataset.wallet);
+    if (link) { if (tg?.openLink) tg.openLink(link); else window.open(link, '_blank'); }
+  }));
+  function showWalletChoices() {
+    showStatus('Choose your wallet — this launch opens inside that wallet’s app so it can sign.', 'hint');
+    walletChoices.style.display = 'block';
+  }
+
+  // ---------- review screen ----------
   async function loadRequest() {
-    if (!requestId) {
-      detailsEl.textContent = 'Missing request ID -- open this from the bot, not directly.';
-      return;
-    }
+    if (!requestId) { detailsEl.textContent = 'Missing request ID -- open this from the bot, not directly.'; return; }
     const res = await fetch(`${API_BASE}/launch-requests/${requestId}`);
-    if (!res.ok) {
-      detailsEl.textContent = 'Could not load launch details (may have expired).';
-      return;
-    }
-    launchRequest = await res.json();
-    const extra = launchRequest.extra_params || {};
+    if (!res.ok) { detailsEl.textContent = 'Could not load launch details (may have expired).'; return; }
+    launchReq = await res.json();
+    net = NETWORKS[launchReq.chain] || null;
+    const extra = launchReq.extra_params || {};
+    const curve = launchReq.mode === 'bonding_curve';
     const rows = [
-      ['Name', launchRequest.name],
-      ['Symbol', launchRequest.symbol],
-      ['Chain', launchRequest.chain],
-      ['Mode', launchRequest.mode],
-      ['Supply', launchRequest.supply_display || launchRequest.total_supply],
+      ['Name', launchReq.name],
+      ['Symbol', launchReq.symbol],
+      ['Chain', net ? net.name : launchReq.chain],
+      ['Mode', curve ? 'Bonding curve' : 'Standard token'],
+      ['Supply', launchReq.supply_display || fmtSupply(launchReq.total_supply, launchReq.decimals)],
     ];
-    if (extra.allocs) rows.push(['Team wallets', extra.allocs]);
-    if (extra.dev_buy && extra.dev_buy !== '0') rows.push(['Dev buy', extra.dev_buy]);
-    if (extra.start_minutes && extra.start_minutes !== '0') rows.push(['Opens in', extra.start_minutes + ' min']);
-    if (extra.max_buy && extra.max_buy !== '0') rows.push(['Max buy / wallet', extra.max_buy]);
-    if (extra.graduation_eth_threshold) rows.push(['Graduate at', extra.graduation_eth_threshold]);
-    rows.push(['Fee', extra.dev_buy && extra.dev_buy !== '0' ? 'launch fee + dev buy in tx value' : 'platform launch fee in tx value']);
-    detailsEl.innerHTML = rows.map(([k,v]) =>
-      `<div class="detail-row"><span>${k}</span><b>${String(v ?? '').slice(0,80)}</b></div>`
-    ).join('');
-    connectBtn.style.display = 'block';
-    document.getElementById('browserBtn').style.display = 'block';
-    try { initWagmi(); document.getElementById('walletChoices').style.display = 'block'; } catch (e) {
-      showStatus('Wallet kit failed to start: ' + e.message, 'error');
+    if (extra.allocs_display || extra.allocs) rows.push(['Team wallets', extra.allocs_display || extra.allocs]);
+    const sym = net ? net.sym : '';
+    if (curve) {
+      if (extra.graduation_display) rows.push(['Graduates at', extra.graduation_display]);
+      rows.push(['Dev buy', Number(extra.dev_buy || 0) > 0 ? `${extra.dev_buy} ${sym}` : 'none']);
+      const mins = Number(extra.start_minutes || 0);
+      rows.push(['Trading opens', extra.start_at
+        ? new Date(Number(extra.start_at) * 1000).toLocaleString([], { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
+        : (extra.start_display || (mins > 0 ? `${mins} min after launch` : 'right away'))]);
+      if (launchReq.image_url) rows.push(['Logo', '✅ added']);
+      if (extra.website || extra.x || extra.telegram) rows.push(['Links', [['website', 'Website'], ['x', 'X'], ['telegram', 'Telegram']].filter(([k]) => extra[k]).map(([, n]) => n).join(', ')]);
+      rows.push(['Max buy', Number(extra.max_buy || 0) > 0 ? `${extra.max_buy} ${sym} per wallet` : 'no limit']);
+      rows.push(['Token', 'Fixed supply · no owner · pool liquidity burned at graduation']);
+      if (extra.allocs) rows.push(['Team tokens', 'locked until the curve graduates']);
+      rows.push(['Cost', 'Launch fee + dev buy + gas, shown before you sign']);
+    } else {
+      rows.push(['Token', 'Fixed supply · no owner · can never be minted again']);
+      rows.push(['Cost', 'Launch fee + network gas, shown in your wallet']);
     }
+    detailsEl.innerHTML = rows.map(([k, v]) =>
+      `<div class="detail-row"><span>${k}</span><b>${String(v ?? '').replace(/</g, '&lt;').slice(0, 90)}</b></div>`
+    ).join('');
+    if (!net) { showStatus(`Launches on ${launchReq.chain} aren't available yet.`, 'error'); return; }
+    const found = await findProvider();
+    if (found) { connectBtn.textContent = `Connect ${found.name}`; connectBtn.style.display = 'block'; }
+    else showWalletChoices();
   }
 
-  function wagmiConfig() {
-    return wagmiConfigInstance;
-  }
-
-  function initWagmi() {
-    if (wagmiConfigInstance) return;
-    const network = CHAIN_NETWORK_MAP[launchRequest.chain];
-    if (!network) throw new Error(`No network configured for chain: ${launchRequest.chain}`);
-
-    wagmiConfigInstance = createConfig({
-          chains: [network],
-          connectors: [injected()],
-          transports: { [network.id]: http() },
-        });
+  async function ensureNetwork() {
+    const want = hex(net.id);
+    const onNet = async () => { try { return Number(BigInt(await provider.request({ method: 'eth_chainId' }))) === net.id; } catch (e) { return false; } };
+    if (await onNet()) return;
+    showStatus(`Switching your wallet to ${net.name}...`, 'hint');
+    try {
+      await provider.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: want }] });
+    } catch (e) {
+      if (e?.code === 4902 || /unrecognized|not added|unknown chain/i.test(e?.message || '')) {
+        await provider.request({ method: 'wallet_addEthereumChain', params: [{
+          chainId: want, chainName: net.name, rpcUrls: [net.rpc],
+          nativeCurrency: { name: net.sym, symbol: net.sym, decimals: 18 },
+          blockExplorerUrls: net.explorer ? [net.explorer] : [],
+        }] });
+      } else {
+        throw new Error(`please switch your wallet to ${net.name} and try again`);
       }
-
-      function markConnected(address) {
-    showStatus('Connected: ' + address, 'success');
-    connectBtn.style.display = 'none';
-    signBtn.style.display = 'block';
+    }
+    for (let i = 0; i < 16; i++) { if (await onNet()) return; await new Promise(r => setTimeout(r, 500)); }
+    throw new Error(`your wallet didn't switch — open the network menu in your wallet, pick ${net.name}, then tap Connect again`);
   }
 
   connectBtn.addEventListener('click', async () => {
-        try {
-          initWagmi();
-          document.getElementById('walletChoices').style.display = 'block';
-          document.getElementById('browserBtn').style.display = 'block';
-          showStatus('Connecting... if a wallet app does not open, pick one above, or tap Open in Safari / Chrome.');
-          try {
-            await connect(wagmiConfig(), { connector: injected() });
-          } catch (e) {
-            // no injected provider in this webview -- user will tap a deep-link button instead
-          }
-          const account = await waitForConnection(25000);
-          markConnected(account.address);
-        } catch (e) {
-          showStatus(
-            (e.message || 'Wallet connection failed') +
-            ' Tap a wallet button above to open your wallet app, approve there, then come back and tap Connect again.',
-            'error'
-          );
-        }
-      });
-
-      document.getElementById('metamaskBtn').addEventListener('click', () => {
-        const url = 'https://metamask.app.link/dapp/' + window.location.href.replace(/^https?:\/\//, '');
-        if (tg?.openLink) tg.openLink(url); else window.open(url, '_blank');
-      });
-      document.getElementById('trustBtn').addEventListener('click', () => {
-        const url = 'https://link.trustwallet.com/open_url?coin_id=60&url=' + encodeURIComponent(window.location.href);
-        if (tg?.openLink) tg.openLink(url); else window.open(url, '_blank');
-      });
-      document.getElementById('coinbaseBtn').addEventListener('click', () => {
-        const url = 'https://go.cb-w.com/dapp?cb_url=' + encodeURIComponent(window.location.href);
-        if (tg?.openLink) tg.openLink(url); else window.open(url, '_blank');
-      });
-
-      document.getElementById('browserBtn').addEventListener('click', () => {
-    const url = window.location.href;
-    if (tg?.openLink) tg.openLink(url);
-    else window.open(url, '_blank');
+    try {
+      const found = await findProvider();
+      if (!found) { showWalletChoices(); return; }
+      provider = found.p;
+      const accts = await provider.request({ method: 'eth_requestAccounts' });
+      account = (accts || [])[0] || '';
+      if (!account) throw new Error('the wallet did not share an address');
+      await ensureNetwork();
+      showStatus(`Connected: ${account} (${net.name})`, 'success');
+      connectBtn.style.display = 'none';
+      walletChoices.style.display = 'none';
+      signBtn.style.display = 'block';
+    } catch (e) {
+      showStatus(`Wallet connection failed: ${e.message}`, 'error');
+    }
   });
 
-  function waitForConnection(timeoutMs = 25000) {
-    return new Promise((resolve, reject) => {
-      const start = Date.now();
-      const interval = setInterval(() => {
-        try {
-          const cfg = wagmiConfig();
-          const account = cfg ? getAccount(cfg) : {};
-          const addr = account.address || '';
-          if (account.isConnected || addr) {
-            clearInterval(interval);
-            resolve({ address: account.address || addr, isConnected: true });
-          } else if (Date.now() - start > timeoutMs) {
-            clearInterval(interval);
-            reject(new Error('No wallet connected after 25s.'));
-          }
-        } catch (e) {
-          if (Date.now() - start > timeoutMs) {
-            clearInterval(interval);
-            reject(e);
-          }
-        }
-      }, 400);
+  async function api(path, body) {
+    const r = await fetch(`${API_BASE}/launch-requests/${requestId}/${path}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}),
     });
+    let data = {};
+    try { data = await r.json(); } catch (e) {}
+    if (!r.ok) throw new Error(data.detail || `server error ${r.status}`);
+    return data;
+  }
+
+  async function getReceipt(hash, rpcUrl) {
+    try {
+      const rc = await provider.request({ method: 'eth_getTransactionReceipt', params: [hash] });
+      if (rc) return rc;
+    } catch (e) {}
+    const url = rpcUrl || net.rpc;
+    try {
+      const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_getTransactionReceipt', params: [hash] }) });
+      return (await r.json()).result || null;
+    } catch (e) { return null; }
+  }
+
+  function tokenFromReceipt(rc) {
+    for (const log of rc.logs || []) {
+      const t = (log.topics || []).map(x => String(x).toLowerCase());
+      if (t[0] === TOKEN_TOPIC && t[1]) return '0x' + t[1].slice(-40);
+    }
+    // fallback: the new token's first Transfer is a mint (from = 0x0)
+    for (const log of rc.logs || []) {
+      const t = (log.topics || []).map(x => String(x).toLowerCase());
+      if (t[0] === TRANSFER_TOPIC && t[1] === ZERO_TOPIC) return log.address;
+    }
+    return '';
   }
 
   const CURVE_TOPIC = '0x188ae4cd8aa7c0376e9501e76fb7a19dd1454add5c88bffbf75f391807a14475';
-  const TOKEN_TOPIC = '0x1a8ab442384acdb09c73bc5f71549c099dad32203f07e1655e0ebce05831f749';
-
-  function topicAddr(topic) {
-    const raw = String(topic || '').replace(/^0x/i, '');
-    if (raw.length < 40) return '';
-    return '0x' + raw.slice(-40);
-  }
-
-  async function waitForLaunchReceipt(rpcUrl, hash, tries = 24) {
-    const out = { token: '', curve: '' };
-    if (!rpcUrl || !hash) return out;
-    for (let i = 0; i < tries; i++) {
-      try {
-        const r = await fetch(rpcUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            jsonrpc: '2.0', id: 1,
-            method: 'eth_getTransactionReceipt',
-            params: [hash],
-          }),
-        });
-        const body = await r.json();
-        const receipt = body.result;
-        if (receipt && receipt.logs) {
-          for (const log of receipt.logs) {
-            const sig = String((log.topics || [])[0] || '').toLowerCase();
-            if (sig === CURVE_TOPIC && log.topics.length >= 3) {
-              out.curve = topicAddr(log.topics[1]);
-              out.token = topicAddr(log.topics[2]);
-            } else if (sig === TOKEN_TOPIC && log.topics.length >= 2) {
-              out.token = out.token || topicAddr(log.topics[1]);
-            }
-          }
-          if (out.token || out.curve || receipt.status) return out;
-        }
-      } catch (e) {}
-      await new Promise((res) => setTimeout(res, 2500));
+  function curveFromReceipt(rc) {
+    for (const log of rc.logs || []) {
+      const t = (log.topics || []).map(x => String(x).toLowerCase());
+      if (t[0] === CURVE_TOPIC && t[1]) return '0x' + t[1].slice(-40);
     }
-    return out;
+    return '';
   }
 
   signBtn.addEventListener('click', async () => {
+    signBtn.disabled = true;
+    let hash = '';
     try {
-      const account = getAccount(wagmiConfig());
-      showStatus('Building transaction...');
-      const buildRes = await fetch(`${API_BASE}/launch-requests/${requestId}/build-tx`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ wallet_address: account.address }),
-      });
-      if (!buildRes.ok) {
-        const err = await buildRes.json();
-        throw new Error(err.detail || 'Failed to build transaction');
+      await ensureNetwork();
+      showStatus('Building transaction...', 'hint');
+      const built = await api('build-tx', { wallet_address: account });
+      const tx = built.unsigned_transaction || {};
+      if (Number(tx.chainId || net.id) !== net.id) throw new Error('the launch was built for a different network');
+      const fee = BigInt(String(tx.value || 0));
+      const devWei = BigInt(String(tx.dev_buy_wei || 0));
+      const feeWei = tx.launch_fee_wei != null ? BigInt(String(tx.launch_fee_wei)) : fee - devWei;
+      const costTxt = devWei > 0n
+        ? `${fmtNative(fee)} total (${fmtNative(feeWei)} launch fee + ${fmtNative(devWei)} dev buy)`
+        : `the ${fmtNative(fee)} launch fee`;
+      showStatus(`You'll pay ${costTxt} + network gas.\n\nPlease review and approve in your wallet...`, 'hint');
+      const req = { from: account, to: tx.to, data: tx.data, value: hex(fee) };
+      if (tx.gas) req.gas = hex(tx.gas);
+      hash = await provider.request({ method: 'eth_sendTransaction', params: [req] });
+      if (!hash) throw new Error('the wallet did not return a transaction hash');
+
+      showStatus(`Sent. Waiting for ${net.name} to confirm...<br>${linkHtml(hash, 'View transaction')}`, 'hint', true);
+      let rc = null;
+      const until = Date.now() + 120000;
+      while (!rc && Date.now() < until) {
+        await new Promise(r => setTimeout(r, 2500));
+        rc = await getReceipt(hash, built.rpc_url);
       }
-      const built = await buildRes.json();
-      const unsigned_transaction = built.unsigned_transaction;
-      const rpcUrl = built.rpc_url || '';
-
-      showStatus('Please review and approve in your wallet...');
-      const hash = await sendTransaction(wagmiConfig(), {
-        to: unsigned_transaction.to,
-        value: BigInt(unsigned_transaction.value || 0),
-        data: unsigned_transaction.data,
-        gas: unsigned_transaction.gas ? BigInt(unsigned_transaction.gas) : undefined,
-      });
-
-      showStatus('Transaction submitted, waiting for confirmation...');
-      const parsed = await waitForLaunchReceipt(rpcUrl, hash);
-
-      await fetch(`${API_BASE}/launch-requests/${requestId}/complete`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          tx_hash: hash,
-          result_token_address: parsed.token || '',
-          curve_address: parsed.curve || '',
-        }),
-      });
-
-      showStatus(`✅ Launched! Tx: ${hash}`, 'success');
+      if (!rc) {
+        showStatus(`Sent, but not confirmed after 2 minutes. Check it before trying again:<br>${linkHtml(hash, 'View transaction')}`, 'hint', true);
+        signBtn.disabled = false;
+        return;
+      }
+      if (String(rc.status) !== '0x1' && String(rc.status) !== '1') {
+        throw new Error('the launch transaction failed on-chain (nothing was created)');
+      }
+      const token = tokenFromReceipt(rc);
+      const curveAddr = curveFromReceipt(rc);
+      await api('complete', { tx_hash: hash, result_token_address: token || '', curve_address: curveAddr || '' });
+      const tokenLink = token && net.explorer ? `<br><a href="${net.explorer}/token/${token}" target="_blank" rel="noopener">View your token</a>` : '';
+      const tradeUrl = curveAddr ? new URL(`curve.html?chain=${launchReq.chain}&curve=${curveAddr}`, location.href).href : '';
+      const tradeLink = tradeUrl ? `<br><a href="${tradeUrl}">📈 Open the trade page</a>` : '';
+      showStatus(`✅ Launched on ${net.name}!${tradeLink}${tokenLink}<br>${linkHtml(hash, 'View transaction')}`, 'success', true);
       signBtn.style.display = 'none';
-      setTimeout(() => tg?.close(), 2500);
-
     } catch (e) {
-      showStatus(`Failed: ${e.message}`, 'error');
-      await fetch(`${API_BASE}/launch-requests/${requestId}/fail`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ tx_hash: e.message }),
-      }).catch(() => {});
+      let msg = e?.code === 4001 ? 'you rejected the request in your wallet' : (e?.message || String(e));
+      const lack = /insufficient funds[\s\S]*?have (\d+) want (\d+)/i.exec(msg);
+      if (lack) msg = `not enough ${net.sym} in this wallet. It has ${fmtNative(lack[1])} but the launch needs ${fmtNative(lack[2])} (launch fee) plus a little for gas. Add ${net.sym} on ${net.name} and tap the button again.`;
+      else if (/insufficient funds/i.test(msg)) msg = `not enough ${net.sym} in this wallet for the launch fee + gas. Add ${net.sym} on ${net.name} and try again.`;
+      showStatus(`Failed: ${msg}`, 'error');
+      signBtn.disabled = false;
+      api('fail', { tx_hash: hash || msg.slice(0, 300) }).catch(() => {});
     }
   });
 

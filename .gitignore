@@ -8,3 +8,10 @@
 .master
 __pycache__/
 node_modules/
+
+# runtime data / media / generated (never commit)
+launch/
+Ferzan-Ecosystem/Launch Bot/media/
+*.db-wal
+*.db-shm
+*.taken

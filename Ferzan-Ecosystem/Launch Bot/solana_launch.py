@@ -116,7 +116,12 @@ def build_unsigned_launch_tx(
 ) -> SolanaLaunchResult:
     creator = Pubkey.from_string(creator_pubkey)
 
-    mint_keypair = Keypair()  # fresh, one-time, controls nothing but this new mint
+    try:  # branded mint address from the pre-ground pool, else a fresh random one
+        from vanity import sol_take_mint
+        _vanity_secret = sol_take_mint()
+    except Exception:
+        _vanity_secret = None
+    mint_keypair = Keypair.from_bytes(bytes(_vanity_secret)) if _vanity_secret else Keypair()
     mint_pubkey = mint_keypair.pubkey()
 
     async def _fetch_rpc_data():

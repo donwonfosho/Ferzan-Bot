@@ -627,6 +627,53 @@ def _gt(path: str) -> dict | list | None:
         return None
 
 
+# ---- Ferzan bonding curves: tokens still on the curve have no DEX pool, so their
+# buys come from the Ferzan launch index instead of DexScreener/GeckoTerminal.
+FERZAN_API = (os.getenv("FERZAN_LAUNCH_API") or "https://launch.ferzaneco.com/api").rstrip("/")
+_FZ_MISS: dict = {}
+
+
+def _ferzan_curve(ca: str, since: int = 0, kind: str = "buy") -> dict:
+    ca = (ca or "").strip().lower()
+    if not (ca.startswith("0x") and len(ca) == 42):
+        return {}
+    if since == 0 and time.time() - _FZ_MISS.get(ca, 0) < 300:
+        return {}
+    try:
+        r = requests.get(f"{FERZAN_API}/curve-by-token/{ca}", params={"since": int(since), "kind": kind}, timeout=10)
+        d = r.json() if r.status_code == 200 else {}
+    except Exception:
+        d = {}
+    if not d.get("found"):
+        _FZ_MISS[ca] = time.time()
+        return {}
+    return d
+
+
+def _ferzan_pool(ca: str) -> tuple[str, dict]:
+    d = _ferzan_curve(ca)
+    if not d or d.get("graduated"):
+        return "", {}
+    return "ferzan:" + ca.strip().lower(), {
+        "name": d.get("name"), "symbol": d.get("symbol"), "address": ca, "dex": "ferzan curve",
+        "source": "ferzan", "fdv_usd": d.get("mcap_usd"), "market_cap_usd": d.get("mcap_usd"),
+    }
+
+
+def _ferzan_trades(pool: str, last_ts: int, kind: str) -> list[dict]:
+    d = _ferzan_curve(pool.split(":", 1)[1], int(last_ts or 0), kind)
+    out = []
+    for t in d.get("trades") or []:
+        native, toks = t.get("native") or 0, t.get("tokens") or 0
+        out.append({
+            "ts": int(t["ts"]), "kind": kind, "volume_in_usd": t.get("usd") or 0,
+            "from_token_amount": native if kind == "buy" else toks,
+            "to_token_amount": toks if kind == "buy" else native,
+            "tx_from_address": t.get("trader") or "", "tx_hash": t.get("tx") or "",
+        })
+    return out
+
+
 def _pool_for(chain: str, ca: str) -> tuple[str, dict]:
     p = _ds(ca, chain)
     if p:
@@ -646,7 +693,7 @@ def _pool_for(chain: str, ca: str) -> tuple[str, dict]:
     data = _gt(f"/networks/{net}/tokens/{ca}/pools?page=1")
     rows = (data or {}).get("data") or []
     if not rows:
-        return "", {}
+        return _ferzan_pool(ca)
     row = rows[0]
     pid = row.get("id") or ""
     pool = pid.split("_", 1)[-1] if "_" in str(pid) else str(pid)
@@ -654,6 +701,8 @@ def _pool_for(chain: str, ca: str) -> tuple[str, dict]:
 
 
 def _trades(net: str, pool: str, last_ts: int, kind: str = "buy") -> list[dict]:
+    if str(pool).startswith("ferzan:"):
+        return _ferzan_trades(pool, last_ts, kind)
     data = _gt(f"/networks/{net}/pools/{pool}/trades?trade_volume_in_usd_greater_than=1")
     rows = (data or {}).get("data") or []
     out = []
@@ -943,6 +992,16 @@ CHAIN_BTNS = [
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    arg = (context.args[0] if context.args else "")
+    if arg.startswith("trk_") and update.effective_chat and update.effective_chat.type != "private":
+        parts = arg.split("_", 2)
+        if len(parts) == 3 and parts[1] in GT_NET:
+            if not await _is_chat_admin(update):
+                await update.effective_message.reply_text("Only a group admin can turn on buy alerts. Ask an admin to run /add with the chain and contract address.")
+                return
+            context.args = [parts[1], parts[2]]
+            await track(update, context)
+            return
     await update.effective_message.reply_text(
         "⚡ Ferzan Buy — channel buy alerts for any project chat.\n\n"
         "Dev setup (easiest):\n"
@@ -2851,6 +2910,14 @@ async def tick(context: ContextTypes.DEFAULT_TYPE) -> None:
         floor = float(min_usd or MIN_USD)
         whale_floor = float(whale_usd or 0) or max(500.0, floor * 10)
         net = GT_NET.get(chain, chain)
+        if str(pool).startswith("ferzan:"):
+            fz = _ferzan_curve(ca)
+            if fz.get("graduated"):
+                newp, _ = _pool_for(chain, ca)
+                if newp and not newp.startswith("ferzan:"):
+                    con.execute("UPDATE watches SET pool=? WHERE chat_id=? AND ca=?", (newp, chat_id, ca))
+                    con.commit()
+                    pool = newp
         trades = _trades(net, pool, int(last_ts or 0), "buy")
         _, attrs = _pool_for(chain, ca)
         vip = bool(con.execute(
