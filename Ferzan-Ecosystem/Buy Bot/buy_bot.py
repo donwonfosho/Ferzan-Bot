@@ -2764,6 +2764,71 @@ async def untrack(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.effective_message.reply_text("Stopped buy alerts in this chat.")
 
 
+FERZAN_GIF_ID: dict = {"id": ""}  # Telegram file_id after the first upload, reused for every later card
+
+
+def _ferzan_mint() -> str:
+    return (os.getenv("FERZAN_MINT") or "").strip()
+
+
+def _ferzan_gif() -> Path | None:
+    for p in (Path(__file__).resolve().parent / "ferzan_buy.gif",
+              Path("/opt/ferzan/app/Ferzan-Ecosystem/Buy Bot/ferzan_buy.gif")):
+        if p.exists():
+            return p
+    return None
+
+
+async def _send_ferzan_card(bot, chat_id, text: str, kb) -> bool:
+    """FERZAN buys carry the BUY $FERZAN GIF on top of the card, in every group. False = use the normal media."""
+    gif = _ferzan_gif()
+    if not gif:
+        return False
+    if FERZAN_GIF_ID["id"]:
+        try:
+            await bot.send_animation(chat_id, FERZAN_GIF_ID["id"], caption=text, parse_mode="HTML", reply_markup=kb)
+            return True
+        except Exception:
+            FERZAN_GIF_ID["id"] = ""
+    with gif.open("rb") as fh:
+        m = await bot.send_animation(chat_id, fh, filename="ferzan_buy.gif", caption=text, parse_mode="HTML", reply_markup=kb)
+    if m and (m.animation or m.document):
+        FERZAN_GIF_ID["id"] = (m.animation or m.document).file_id
+    return True
+
+
+FERZAN_AUTO_DONE: set = set()
+FERZAN_AUTO_LAST: list = [0.0]
+
+
+async def _ferzan_autowatch(bot, con) -> None:
+    """Once FERZAN has a pool, watch it in the Ferzan groups (FERZAN_BUY_CHATS) without anyone running /track."""
+    mint = _ferzan_mint()
+    chats = [c.strip() for c in (os.getenv("FERZAN_BUY_CHATS") or "@Ferzan_Trade_Ecosystem,@Ferzan_Chat").split(",") if c.strip()]
+    if not mint or not chats or all(c in FERZAN_AUTO_DONE for c in chats):
+        return
+    if time.time() - FERZAN_AUTO_LAST[0] < 60:
+        return  # look up the pool at most once a minute
+    FERZAN_AUTO_LAST[0] = time.time()
+    pool, _ = _pool_for("sol", mint)
+    if not pool:
+        return  # not launched yet
+    for c in chats:
+        if c in FERZAN_AUTO_DONE:
+            continue
+        try:
+            cid = (await bot.get_chat(c)).id
+        except Exception as exc:
+            log.warning("ferzan autowatch %s: %s (add @Ferzan_Buy_Bot there)", c, exc)
+            continue
+        if not con.execute("SELECT 1 FROM watches WHERE chat_id=? AND ca=?", (cid, mint)).fetchone():
+            con.execute("INSERT OR REPLACE INTO watches(chat_id, chain, ca, pool, last_ts, min_usd) VALUES(?,?,?,?,?,?)",
+                        (cid, "sol", mint, pool, int(time.time()) - 60, MIN_USD))
+            con.commit()
+            log.info("ferzan autowatch: watching FERZAN in %s", c)
+        FERZAN_AUTO_DONE.add(c)
+
+
 async def tick(context: ContextTypes.DEFAULT_TYPE) -> None:
     con = _db()
     now = int(time.time())
@@ -2898,6 +2963,10 @@ async def tick(context: ContextTypes.DEFAULT_TYPE) -> None:
             log.warning("raid ping %s: %s", chat_id, exc)
     con.commit()
     try:
+        await _ferzan_autowatch(context.bot, con)
+    except Exception as exc:
+        log.warning("ferzan autowatch %s", exc)
+    try:
         rows = list(con.execute(
             "SELECT chat_id, chain, ca, pool, last_ts, min_usd, emoji, tg_url, discord_url, x_url, "
             "last_milestone, ath_mcap, whale_usd, sell_alerts, dev_wallet, dev_last_bal FROM watches"
@@ -2942,7 +3011,9 @@ async def tick(context: ContextTypes.DEFAULT_TYPE) -> None:
             )
             try:
                 media = _media(chat_id)
-                if media and media[0] in {"animation", "video"}:
+                if _ferzan_mint() and ca == _ferzan_mint() and await _send_ferzan_card(context.bot, chat_id, text, kb):
+                    pass
+                elif media and media[0] in {"animation", "video"}:
                     try:
                         await context.bot.send_animation(chat_id, media[1], caption=text, parse_mode="HTML", reply_markup=kb)
                     except Exception:
