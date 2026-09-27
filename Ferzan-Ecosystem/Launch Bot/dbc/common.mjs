@@ -31,6 +31,35 @@ export function loadOrCreateKey(name) {
     return k
 }
 
+// MULTI_CONFIG_B23: every Ferzan partner config, newest first. METEORA_CONFIG is the one new launches
+// use; METEORA_CONFIGS lists all of them (old ones too) so older coins keep trading.
+export function allConfigs(inp = {}) {
+    const env = loadEnv()
+    const raw = [...(Array.isArray(inp.configs) ? inp.configs : []), inp.config, env.METEORA_CONFIG,
+        ...String(env.METEORA_CONFIGS || '').split(',')]
+    return [...new Set(raw.map((x) => String(x || '').trim()).filter((x) => /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(x)))]
+}
+
+// A coin's curve pool: derived from each known config, then (if the SDK can) looked up by its mint.
+export async function findPool(client, mint, configs, deriveDbcPoolAddress, NATIVE_MINT, PublicKey) {
+    for (const c of configs) {
+        const pool = deriveDbcPoolAddress(NATIVE_MINT, mint, new PublicKey(c))
+        const vp = await client.state.getPool(pool)
+        if (vp) return { pool, vp, config: c }
+    }
+    if (typeof client.state.getPoolByBaseMint === 'function') {
+        try {
+            const hit = await client.state.getPoolByBaseMint(mint)
+            if (hit) {
+                const pool = hit.publicKey || hit.pubkey
+                const vp = hit.account || hit
+                if (pool) return { pool, vp, config: String(((vp.poolState || vp).config || '')) }
+            }
+        } catch {}
+    }
+    return null
+}
+
 // Simulate a legacy Transaction without needing any signatures.
 export async function simulate(conn, tx) {
     const vtx = new VersionedTransaction(tx.compileMessage())

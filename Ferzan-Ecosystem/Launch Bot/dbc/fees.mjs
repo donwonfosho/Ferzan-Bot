@@ -8,7 +8,7 @@ import BN from 'bn.js'
 import { Connection, PublicKey, Transaction } from '@solana/web3.js'
 import { ASSOCIATED_TOKEN_PROGRAM_ID, createCloseAccountInstruction } from '@solana/spl-token'
 import { DynamicBondingCurveClient } from '@meteora-ag/dynamic-bonding-curve-sdk'
-import { simulate } from './common.mjs'
+import { simulate, allConfigs } from './common.mjs' // MULTI_CONFIG_B23
 
 const U64_MAX = new BN('18446744073709551615')
 const WSOL = 'So11111111111111111111111111111111111111112'
@@ -78,10 +78,14 @@ async function feeClaimerOf(client, config) {
     } catch { return '' }
 }
 
-async function listPools(client, role, wallet, config) {
-    const raw = role === 'partner'
-        ? await client.state.getPoolsByConfig(config)
-        : await client.state.getPoolsByCreator(wallet)
+async function listPools(client, role, wallet, config, configs = []) {
+    let raw = []
+    if (role === 'partner') {
+        // every config this wallet is the fee claimer of
+        for (const c of (configs.length ? configs : [config.toBase58()])) {
+            if ((await feeClaimerOf(client, new PublicKey(c))) === wallet.toBase58()) raw.push(...await client.state.getPoolsByConfig(new PublicKey(c)))
+        }
+    } else raw = await client.state.getPoolsByCreator(wallet)
     const out = []
     for (const p of raw) {
         const s = p.account.poolState || p.account
@@ -142,12 +146,18 @@ try {
     const client = new DynamicBondingCurveClient(conn, 'confirmed')
     const role = inp.role === 'partner' ? 'partner' : 'creator'
     const wallet = new PublicKey(inp.wallet)
-    const config = inp.config ? new PublicKey(inp.config) : null
+    const configs = allConfigs(inp)
+    const config = configs.length ? new PublicKey(configs[0]) : null
     if (role === 'partner' && !config) throw new Error('METEORA_CONFIG missing')
-    const claimer = role === 'partner' ? await feeClaimerOf(client, config) : wallet.toBase58()
+    let claimer = wallet.toBase58()
+    if (role === 'partner') {
+        const claimers = []
+        for (const c of configs) claimers.push(await feeClaimerOf(client, new PublicKey(c)))
+        claimer = claimers.includes(wallet.toBase58()) ? wallet.toBase58() : (claimers[0] || '')
+    }
 
     if (inp.action === 'list') {
-        const pools = [...await listPools(client, role, wallet, config), ...await listDamm(conn, wallet)]
+        const pools = [...await listPools(client, role, wallet, config, configs), ...await listDamm(conn, wallet)]
         pools.sort((a, b) => (BigInt(b.quote_fee) > BigInt(a.quote_fee) ? 1 : BigInt(b.quote_fee) < BigInt(a.quote_fee) ? -1 : 0))
         const total = pools.reduce((a, p) => a + BigInt(p.quote_fee), 0n)
         process.stdout.write(JSON.stringify({

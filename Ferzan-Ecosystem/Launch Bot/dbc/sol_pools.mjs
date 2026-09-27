@@ -5,6 +5,7 @@ import fs from 'fs'
 import { Connection, PublicKey } from '@solana/web3.js'
 import { NATIVE_MINT } from '@solana/spl-token'
 import { DynamicBondingCurveClient, deriveDbcPoolAddress } from '@meteora-ag/dynamic-bonding-curve-sdk'
+import { allConfigs, findPool } from './common.mjs' // MULTI_CONFIG_B23
 
 const big = (v) => (v === undefined || v === null ? '0' : typeof v.toString === 'function' ? v.toString() : String(v))
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
@@ -13,16 +14,17 @@ try {
     const inp = JSON.parse(fs.readFileSync(0, 'utf8'))
     const conn = new Connection(inp.rpc, 'confirmed')
     const client = new DynamicBondingCurveClient(conn, 'confirmed')
-    const config = new PublicKey(inp.config)
+    const configs = allConfigs(inp)
+    const config = new PublicKey(configs[0])
     const thresholds = {}
     const out = []
     for (const it of (inp.items || []).slice(0, 60)) {
         const row = { mint: it.mint, pool: '', found: false }
         try {
-            const pool = deriveDbcPoolAddress(NATIVE_MINT, new PublicKey(it.mint), config)
+            const hit = await findPool(client, new PublicKey(it.mint), configs, deriveDbcPoolAddress, NATIVE_MINT, PublicKey)
+            if (!hit) { out.push(row); continue }
+            const pool = hit.pool, vp = hit.vp
             row.pool = pool.toBase58()
-            const vp = await client.state.getPool(pool)
-            if (!vp) { out.push(row); continue }
             const s = vp.poolState || vp
             const cfgKey = (s.config || config).toBase58()
             if (!(cfgKey in thresholds)) {

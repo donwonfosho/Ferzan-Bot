@@ -6,7 +6,7 @@ import BN from 'bn.js'
 import { Connection, PublicKey } from '@solana/web3.js'
 import { NATIVE_MINT } from '@solana/spl-token'
 import * as sdk from '@meteora-ag/dynamic-bonding-curve-sdk'
-import { simulate } from './common.mjs'
+import { simulate, allConfigs, findPool } from './common.mjs' // MULTI_CONFIG_B23
 
 const { DynamicBondingCurveClient, deriveDbcPoolAddress } = sdk
 
@@ -17,16 +17,16 @@ try {
     const slippageBps = Math.min(5000, Math.max(10, Math.floor(Number(inp.slippageBps || 500))))
     const conn = new Connection(inp.rpc, 'confirmed')
     const client = new DynamicBondingCurveClient(conn, 'confirmed')
-    const config = new PublicKey(inp.config)
+    const configs = allConfigs(inp)
     const mint = new PublicKey(inp.mint)
     const owner = new PublicKey(inp.owner)
-    const pool = deriveDbcPoolAddress(NATIVE_MINT, mint, config)
 
     let stage = 'load'
     const mark = (x) => { stage = x; globalThis.__stage = `[${x}] ` }
     mark('load')
-    const vp = await client.state.getPool(pool)
-    if (!vp) throw new Error('no Ferzan curve pool for this token')
+    const hit = await findPool(client, mint, configs, deriveDbcPoolAddress, NATIVE_MINT, PublicKey)
+    if (!hit) throw new Error('no Ferzan curve pool for this token')
+    const pool = hit.pool, vp = hit.vp, config = new PublicKey(hit.config || configs[0])
     // 1.5.x returns {publicKey?, poolState?...}; swapQuote reads virtualPool.poolState.*, so always pass that wrapper.
     const vpWrap = vp.poolState ? vp : { poolState: vp }
     const state = vpWrap.poolState

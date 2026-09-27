@@ -11,7 +11,7 @@ import { loadEnv, loadOrCreateKey, simulate, KEYDIR } from './common.mjs'
 const { DynamicBondingCurveClient, buildCurveWithMarketCap, ActivationType, BaseFeeMode, CollectFeeMode,
     MigrationFeeOption, MigrationOption, TokenDecimal, TokenType, TokenAuthorityOption } = DBC
 const mode = process.argv[2] || 'plan'
-if (mode !== 'plan') { console.log('This batch only plans. Nothing sent.'); process.exit(1) }
+if (mode !== 'plan' && mode !== 'send') { console.log('use: plan | send'); process.exit(1) } // MULTI_CONFIG_B23
 const env = loadEnv()
 const rpc = env.SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com'
 const treasury = new PublicKey((env.PLATFORM_TREASURY_SOL || env.TREASURY_SOL || '').trim())
@@ -88,10 +88,17 @@ async function sim(label, cfgKey, curve, feeClaimer) {
     tx.recentBlockhash = (await conn.getLatestBlockhash('confirmed')).blockhash
     const r = await simulate(conn, tx)
     console.log(`${label.padEnd(20)}:`, r.err ? 'FAILED ' + JSON.stringify(r.err) + ' | ' + (r.logs || []).slice(-3).join(' | ') : 'OK')
+    if (r.err) process.exit(1)
+    if (mode === 'send') {
+        const { sendAndConfirmTransaction } = await import('@solana/web3.js')
+        const sig = await sendAndConfirmTransaction(conn, tx, [payer, cfgKey], { commitment: 'confirmed' })
+        console.log(`${label.padEnd(20)}: CREATED https://solscan.io/tx/${sig}`)
+    }
 }
 console.log('\n== Simulations (nothing sent) ==')
 if (await conn.getAccountInfo(stdCfg.publicKey)) console.log('config v2           : already exists')
 else await sim('config v2', stdCfg, std, keeper.publicKey)
 if (await conn.getAccountInfo(flagCfg.publicKey)) console.log('flagship config     : already exists')
 else await sim('flagship config', flagCfg, flag, keeper.publicKey)
-console.log('\nPLAN ONLY. Nothing was sent.')
+console.log(mode === 'send' ? '\nDone.' : '\nPLAN ONLY. Nothing was sent.')
+console.log(`CONFIGS v2=${stdCfg.publicKey.toBase58()} flagship=${flagCfg.publicKey.toBase58()}`)
