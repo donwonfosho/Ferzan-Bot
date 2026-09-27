@@ -2780,7 +2780,7 @@ def _ferzan_gif() -> Path | None:
 
 
 async def _send_ferzan_card(bot, chat_id, text: str, kb) -> bool:
-    """FERZAN buys carry the BUY $FERZAN GIF on top of the card, in every group. False = use the normal media."""
+    """FERZAN buys in the Ferzan groups carry the BUY $FERZAN GIF on top of the card. False = use the normal media."""
     gif = _ferzan_gif()
     if not gif:
         return False
@@ -2798,6 +2798,7 @@ async def _send_ferzan_card(bot, chat_id, text: str, kb) -> bool:
 
 
 FERZAN_AUTO_DONE: set = set()
+FERZAN_CHAT_IDS: set = set()  # resolved ids of the Ferzan groups; only these get the FERZAN GIF
 FERZAN_AUTO_LAST: list = [0.0]
 
 
@@ -2821,6 +2822,7 @@ async def _ferzan_autowatch(bot, con) -> None:
         except Exception as exc:
             log.warning("ferzan autowatch %s: %s (add @Ferzan_Buy_Bot there)", c, exc)
             continue
+        FERZAN_CHAT_IDS.add(cid)
         if not con.execute("SELECT 1 FROM watches WHERE chat_id=? AND ca=?", (cid, mint)).fetchone():
             con.execute("INSERT OR REPLACE INTO watches(chat_id, chain, ca, pool, last_ts, min_usd) VALUES(?,?,?,?,?,?)",
                         (cid, "sol", mint, pool, int(time.time()) - 60, MIN_USD))
@@ -3011,7 +3013,8 @@ async def tick(context: ContextTypes.DEFAULT_TYPE) -> None:
             )
             try:
                 media = _media(chat_id)
-                if _ferzan_mint() and ca == _ferzan_mint() and await _send_ferzan_card(context.bot, chat_id, text, kb):
+                if (_ferzan_mint() and ca == _ferzan_mint() and chat_id in FERZAN_CHAT_IDS
+                        and await _send_ferzan_card(context.bot, chat_id, text, kb)):
                     pass
                 elif media and media[0] in {"animation", "video"}:
                     try:
