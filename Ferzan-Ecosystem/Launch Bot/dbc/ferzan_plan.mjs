@@ -46,11 +46,11 @@ const std = common({
 }, NO_VEST, 28, 400)
 
 // 2) FERZAN: 650M locked (50M at graduation, 600M monthly for 24 months), big buys pay more for 30 minutes.
-const RL = { baseFeeBps: 100, feeIncrementBps: 1000, referenceAmount: 1, maxLimiterDuration: 1800 }
+const SCHED = { startingFeeBps: 9900, endingFeeBps: 100, numberOfPeriod: 60, totalDuration: 1800 }
 const VEST = { totalLockedVestingAmount: 650_000_000, numberOfVestingPeriod: 24, cliffUnlockAmount: 50_000_000,
     totalVestingDuration: 24 * 30 * 86400, cliffDurationFromMigrationTime: 0 }
 const flag = common({
-    baseFeeParams: { baseFeeMode: BaseFeeMode.RateLimiter, rateLimiterParam: RL },
+    baseFeeParams: { baseFeeMode: BaseFeeMode.FeeSchedulerExponential, feeSchedulerParam: SCHED },
     dynamicFeeEnabled: true, collectFeeMode: CollectFeeMode.QuoteToken, creatorTradingFeePercentage: 50,
     poolCreationFee: 0, enableFirstSwapWithMinFee: false,
 }, VEST, 50, 800)
@@ -69,17 +69,16 @@ console.log('Address          :', flagCfg.publicKey.toBase58())
 console.log('Graduates at     :', sol(flag.migrationQuoteThreshold), 'SOL raised')
 console.log('Market cap       : starts ~50 SOL, graduates ~800 SOL')
 console.log('Locked           : 650,000,000 FERZAN (50,000,000 at graduation, then 25,000,000 a month for 24 months)')
-console.log('Early protection : 30 minutes; each SOL above 1 SOL in one buy adds 10 points of fee (max 99%); dynamic fee on')
-for (const buy of [0.5, 1, 3, 5, 10, 25]) {
-    let fee = 0, left = buy, step = 0
-    while (left > 1e-9) { const part = Math.min(1, left); fee += part * Math.min(0.99, 0.01 + 0.10 * step); left -= part; step += 1 }
-    console.log(`  a ${String(buy).padStart(4)} SOL buy in the first 30 min pays about ${(fee / buy * 100).toFixed(0)}% in fees`)
+console.log('Early protection : fee starts at 99% and falls every 30 s to 1% at 30 minutes; dynamic fee on')
+for (const m of [0, 1, 2, 5, 10, 15, 20, 25, 30]) {
+    const n = Math.min(60, Math.floor(m * 2)); const f = 99 * Math.pow(1 / 99, n / 60)
+    console.log(`  minute ${String(m).padStart(2)}: fee about ${f.toFixed(1)}%`)
 }
 const dist = (() => { for (const p of ['@meteora-ag/dynamic-bonding-curve-sdk/dist/index.js', '@meteora-ag/dynamic-bonding-curve-sdk/dist/index.cjs']) {
     try { return fs.readFileSync(new URL('./node_modules/' + p, import.meta.url), 'utf8') } catch {} } return '' })()
 console.log('\n== SDK checks ==')
 console.log('transferPoolCreator :', typeof client.creator?.transferPoolCreator === 'function' ? 'available' : 'MISSING')
-console.log('rate limiter mode   :', BaseFeeMode.RateLimiter === 2 ? 'available' : 'MISSING')
+console.log('fee modes           :', Object.keys(BaseFeeMode).filter((k) => isNaN(Number(k))).join(', '))
 console.log('delayed start option:', /activationPoint/.test(dist) ? 'mentioned in SDK (checking use next batch)' : 'none: the pool starts trading when it is created')
 
 async function sim(label, cfgKey, curve, feeClaimer) {
