@@ -94,15 +94,18 @@ def run() -> int:
     admins("\n".join(msg + ([""] + notes if notes else []) + [f"Keeper: {r.get('keeper')} ({r.get('keeper_sol_start', 0):.4f} SOL)"]))
     if LIVE and (r.get("burn_sig") or r.get("buy_sig")):  # public receipt only when something happened
         public = "\n".join(msg)
-        tg(os.environ.get("FERZAN_LAUNCHES_CHANNEL") or "", public)
+        import ferzan_media as fm
+        pic = fm.img("burn.jpg")
+        groups = [g.strip() for g in (os.environ.get("PROMO_GROUPS") or "@Ferzan_Trade_Ecosystem,@Ferzan_Chat").split(",") if g.strip()]
+        for chat in [os.environ.get("FERZAN_LAUNCHES_CHANNEL") or ""] + groups:
+            fm.tg_photo(chat, public, pic)
         try:
-            import x_poster
-            keys = x_poster.keys_from_env()
-            if keys:
-                xt = f"🔥 Ferzan flywheel: {r.get('bought_sol', 0):.3f} SOL of fees bought FERZAN today and {burned:,.0f} FERZAN were burned."
-                if r.get("burn_sig"):
-                    xt += f"\nBurn: https://solscan.io/tx/{r['burn_sig']}"
-                x_poster.tweet(keys, xt)
+            xt = f"🔥 Ferzan flywheel: {r.get('bought_sol', 0):.3f} SOL of fees bought $FERZAN today and {burned:,.0f} FERZAN were burned."
+            if r.get("burn_sig"):
+                xt += f"\nBurn: https://solscan.io/tx/{r['burn_sig']}"
+            ok, info = fm.x_post(xt + "\n\n#Solana #buyback", pic)
+            if not ok and info != "no X keys":
+                admins(f"Flywheel X post failed: {info}")
         except Exception as e:
             print("X post skipped:", e)
     return 0

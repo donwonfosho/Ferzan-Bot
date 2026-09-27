@@ -18,6 +18,7 @@ for f in ("/opt/ferzan/.env", str(HERE / ".env")):
                 os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
 os.chdir(HERE); sys.path.insert(0, str(HERE))
 import requests  # noqa: E402
+import ferzan_media as fm  # noqa: E402
 
 LAUNCH_AT = calendar.timegm((2026, 10, 9, 23, 0, 0))
 STATE = Path("/opt/ferzan/promo-state.json")
@@ -25,6 +26,7 @@ LIVE = os.environ.get("PROMO_LIVE") == "1"
 SITE = "https://ferzan-factory.com"
 API = "http://127.0.0.1:8000/api"
 COUNTDOWN = [(7 * 86400, "7 days"), (3 * 86400, "3 days"), (86400, "24 hours"), (6 * 3600, "6 hours"), (3600, "1 hour"), (600, "10 minutes")]
+COUNTDOWN_IMG = {7 * 86400: "countdown_7d.jpg", 3 * 86400: "countdown_3d.jpg", 86400: "countdown_24h.jpg", 6 * 3600: "countdown_6h.jpg", 3600: "countdown_1h.jpg", 600: "countdown_10m.jpg"}
 # (Telegram text, X text, X hashtags). X gets its own shorter copy; hashtags only go on X.
 PROMOS = [
     (f"🚀 Launch a coin in a minute on Ferzan Factory: Solana, Base, BNB, Ethereum and Robinhood Chain. Sign in with email, Google or X; your wallet is built in.\n{SITE}/launch",
@@ -107,36 +109,42 @@ def tg(chat: str, text: str) -> bool:
         return False
 
 
+def _admin_ids() -> set:
+    return {x.strip() for x in ((os.environ.get("FERZAN_ADMIN_IDS") or "") + "," + (os.environ.get("ADMIN_TELEGRAM_ID") or "")).split(",") if x.strip()}
+
+
 def admins(text: str) -> None:
-    for chat in {x.strip() for x in ((os.environ.get("FERZAN_ADMIN_IDS") or "") + "," + (os.environ.get("ADMIN_TELEGRAM_ID") or "")).split(",") if x.strip()}:
+    for chat in _admin_ids():
         tg(chat, text)
 
 
 GROUPS = [g.strip() for g in (os.environ.get("PROMO_GROUPS") or "@Ferzan_Trade_Ecosystem,@Ferzan_Chat").split(",") if g.strip()]
 
 
-def post(s: dict, key: str, text: str, x_text: str | None = None, groups: bool = False) -> None:
-    """Posts once per key. Preview mode sends it to the admins only."""
+def post(s: dict, key: str, text: str, x_text: str | None = None, groups: bool = False, image: str = "") -> None:
+    """Posts once per key, with its graphic when promo_img/<image> exists. Preview mode sends it to the admins only."""
     if key in s["done"]:
         return
     s["done"].append(key)
+    pic = fm.img(image) if image else None
     if not LIVE:
         where = "channel + X" + (" + " + ", ".join(GROUPS) if groups else "")
-        admins(f"PREVIEW (would go to {where}):\n\n" + text); print("preview:", key); return
-    tg(os.environ.get("FERZAN_LAUNCHES_CHANNEL") or "", text)
+        for chat in _admin_ids():
+            fm.tg_photo(chat, f"PREVIEW (would go to {where}):\n\n" + text, pic)
+        print("preview:", key); return
+    fm.tg_photo(os.environ.get("FERZAN_LAUNCHES_CHANNEL") or "", text, pic)
     if groups:
         for g in GROUPS:
-            if not tg(g, text):
+            if not fm.tg_photo(g, text, pic):
                 admins(f"Could not post in {g}: add @Ferzan_Launch_Bot to it (admin in a channel, member in a group).")
     cap = int(os.environ.get("PROMO_X_PER_DAY") or 4)
     if x_text is not None and len(s["x_log"]) < cap:
         try:
-            import x_poster
-            keys = x_poster.keys_from_env()
-            if keys:
-                ok, info = x_poster.tweet(keys, x_text[:280])
-                if ok:
-                    s["x_log"].append(time.time())
+            ok, info = fm.x_post(x_text[:280], pic)
+            if ok:
+                s["x_log"].append(time.time())
+            elif info != "no X keys":
+                admins(f"X post failed for {key}: {info}")
         except Exception as e:
             print("X skipped:", e)
     print("posted:", key)
@@ -150,7 +158,7 @@ def countdown(s: dict, now: float) -> None:
             text = (f"⏳ FERZAN launches in {label} — {et}.\n\nThe launch is automatic. The fee starts at 99% and falls to 1% over 30 minutes, "
                     f"so sniping the open costs almost everything. 650M of the supply is locked in a multisig by Meteora.\n\n"
                     f"The contract address is posted here and at {SITE}/ferzan the moment it goes live. Anything posted before that is not FERZAN.")
-            post(s, f"countdown:{secs}", text, with_tags(f"⏳ $FERZAN launches in {label}: {et}. Anti-sniper fee at open, 650M locked. Contract address only from @ferzaneco and {SITE}/ferzan at launch.", "#Solana #Meteora"), groups=True)
+            post(s, f"countdown:{secs}", text, with_tags(f"⏳ $FERZAN launches in {label}: {et}. Anti-sniper fee at open, 650M locked. Contract address only from @ferzaneco and {SITE}/ferzan at launch.", "#Solana #Meteora"), groups=True, image=COUNTDOWN_IMG.get(secs, ""))
 
 
 def recap(s: dict, now: float) -> None:
@@ -169,7 +177,7 @@ def recap(s: dict, now: float) -> None:
     if n_new == 0 and not tops:
         s["done"].append(f"recap:{day}"); return  # nothing worth posting
     text = "\n".join([f"📊 Ferzan today", f"New launches: {n_new}"] + (["Top by 24h volume:"] + tops if tops else []) + [f"\n{SITE}"])
-    post(s, f"recap:{day}", text, with_tags(f"📊 Ferzan today: {n_new} new launches." + (f" Top: {tops[0].split(' · ')[0][3:]}" if tops else "") + f" {SITE}", "#memecoin #crypto"), groups=True)
+    post(s, f"recap:{day}", text, with_tags(f"📊 Ferzan today: {n_new} new launches." + (f" Top: {tops[0].split(' · ')[0][3:]}" if tops else "") + f" {SITE}", "#memecoin #crypto"), groups=True, image="recap.jpg")
 
 
 def promo(s: dict, now: float) -> None:
@@ -180,7 +188,7 @@ def promo(s: dict, now: float) -> None:
     i = int(s.get("promo_i") or 0) % len(PROMOS)
     tg_text, x_body, tags = PROMOS[i]
     n = int(s.get("promo_n") or 0)  # rotating extra tag keeps repeat cycles from being identical (X rejects duplicates)
-    post(s, f"promo:{int(now // (8 * 3600))}", tg_text, with_tags(x_body, tags, GENERAL_TAGS[n % len(GENERAL_TAGS)]))
+    post(s, f"promo:{int(now // (8 * 3600))}", tg_text, with_tags(x_body, tags, GENERAL_TAGS[n % len(GENERAL_TAGS)]), image=f"promo_{i + 1:02d}.jpg")
     s["promo_n"] = n + 1
     s["promo_i"] = i + 1; s["last_promo"] = now
 

@@ -127,6 +127,23 @@ def launch() -> int:
         except Exception:
             pass
         time.sleep(10)
+    if not s.get("live_posted"):  # the public launch post, once: channel, the Ferzan groups and X, with the IS LIVE graphic
+        import ferzan_media as fm
+        link = f"https://ferzan-factory.com/coin/solana/{s['mint']}"
+        pic = fm.img("ferzan_live.jpg")
+        text = (f"🚀 FERZAN IS LIVE\n\nCA: {s['mint']}\n\nTrade it on Ferzan Factory: {link}\n\n"
+                "The fee starts at 99% and falls to 1% over the first 30 minutes, so buying in the first minutes costs far more. "
+                "650M FERZAN are locked to the Ferzan multisig.\n\nThis is the only official contract address.")
+        groups = [g.strip() for g in (os.environ.get("PROMO_GROUPS") or "@Ferzan_Trade_Ecosystem,@Ferzan_Chat").split(",") if g.strip()]
+        for chat in [os.environ.get("FERZAN_LAUNCHES_CHANNEL") or ""] + groups:
+            fm.tg_photo(chat, text, pic)
+        try:
+            ok, info = fm.x_post(f"🚀 $FERZAN is LIVE on Solana.\n\nCA: {s['mint']}\n\n{link}\n\n#Solana #Meteora", pic)
+            if not ok:
+                notify(f"FERZAN launch X post failed: {info}")
+        except Exception as e:
+            print("X post skipped:", e)
+        s["live_posted"] = True; save(s)
     notify(f"FERZAN IS LIVE\nCA: {s['mint']}\nPool: {s['pool']}\nCreator now: {s.get('creator_now')} (Squads vault)\n"
            f"Announced: {'yes' if s.get('announced') else 'NO - re-run: systemctl start ferzan-flagship'}\n"
            f"Trade: https://ferzan-factory.com/coin/solana/{s['mint']}")
