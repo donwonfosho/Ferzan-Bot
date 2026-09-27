@@ -393,6 +393,20 @@ def build_tx(request_id: str, body: BuildTxRequest):
     return response
 
 
+def _verifiable_launch(req) -> bool:
+    """VERIFY_ALL_BATCH21: which launches must be proven on chain before they are posted.
+    Website launches always; Telegram launches when they are a Ferzan curve (EVM factory) or a
+    Ferzan Meteora pool, the two kinds _verify_site_launch understands. Other modes are unchanged."""
+    if (req.extra_params or {}).get("source") == "site":
+        return True
+    if not (req.wallet_address or "").strip():
+        logger.warning("launch %s has no wallet yet; skipping the on-chain check", req.id)
+        return False
+    if req.chain == "solana":
+        return req.mode == "meteora"
+    return req.mode == "bonding_curve" and bool(FACTORY_ADDRESSES.get(req.chain, {}).get("bonding_curve"))
+
+
 @app.post("/api/launch-requests/{request_id}/complete")
 def complete_request(request_id: str, body: CompleteRequest):
     req = db.get_launch_request(request_id)
@@ -400,7 +414,7 @@ def complete_request(request_id: str, body: CompleteRequest):
         raise HTTPException(404, "Launch request not found")
     if req.status == "confirmed":
         return {"status": "ok", "already": True}  # a replayed call must not post to the channel again
-    if (req.extra_params or {}).get("source") == "site":
+    if _verifiable_launch(req):
         verified = _verify_site_launch(req, body)
         body = CompleteRequest(tx_hash=body.tx_hash, result_token_address=verified.get("token", ""),
                                curve_address=verified.get("curve", ""))
@@ -596,8 +610,10 @@ def _verify_site_launch(req, body) -> dict:
             if res:
                 break
             time.sleep(2)
-        if not res or (res.get("meta") or {}).get("err") is not None:
+        if not res:
             raise HTTPException(400, "The launch is not confirmed on Solana")
+        if (res.get("meta") or {}).get("err") is not None:
+            raise HTTPException(400, "The launch transaction failed on Solana")
         keys = [k.get("pubkey") if isinstance(k, dict) else k for k in (res.get("transaction") or {}).get("message", {}).get("accountKeys") or []]
         if not keys or keys[0] != wallet or mint not in keys:
             raise HTTPException(400, "That launch was not made by this wallet")
