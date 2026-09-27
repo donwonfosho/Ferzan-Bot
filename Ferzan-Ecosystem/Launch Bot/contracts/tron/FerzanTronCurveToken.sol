@@ -9,11 +9,9 @@ interface ICurveState {
 /// Every launch is an EIP-1167 clone of one master copy, initialized once by the factory in the launch
 /// transaction; the whole supply goes to the curve.
 ///
-/// Until the curve graduates:
-///   - nobody but the curve can send this coin to its SunSwap pool (the pool address is known in advance),
-///     so nobody can open the pool early at a fake price;
-///   - the coin can only move between wallets and the curve, not into other contracts (defense in depth).
-/// Both rules switch off by themselves the moment the curve graduates.
+/// Until the curve graduates the coin only moves through the curve (buys and sells). Nobody can send it to
+/// another wallet or contract yet, so nobody can put coins into its SunSwap pool early at a fake price.
+/// The rule switches off by itself the moment the curve graduates.
 contract FerzanTronCurveToken {
     string public name;
     string public symbol;
@@ -22,7 +20,6 @@ contract FerzanTronCurveToken {
     mapping(address => uint256) public balanceOf;
     mapping(address => mapping(address => uint256)) public allowance;
     address public curve;
-    address public pool;
     bool public open; // set once the curve has graduated, so the lock stops costing energy
     bool private _initialized;
 
@@ -33,17 +30,14 @@ contract FerzanTronCurveToken {
         _initialized = true; // lock the master copy
     }
 
-    function initialize(string calldata name_, string calldata symbol_, uint256 supply, address curve_, address pool_)
-        external
-    {
+    function initialize(string calldata name_, string calldata symbol_, uint256 supply, address curve_) external {
         require(!_initialized, "initialized");
-        require(curve_ != address(0) && pool_ != address(0) && supply > 0, "args");
+        require(curve_ != address(0) && supply > 0, "args");
         _initialized = true;
         name = name_;
         symbol = symbol_;
         totalSupply = supply;
         curve = curve_;
-        pool = pool_;
         balanceOf[curve_] = supply;
         emit Transfer(address(0), curve_, supply);
     }
@@ -75,9 +69,8 @@ contract FerzanTronCurveToken {
             address c = curve;
             if (ICurveState(c).graduated()) {
                 open = true;
-            } else if (from != c && to != c) {
-                require(to != pool, "pool opens at graduation");
-                require(to.code.length == 0, "contracts can receive this coin after graduation");
+            } else {
+                require(from == c || to == c, "trades only on the curve until it graduates");
             }
         }
         uint256 b = balanceOf[from];

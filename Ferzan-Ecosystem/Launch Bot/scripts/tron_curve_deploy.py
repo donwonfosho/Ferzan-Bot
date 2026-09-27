@@ -6,9 +6,8 @@ Deploy and test the Ferzan Tron bonding curve (FerzanTronCurveToken + FerzanTron
   python -u scripts/tron_curve_deploy.py nile test    # launch a tiny curve, buy, sell, fill it, graduate, check the pool
   python -u scripts/tron_curve_deploy.py mainnet plan|send
 
-The SunSwap pair init-code hash is never typed in: it is extracted from the live SunSwap factory's own bytecode and
-accepted only if it reproduces the address of a real existing pair. The factory stores it so every curve knows its
-pool address in advance (the coin refuses early deposits to that address).
+Before graduation the coin only moves through its curve, so nobody can seed the SunSwap pool early; the pool is
+created by graduate() (the caller is paid the graduation reward for that energy).
 Deployer: /opt/ferzan/dbc-keys/evm-deployer.json. Addresses go to /opt/ferzan/dbc-keys/tron-factories.json.
 Mainnet settings (in /opt/ferzan/.env): PLATFORM_TREASURY_TRX, TRON_CURVE_FEE_TRX (default 5),
 TRON_CURVE_GRAD_REWARD_TRX (default 300), TRON_CURVE_MIN_GRAD_TRX (default 5000).
@@ -145,75 +144,19 @@ def call(contract, sig, params, owner, key, value=0, fee_limit=300_000_000, what
     return send(built.get("transaction") or {}, key, what or sig.split("(")[0])
 
 
-# ------------------------------------------------------------ SunSwap discovery --
-def _check_hash(h: bytes, dex_factory: str, samples: list) -> str:
-    """'41' or 'ff' if this init-code hash reproduces every sample pair address, else ''."""
-    fac20 = hex41(dex_factory)[2:]
-    for prefix in ("41", "ff"):
-        if all(keccak(bytes.fromhex(prefix + fac20) + keccak(bytes.fromhex(t0 + t1)) + h)[12:].hex() == p
-               for p, t0, t1 in samples):
-            return prefix
-    return ""
-
-
-def find_pair_hash(dex_factory: str) -> tuple[str, str]:
-    """Extracts candidate pair creation codes from the SunSwap factory bytecode and returns the one whose hash
-    reproduces a real pair address (hash hex, create2 prefix)."""
+def can_transfer(owner: str, token: str) -> bool:
+    """Simulates sending 1 unit of the coin to an unrelated wallet (sends nothing)."""
     from eth_abi import encode
 
-    n = int(const(dex_factory, "allPairsLength()") or "0", 16)
-    if n == 0:
-        sys.exit("ABORT: SunSwap factory has no pairs to check the hash against")
-    samples, pc = [], ""
-    for i in (0, 1, n - 1):
-        p = word_addr(const(dex_factory, "allPairs(uint256)", encode(["uint256"], [i]).hex()))
-        t0 = word_addr(const(b58(p), "token0()"))
-        t1 = word_addr(const(b58(p), "token1()"))
-        if p and t0 and t1:
-            samples.append((p[2:], t0[2:], t1[2:]))
-    # Tron keeps the creation code of every contract, also of contracts made by other contracts: a live pair's own
-    # stored bytecode is exactly the init code its factory hashed.
-    for p, _t0, _t1 in samples[:1]:
-        pc = (ts._post("/wallet/getcontract", {"value": "41" + p, "visible": False}).get("bytecode") or "").lower()
-        if pc:
-            h = keccak(bytes.fromhex(pc))
-            found = _check_hash(h, dex_factory, samples)
-            print(f"  (live pair code {len(pc) // 2:,} bytes: {'matches' if found else 'no match'})")
-            if found:
-                return h.hex(), found
-    code = (ts._post("/wallet/getcontract", {"value": hex41(dex_factory), "visible": False}).get("bytecode") or "").lower()
-    if not code:
-        sys.exit("ABORT: could not read the SunSwap factory bytecode")
-    if pc and pc in code:
-        print("  (the pair code is embedded in the factory code as-is)")
-    for sig in ("INIT_CODE_PAIR_HASH()", "INIT_CODE_HASH()", "pairCodeHash()"):  # some forks publish it directly
-        h = const(dex_factory, sig)
-        if h and len(h) == 64 and int(h, 16):
-            found = _check_hash(bytes.fromhex(h), dex_factory, samples)
-            if found:
-                return h, found
-    import re
-
-    # every Solidity metadata trailer (0.4 bzzr0, 0.5 bzzr0/bzzr1, 0.6+ ipfs) marks the end of a code blob
-    ends = sorted({m.end() for m in re.finditer(
-        r"(a165627a7a72305820[0-9a-f]{64}0029|a265627a7a7230(?:30|31)5820[0-9a-f]{64}64736f6c6343[0-9a-f]{6}0032"
-        r"|a265627a7a72(?:30|31)5820[0-9a-f]{64}64736f6c6343[0-9a-f]{6}0032"
-        r"|a264697066735822[0-9a-f]{68}64736f6c6343[0-9a-f]{6}0033)", code)})
-    starts = [m.start() for m in re.finditer("60806040", code) if m.start() % 2 == 0]
-    ends = sorted(set(ends) | set(starts[1:]) | {len(code)})  # no metadata (some Tron builds): blob boundaries
-    print(f"  (factory code {len(code) // 2:,} bytes, {len(samples)} sample pairs, {len(starts)} code starts, {len(ends)} code ends)")
-    for s in starts:
-        for e in ends:
-            if e <= s + 400:
-                continue
-            found = _check_hash(keccak(bytes.fromhex(code[s:e])), dex_factory, samples)
-            if found:
-                return keccak(bytes.fromhex(code[s:e])).hex(), found
-    sys.exit("ABORT: could not prove SunSwap's pair hash from its bytecode. Tell Claude; nothing was deployed.")
+    r = ts._post("/wallet/triggerconstantcontract", {
+        "owner_address": hex41(owner), "contract_address": hex41(token), "function_selector": "transfer(address,uint256)",
+        "parameter": encode(["address", "uint256"], ["0x" + "11" * 20, 1]).hex(), "visible": False})
+    failed = ((r.get("transaction") or {}).get("ret") or [{}])[0].get("ret") == "FAILED"
+    return bool((r.get("result") or {}).get("result")) and not failed
 
 
 def main():
-    from eth_abi import decode, encode
+    from eth_abi import encode
 
     rec = json.loads(RECORD.read_text()) if RECORD.exists() else {}
     net = rec.setdefault(NET, {})
@@ -235,10 +178,10 @@ def main():
     print(f"Settings     : launch fee {fee_trx:g} TRX, graduation reward {reward_trx:g} TRX, min graduation {min_grad_trx:g} TRX")
 
     if MODE in ("plan", "send"):
-        pair_hash, prefix = find_pair_hash(dexf)
-        print(f"Pair hash    : {pair_hash} (proven against live pairs, CREATE2 prefix 0x{prefix})")
-        if prefix != "41":
-            sys.exit("ABORT: this chain uses the 0xff CREATE2 prefix; the factory's pairFor must be changed. Tell Claude.")
+        pairs = int(const(dexf, "allPairsLength()") or "0", 16)
+        if pairs <= 0 or not wtrx.startswith("T"):
+            sys.exit("ABORT: that SunSwap factory/WTRX does not answer like SunSwap V2")
+        print(f"SunSwap check: {pairs:,} pools on this factory")
         built = compile_all()
         for n, (_a, b) in built.items():
             print(f"Bytecode     : {n} {len(b) // 2:,} bytes")
@@ -256,10 +199,10 @@ def main():
             if not net.get(label):
                 net[label] = deploy(name, *built[name], "", owner, key)
                 RECORD.write_text(json.dumps(rec, indent=1))
-        params = encode(["address", "address", "address", "address", "address", "uint256", "uint256", "uint256", "bytes32"], [
+        params = encode(["address", "address", "address", "address", "address", "uint256", "uint256", "uint256"], [
             "0x" + hex41(net["curve_token_master"])[2:], "0x" + hex41(net["curve_master"])[2:], "0x" + hex41(dexf)[2:],
             "0x" + hex41(wtrx)[2:], "0x" + hex41(treasury)[2:], int(fee_trx * 1e6), int(reward_trx * 1e6),
-            int(min_grad_trx * 1e6), bytes.fromhex(pair_hash)]).hex()
+            int(min_grad_trx * 1e6)]).hex()
         net["curve_factory"] = deploy("FerzanTronCurveFactory", *built["FerzanTronCurveFactory"], params, owner, key)
         RECORD.write_text(json.dumps(rec, indent=1))
         print(f"\nTRON_CURVE_FACTORY_{'NILE' if NET == 'nile' else 'MAINNET'}={net['curve_factory']}")
@@ -285,8 +228,7 @@ def main():
             curve, token = b58("41" + t[1][-40:]), b58("41" + t[2][-40:])
     if not curve:
         sys.exit("ABORT: no CurveLaunched event")
-    pool_pred = b58(word_addr(const(curve, "pool()")))
-    print(f"  curve {curve}  token {token}  predicted pool {pool_pred}")
+    print(f"  curve {curve}  token {token}")
     zero = "0x" + "00" * 20
     print("Trades:")
     call(curve, "buy(uint256,address)", encode(["uint256", "address"], [1, zero]).hex(), owner, key, value=8_000_000,
@@ -296,12 +238,8 @@ def main():
          owner, key, fee_limit=100_000_000, what="approve")
     call(curve, "sell(uint256,uint256,address)", encode(["uint256", "uint256", "address"], [held // 2, 1, zero]).hex(),
          owner, key, fee_limit=200_000_000, what="sell half")
-    # early pool deposit must be refused before graduation
-    early = ts._post("/wallet/triggerconstantcontract", {
-        "owner_address": hex41(owner), "contract_address": hex41(token), "function_selector": "transfer(address,uint256)",
-        "parameter": encode(["address", "uint256"], ["0x" + hex41(pool_pred)[2:], 1]).hex(), "visible": False})
-    blocked = ((early.get("transaction") or {}).get("ret") or [{}])[0].get("ret") == "FAILED" or not (early.get("result") or {}).get("result")
-    print(f"  early pool deposit refused: {blocked}")
+    blocked = not can_transfer(owner, token)  # before graduation the coin must only move through the curve
+    print(f"  wallet-to-wallet transfer refused before graduation: {blocked}")
     call(curve, "buy(uint256,address)", encode(["uint256", "address"], [1, zero]).hex(), owner, key, value=40_000_000,
          fee_limit=200_000_000, what="buy 40 TRX (fills the curve, refund)")
     complete = int(const(curve, "complete()") or "0", 16) == 1
@@ -313,6 +251,8 @@ def main():
     g = call(curve, "graduate()", "", owner, key, fee_limit=1_500_000_000, what="graduate (creates the SunSwap pool)")
     pair = b58(word_addr(const(dexf, "getPair(address,address)", encode(["address", "address"], [
         "0x" + hex41(token)[2:], "0x" + hex41(wtrx)[2:]]).hex())))
+    pool_curve = b58(word_addr(const(curve, "pool()")))
+    opened = can_transfer(owner, token)
     r = const(pair, "getReserves()")
     t0 = word_addr(const(pair, "token0()"))
     r0, r1 = int(r[:64], 16), int(r[64:128], 16)
@@ -320,9 +260,10 @@ def main():
     lp_dead = int(const(pair, "balanceOf(address)", encode(["address"], ["0x" + "00" * 18 + "dead"]).hex()) or "0", 16)
     pool_price, curve_price = trx_r / tok_r if tok_r else 0, x / y if y else 0
     reward = balance(owner) - before + (g.get("fee") or 0)
-    ok = (complete and blocked and pair == pool_pred and trx_r > 0 and tok_r > 0 and lp_dead > 0
+    ok = (complete and blocked and opened and pair == pool_curve and trx_r > 0 and tok_r > 0 and lp_dead > 0
           and abs(pool_price - curve_price) / curve_price < 0.001)
-    print(f"  pool {pair} (predicted {pool_pred}): {trx_r / 1e6:,.4f} TRX + {tok_r / 1e6:,.0f} coins, LP burned {lp_dead > 0}")
+    print(f"  pool {pair}: {trx_r / 1e6:,.4f} TRX + {tok_r / 1e6:,.0f} coins, LP burned {lp_dead > 0}, "
+          f"coin moves freely now {opened}")
     print(f"  price: pool {pool_price:.10f} vs curve {curve_price:.10f} sun per unit; graduation reward paid {reward / 1e6:.2f} TRX")
     print("\nTRON CURVE TEST:", "PASSED" if ok else "FAILED")
 

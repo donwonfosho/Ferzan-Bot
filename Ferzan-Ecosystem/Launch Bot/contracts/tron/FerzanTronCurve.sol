@@ -50,7 +50,7 @@ contract FerzanTronCurve {
     address public platformTreasury;
     address public wtrx;
     address public dexFactory;
-    address public pool;          // predicted SunSwap pair address (the token blocks early seeding of it)
+    address public pool;          // the SunSwap pair, set at graduation
     uint256 public gradTarget;    // net TRX (sun) raised that completes the curve
     uint256 public virtualEth;
     uint256 public virtualToken;
@@ -81,7 +81,6 @@ contract FerzanTronCurve {
     event Completed(uint256 realEth, uint256 tokensSold);
     event Graduated(address indexed pool, uint256 nativeSeeded, uint256 tokensSeeded, uint256 tokensBurned, uint256 lpBurned);
     event FeeRedirected(address indexed intended, uint256 amount);
-    event PoolMismatch(address expected, address actual);
 
     modifier nonReentrant() {
         require(_lock == 1, "reentrant");
@@ -100,7 +99,6 @@ contract FerzanTronCurve {
         address platformTreasury;
         address wtrx;
         address dexFactory;
-        address pool;
         uint256 curveSupply;
         uint256 gradTarget;
         uint256 startTime;
@@ -112,7 +110,7 @@ contract FerzanTronCurve {
         require(!_initialized, "initialized");
         require(
             p.token != address(0) && p.creator != address(0) && p.platformTreasury != address(0) && p.wtrx != address(0)
-                && p.dexFactory != address(0) && p.pool != address(0),
+                && p.dexFactory != address(0),
             "zero"
         );
         require(p.gradTarget >= 1e6 && p.gradTarget <= 1e17, "grad target");
@@ -125,7 +123,6 @@ contract FerzanTronCurve {
         platformTreasury = p.platformTreasury;
         wtrx = p.wtrx;
         dexFactory = p.dexFactory;
-        pool = p.pool;
         curveSupply = p.curveSupply;
         gradTarget = p.gradTarget;
         startTime = p.startTime;
@@ -239,9 +236,11 @@ contract FerzanTronCurve {
     function graduate() external nonReentrant returns (address pair) {
         require(complete && !graduated, "not ready");
         graduated = true;
+        // The coin cannot have reached the pair before now (it only moves through this curve until graduation),
+        // so even a pair someone created early holds none of it; any TRX gifted into it only raises the price.
         pair = IV2Factory(dexFactory).getPair(token, wtrx);
         if (pair == address(0)) pair = IV2Factory(dexFactory).createPair(token, wtrx);
-        if (pair != pool) emit PoolMismatch(pool, pair);
+        pool = pair;
 
         uint256 raised = realEth;
         uint256 reward = gradReward;

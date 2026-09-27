@@ -5,8 +5,8 @@ import {FerzanTronCurve} from "./FerzanTronCurve.sol";
 import {FerzanTronCurveToken} from "./FerzanTronCurveToken.sol";
 
 /// @notice Launches a Ferzan Tron bonding curve: a coin (clone) + its curve (clone) in one cheap transaction.
-/// No owner, no admin. Master copies, SunSwap V2 factory, WTRX, treasury, launch fee, graduation reward,
-/// minimum graduation target and SunSwap's pair init-code hash are fixed at deploy time.
+/// No owner, no admin. Master copies, SunSwap V2 factory, WTRX, treasury, launch fee, graduation reward and
+/// minimum graduation target are fixed at deploy time.
 /// msg.value = launchFeeSun + optional dev buy.
 contract FerzanTronCurveFactory {
     uint256 public constant MAX_START_DELAY = 7 days;
@@ -19,7 +19,6 @@ contract FerzanTronCurveFactory {
     uint256 public immutable launchFeeSun;
     uint256 public immutable gradRewardSun;
     uint256 public immutable minGradTarget;
-    bytes32 public immutable pairInitHash; // SunSwap V2 pair init code hash, checked against a live pair at deploy
 
     // same event signatures as the EVM factories, so the same receipt/indexer parsing works
     event CurveLaunched(address indexed curve, address indexed token, address indexed creator);
@@ -33,12 +32,11 @@ contract FerzanTronCurveFactory {
         address platformTreasury_,
         uint256 launchFeeSun_,
         uint256 gradRewardSun_,
-        uint256 minGradTarget_,
-        bytes32 pairInitHash_
+        uint256 minGradTarget_
     ) {
         require(
             tokenImpl_ != address(0) && curveImpl_ != address(0) && dexFactory_ != address(0) && wtrx_ != address(0)
-                && platformTreasury_ != address(0) && pairInitHash_ != bytes32(0),
+                && platformTreasury_ != address(0),
             "zero"
         );
         tokenImpl = tokenImpl_;
@@ -49,13 +47,6 @@ contract FerzanTronCurveFactory {
         launchFeeSun = launchFeeSun_;
         gradRewardSun = gradRewardSun_;
         minGradTarget = minGradTarget_;
-        pairInitHash = pairInitHash_;
-    }
-
-    /// The SunSwap V2 pair address for (token, WTRX), before it exists. Tron CREATE2 uses the 0x41 prefix.
-    function pairFor(address token) public view returns (address) {
-        (address a, address b) = token < wtrx ? (token, wtrx) : (wtrx, token);
-        return address(uint160(uint256(keccak256(abi.encodePacked(bytes1(0x41), dexFactory, keccak256(abi.encodePacked(a, b)), pairInitHash)))));
     }
 
     function launch(
@@ -75,8 +66,7 @@ contract FerzanTronCurveFactory {
 
         tokenAddress = _clone(tokenImpl);
         curveAddress = _clone(curveImpl);
-        address pool = pairFor(tokenAddress);
-        FerzanTronCurveToken(tokenAddress).initialize(name, symbol, totalSupply, curveAddress, pool);
+        FerzanTronCurveToken(tokenAddress).initialize(name, symbol, totalSupply, curveAddress);
         FerzanTronCurve(curveAddress).initialize(
             FerzanTronCurve.Init({
                 token: tokenAddress,
@@ -84,7 +74,6 @@ contract FerzanTronCurveFactory {
                 platformTreasury: platformTreasury,
                 wtrx: wtrx,
                 dexFactory: dexFactory,
-                pool: pool,
                 curveSupply: totalSupply,
                 gradTarget: gradTarget,
                 startTime: start,
@@ -99,7 +88,7 @@ contract FerzanTronCurveFactory {
         uint256 devBuy = msg.value - launchFeeSun;
         if (devBuy > 0) FerzanTronCurve(curveAddress).devBuy{value: devBuy}(msg.sender);
         emit CurveLaunched(curveAddress, tokenAddress, msg.sender);
-        emit CurveDetails(curveAddress, pool, gradTarget, start, devBuy);
+        emit CurveDetails(curveAddress, address(0), gradTarget, start, devBuy); // pool is created at graduation
     }
 
     function _clone(address impl) internal returns (address instance) {
