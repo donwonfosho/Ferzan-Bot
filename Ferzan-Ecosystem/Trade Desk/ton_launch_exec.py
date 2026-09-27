@@ -29,6 +29,7 @@ import tron_launch_exec as common  # loads the Trade Bot settings exactly like t
 out = common.out
 MAX_TOTAL_NANO = 2_000_000_000   # 2 TON: a launch sends about 0.6
 GAS_SPARE_NANO = 100_000_000     # 0.1 TON left for the wallet's own fees (and its first-use deploy)
+LAUNCH_TTL_S = 120               # the signed launch is valid this long; we wait past it, so "not confirmed" = can't land
 LOG = Path(os.getenv("TON_LAUNCH_LOG") or "/opt/ferzan/app/ton_launches.json")
 
 
@@ -143,7 +144,7 @@ async def _launch(seed64: bytes, rid: str, parsed, total: int):
         msgs = [_msg(*p) for p in parsed]
         seqno = await tsg._seqno_for_send(provider, w)
         signed = w.raw_create_transfer_msg(private_key=w.private_key, seqno=seqno, wallet_id=w.wallet_id,
-                                           messages=msgs, valid_until=int(time.time()) + tsg.MSG_TTL_S)
+                                           messages=msgs, valid_until=int(time.time()) + LAUNCH_TTL_S)
         ext = w.create_external_msg(dest=w.address, state_init=w.state_init if seqno == 0 else None, body=signed)
         cell = ext.serialize()
         h = cell.hash.hex()
@@ -151,8 +152,11 @@ async def _launch(seed64: bytes, rid: str, parsed, total: int):
         def _mark(d):
             d[rid] = {"hash": h, "seqno": seqno, "address": addr, "minter": minter.to_str(), "at": int(time.time())}
         _log(_mark)
-        await provider.raw_send_message(cell.to_boc())
-        landed = await tsg._await_seqno(w, seqno)
+        ok, why = await tsg.broadcast(provider, cell.to_boc())
+        if not ok:
+            _log(lambda d: d.pop(rid, None))  # nobody took it: a retry may send again
+            return {"ok": False, "address": addr, "error": "no TON relay accepted the launch: " + why[:150]}
+        landed = await tsg._await_seqno(w, seqno, timeout_s=LAUNCH_TTL_S + 30)
         res = {"address": addr, "txid": h, "minter": minter.to_str()}
         return dict(res, ok=True) if landed else dict(res, ok=False, pending=True, error="not confirmed yet")
     finally:
@@ -166,7 +170,7 @@ def launch(args: dict) -> None:
     parsed, total = _parse(args.get("messages"))
     seed64 = ton_signer._ton_keypair_bytes(_secret(int(args["uid"])))
     prev = _log(lambda d: d.get(rid))
-    if prev and time.time() - int(prev.get("at") or 0) < 120:  # a send is still in flight: never sign a second
+    if prev and time.time() - int(prev.get("at") or 0) < LAUNCH_TTL_S + 60:  # still in flight: never sign a second
         out(ok=False, pending=True, txid=prev.get("hash", ""), address=prev.get("address", ""), error="already sending")
     out(**ton_signer._run_async(_launch(seed64, rid, parsed, total)))
 

@@ -171,6 +171,31 @@ async def _await_seqno(wallet, sent_seqno: int, timeout_s: float = CONFIRM_WAIT_
     return False
 
 
+async def broadcast(provider, boc: bytes) -> tuple[bool, str]:
+    """Hands a signed external message to the network by three routes: our liteserver plus the public
+    tonapi and toncenter relays. One liteserver alone can accept a message and still drop it before it
+    reaches a block. Sending the same message twice is safe: the wallet seqno lets it land only once."""
+    import asyncio
+    import base64
+
+    b64, errs, ok = base64.b64encode(boc).decode(), [], False
+    try:
+        await provider.raw_send_message(boc)
+        ok = True
+    except Exception as exc:  # noqa: BLE001
+        errs.append(f"liteserver: {str(exc)[:80]}")
+    for url in ("https://tonapi.io/v2/blockchain/message", "https://toncenter.com/api/v2/sendBoc"):
+        try:
+            r = await asyncio.to_thread(requests.post, url, json={"boc": b64}, timeout=20)
+            if r.status_code == 200:
+                ok = True
+            else:
+                errs.append(f"{url.split('/')[2]}: HTTP {r.status_code} {r.text[:80]}")
+        except Exception as exc:  # noqa: BLE001
+            errs.append(f"{url.split('/')[2]}: {type(exc).__name__}")
+    return ok, "; ".join(errs)
+
+
 async def _send_one(provider, wallet, destination, value: int, body, **msg_kwargs) -> tuple[str, int]:
     """Sign + broadcast one internal message from `wallet`. Handles a
     never-used wallet (no contract deployed yet): seqno 0 + state_init in the
@@ -195,7 +220,9 @@ async def _send_one(provider, wallet, destination, value: int, body, **msg_kwarg
     )
     ext = wallet.create_external_msg(dest=wallet.address, state_init=state_init, body=signed)
     cell = ext.serialize()
-    await provider.raw_send_message(cell.to_boc())
+    ok, why = await broadcast(provider, cell.to_boc())
+    if not ok:
+        raise RuntimeError(f"no TON relay accepted the message ({why})")
     return cell.hash.hex(), seqno
 
 

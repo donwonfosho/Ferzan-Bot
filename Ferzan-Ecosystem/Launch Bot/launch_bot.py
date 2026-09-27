@@ -1111,7 +1111,7 @@ async def _ton_tb_run(bot, req_id: str, uid: int, chat_id: int):
             await say("❌ Couldn't prepare the TON launch (" + _esc(built.get("error", "no messages")) + "). Nothing was sent.")
             return
         res = await tron.run("launch", {"uid": uid, "request_id": req_id, "messages": built["messages"]},
-                             timeout=180, script=helper)
+                             timeout=260, script=helper)
         txid = res.get("txid") or ""
         if res.get("ok") or res.get("pending"):
             if txid:
