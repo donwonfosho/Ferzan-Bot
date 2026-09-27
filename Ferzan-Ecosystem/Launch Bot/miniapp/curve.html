@@ -106,6 +106,8 @@
            dex: (t) => `https://app.uniswap.org/swap?chain=mainnet&outputCurrency=${t}`, dexName: 'Uniswap', presets: ['0.005', '0.01', '0.05', '0.1'] },
     robinhood: { id: 4663, name: 'Robinhood Chain', sym: 'ETH', rpc: 'https://rpc.mainnet.chain.robinhood.com', rpcs: ['https://rpc.mainnet.chain.robinhood.com'], explorer: 'https://robinhoodchain.blockscout.com', trustCoin: 60,
            dex: (t) => `https://app.uniswap.org/swap?outputCurrency=${t}`, dexName: 'Uniswap', presets: ['0.001', '0.005', '0.01', '0.05'] },
+    arc: { id: 5042, name: 'Arc', sym: 'USDC', rpc: 'https://rpc.mainnet.arc.io', rpcs: ['https://rpc.mainnet.arc.io'], explorer: 'https://explorer.arc.io', trustCoin: 60,
+           dex: (t) => `https://dexscreener.com/arc/${t}`, dexName: 'Uniswap (Arc)', presets: ['5', '10', '50', '100'] },
   };
   const net = NETWORKS[q.get('chain')] || null;
   const curveAddr = (q.get('curve') || '').toLowerCase();

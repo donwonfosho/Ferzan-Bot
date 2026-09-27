@@ -318,11 +318,8 @@ def build_tx(request_id: str, body: BuildTxRequest):
             }
 
         elif req.chain in CHAIN_CONFIGS:
-            if req.chain == "arc" and req.mode == "bonding_curve":
-                raise HTTPException(
-                    501,
-                    "Arc bonding curve is held — Uniswap v4 on Arc, no V2 addLiquidityETH.",
-                )
+            if req.chain == "arc" and req.mode == "bonding_curve" and not FACTORY_ADDRESSES["arc"]["bonding_curve"]:
+                raise HTTPException(501, "Arc bonding curves open once the Arc curve factory is deployed.")
             if req.chain == "arc" and (os.environ.get("ARC_LAUNCH_LIVE") or "").strip() != "1":
                 raise HTTPException(501, "Arc launches open once the Arc launch factory is deployed (ARC_LAUNCH_LIVE=1).")
             rpc = RPC_URLS.get(req.chain) or None

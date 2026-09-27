@@ -58,7 +58,7 @@
   const params = new URLSearchParams(location.search);
   let sort = ['new', 'koth', 'trending', 'volume'].includes(params.get('sort')) ? params.get('sort') : 'new';
   let chain = '';
-  const CHAIN_NAME = { bsc: 'BNB', base: 'Base', ethereum: 'Ethereum', robinhood: 'Robinhood', solana: 'Solana' };
+  const CHAIN_NAME = { bsc: 'BNB', base: 'Base', ethereum: 'Ethereum', robinhood: 'Robinhood', solana: 'Solana', arc: 'Arc' };
   const esc = (t) => String(t ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   const usd = (v) => !v ? '' : v >= 1e9 ? '$' + (v / 1e9).toFixed(2) + 'B' : v >= 1e6 ? '$' + (v / 1e6).toFixed(2) + 'M' : v >= 1e3 ? '$' + (v / 1e3).toFixed(1) + 'K' : '$' + v.toFixed(0);
   const ago = (ts) => {

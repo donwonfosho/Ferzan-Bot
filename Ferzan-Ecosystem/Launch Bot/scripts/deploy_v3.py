@@ -9,7 +9,7 @@ curve = FerzanCurveFactoryV3, plain = LaunchTokenFactoryV3. Same toolchain + dep
 as before. Treasury, fee (and DEX/WETH for curves) are fixed forever; no owner, no admin.
 After a deploy it runs a live vanity self-test (read-only) against the new factory.
 """
-import json, subprocess, sys, time
+import json, os, subprocess, sys, time
 from pathlib import Path
 
 from eth_account import Account
@@ -45,11 +45,17 @@ CHAINS = {
         "router": "0x89e5db8b5aa49aa85ac63f691524311aeb649eba",
         "env": "FACTORY_HOOD_CURVE", "explorer": "https://robinhoodchain.blockscout.com/address/",
     },
-    # Arc: plain launches only (no Uniswap-v2-style DEX there for curves). Gas and the fee are native
-    # USDC, 18 decimals at the protocol level (docs.arc.io), so 10 USDC = 10 * 10**18.
+    # Arc: gas and the fee are native USDC, 18 decimals at the protocol level (docs.arc.io), so
+    # 10 USDC = 10 * 10**18 (override with ARC_FEE_USDC=5 etc. when deploying). Arc's wrapped-native
+    # contract is a broken stub, so curves pair with USDC's ERC-20 view (6 dec) on Arc's Uniswap v2
+    # (router 0x1f7d...2EfA -> factory 0x89e5...) and use the USDC editions of the contracts.
     "arc": {
         "rpc": "https://rpc.mainnet.arc.io", "rpc_env": "ARC_RPC_URL", "chain_id": 5042, "sym": "USDC",
-        "fee_wei": 10 * 10**18, "plain_only": True,
+        "fee_wei": 10 * 10**18,
+        "dex": "Uniswap V2 (Arc)", "dex_factory": "0x89e5DB8B5aA49aA85AC63f691524311AEB649eba",
+        "weth": "0x3600000000000000000000000000000000000000", "weth_symbol": "USDC",
+        "router": "0x1f7d7550B1b028f7571E69A784071F0205FD2EfA", "usdc_quote": True,
+        "curve_contract": "FerzanCurveFactoryUsdc",
         "env": "FACTORY_ARC_CURVE", "explorer": "https://explorer.arc.io/address/",
     },
 }
@@ -84,10 +90,10 @@ def env_file(path="/opt/ferzan/.env"):
     return out
 
 
-def compile_factory(kind):
+def compile_factory(kind, c=None):
     if not SOLC.exists() or not (LIB / "@openzeppelin/contracts/token/ERC20/ERC20.sol").exists():
         sys.exit("ABORT: compiler/OpenZeppelin missing in /opt/ferzan/evm-tools")
-    cname = "FerzanCurveFactoryV3" if kind == "curve" else "LaunchTokenFactoryV3"
+    cname = ((c or {}).get("curve_contract") or "FerzanCurveFactoryV3") if kind == "curve" else "LaunchTokenFactoryV3"
     if kind == "plain" and "Ownable" in (HERE / "contracts" / "LaunchToken.sol").read_text():
         sys.exit("ABORT: LaunchToken.sol still has an owner role")
     src = HERE / "contracts" / f"{cname}.sol"
@@ -116,9 +122,10 @@ def main():
     if len(sys.argv) < 3 or sys.argv[1] not in CHAINS or sys.argv[2] not in ("curve", "plain"):
         sys.exit("usage: deploy_v3.py bsc|base|ethereum|robinhood|arc curve|plain [plan|send]")
     chain, kind, mode = sys.argv[1], sys.argv[2], (sys.argv[3] if len(sys.argv) > 3 else "plan")
-    c = CHAINS[chain]
-    if kind == "curve" and c.get("plain_only"):
-        sys.exit(f"ABORT: {chain} supports plain launches only")
+    c = dict(CHAINS[chain])
+    if chain == "arc" and os.environ.get("ARC_FEE_USDC"):  # e.g. ARC_FEE_USDC=5 python deploy_v3.py arc plain plan
+        from decimal import Decimal
+        c["fee_wei"] = int(Decimal(os.environ["ARC_FEE_USDC"]) * 10**18)
     rec_key = f"{chain}_{kind}_v3"
     env_name = c["env"] if kind == "curve" else c["env"].replace("_CURVE", "_PLAIN")
     treasury = (env_file().get("PLATFORM_TREASURY_EVM") or "").strip()
@@ -138,13 +145,33 @@ def main():
         return
 
     # --- prove the DEX factory + WETH addresses are the real ones on this chain (curves only use them)
-    if c.get("plain_only"):
+    if kind == "plain":
         dex = weth = None
         probe_pair = "not needed (plain launches)"
+    elif c.get("usdc_quote"):
+        dex, weth, probe_pair = _check_usdc_dex(w3, c)
     else:
         dex, weth, probe_pair = _check_dex(w3, c)
-    abi, bytecode = compile_factory(kind)
+    abi, bytecode = compile_factory(kind, c)
     _deploy(w3, c, chain, kind, mode, abi, bytecode, dex, weth, treasury, record, rec_key, env_name, probe_pair)
+
+
+def _check_usdc_dex(w3, c):
+    """Arc: the pool pairs with USDC's ERC-20 view; prove the v2 factory is live and the router uses it."""
+    dex = Web3.to_checksum_address(c["dex_factory"])
+    usdc = Web3.to_checksum_address(c["weth"])
+    if w3.eth.get_code(dex) in (b"", b"\x00") or w3.eth.get_code(usdc) in (b"", b"\x00"):
+        sys.exit("ABORT: DEX factory or USDC has no code on this chain")
+    if w3.eth.contract(address=usdc, abi=ERC20_ABI).functions.symbol().call() != c["weth_symbol"]:
+        sys.exit("ABORT: USDC symbol mismatch")
+    router = w3.eth.contract(address=Web3.to_checksum_address(c["router"]), abi=ROUTER_ABI)
+    if router.functions.factory().call() != dex:
+        sys.exit("ABORT: the Arc v2 router does not point at this factory")
+    n = w3.eth.contract(address=dex, abi=[{"name": "allPairsLength", "type": "function", "stateMutability": "view",
+                        "inputs": [], "outputs": [{"name": "", "type": "uint256"}]}]).functions.allPairsLength().call()
+    if n < 10:
+        sys.exit(f"ABORT: only {n} pairs on this factory - not the live Arc v2 DEX?")
+    return dex, usdc, f"router {c['router']}, {n} pairs"
 
 
 def _check_dex(w3, c):

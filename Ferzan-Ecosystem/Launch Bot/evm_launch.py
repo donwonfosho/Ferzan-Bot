@@ -77,6 +77,21 @@ def launch_fee_units(chain_key: str) -> int:
         return int(os.environ.get("LAUNCH_FEE_ARC") or "0")
     return int(os.environ.get("LAUNCH_FEE_WEI") or "0")
 
+def _funds_error(builder, creator: str, need_wei: int, err: Exception) -> str | None:
+    """A plain-English message when the launch wallet can't cover the fee + gas (None if that isn't the cause)."""
+    if not any(k in str(err) for k in ("OutOfFunds", "insufficient funds", "insufficient balance")):
+        return None
+    c = builder.chain
+    try:
+        have = builder.w3.eth.get_balance(creator) / 10**c.native_decimals
+    except Exception:
+        have = None
+    need = need_wei / 10**c.native_decimals
+    has = f" It has {have:,.4f} {c.native_symbol}." if have is not None else ""
+    return (f"Your wallet doesn't have enough {c.native_symbol} on {c.name}. The launch needs {need:,.4f} {c.native_symbol} "
+            f"plus a little for gas.{has} Add {c.native_symbol} on {c.name} to this wallet and tap the button again.")
+
+
 # Minimal ABI covering just the function we call. After you compile
 # LaunchTokenFactory.sol (Hardhat/Foundry), replace this with the real
 # generated ABI -- this hand-written version matches the Solidity
@@ -264,6 +279,9 @@ class EvmLaunchTxBuilder:
             # call would revert (e.g. bad params) -- surface this clearly
             # rather than silently falling back to a guessed gas limit,
             # since launches are one-shot and expensive to get wrong.
+            friendly = _funds_error(self, creator, int(locals().get("fee_wei") or 0), e)
+            if friendly:
+                raise ValueError(friendly) from e
             raise ValueError(
                 f"Gas estimation failed -- the transaction would likely revert "
                 f"or the factory address is wrong for {self.chain.name}: {e}"
@@ -407,7 +425,7 @@ class FerzanCurveTxBuilder:
     """Builds the unsigned launch tx for a deployed FerzanCurveFactory."""
 
     def __init__(self, chain_key: str, factory_address: str, rpc_url: Optional[str] = None):
-        if chain_key not in CHAIN_CONFIGS or chain_key == "arc":
+        if chain_key not in CHAIN_CONFIGS:
             raise UnsupportedChainError(f"Bonding curves are not available on '{chain_key}' yet.")
         self.chain_key = chain_key
         self.chain = CHAIN_CONFIGS[chain_key]
@@ -454,6 +472,9 @@ class FerzanCurveTxBuilder:
         try:
             gas_estimate = fn.estimate_gas({"from": creator, "value": value})
         except Exception as e:
+            friendly = _funds_error(self, creator, int(value or 0), e)
+            if friendly:
+                raise ValueError(friendly) from e
             raise ValueError(
                 f"Gas estimation failed -- the launch would revert on {self.chain.name}: {e}"
             ) from e

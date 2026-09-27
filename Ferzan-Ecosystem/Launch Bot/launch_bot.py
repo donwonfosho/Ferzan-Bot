@@ -68,10 +68,11 @@ SUPPLY_PRESETS = [("1M", 10**6), ("100M", 10**8), ("1B", 10**9), ("10B", 10**10)
 DEVBUY_PRESETS = {
     "solana": ["0.1", "0.5", "1", "2"],
     "bsc": ["0.01", "0.05", "0.1", "0.5"],
+    "arc": ["10", "50", "100", "500"],
     "default": ["0.001", "0.005", "0.01", "0.05"],
 }
-GRAD_PRESETS = {"bsc": ["5", "10", "20"], "default": ["1", "2.5", "5"]}
-MAXBUY_PRESETS = {"bsc": ["0.1", "0.5", "1"], "default": ["0.01", "0.05", "0.1"]}
+GRAD_PRESETS = {"bsc": ["5", "10", "20"], "arc": ["5000", "10000", "25000"], "default": ["1", "2.5", "5"]}
+MAXBUY_PRESETS = {"bsc": ["0.1", "0.5", "1"], "arc": ["100", "500", "1000"], "default": ["0.01", "0.05", "0.1"]}
 
 (CHOOSING_CHAIN, CHOOSING_MODE, ENTERING_NAME, ENTERING_SYMBOL, ENTERING_SUPPLY, ENTERING_GRAD,
  ENTERING_VETH, ENTERING_VTOKEN, ENTERING_ALLOCS, ENTERING_DEVBUY, ENTERING_WINDOW, CONFIRMING,
@@ -107,8 +108,6 @@ def _plain_live(chain: str) -> bool:
 
 
 def _curve_live(chain: str) -> bool:
-    if chain == "arc":
-        return False  # no Uniswap-v2-style DEX on Arc for curves to graduate into (yet)
     if chain == "solana":
         return bool((os.environ.get("METEORA_CONFIG") or "").strip())
     key = FACTORY_KEY.get(chain)

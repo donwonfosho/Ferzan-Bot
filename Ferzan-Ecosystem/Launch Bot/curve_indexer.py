@@ -61,12 +61,17 @@ CHAINS = {
         "fallback": ['https://rpc.mainnet.chain.robinhood.com'],
         "block_time": 0.25, "explorer": "https://robinhoodchain.blockscout.com",
     },
+    "arc": {
+        "factory_env": "FACTORY_ARC_CURVE", "rpc_env": "ARC_RPC_URL", "sym": "USDC", "dex": "Uniswap",
+        "fallback": ["https://rpc.mainnet.arc.io"],
+        "block_time": 0.5, "explorer": "https://explorer.arc.io",
+    },
 }
 CHAINS["solana"] = {  # Meteora DBC launches - read by sol_indexer.py, not by a ChainIndexer worker
     "kind": "solana", "factory_env": "", "rpc_env": "SOLANA_RPC_URL", "sym": "SOL", "dex": "Meteora",
     "fallback": [], "block_time": 0.4, "explorer": "https://solscan.io",
 }
-CHAIN_LABEL = {"bsc": "BNB Chain", "base": "Base", "ethereum": "Ethereum", "robinhood": "Robinhood Chain", "solana": "Solana"}
+CHAIN_LABEL = {"bsc": "BNB Chain", "base": "Base", "ethereum": "Ethereum", "robinhood": "Robinhood Chain", "solana": "Solana", "arc": "Arc"}
 
 
 def _trade_url(r) -> str:
