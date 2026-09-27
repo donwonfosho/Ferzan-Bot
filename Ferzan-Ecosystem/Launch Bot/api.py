@@ -811,6 +811,9 @@ def _launch_card(req, token_addr: str, curve_addr: str, tx_hash: str) -> str:
                   "and the pool liquidity is burned forever. Team tokens stay locked until graduation.")
     elif req.mode == "meteora":
         safety = "Meteora curve with anti-sniper fee; moves to a Meteora DAMM v2 pool when it fills."
+    elif req.chain == "tron":
+        safety = ("Fixed supply, no owner, can never be minted again. Creator: send /liquidity to open a SunSwap pool "
+                  "from your Trade Bot wallet (LP burned by default) so anyone can trade it.")
     else:
         safety = "Fixed supply, no owner, can never be minted again. Use /lplock after you add liquidity."
     lines = [

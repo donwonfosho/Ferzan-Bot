@@ -36,6 +36,7 @@ from telegram.ext import (
 import launch_bot_db as db
 import launch_extras as lx
 import tron_launch as tron
+import tron_liquidity
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -1703,6 +1704,7 @@ def main():
     app.add_handler(CallbackQueryHandler(drafts_cb, pattern="^dr:"))
     app.add_handler(CallbackQueryHandler(tzset_cb, pattern="^tzset:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, resched_text), group=1)
+    tron_liquidity.register(app)
 
     async def _post(application):
         await application.bot.set_my_commands(
@@ -1718,6 +1720,7 @@ def main():
                 BotCommand("refer", "Your referral link"),
                 BotCommand("referwallet", "Set referral payout wallet"),
                 BotCommand("lplock", "Burn / lock LP helper"),
+                BotCommand("liquidity", "Add a SunSwap pool for your Tron coin"),
                 BotCommand("cancel", "Cancel launch"),
             ]
         )
