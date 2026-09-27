@@ -73,7 +73,7 @@ def main():
         return
 
     p = ("Ferzan Arc Test", "FZTEST", 10**27, 10**18, 0, 0, [], [])
-    rc = send(w3, acct, fac.functions.launch(p).build_transaction({"value": fee}))
+    rc = send(w3, acct, fac.functions.launch(p).build_transaction({"from": acct.address, "value": fee}))
     ev = fac.events.CurveLaunched().process_receipt(rc)
     if not ev:
         sys.exit("ABORT: no CurveLaunched event")
@@ -83,7 +83,7 @@ def main():
     print(f"Launched: token {token}  curve {curve_addr}  pool {pool}")
     usdc = w3.eth.contract(address=Web3.to_checksum_address(c["weth"]), abi=BAL_ABI)
     before_native = w3.eth.get_balance(curve_addr)
-    send(w3, acct, curve.functions.buy(0, "0x0000000000000000000000000000000000000000").build_transaction({"value": buy}))
+    send(w3, acct, curve.functions.buy(0, "0x0000000000000000000000000000000000000000").build_transaction({"from": acct.address, "value": buy}))
     time.sleep(2)
     grad = curve.functions.graduated().call()
     r0, r1, _ = w3.eth.contract(address=pool, abi=PAIR_ABI).functions.getReserves().call()
