@@ -303,6 +303,28 @@ GT_NET = {
     "polygon": "polygon",
     "pump": "solana",
     "pumpfun": "solana",
+    "arc": "arc",
+    "tron": "tron",
+    "trx": "tron",
+    "ton": "ton",
+}
+
+# Explorer links per chain: {h} = transaction, {a} = wallet.
+TX_URL = {
+    "sol": "https://solscan.io/tx/{h}", "solana": "https://solscan.io/tx/{h}",
+    "base": "https://basescan.org/tx/{h}", "eth": "https://etherscan.io/tx/{h}", "ethereum": "https://etherscan.io/tx/{h}",
+    "bsc": "https://bscscan.com/tx/{h}", "arb": "https://arbiscan.io/tx/{h}",
+    "arc": "https://explorer.arc.io/tx/{h}",
+    "tron": "https://tronscan.org/#/transaction/{h}", "trx": "https://tronscan.org/#/transaction/{h}",
+    "ton": "https://tonviewer.com/transaction/{h}",
+}
+ADDR_URL = {
+    "sol": "https://solscan.io/account/{a}", "solana": "https://solscan.io/account/{a}",
+    "base": "https://basescan.org/address/{a}", "eth": "https://etherscan.io/address/{a}", "ethereum": "https://etherscan.io/address/{a}",
+    "bsc": "https://bscscan.com/address/{a}", "arb": "https://arbiscan.io/address/{a}",
+    "arc": "https://explorer.arc.io/address/{a}",
+    "tron": "https://tronscan.org/#/address/{a}", "trx": "https://tronscan.org/#/address/{a}",
+    "ton": "https://tonviewer.com/{a}",
 }
 
 
@@ -588,6 +610,10 @@ DS_CHAIN = {
     "avax": "avalanche",
     "pol": "polygon",
     "polygon": "polygon",
+    "arc": "arc",
+    "tron": "tron",
+    "trx": "tron",
+    "ton": "ton",
 }
 
 
@@ -820,16 +846,8 @@ def _card(chain: str, ca: str, tr: dict, attrs: dict, emoji: str = "🟢", tg_ur
             tg = s.get("url") or ""
             break
     buy = f"https://t.me/{TRADE}?start=buy_{ca}"
-    scan = {
-        "sol": f"https://solscan.io/tx/{tx}",
-        "solana": f"https://solscan.io/tx/{tx}",
-        "base": f"https://basescan.org/tx/{tx}",
-        "eth": f"https://etherscan.io/tx/{tx}",
-        "ethereum": f"https://etherscan.io/tx/{tx}",
-        "bsc": f"https://bscscan.com/tx/{tx}",
-        "arb": f"https://arbiscan.io/tx/{tx}",
-    }.get(chain, ds)
-    buyer_url = scan.replace("/tx/", "/address/") if buyer and "/tx/" in scan else scan
+    scan = TX_URL[chain].format(h=tx) if chain in TX_URL and tx else ds
+    buyer_url = ADDR_URL[chain].format(a=buyer) if chain in ADDR_URL and buyer else scan
     liq = (os.getenv("FERZAN_LIQ_BOT") or "FerzanLiqBot").lstrip("@")
     boost = f"https://t.me/{liq}"
     chat = tg or os.getenv("FERZAN_CHAT_URL") or "https://t.me/Ferzan_Trade_Ecosystem"
@@ -960,12 +978,7 @@ def _sell_card(chain: str, ca: str, tr: dict, attrs: dict, is_dev: bool = False)
     mc = attrs.get("fdv_usd") or attrs.get("market_cap_usd") or pair.get("marketCap") or pair.get("fdv") or ""
     net = GT_NET.get(chain, chain)
     ds = pair.get("url") or f"https://dexscreener.com/{net}/{ca}"
-    scan = {
-        "sol": f"https://solscan.io/tx/{tx}", "solana": f"https://solscan.io/tx/{tx}",
-        "base": f"https://basescan.org/tx/{tx}", "eth": f"https://etherscan.io/tx/{tx}",
-        "ethereum": f"https://etherscan.io/tx/{tx}", "bsc": f"https://bscscan.com/tx/{tx}",
-        "arb": f"https://arbiscan.io/tx/{tx}",
-    }.get(chain, ds)
+    scan = TX_URL[chain].format(h=tx) if chain in TX_URL and tx else ds
     header = "🚨 <b>DEV WALLET SELL</b>" if is_dev else "🔴 SELL"
     return (
         f"{header}\n"
@@ -990,6 +1003,9 @@ CHAIN_BTNS = [
      InlineKeyboardButton("🔺 Avalanche", callback_data="su:avax")],
     [InlineKeyboardButton("🟣 Polygon", callback_data="su:pol"),
      InlineKeyboardButton("💊 Pump.fun", callback_data="su:sol")],
+    [InlineKeyboardButton("🔷 Arc", callback_data="su:arc"),
+     InlineKeyboardButton("🔴 Tron", callback_data="su:tron")],
+    [InlineKeyboardButton("💎 TON", callback_data="su:ton")],
 ]
 
 
@@ -1557,7 +1573,7 @@ async def track(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await update.effective_message.reply_text("min_usd must be a number, e.g. 25")
             return
     if chain not in GT_NET:
-        await update.effective_message.reply_text("Chain: sol eth base bsc arb avax pol")
+        await update.effective_message.reply_text("Chain: sol eth base bsc arb avax pol arc tron ton")
         return
     pool, attrs = _pool_for(chain, ca)
     if not pool:
