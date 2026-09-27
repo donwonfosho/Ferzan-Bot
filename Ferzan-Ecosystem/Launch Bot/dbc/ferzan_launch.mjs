@@ -62,7 +62,7 @@ try {
     let lastErr = ''
     for (let attempt = 1; attempt <= 3; attempt++) {
         try {
-            const ttx = await client.creator.transferPoolCreator({ virtualPool: pool, creator: launcher.publicKey, newCreator: vault })
+            const ttx = await client.creator.transferPoolCreator({ pool, virtualPool: pool, creator: launcher.publicKey, newCreator: vault })
             ttx.feePayer = launcher.publicKey
             ttx.recentBlockhash = (await conn.getLatestBlockhash('confirmed')).blockhash
             out.transfer_sig = await sendAndConfirmTransaction(conn, ttx, [launcher], { commitment: 'confirmed', maxRetries: 5 })
