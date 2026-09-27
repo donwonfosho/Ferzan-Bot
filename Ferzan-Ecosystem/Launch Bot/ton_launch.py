@@ -1,45 +1,173 @@
 """
-TON launch request + treasury fee memo.
+TON coin launches: a standard TEP-74 jetton (the discoverable minter from @ton-community/assets-sdk),
+deployed and signed by the creator's own wallet through TonConnect in the Mini App.
 
-A full jetton minter deploy needs the official minter code + Tonkeeper
-signing in the Mini App. Until that minter is pinned, we:
+One TonConnect request carries three messages from the creator's wallet:
+  1. deploy the jetton minter (state_init) with the creator as admin + mint the full supply to them
+  2. change_admin -> nobody, so the supply can never grow (fixed-supply, like the other chains)
+  3. the Ferzan launch fee to PLATFORM_TREASURY_TON, with the memo FERZAN_LAUNCH:<request id>
+Messages between the same two accounts arrive in order, so the mint always lands before the admin drop.
 
-  1. Record the launch request (name / symbol / supply)
-  2. Build a TON transfer to PLATFORM_TREASURY_TON with comment
-     FERZAN_LAUNCH:<request_id>
-  3. Return that payload for Tonkeeper
-
-Do not advertise this as an on-chain jetton until TON_MINTER_CODE is set.
+The contract code is loaded from TON_CODE_DIR (default /opt/ferzan/ton-code) and must match the pinned
+hashes below, so a swapped file can never be deployed.
+Network: TON_NETWORK=testnet uses TON's test network (addresses, TonConnect and verification).
 """
-
 from __future__ import annotations
 
+import base64
 import os
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+
+MINTER_CODE_HASH = "0571976c63ec1b7550230a2609dbedb36e1b64ef8d022a16b34ea57063185b2f"
+WALLET_CODE_HASH = "a760d629d5343e76d045017d9dc216fc8a307a8377815feb2b0a5c490e733486"
+CODE_DIR = Path(os.environ.get("TON_CODE_DIR") or "/opt/ferzan/ton-code")
+
+OP_MINT = 21
+OP_INTERNAL_TRANSFER = 0x178D4519
+OP_CHANGE_ADMIN = 3
+
+DEPLOY_TON = 250_000_000      # 0.25 TON to the minter (storage + mint gas; the excess returns to the creator)
+WALLET_TON = 60_000_000       # of that, 0.06 TON forwarded to deploy the creator's jetton wallet
+ADMIN_TON = 50_000_000        # 0.05 TON for the admin drop (the excess returns)
+
+
+def testnet() -> bool:
+    return (os.environ.get("TON_NETWORK") or "").strip().lower() == "testnet"
+
+
+def launch_fee_nano() -> int:
+    return int(os.environ.get("LAUNCH_FEE_NANOTON") or "300000000")  # 0.3 TON by default
 
 
 @dataclass
 class TonLaunchTx:
-    to: str
-    amount_nano: int
-    comment: str
-    note: str
+    minter: str                      # user-friendly minter (coin) address
+    minter_raw: str                  # 0:hex
+    messages: list = field(default_factory=list)  # TonConnect messages
+    valid_until: int = 0
+    network: str = "-239"            # TonConnect chain id: -239 mainnet, -3 testnet
+    note: str = ""
+    cells: dict = field(default_factory=dict, repr=False)  # raw cells, for the server-side testnet run
 
 
-def build_unsigned_launch_tx(request_id: str, creator_address: str = "") -> TonLaunchTx:
+def _code(name: str, want: str):
+    from pytoniq_core import Cell
+
+    p = CODE_DIR / f"{name}.b64"
+    if not p.exists():
+        raise ValueError(f"TON contract code missing ({p}); run the TON setup step first.")
+    cell = Cell.one_from_boc(base64.b64decode(p.read_text().strip()))
+    if cell.hash.hex() != want:
+        raise ValueError(f"TON contract code at {p} does not match the pinned hash; refusing to launch.")
+    return cell
+
+
+def _content(url: str):
+    """Off-chain metadata: 0x01 + URL (one cell holds 126 bytes after the prefix)."""
+    from pytoniq_core import begin_cell
+
+    raw = url.encode()
+    if len(raw) > 126:
+        raise ValueError("metadata URL too long for one cell")
+    return begin_cell().store_uint(1, 8).store_bytes(raw).end_cell()
+
+
+def _addr(a: str):
+    from pytoniq_core import Address
+
+    return Address(a)
+
+
+def _fmt(address, bounceable: bool = True) -> str:
+    return address.to_str(is_user_friendly=True, is_bounceable=bounceable, is_test_only=testnet())
+
+
+def _b64(cell) -> str:
+    return base64.b64encode(cell.to_boc()).decode()
+
+
+def build_unsigned_launch_tx(request_id: str, creator_address: str, supply_raw: int, metadata_url: str) -> TonLaunchTx:
+    from pytoniq_core import Address, begin_cell
+
     treasury = (os.environ.get("PLATFORM_TREASURY_TON") or "").strip()
     if not treasury:
-        raise ValueError("Set PLATFORM_TREASURY_TON before a TON launch fee.")
-    amount = int(os.environ.get("LAUNCH_FEE_NANOTON") or "100000000")
-    minter = (os.environ.get("TON_MINTER_CODE") or "").strip()
-    note = (
-        "Fee memo only. Jetton minter not pinned — TON_MINTER_CODE empty."
-        if not minter
-        else f"Minter code set ({minter[:12]}…). Attach Tonkeeper deploy next."
-    )
+        raise ValueError("Set PLATFORM_TREASURY_TON before TON launches.")
+    if not (0 < int(supply_raw) < 2**120):
+        raise ValueError("supply out of range")
+    creator = _addr(creator_address)
+    minter_code = _code("jetton-minter", MINTER_CODE_HASH)
+    wallet_code = _code("jetton-wallet", WALLET_CODE_HASH)
+
+    data = (begin_cell().store_coins(0).store_address(creator)
+            .store_ref(_content(metadata_url)).store_ref(wallet_code).end_cell())
+    # StateInit: split_depth=None, special=None, code=^Cell, data=^Cell, library=None
+    state_init = begin_cell().store_uint(0b00110, 5).store_ref(minter_code).store_ref(data).end_cell()
+    minter = Address(f"0:{state_init.hash.hex()}")
+    qid = int(time.time())
+
+    internal_transfer = (begin_cell().store_uint(OP_INTERNAL_TRANSFER, 32).store_uint(qid, 64)
+                         .store_coins(int(supply_raw))
+                         .store_address(None)          # from: nobody (fresh mint)
+                         .store_address(creator)       # excess TON goes back to the creator
+                         .store_coins(0)               # no forward notification
+                         .store_bit(0)                 # empty forward payload
+                         .end_cell())
+    mint = (begin_cell().store_uint(OP_MINT, 32).store_uint(qid, 64).store_address(creator)
+            .store_coins(WALLET_TON).store_ref(internal_transfer).end_cell())
+    drop_admin = (begin_cell().store_uint(OP_CHANGE_ADMIN, 32).store_uint(qid + 1, 64)
+                  .store_address(None).end_cell())
+    memo = f"FERZAN_LAUNCH:{request_id}".encode()
+    fee_body = begin_cell().store_uint(0, 32).store_bytes(memo).end_cell()
+
+    messages = [
+        {"address": _fmt(minter, bounceable=False), "amount": str(DEPLOY_TON), "stateInit": _b64(state_init), "payload": _b64(mint)},
+        {"address": _fmt(minter, bounceable=True), "amount": str(ADMIN_TON), "payload": _b64(drop_admin)},
+    ]
+    fee = launch_fee_nano()
+    if fee > 0:
+        messages.append({"address": _fmt(_addr(treasury), bounceable=False), "amount": str(fee), "payload": _b64(fee_body)})
+    total = DEPLOY_TON + ADMIN_TON + fee
     return TonLaunchTx(
-        to=treasury,
-        amount_nano=amount,
-        comment=f"FERZAN_LAUNCH:{request_id}",
-        note=note,
+        minter=_fmt(minter), minter_raw=minter.to_str(is_user_friendly=False), messages=messages,
+        valid_until=int(time.time()) + 600, network="-3" if testnet() else "-239",
+        cells={"code": minter_code, "data": data, "mint": mint, "drop_admin": drop_admin, "fee": fee_body,
+               "minter": minter, "treasury": _addr(treasury), "fee_nano": fee},
+        note=f"Your wallet sends {total / 1e9:.2f} TON; part of the {(DEPLOY_TON + ADMIN_TON) / 1e9:.2f} TON for the contract comes back as change.",
     )
+
+
+async def _jetton_data(minter: str):
+    from pytoniq import LiteBalancer
+
+    provider = LiteBalancer.from_testnet_config(trust_level=2) if testnet() else LiteBalancer.from_mainnet_config(trust_level=2)
+    await provider.start_up()
+    try:
+        return await provider.run_get_method(address=_addr(minter), method="get_jetton_data", stack=[])
+    finally:
+        await provider.close_all()
+
+
+def verify_launch(minter: str, supply_raw: int, wait_s: int = 90) -> dict:
+    """Proves the coin exists: total supply matches and nobody can mint more (admin dropped)."""
+    import asyncio
+
+    deadline = time.time() + wait_s
+    last = "not deployed yet"
+    while time.time() < deadline:
+        try:
+            st = asyncio.run(_jetton_data(minter))
+            total = int(st[0])
+            admin = None
+            try:
+                admin = st[2].load_address()
+            except Exception:
+                admin = "unreadable"
+            if total == int(supply_raw) and admin is None:
+                return {"ok": True, "total_supply": total}
+            last = f"supply {total} (want {supply_raw}), admin {'still set' if admin else 'none'}"
+        except Exception as e:
+            last = str(e)[:120]
+        time.sleep(6)
+    return {"ok": False, "error": last}
