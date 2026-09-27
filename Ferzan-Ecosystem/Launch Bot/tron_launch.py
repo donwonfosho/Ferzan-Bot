@@ -50,17 +50,19 @@ def live() -> bool:
     return _setting("TRON_LAUNCH_LIVE") == "1" and f.startswith("T") and len(f) == 34
 
 
-async def run(cmd: str, args: dict, timeout: int = 150) -> dict:
-    """Runs the Trade Desk helper with a clean environment (it loads the Trade Bot's own settings)."""
+async def run(cmd: str, args: dict, timeout: int = 150, script: str = "tron_launch_exec.py") -> dict:
+    """Runs a Trade Desk launch helper (Tron or TON) with a clean environment; it loads the Trade Bot's
+    own settings."""
+    exe = EXEC.with_name(script)
     env = {k: os.environ[k] for k in ("PATH", "HOME", "LANG") if k in os.environ}
     env["TRON_FACTORY"] = factory()
     try:
         p = await asyncio.create_subprocess_exec(
-            sys.executable, "-W", "ignore", str(EXEC), cmd, json.dumps(args), cwd=str(EXEC.parent), env=env,
+            sys.executable, "-W", "ignore", str(exe), cmd, json.dumps(args), cwd=str(EXEC.parent), env=env,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         so, _ = await asyncio.wait_for(p.communicate(), timeout=timeout)
     except asyncio.TimeoutError:
-        return {"ok": False, "pending": True, "error": "still waiting for Tron"}
+        return {"ok": False, "pending": True, "error": "still waiting for the network"}
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "error": f"could not start the wallet helper ({type(e).__name__})"}
     for line in reversed((so or b"").decode(errors="replace").splitlines()):

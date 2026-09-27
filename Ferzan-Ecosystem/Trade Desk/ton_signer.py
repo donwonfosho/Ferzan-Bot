@@ -105,7 +105,9 @@ async def _address_and_balance(seed64: bytes) -> tuple[str, int]:
         wallet = await WalletV4R2.from_private_key(provider, seed64)
         state = await provider.get_account_state(wallet.address)
         nano = int(getattr(state, "balance", 0) or 0)
-        return wallet.address.to_str(), nano
+        # UQ.. (non-bounceable): what people should send to. TON sent to the EQ.. form of a wallet that was
+        # never used bounces straight back.
+        return wallet.address.to_str(is_user_friendly=True, is_bounceable=False), nano
     finally:
         await provider.close_all()
 

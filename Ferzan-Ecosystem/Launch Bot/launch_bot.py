@@ -954,19 +954,43 @@ async def _show_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         text += ("\n\nNext you'll connect your wallet and see the exact cost before signing. "
                  "Ferzan never holds your keys.")
+    if chain == "ton" and mode == "plain":
+        text += ("\n\n<b>Two ways to pay:</b> connect Tonkeeper / Telegram Wallet, or launch straight from your "
+                 f"Ferzan Trade Bot wallet (it needs about {(_ton_need_nano() + 100_000_000) / 1e9:g} TON; "
+                 f"your TON address is in @{_esc(TRADE)} → /wallet → TON).")
     first = [InlineKeyboardButton(launch_btn, callback_data="confirm:yes")]
     if chain != "tron":  # Tron launches run from the chat, so there is no reminder flow for them
         first.append(InlineKeyboardButton("⏰ Launch later", callback_data="confirm:later"))
+    kb = [first]
+    if chain == "ton" and mode == "plain":
+        first[0] = InlineKeyboardButton("🔗 Connect a wallet", callback_data="confirm:yes")
+        kb.append([InlineKeyboardButton("💼 Launch from my Trade Bot wallet", callback_data="confirm:tb")])
     await update.effective_message.reply_text(
         text,
         parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup([
-            first,
+        reply_markup=InlineKeyboardMarkup(kb + [
             [InlineKeyboardButton("🔄 Start over", callback_data="confirm:restart"),
              InlineKeyboardButton("❌ Cancel", callback_data="confirm:no")],
         ]),
     )
     return CONFIRMING
+
+
+def _ton_need_nano() -> int:
+    return 300_000_000 + int(os.environ.get("LAUNCH_FEE_NANOTON") or "300000000")  # contract + mint + admin drop + fee
+
+
+def _ton_wallet_text(info: dict) -> str:
+    if info.get("error") == "no_wallet":
+        return f"(No Trade Bot wallet yet: open @{_esc(TRADE)} and tap /wallet to make one.)"
+    if not info.get("ok"):
+        return "(Couldn't read your Trade Bot TON wallet right now; it checks again when you tap.)"
+    t = (f"Trade Bot TON wallet: <code>{_esc(info['address'])}</code>\n"
+         f"Balance: <b>{info['balance_ton']:,.3f} TON</b> (needs about {info['need_ton']:g} TON; most of the "
+         "contract part comes back as change)")
+    if not info.get("enough"):
+        t += f"\n⚠️ Send at least {info['need_ton'] - info['balance_ton']:,.3f} TON to that address to use it."
+    return t
 
 
 def _tron_wallet_text(info: dict) -> str:
@@ -1010,6 +1034,8 @@ async def confirmed(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await _need_tz(update, context, "later")
     if launch["chain"] == "tron":
         return await _tron_go(update, context, launch)
+    if query.data == "confirm:tb" and launch["chain"] == "ton":
+        return await _ton_tb_go(update, context, launch)
 
     text, markup = _make_request(update.effective_user.id, update.effective_chat.id, launch)
     await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
@@ -1036,6 +1062,78 @@ async def _tron_go(update: Update, context: ContextTypes.DEFAULT_TYPE, launch: d
         "wallet. This takes about a minute. Please don't launch it again.", parse_mode="HTML")
     context.application.create_task(_tron_run(context.bot, req.id, uid, chat_id, launch))
     return ConversationHandler.END
+
+
+async def _ton_tb_go(update: Update, context: ContextTypes.DEFAULT_TYPE, launch: dict):
+    q = update.callback_query
+    uid, chat_id = update.effective_user.id, update.effective_chat.id
+    req = db.create_launch_request(
+        telegram_user_id=uid, chat_id=chat_id, chain="ton", mode="plain", name=launch["name"],
+        symbol=launch["symbol"], total_supply=launch["total_supply_raw"], decimals=launch["decimals"],
+        description=launch.get("description") or "", image_url=launch.get("image_url") or "",
+        extra_params=dict(launch.get("extra_params") or {}, source="tradebot_wallet"),
+    )
+    context.user_data.pop("launch", None)
+    await q.edit_message_text(
+        f"⏳ Launching <b>{_esc(launch['name'])} (${_esc(launch['symbol'])})</b> on TON from your Trade Bot "
+        "wallet. This takes 1-2 minutes. Please don't launch it again.", parse_mode="HTML")
+    context.application.create_task(_ton_tb_run(context.bot, req.id, uid, chat_id))
+    return ConversationHandler.END
+
+
+def _build_tx(req_id: str, wallet: str) -> dict:
+    import requests
+
+    try:
+        r = requests.post(f"{LAUNCH_API}/api/launch-requests/{req_id}/build-tx", json={"wallet_address": wallet},
+                          timeout=90)
+        d = r.json() or {}
+        return d if r.status_code == 200 else {"error": str(d.get("detail") or r.status_code)[:200]}
+    except Exception as e:  # noqa: BLE001
+        return {"error": type(e).__name__}
+
+
+async def _ton_tb_run(bot, req_id: str, uid: int, chat_id: int):
+    say = lambda t: bot.send_message(chat_id=chat_id, text=t, parse_mode="HTML", disable_web_page_preview=True)  # noqa: E731
+    helper = "ton_launch_exec.py"
+    try:
+        info = await tron.run("info", {"uid": uid, "need_nano": _ton_need_nano()}, timeout=60, script=helper)
+        if not info.get("ok"):
+            db.update_status(req_id, "failed", error_message=str(info.get("error"))[:200])
+            await say("❌ Couldn't use your Trade Bot TON wallet. " + _ton_wallet_text(info) + "\nNothing was sent.")
+            return
+        if not info.get("enough"):
+            db.update_status(req_id, "failed", error_message="low balance")
+            await say("❌ Not launched. " + _ton_wallet_text(info) + "\nNothing was sent.")
+            return
+        built = await asyncio.to_thread(_build_tx, req_id, info["address"])
+        if not built.get("messages"):
+            await say("❌ Couldn't prepare the TON launch (" + _esc(built.get("error", "no messages")) + "). Nothing was sent.")
+            return
+        res = await tron.run("launch", {"uid": uid, "request_id": req_id, "messages": built["messages"]},
+                             timeout=180, script=helper)
+        txid = res.get("txid") or ""
+        if res.get("ok") or res.get("pending"):
+            if txid:
+                db.update_status(req_id, "submitted", tx_hash=txid)
+            for _ in range(6):  # the API proves the coin on-chain (supply + no admin), then posts the card
+                ok, why = await asyncio.to_thread(_tron_complete, req_id, txid)
+                if ok:
+                    return
+                await asyncio.sleep(30)
+            logger.warning("ton tb launch %s not recorded: %s", req_id, why)
+            await say("⏳ Your TON launch was sent but isn't confirmed yet. Check your Trade Bot wallet on "
+                      f"https://tonviewer.com/{_esc(info['address'])} and please don't launch it again.")
+            return
+        db.update_status(req_id, "failed", error_message=str(res.get("error"))[:200])
+        if res.get("error") == "low_balance":
+            await say("❌ Not launched: not enough TON in your Trade Bot wallet. Nothing was sent.")
+        else:
+            await say(f"❌ The TON launch didn't go through ({_esc(str(res.get('error'))[:150])}). Check "
+                      f"https://tonviewer.com/{_esc(info['address'])} before trying again.")
+    except Exception:
+        logger.exception("ton tb launch %s crashed", req_id)
+        await say("❌ Something went wrong with the TON launch. Check /history before trying again.")
 
 
 def _tron_complete(req_id: str, txid: str) -> tuple[bool, str]:
