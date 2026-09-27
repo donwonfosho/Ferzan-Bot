@@ -1570,7 +1570,7 @@ def _sell_any(uid: int, mint: str, pct: int = 100) -> tuple[bool, str, str]:
     elif cid == "sol":
         ok, msg = signer.sell_sol(mint, secret=sol_secret, pct=pct, slip_bps=_slip_bps(uid, "sell"), user_id=uid)
     else:
-        ok, msg = evm_signer.sell_evm(cid, mint, key_hex=evm_secret, pct=pct)
+        ok, msg = evm_signer.sell_evm(cid, mint, key_hex=evm_secret, pct=pct, user_id=uid)
     if ok:
         _log_trade_safe(uid, "sell", mint, cid, _est.value())
         try:
@@ -6801,7 +6801,7 @@ def _exit_sell_all(uid: int, mint: str, holdings: list, pct: int) -> tuple[bool,
     for sol, evm, cid, amt in holdings:
         try:
             if mint.startswith("0x"):
-                ok, msg = evm_signer.sell_evm(cid, mint, key_hex=evm, pct=pct)
+                ok, msg = evm_signer.sell_evm(cid, mint, key_hex=evm, pct=pct, user_id=uid)
             else:
                 ok, msg = signer.sell_sol(
                     mint, secret=sol, pct=pct, slip_bps=_slip_bps(uid, "sell"), user_id=uid

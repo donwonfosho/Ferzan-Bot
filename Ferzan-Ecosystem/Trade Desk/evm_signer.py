@@ -243,7 +243,8 @@ def curve_meta(token: str) -> tuple[float, str, str, str]:
     return ci["price_native"] * px, cid, sym, name
 
 
-def sell_curve(cid: str, meta: dict, acct, token: str, curve: str, amount: int, slip_bps: int = 500) -> tuple[bool, str]:
+def sell_curve(cid: str, meta: dict, acct, token: str, curve: str, amount: int, slip_bps: int = 500,
+               referrer: str = "") -> tuple[bool, str]:
     """Sell `amount` (raw units) of a Ferzan curve token back to its curve."""
     import time as _t
 
@@ -273,7 +274,10 @@ def sell_curve(cid: str, meta: dict, acct, token: str, curve: str, amount: int, 
     if not q:
         return False, note + "Curve quote failed - it may have just graduated. Try again."
     min_out = q[0] * (10_000 - max(1, min(int(slip_bps), 4900))) // 10_000
-    data = "0xd04c6983" + _u256(amount) + _u256(min_out) + "0" * 64  # sell(amount, minOut, referrer=0)
+    ref = (referrer or "").lower().replace("0x", "")
+    if len(ref) != 40 or ref == "0" * 40 or ref == owner.lower().replace("0x", ""):
+        ref = "0" * 40  # no referrer (or self-referral): the curve keeps the default split
+    data = "0xd04c6983" + _u256(amount) + _u256(min_out) + ref.rjust(64, "0")  # sell(amount, minOut, referrer)
     sim = _rpc(meta["rpc"], "eth_call", [{"from": owner, "to": curve, "data": data}, "latest"])
     if isinstance(sim, dict) and sim.get("error"):
         err = sim["error"]
@@ -700,7 +704,8 @@ def send_native(chain: str, dest: str, key_hex: str | None = None) -> tuple[bool
     return True, f"Collected {value / 10**18:.6f} {meta.get('native')}\n{msg}"
 
 
-def sell_evm(chain: str, sell_token: str, key_hex: str | None = None, pct: int = 100) -> tuple[bool, str]:
+def sell_evm(chain: str, sell_token: str, key_hex: str | None = None, pct: int = 100,
+             user_id: int | None = None) -> tuple[bool, str]:
     if not live_enabled():
         return False, "Live sells OFF. LIVE_BUYS=1"
     cid = resolve_chain(chain)
@@ -743,7 +748,7 @@ def sell_evm(chain: str, sell_token: str, key_hex: str | None = None, pct: int =
         )
     ci = curve_info(token)
     if ci and not ci.get("graduated") and ci.get("cid") == cid:
-        return sell_curve(cid, meta, acct, token, ci["curve"], bal)
+        return sell_curve(cid, meta, acct, token, ci["curve"], bal, referrer=_referrer_wallet(user_id))
     headers = {
         "0x-api-key": os.getenv("ZEROX_API_KEY", "").strip(),
         "0x-version": "v2",
