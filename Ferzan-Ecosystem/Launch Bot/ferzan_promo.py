@@ -3,7 +3,7 @@
   - daily recap (23:30 UTC): new launches and the top coins by 24h volume
   - 14 rotating feature promos, every 8 hours (X copies carry hashtags and the $FERZAN cashtag where relevant)
 Where: the @Ferzan_Launches channel and X get everything; the groups in PROMO_GROUPS
-(default @Ferzan_Trade_Ecosystem and @Ferzan_Chat) get the countdown and the recap, not the promos. Preview mode (default) sends everything to the admins only;
+(default @Ferzan_Trade_Ecosystem and @Ferzan_Chat) get everything too (PROMO_GROUP_PROMOS=0 keeps promos out of them). Preview mode (default) sends everything to the admins only;
 set PROMO_LIVE=1 to post publicly, PROMO_OFF=1 to stop. X posts are capped by PROMO_X_PER_DAY (default 4)."""
 import calendar, json, os, sys, time
 from pathlib import Path
@@ -188,7 +188,8 @@ def promo(s: dict, now: float) -> None:
     i = int(s.get("promo_i") or 0) % len(PROMOS)
     tg_text, x_body, tags = PROMOS[i]
     n = int(s.get("promo_n") or 0)  # rotating extra tag keeps repeat cycles from being identical (X rejects duplicates)
-    post(s, f"promo:{int(now // (8 * 3600))}", tg_text, with_tags(x_body, tags, GENERAL_TAGS[n % len(GENERAL_TAGS)]), image=f"promo_{i + 1:02d}.jpg")
+    post(s, f"promo:{int(now // (8 * 3600))}", tg_text, with_tags(x_body, tags, GENERAL_TAGS[n % len(GENERAL_TAGS)]),
+         groups=os.environ.get("PROMO_GROUP_PROMOS") != "0", image=f"promo_{i + 1:02d}.jpg")
     s["promo_n"] = n + 1
     s["promo_i"] = i + 1; s["last_promo"] = now
 
