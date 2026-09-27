@@ -1453,7 +1453,7 @@ def curve_by_token(token: str, since: int = 0, kind: str = "buy"):
 
 
 # ---- SOL_COIN_BATCH17: Solana coin pages on the website ----
-_B58 = r"[1-9A-HJ-NP-Za-km-z]{32,44}"
+_B58_RE = r"[1-9A-HJ-NP-Za-km-z]{32,44}"  # address pattern (not the _B58 alphabet)
 
 
 def _sol_rpc_sync(method: str, params: list, timeout: int = 15) -> dict:
@@ -1467,7 +1467,7 @@ def _sol_rpc_sync(method: str, params: list, timeout: int = 15) -> dict:
 @app.get("/api/sol-coin/{mint}")
 def sol_coin(mint: str, tf: int = 300, wallet: str = ""):
     """Chart, stats and project info for a Ferzan Meteora curve, like /api/curve-chart for EVM."""
-    if not _re.fullmatch(_B58, mint or ""):
+    if not _re.fullmatch(_B58_RE, mint or ""):
         raise HTTPException(404, "not found")
     tf = tf if tf in (60, 300, 900, 3600, 14400) else 300
     c = _idx_db()
@@ -1510,7 +1510,7 @@ def sol_coin(mint: str, tf: int = 300, wallet: str = ""):
         info = {"image": row[2] or "", "description": row[3] or "",
                 "website": extra.get("website", ""), "x": extra.get("x", ""), "telegram": extra.get("telegram", "")}
     mine = None
-    if _re.fullmatch(_B58, wallet or ""):
+    if _re.fullmatch(_B58_RE, wallet or ""):
         bal = ((_sol_rpc_sync("getBalance", [wallet, {"commitment": "confirmed"}]).get("result") or {}).get("value")) or 0
         accts = ((_sol_rpc_sync("getTokenAccountsByOwner", [wallet, {"mint": mint}, {"encoding": "jsonParsed"}])
                   .get("result") or {}).get("value")) or []
@@ -1550,7 +1550,7 @@ def sol_swap(body: SolSwapBody, request: Request):
     """For the website: an unsigned Meteora buy/sell for the visitor's wallet (their wallet must sign it)."""
     import json as _json
     import subprocess as _sp
-    if not _re.fullmatch(_B58, body.mint or "") or not _re.fullmatch(_B58, body.wallet or ""):
+    if not _re.fullmatch(_B58_RE, body.mint or "") or not _re.fullmatch(_B58_RE, body.wallet or ""):
         raise HTTPException(400, "Mint or wallet looks wrong")
     if body.side not in ("buy", "sell") or not _re.fullmatch(r"\d{1,20}", body.amount or "") or body.amount == "0":
         raise HTTPException(400, "Side or amount looks wrong")
@@ -1631,7 +1631,7 @@ def wallet_portfolio(wallet: str):
     """Coins a wallet holds (live balances), coins it launched, and the trading fees those paid it."""
     w = (wallet or "").strip()
     evm = bool(_re.fullmatch(r"0x[0-9a-fA-F]{40}", w))
-    if not evm and not _re.fullmatch(_B58, w):
+    if not evm and not _re.fullmatch(_B58_RE, w):
         raise HTTPException(400, "bad wallet address")
     key = w.lower() if evm else w
     hit = _WALLET_CACHE.get(key)
