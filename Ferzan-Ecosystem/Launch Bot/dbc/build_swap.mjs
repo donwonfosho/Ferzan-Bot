@@ -1,6 +1,6 @@
 // Build ONE unsigned Meteora DBC swap for a visitor's wallet (the website's buy/sell).
 // stdin:  {rpc, config, mint, owner, side: "buy"|"sell", amount (raw: lamports to spend | token units to sell), slippageBps, simulate?}
-// stdout: {pool, tx_b64, amount_in, amount_out, min_out, sim_err?, sim_logs?} | {error}
+// stdout: {pool, tx_b64, amount_in, amount_out, min_out, fee_bps?, sim_err?, sim_logs?} | {error}
 import fs from 'fs'
 import BN from 'bn.js'
 import { Connection, PublicKey } from '@solana/web3.js'
@@ -66,6 +66,20 @@ try {
         ? new BN(q.minimumAmountOut.toString())
         : amountOut.muln(10000 - slippageBps).divn(10000)
 
+    // The fee this trade pays right now (the launch fee scheduler and dynamic fee included), in basis points.
+    // Fees are taken in SOL: from the input on a buy, from the output on a sell.
+    let feeBps = null
+    try {
+        const big = (v) => (v && typeof v === 'object' && typeof v.toString === 'function' && /^\d+$/.test(v.toString()) ? BigInt(v.toString()) : null)
+        let fee = 0n, seen = false
+        const add = (obj, all) => { for (const [k, v] of Object.entries(obj || {})) { const b = all || /fee/i.test(k) ? big(v) : null; if (b !== null) { fee += b; seen = true } } }
+        add(q, false); if (q.fee && typeof q.fee === 'object' && big(q.fee) === null) add(q.fee, true) // {fee: {trading, protocol, referral}}
+        if (seen) {
+            const base = swapBaseForQuote ? BigInt(amountOut.toString()) + fee : BigInt(amountIn.toString())
+            if (base > 0n) feeBps = Math.max(0, Math.min(10000, Number((fee * 10000n) / base)))
+        }
+    } catch { feeBps = null }
+
     mark('swap')
     // Newer docs call the pool field `pool`, older ones `poolAddress`; pass both.
     const tx = await client.pool.swap({
@@ -82,6 +96,7 @@ try {
         amount_in: amountIn.toString(),
         amount_out: amountOut.toString(),
         min_out: minOut.toString(),
+        ...(feeBps !== null ? { fee_bps: feeBps } : {}),
     }
     if (inp.simulate) {
         const sim = await simulate(conn, tx)
