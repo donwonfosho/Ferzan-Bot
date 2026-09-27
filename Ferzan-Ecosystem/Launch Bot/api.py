@@ -287,7 +287,14 @@ def build_tx(request_id: str, body: BuildTxRequest):
                 raise HTTPException(400, f"Unknown Solana mode: {req.mode}")
 
         elif req.chain == "tron":
-            raise HTTPException(400, "Tron coins launch from your Ferzan Trade Bot wallet, right in the Launch Bot chat.")
+            if (req.extra_params or {}).get("source") != "site":
+                raise HTTPException(400, "Tron coins launch from your Ferzan Trade Bot wallet, right in the Launch Bot chat.")
+            try:
+                tx = _tron.build_site_launch(body.wallet_address, req.name, req.symbol, total_supply)
+            except ValueError as e:
+                raise HTTPException(400, str(e))
+            response = {"chain": "tron", "transaction": tx["transaction"], "fee_sun": tx["fee_sun"],
+                        "factory": _tron.factory(), "note": "Sign in TronLink. About 16 TRX of energy + the launch fee."}
 
         elif req.chain == "ton":
             if (os.environ.get("TON_LAUNCH_LIVE") or "").strip() != "1":
@@ -411,8 +418,9 @@ def complete_request(request_id: str, body: CompleteRequest):
     req = db.get_launch_request(request_id)
     if not req:
         raise HTTPException(404, "Launch request not found")
-    if req.status == "confirmed":
-        return {"status": "ok", "already": True}  # a replayed call must not post to the channel again
+    if req.status == "confirmed":  # a replayed call must not post to the channel again
+        return {"status": "ok", "already": True, "token": req.result_token_address or "",
+                "curve": str((req.extra_params or {}).get("curve_address") or "")}
     if req.chain == "ton":
         minter = str((req.extra_params or {}).get("ton_minter") or "")
         if not minter:
@@ -459,7 +467,7 @@ def complete_request(request_id: str, body: CompleteRequest):
     if channel:
         _notify_telegram(channel, text, photo=req.image_url or "",
                          markup=_growth_buttons(req, token_addr, curve_addr, trade_only=True))
-    return {"status": "ok"}
+    return {"status": "ok", "token": token_addr, "curve": curve_addr}
 
 
 # ---- SITE_LAUNCH_BATCH16: launches from ferzan-factory.grok.me (no Telegram account needed) ----
@@ -467,7 +475,7 @@ import base64 as _b64
 import hmac as _hmac
 import uuid as _uuid
 
-_SITE_CHAINS = {"ethereum", "bsc", "base", "robinhood", "solana"}
+_SITE_CHAINS = {"ethereum", "bsc", "base", "robinhood", "solana", "arc", "tron", "ton"}
 _IMG_MAGIC = {"png": b"\x89PNG", "jpg": b"\xff\xd8\xff", "gif": b"GIF8", "webp": b"RIFF"}
 
 
@@ -561,6 +569,16 @@ def site_launch(body: SiteLaunchBody, request: Request):
     if chain == "solana":
         if not _re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{32,44}", wallet):
             raise HTTPException(400, "Solana wallet looks wrong")
+    elif chain == "tron":
+        if not _re.fullmatch(r"T[1-9A-HJ-NP-Za-km-z]{33}", wallet):
+            raise HTTPException(400, "Tron wallet looks wrong")
+        if not _tron.live():
+            raise HTTPException(501, "Tron launches are not open yet")
+    elif chain == "ton":
+        if not _re.fullmatch(r"(0|-1):[0-9a-fA-F]{64}|[A-Za-z0-9_-]{48}", wallet):
+            raise HTTPException(400, "TON wallet looks wrong")
+        if (os.environ.get("TON_LAUNCH_LIVE") or "").strip() != "1":
+            raise HTTPException(501, "TON launches are not open yet")
     elif not _re.fullmatch(r"0x[0-9a-fA-F]{40}", wallet):
         raise HTTPException(400, "Wallet looks wrong")
     dev = _site_num(body.dev_buy, "Dev buy", Decimal("0.000001"), Decimal("100000"), allow_zero=True)
@@ -569,7 +587,12 @@ def site_launch(body: SiteLaunchBody, request: Request):
         link = _site_link(getattr(body, k), k)
         if link:
             extra[k] = link
-    if chain == "solana":
+    if chain in ("tron", "ton"):  # SITE_TRON_TON: standard fixed-supply coins, signed by TronLink / TON Connect
+        decimals = 6 if chain == "tron" else 9
+        whole = int(_site_num(body.supply_whole, "Supply", Decimal(1), Decimal(10**12)))
+        mode, total_supply = "plain", str(whole * 10**decimals)
+        extra["dev_buy"] = "0"
+    elif chain == "solana":
         mode, decimals, total_supply = "meteora", 6, str(10**9 * 10**6)  # fixed by the Ferzan Meteora config
         if not (os.environ.get("METEORA_CONFIG") or "").strip():
             raise HTTPException(501, "Solana curves are not configured")

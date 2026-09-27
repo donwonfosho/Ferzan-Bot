@@ -145,3 +145,24 @@ def verify_launch(txid: str, creator: str, supply_raw: int, wait_s: int = 60) ->
     if total != int(supply_raw):
         return {"ok": False, "error": f"supply mismatch ({total})"}
     return {"ok": True, "token": token}
+
+
+def build_site_launch(owner: str, name: str, symbol: str, supply_raw) -> dict:
+    """Unsigned launchToken() call for a website visitor's TronLink wallet (the wallet signs and sends it)."""
+    from eth_abi import encode
+
+    fac = factory()
+    if not live() or not fac:
+        raise ValueError("Tron launches are not open yet")
+    fee_hex = ((_post("/wallet/triggerconstantcontract", {"owner_address": to_hex41(fac), "contract_address": to_hex41(fac),
+                "function_selector": "launchFeeSun()", "parameter": ""}).get("constant_result") or ["0"])[0]) or "0"
+    fee = int(fee_hex, 16)
+    params = encode(["string", "string", "uint256"], [name, symbol, int(supply_raw)]).hex()
+    built = _post("/wallet/triggersmartcontract", {
+        "owner_address": to_hex41(owner), "contract_address": to_hex41(fac),
+        "function_selector": "launchToken(string,string,uint256)", "parameter": params,
+        "call_value": fee, "fee_limit": 60_000_000, "visible": False})
+    tx = built.get("transaction") or {}
+    if not tx.get("txID") or not (built.get("result") or {}).get("result"):
+        raise ValueError("Tron could not prepare the launch: " + str(built.get("result") or built)[:120])
+    return {"transaction": tx, "fee_sun": fee}
