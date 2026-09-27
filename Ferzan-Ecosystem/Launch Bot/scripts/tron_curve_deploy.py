@@ -164,16 +164,28 @@ def find_pair_hash(dex_factory: str) -> tuple[str, str]:
     n = int(const(dex_factory, "allPairsLength()") or "0", 16)
     if n == 0:
         sys.exit("ABORT: SunSwap factory has no pairs to check the hash against")
-    samples = []
+    samples, pc = [], ""
     for i in (0, 1, n - 1):
         p = word_addr(const(dex_factory, "allPairs(uint256)", encode(["uint256"], [i]).hex()))
         t0 = word_addr(const(b58(p), "token0()"))
         t1 = word_addr(const(b58(p), "token1()"))
         if p and t0 and t1:
             samples.append((p[2:], t0[2:], t1[2:]))
+    # Tron keeps the creation code of every contract, also of contracts made by other contracts: a live pair's own
+    # stored bytecode is exactly the init code its factory hashed.
+    for p, _t0, _t1 in samples[:1]:
+        pc = (ts._post("/wallet/getcontract", {"value": "41" + p, "visible": False}).get("bytecode") or "").lower()
+        if pc:
+            h = keccak(bytes.fromhex(pc))
+            found = _check_hash(h, dex_factory, samples)
+            print(f"  (live pair code {len(pc) // 2:,} bytes: {'matches' if found else 'no match'})")
+            if found:
+                return h.hex(), found
     code = (ts._post("/wallet/getcontract", {"value": hex41(dex_factory), "visible": False}).get("bytecode") or "").lower()
     if not code:
         sys.exit("ABORT: could not read the SunSwap factory bytecode")
+    if pc and pc in code:
+        print("  (the pair code is embedded in the factory code as-is)")
     for sig in ("INIT_CODE_PAIR_HASH()", "INIT_CODE_HASH()", "pairCodeHash()"):  # some forks publish it directly
         h = const(dex_factory, sig)
         if h and len(h) == 64 and int(h, 16):
