@@ -1034,7 +1034,8 @@ async def sol_fees_confirm(body: SolConfirmBody):
 # --------------------------------------- curve index: chart, feed, track record --
 # curve_indexer.py (its own service) fills this read-only index from chain logs.
 _NATIVE_USD: dict = {"t": 0.0, "bsc": 0.0, "base": 0.0, "solana": 0.0}
-_NATIVE_SYM = {"bsc": "BNB", "base": "ETH", "ethereum": "ETH", "robinhood": "ETH", "solana": "SOL", "arc": "USDC"}
+_NATIVE_SYM = {"bsc": "BNB", "base": "ETH", "ethereum": "ETH", "robinhood": "ETH", "solana": "SOL", "arc": "USDC",
+               "tron": "TRX", "ton": "TON"}
 
 
 def _idx_db():
@@ -1198,7 +1199,80 @@ def launches_feed(sort: str = "new", limit: int = 30, chain: str = "", q: str = 
                           "url": f"https://jup.ag/tokens/{r[3]}"})
         items.sort(key=lambda x: x.get("launched_ts") or 0, reverse=True)
         items = items[:limit]
+    if sort == "new" and chain in ("",) + _PLAIN_FEED_CHAINS:
+        have = {(it.get("chain"), it.get("token")) for it in items}
+        items += [it for it in _plain_items(chain, q, limit) if (it["chain"], it["token"]) not in have]
+        items.sort(key=lambda x: x.get("launched_ts") or 0, reverse=True)
+        items = items[:limit]
+    hide = {h.strip().lower() for h in (os.environ.get("FEED_HIDE") or _env_file_value("/opt/ferzan/.env", "FEED_HIDE")
+                                        or "").split(",") if h.strip()}
+    if hide:  # test coins kept off the public board (FEED_HIDE = comma list of token or curve addresses)
+        items = [it for it in items if str(it.get("token", "")).lower() not in hide and str(it.get("curve", "")).lower() not in hide]
     return {"sort": sort, "items": items, "now": int(time.time())}
+
+
+# ---- PLAIN_COINS_FEED: fixed-supply launches on chains with no Ferzan curve (Tron, TON) and Arc standard tokens ----
+_PLAIN_FEED_CHAINS = ("tron", "ton", "arc")
+_PLAIN_URL = {"tron": "https://tronscan.org/#/token20/{t}", "ton": "https://tonviewer.com/{t}",
+              "arc": "https://explorer.arc.io/token/{t}"}
+
+
+def _ts_of(created: str) -> int:
+    from datetime import datetime as _dt
+
+    try:
+        return int(_dt.fromisoformat(str(created).replace("Z", "+00:00")).timestamp())
+    except ValueError:
+        return 0
+
+
+def _plain_items(chain: str, q: str, limit: int) -> list:
+    chains = [chain] if chain else list(_PLAIN_FEED_CHAINS)
+    qn = (q or "").strip().lower()[:44]
+    marks = ",".join("?" for _ in chains)
+    sql = ("SELECT chain, name, symbol, image_url, result_token_address, created_at, wallet_address FROM launch_requests "
+           f"WHERE chain IN ({marks}) AND mode = 'plain' AND status = 'confirmed' AND result_token_address IS NOT NULL "
+           "AND result_token_address != ''")
+    args: list = list(chains)
+    if qn:
+        sql += " AND (LOWER(name) LIKE ? OR LOWER(symbol) LIKE ? OR LOWER(result_token_address) = ?)"
+        args += [f"%{qn}%", f"%{qn}%", qn]
+    with db._get_conn() as conn:
+        rows = conn.execute(sql + " ORDER BY created_at DESC LIMIT ?", args + [limit]).fetchall()
+    return [{"chain": r[0], "token": r[4], "name": r[1], "symbol": r[2], "image": r[3] or "",
+             "launched_ts": _ts_of(r[5]), "native": _NATIVE_SYM.get(r[0], ""), "progress": None, "graduated": False,
+             "creator": r[6] or "", "url": _PLAIN_URL[r[0]].format(t=r[4]), "source": "telegram"} for r in rows]
+
+
+@app.get("/api/coin/{chain}/{token}")
+def plain_coin(chain: str, token: str):
+    """One standard (fixed-supply) Ferzan launch, for the website's coin page."""
+    if chain not in _PLAIN_FEED_CHAINS or not _re.fullmatch(r"[0-9A-Za-z_:\-]{20,70}", token or ""):
+        raise HTTPException(404, "not a Ferzan coin")
+    with db._get_conn() as conn:
+        r = conn.execute("SELECT * FROM launch_requests WHERE chain = ? AND mode = 'plain' AND status = 'confirmed' "
+                         "AND LOWER(result_token_address) = LOWER(?) ORDER BY created_at DESC LIMIT 1",
+                         (chain, token)).fetchone()
+    if not r:
+        raise HTTPException(404, "not a Ferzan coin")
+    import json as _json
+
+    try:
+        extra = _json.loads(r["extra_params"] or "{}")
+    except ValueError:
+        extra = {}
+    dec = int(r["decimals"] or 0)
+    trade = (os.environ.get("FERZAN_BOT_USERNAME") or "Ferzan_Trade_Bot").lstrip("@")
+    return {
+        "chain": chain, "chain_name": _CHAIN_NAME.get(chain, chain), "token": r["result_token_address"],
+        "name": r["name"], "symbol": r["symbol"], "image": r["image_url"] or "", "description": r["description"] or "",
+        "links": {k: extra[k] for k in ("website", "x", "telegram") if str(extra.get(k) or "").startswith("https://")},
+        "supply": str(int(r["total_supply"]) // (10 ** dec)) if dec else str(r["total_supply"]), "decimals": dec,
+        "creator": r["wallet_address"] or "", "launched_ts": _ts_of(r["created_at"]), "tx": r["tx_hash"] or "",
+        "native": _NATIVE_SYM.get(chain, ""), "explorer": _PLAIN_URL[chain].format(t=r["result_token_address"]),
+        "trade_bot": f"https://t.me/{trade}?start=buy_{r['result_token_address']}",
+        "fixed_supply": True,
+    }
 
 
 @app.get("/api/leaderboard")
