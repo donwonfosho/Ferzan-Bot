@@ -34,9 +34,11 @@ BAL_ABI = [{"name": "balanceOf", "type": "function", "stateMutability": "view",
 
 
 def send(w3, acct, tx):
-    tx.update({"from": acct.address, "nonce": w3.eth.get_transaction_count(acct.address), "chainId": 5042,
-               "gasPrice": int(w3.eth.gas_price * 1.25)})
+    for k in ("maxFeePerGas", "maxPriorityFeePerGas", "gasPrice", "gas", "type"):
+        tx.pop(k, None)  # build_transaction fills EIP-1559 fields; use one legacy gas price instead
+    tx.update({"from": acct.address, "nonce": w3.eth.get_transaction_count(acct.address), "chainId": 5042})
     tx["gas"] = int(w3.eth.estimate_gas(tx) * 1.3)
+    tx["gasPrice"] = int(w3.eth.gas_price * 1.25)
     signed = acct.sign_transaction(tx)
     raw = getattr(signed, "raw_transaction", None) or signed.rawTransaction
     rc = w3.eth.wait_for_transaction_receipt(w3.eth.send_raw_transaction(raw), timeout=180)
