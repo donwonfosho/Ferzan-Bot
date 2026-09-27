@@ -59,9 +59,9 @@ CHAINS = {
 EVM_CHAINS = {"ethereum", "bsc", "base", "robinhood", "arc"}
 NATIVE = {"ethereum": "ETH", "bsc": "BNB", "base": "ETH", "robinhood": "ETH", "arc": "USDC", "solana": "SOL"}
 # env-var prefix used by api.py for factory addresses
-FACTORY_KEY = {"ethereum": "ETH", "bsc": "BSC", "base": "BASE", "robinhood": "HOOD"}
+FACTORY_KEY = {"ethereum": "ETH", "bsc": "BSC", "base": "BASE", "robinhood": "HOOD", "arc": "ARC"}
 # the plain factories' fixed launch fee (set in the contract at deploy time)
-PLAIN_FEE_TEXT = {"bsc": "0.015 BNB", "base": "0.003 ETH", "ethereum": "0.003 ETH", "robinhood": "0.003 ETH"}
+PLAIN_FEE_TEXT = {"bsc": "0.015 BNB", "base": "0.003 ETH", "ethereum": "0.003 ETH", "robinhood": "0.003 ETH", "arc": "10 USDC"}
 
 # quick-pick presets
 SUPPLY_PRESETS = [("1M", 10**6), ("100M", 10**8), ("1B", 10**9), ("10B", 10**10), ("100B", 10**11), ("1T", 10**12)]
@@ -107,6 +107,8 @@ def _plain_live(chain: str) -> bool:
 
 
 def _curve_live(chain: str) -> bool:
+    if chain == "arc":
+        return False  # no Uniswap-v2-style DEX on Arc for curves to graduate into (yet)
     if chain == "solana":
         return bool((os.environ.get("METEORA_CONFIG") or "").strip())
     key = FACTORY_KEY.get(chain)

@@ -45,6 +45,13 @@ CHAINS = {
         "router": "0x89e5db8b5aa49aa85ac63f691524311aeb649eba",
         "env": "FACTORY_HOOD_CURVE", "explorer": "https://robinhoodchain.blockscout.com/address/",
     },
+    # Arc: plain launches only (no Uniswap-v2-style DEX there for curves). Gas and the fee are native
+    # USDC, 18 decimals at the protocol level (docs.arc.io), so 10 USDC = 10 * 10**18.
+    "arc": {
+        "rpc": "https://rpc.mainnet.arc.io", "rpc_env": "ARC_RPC_URL", "chain_id": 5042, "sym": "USDC",
+        "fee_wei": 10 * 10**18, "plain_only": True,
+        "env": "FACTORY_ARC_CURVE", "explorer": "https://explorer.arc.io/address/",
+    },
 }
 ROUTER_ABI = [{"name": n, "type": "function", "stateMutability": "view", "inputs": [],
                "outputs": [{"name": "", "type": "address"}]} for n in ("factory", "WETH")]
@@ -107,9 +114,11 @@ def deployer():
 
 def main():
     if len(sys.argv) < 3 or sys.argv[1] not in CHAINS or sys.argv[2] not in ("curve", "plain"):
-        sys.exit("usage: deploy_v3.py bsc|base|ethereum|robinhood curve|plain [plan|send]")
+        sys.exit("usage: deploy_v3.py bsc|base|ethereum|robinhood|arc curve|plain [plan|send]")
     chain, kind, mode = sys.argv[1], sys.argv[2], (sys.argv[3] if len(sys.argv) > 3 else "plan")
     c = CHAINS[chain]
+    if kind == "curve" and c.get("plain_only"):
+        sys.exit(f"ABORT: {chain} supports plain launches only")
     rec_key = f"{chain}_{kind}_v3"
     env_name = c["env"] if kind == "curve" else c["env"].replace("_CURVE", "_PLAIN")
     treasury = (env_file().get("PLATFORM_TREASURY_EVM") or "").strip()
@@ -128,7 +137,17 @@ def main():
         print(f"Already deployed on {chain}: {record[rec_key]}\n{env_name}={record[rec_key]}")
         return
 
-    # --- prove the DEX factory + WETH addresses are the real ones on this chain
+    # --- prove the DEX factory + WETH addresses are the real ones on this chain (curves only use them)
+    if c.get("plain_only"):
+        dex = weth = None
+        probe_pair = "not needed (plain launches)"
+    else:
+        dex, weth, probe_pair = _check_dex(w3, c)
+    abi, bytecode = compile_factory(kind)
+    _deploy(w3, c, chain, kind, mode, abi, bytecode, dex, weth, treasury, record, rec_key, env_name, probe_pair)
+
+
+def _check_dex(w3, c):
     dex = Web3.to_checksum_address(c["dex_factory"])
     weth = Web3.to_checksum_address(c["weth"])
     if w3.eth.get_code(dex) in (b"", b"\x00") or w3.eth.get_code(weth) in (b"", b"\x00"):
@@ -147,8 +166,10 @@ def main():
         if router.functions.factory().call() != dex or router.functions.WETH().call() != weth:
             sys.exit("ABORT: official router does not point at this DEX factory / WETH")
         probe_pair = f"router {c['router']}"
+    return dex, weth, probe_pair
 
-    abi, bytecode = compile_factory(kind)
+
+def _deploy(w3, c, chain, kind, mode, abi, bytecode, dex, weth, treasury, record, rec_key, env_name, probe_pair):
     acct = deployer()
     bal = w3.eth.get_balance(acct.address)
     Factory = w3.eth.contract(abi=abi, bytecode=bytecode)
@@ -158,8 +179,11 @@ def main():
     cost = gas * gas_price
     print(f"Factory        : {'FerzanCurveFactoryV3' if kind == 'curve' else 'LaunchTokenFactoryV3'} (vanity addresses)")
     print(f"Chain          : {chain} ({c['chain_id']})")
-    print(f"DEX            : {c['dex']} factory {dex}  (verified: live {c['weth_symbol']} pool {probe_pair})")
-    print(f"Wrapped native : {weth} ({c['weth_symbol']})")
+    if dex:
+        print(f"DEX            : {c['dex']} factory {dex}  (verified: live {c['weth_symbol']} pool {probe_pair})")
+        print(f"Wrapped native : {weth} ({c['weth_symbol']})")
+    else:
+        print(f"DEX            : {probe_pair}")
     print(f"Deployer wallet: {acct.address}  balance {Web3.from_wei(bal, 'ether')} {c['sym']}")
     print(f"Treasury       : {treasury}")
     print(f"Launch fee     : {Web3.from_wei(c['fee_wei'], 'ether')} {c['sym']} (fixed in the contract)")
@@ -168,7 +192,8 @@ def main():
     print(f"Bytecode       : {len(bytecode) // 2 - 1} bytes, compiled OK")
     print(f"Est. deploy gas: {gas} @ {Web3.from_wei(gas_price, 'gwei'):.4f} gwei = ~{Web3.from_wei(cost, 'ether'):.6f} {c['sym']}")
     if bal < cost * 2:
-        print(f"\nNEXT: send ~{Web3.from_wei(max(cost * 3, 10**15), 'ether'):.5f} {c['sym']} on {chain} to {acct.address}, then run plan again.")
+        need = max(cost * 3, 10**15 if c["sym"] != "USDC" else 2 * 10**18)
+        print(f"\nNEXT: send ~{Web3.from_wei(need, 'ether'):.5f} {c['sym']} on {chain} to {acct.address}, then run plan again.")
         return
     if mode != "send":
         print("\nPlan OK - nothing sent. Run with 'send' to deploy.")

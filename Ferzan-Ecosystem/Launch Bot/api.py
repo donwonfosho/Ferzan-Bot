@@ -324,11 +324,7 @@ def build_tx(request_id: str, body: BuildTxRequest):
                     "Arc bonding curve is held — Uniswap v4 on Arc, no V2 addLiquidityETH.",
                 )
             if req.chain == "arc" and (os.environ.get("ARC_LAUNCH_LIVE") or "").strip() != "1":
-                raise HTTPException(
-                    501,
-                    "Arc plain is held until you confirm rpc.mainnet.arc.io and "
-                    "LAUNCH_FEE_ARC (6-dec USDC, not LAUNCH_FEE_WEI). Then set ARC_LAUNCH_LIVE=1.",
-                )
+                raise HTTPException(501, "Arc launches open once the Arc launch factory is deployed (ARC_LAUNCH_LIVE=1).")
             rpc = RPC_URLS.get(req.chain) or None
             if req.mode == "plain":
                 factory_addr = FACTORY_ADDRESSES[req.chain]["plain"]
@@ -783,8 +779,9 @@ def _wei(raw) -> int:
 _EXPLORER = {
     "solana": "https://solscan.io/token/", "bsc": "https://bscscan.com/token/",
     "base": "https://basescan.org/token/", "ethereum": "https://etherscan.io/token/",
+    "robinhood": "https://robinhoodchain.blockscout.com/token/", "arc": "https://explorer.arc.io/token/",
 }
-_CHAIN_NAME = {"solana": "Solana", "bsc": "BNB Chain", "base": "Base", "ethereum": "Ethereum", "robinhood": "Robinhood Chain"}
+_CHAIN_NAME = {"solana": "Solana", "bsc": "BNB Chain", "base": "Base", "ethereum": "Ethereum", "robinhood": "Robinhood Chain", "arc": "Arc"}
 
 
 def _launch_card(req, token_addr: str, curve_addr: str, tx_hash: str) -> str:
@@ -1016,7 +1013,7 @@ async def sol_fees_confirm(body: SolConfirmBody):
 # --------------------------------------- curve index: chart, feed, track record --
 # curve_indexer.py (its own service) fills this read-only index from chain logs.
 _NATIVE_USD: dict = {"t": 0.0, "bsc": 0.0, "base": 0.0, "solana": 0.0}
-_NATIVE_SYM = {"bsc": "BNB", "base": "ETH", "ethereum": "ETH", "robinhood": "ETH", "solana": "SOL"}
+_NATIVE_SYM = {"bsc": "BNB", "base": "ETH", "ethereum": "ETH", "robinhood": "ETH", "solana": "SOL", "arc": "USDC"}
 
 
 def _idx_db():
@@ -1031,6 +1028,8 @@ def _idx_db():
 
 
 def _native_usd(chain: str) -> float:
+    if chain == "arc":
+        return 1.0  # Arc's gas token is USDC
     chain = "base" if chain in ("ethereum", "robinhood") else chain  # all ETH-gas chains share the ETH price
     if time.time() - _NATIVE_USD["t"] > 300:
         try:
@@ -1225,9 +1224,10 @@ def leaderboard(period: str = "all", chain: str = "", limit: int = 50):
     return {"period": period, "items": items, "now": int(time.time())}
 
 
-_EVM_LAUNCH_FEE = {"bsc": 0.015, "base": 0.003, "ethereum": 0.003, "robinhood": 0.003}  # native, fixed in the v3 factories
+_EVM_LAUNCH_FEE = {"bsc": 0.015, "base": 0.003, "ethereum": 0.003, "robinhood": 0.003, "arc": 10.0}  # native, fixed in the v3 factories
 _REV_RPC = {"bsc": "https://bsc-rpc.publicnode.com", "base": "https://base-rpc.publicnode.com",
-            "ethereum": "https://ethereum-rpc.publicnode.com", "robinhood": "https://rpc.mainnet.chain.robinhood.com"}
+            "ethereum": "https://ethereum-rpc.publicnode.com", "robinhood": "https://rpc.mainnet.chain.robinhood.com",
+            "arc": "https://rpc.mainnet.arc.io"}
 
 
 def _env_file_value(path: str, key: str) -> str:
@@ -1264,7 +1264,7 @@ def internal_revenue(request: Request):
         raise HTTPException(403, "internal only")
     now = int(time.time())
     periods = {"24h": now - 86400, "7d": now - 7 * 86400, "30d": now - 30 * 86400, "all": 0}
-    px = {ch: _native_usd(ch) for ch in ("bsc", "base", "ethereum", "robinhood", "solana")}
+    px = {ch: _native_usd(ch) for ch in ("bsc", "base", "ethereum", "robinhood", "solana", "arc")}
     rev = {p: {"curve": 0.0, "launch": 0.0, "desk": 0.0} for p in periods}
     by_chain = {}          # 30d curve+launch income per chain, native
     launches_30d = 0
@@ -1341,7 +1341,7 @@ def internal_revenue(request: Request):
             logger.info("revenue: partner fee list failed: %s", e)
     balances = {}
     if PLATFORM_TREASURY_EVM:
-        for ch in ("bsc", "base", "ethereum", "robinhood"):
+        for ch in ("bsc", "base", "ethereum", "robinhood", "arc"):
             balances[ch] = _rpc_balance(ch, PLATFORM_TREASURY_EVM)
     if sol_treasury:
         try:

@@ -66,13 +66,13 @@ CHAIN_CONFIGS = {
         name="Arc", chain_id=5042, native_symbol="USDC",
         default_rpc="https://rpc.mainnet.arc.io",
         explorer="https://explorer.arc.io",
-        native_decimals=6,  # Arc gas is USDC with 6 decimals — not 18
+        native_decimals=18,  # native USDC gas has 18 decimals (docs.arc.io); only the ERC-20 view uses 6
     ),
 }
 
 
 def launch_fee_units(chain_key: str) -> int:
-    """Native-unit launch fee. Arc is 6-dec USDC; everyone else is 18-dec wei."""
+    """Fallback native launch fee (18-dec wei on every chain, Arc included). The v3 factories report their own fee."""
     if chain_key == "arc":
         return int(os.environ.get("LAUNCH_FEE_ARC") or "0")
     return int(os.environ.get("LAUNCH_FEE_WEI") or "0")
