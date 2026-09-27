@@ -1,94 +1,145 @@
 """
-Unsigned TRC-20 launch via a Tron-deployed LaunchTokenFactory.
+Tron coin launches. Creators launch from their Ferzan Trade Bot wallet, confirmed in the chat:
+there is no Tron wallet-connect in the Mini App.
 
-Same Solidity factory as EVM. Deploy it with TronBox / Hardhat-Tron, then
-set FACTORY_TRX_PLAIN. The Mini App signs the trigger with TronLink.
-A launch fee in SUN is attached as a second TransferContract to
-PLATFORM_TREASURY_TRX when that env is set.
+  launch_bot.py -> run("info"/"launch", ...)  runs Trade Desk/tron_launch_exec.py, which holds the wallet
+                                               key, signs launchToken() on the Ferzan factory and reads it back
+  api.py        -> verify_launch(...)          checks the launch again on-chain, independently, before the
+                                               coin is recorded and posted
+
+Factory: TRON_FACTORY (FerzanTronFactory: clones a fixed-supply TRC-20, fee fixed at deploy time).
+Shown in the bot only when TRON_LAUNCH_LIVE=1 and TRON_FACTORY is set.
 """
-
 from __future__ import annotations
 
+import asyncio
+import hashlib
+import json
 import os
-from dataclasses import dataclass
+import sys
+import time
+from pathlib import Path
 
 import requests
 
-TRONGRID = (os.environ.get("TRONGRID_URL") or "https://api.trongrid.io").rstrip("/")
+EXEC = Path(__file__).resolve().parent.parent / "Trade Desk" / "tron_launch_exec.py"
+TOPIC = "TokenLaunched(address,address,string,string,uint256)"
+_ALPH = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 
 
-@dataclass
-class TronLaunchTx:
-    trigger: dict
-    fee_transfer: dict | None
-    factory: str
-    note: str
+def _setting(name: str) -> str:
+    """From the service environment, else /opt/ferzan/.env, else Launch Bot/.env (api.py loads neither)."""
+    v = (os.environ.get(name) or "").strip()
+    if v:
+        return v
+    from dotenv import dotenv_values
+
+    for f in ("/opt/ferzan/.env", str(Path(__file__).resolve().with_name(".env"))):
+        v = (dotenv_values(f).get(name) or "").strip()
+        if v:
+            return v
+    return ""
 
 
-def _headers() -> dict:
-    key = (os.environ.get("TRONGRID_API_KEY") or "").strip()
+def factory() -> str:
+    return _setting("TRON_FACTORY")
+
+
+def live() -> bool:
+    f = factory()
+    return _setting("TRON_LAUNCH_LIVE") == "1" and f.startswith("T") and len(f) == 34
+
+
+async def run(cmd: str, args: dict, timeout: int = 150) -> dict:
+    """Runs the Trade Desk helper with a clean environment (it loads the Trade Bot's own settings)."""
+    env = {k: os.environ[k] for k in ("PATH", "HOME", "LANG") if k in os.environ}
+    env["TRON_FACTORY"] = factory()
+    try:
+        p = await asyncio.create_subprocess_exec(
+            sys.executable, "-W", "ignore", str(EXEC), cmd, json.dumps(args), cwd=str(EXEC.parent), env=env,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        so, _ = await asyncio.wait_for(p.communicate(), timeout=timeout)
+    except asyncio.TimeoutError:
+        return {"ok": False, "pending": True, "error": "still waiting for Tron"}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": f"could not start the wallet helper ({type(e).__name__})"}
+    for line in reversed((so or b"").decode(errors="replace").splitlines()):
+        if line.startswith("{"):
+            try:
+                return json.loads(line)
+            except ValueError:
+                break
+    return {"ok": False, "error": "no answer from the wallet helper"}
+
+
+# ---- independent on-chain check (api.py) ----
+def _grid() -> str:
+    return (_setting("TRONGRID_URL") or "https://api.trongrid.io").rstrip("/")
+
+
+def _post(path: str, body: dict) -> dict:
     h = {"Content-Type": "application/json"}
+    key = _setting("TRONGRID_API_KEY")
     if key:
         h["TRON-PRO-API-KEY"] = key
-    return h
-
-
-def build_unsigned_launch_tx(
-    creator_address: str,
-    name: str,
-    symbol: str,
-    total_supply: int,
-    project_url: str = "",
-) -> TronLaunchTx:
-    factory = (os.environ.get("FACTORY_TRX_PLAIN") or "").strip()
-    if not factory:
-        raise ValueError(
-            "FACTORY_TRX_PLAIN is empty. Deploy LaunchTokenFactory on Tron "
-            "and set that address before a live TRC-20 launch."
-        )
-    body = {
-        "owner_address": creator_address,
-        "contract_address": factory,
-        "function_selector": "launchToken(string,string,uint256,string)",
-        "parameter": "",
-        "fee_limit": 150_000_000,
-        "call_value": int(os.environ.get("LAUNCH_FEE_SUN") or "0"),
-        "visible": True,
-    }
-    # TronGrid can encode parameters if we pass parameter as hex ABI.
-    # Keep names in extra so the Mini App can encode with TronWeb.
-    extra = {
-        "name": name,
-        "symbol": symbol,
-        "total_supply": str(total_supply),
-        "project_url": project_url,
-    }
     try:
-        r = requests.post(
-            f"{TRONGRID}/wallet/triggersmartcontract",
-            json=body,
-            headers=_headers(),
-            timeout=20,
-        )
-        trigger = r.json()
-    except Exception as exc:
-        trigger = {"error": str(exc), "params": extra}
-    else:
-        trigger["params"] = extra
+        return requests.post(_grid() + path, json=body, headers=h, timeout=20).json()
+    except Exception:  # noqa: BLE001
+        return {}
 
-    treasury = (os.environ.get("PLATFORM_TREASURY_TRX") or "").strip()
-    fee = int(os.environ.get("LAUNCH_FEE_SUN") or "0")
-    fee_transfer = None
-    if treasury and fee > 0:
-        fee_transfer = {
-            "to_address": treasury,
-            "owner_address": creator_address,
-            "amount": fee,
-            "visible": True,
-        }
-    return TronLaunchTx(
-        trigger=trigger,
-        fee_transfer=fee_transfer,
-        factory=factory,
-        note="Sign the factory trigger in TronLink. Fee goes to PLATFORM_TREASURY_TRX.",
-    )
+
+def _chk(raw: bytes) -> bytes:
+    return hashlib.sha256(hashlib.sha256(raw).digest()).digest()[:4]
+
+
+def to_b58(hex20: str) -> str:
+    raw = bytes.fromhex("41" + hex20[-40:])
+    n = int.from_bytes(raw + _chk(raw), "big")
+    s = ""
+    while n:
+        n, r = divmod(n, 58)
+        s = _ALPH[r] + s
+    return s
+
+
+def to_hex41(addr: str) -> str:
+    n = 0
+    for ch in addr:
+        n = n * 58 + _ALPH.index(ch)
+    raw = n.to_bytes(25, "big")
+    if raw[0] != 0x41 or _chk(raw[:21]) != raw[21:]:
+        raise ValueError("not a Tron address")
+    return raw[:21].hex()
+
+
+def verify_launch(txid: str, creator: str, supply_raw: int, wait_s: int = 60) -> dict:
+    """{'ok': True, 'token': T...} only if this txid is a successful Ferzan-factory launch by `creator`
+    and the new coin's total supply is exactly supply_raw."""
+    from eth_hash.auto import keccak
+
+    fac = factory()
+    if not fac or not txid:
+        return {"ok": False, "error": "no factory or transaction"}
+    info, deadline = {}, time.time() + wait_s
+    while time.time() < deadline:
+        info = _post("/wallet/gettransactioninfobyid", {"value": txid})
+        if info.get("id"):
+            break
+        time.sleep(3)
+    if (info.get("receipt") or {}).get("result") != "SUCCESS":
+        return {"ok": False, "error": "transaction not confirmed as successful"}
+    topic, fac_hex = keccak(TOPIC.encode()).hex(), to_hex41(fac)[2:]
+    token = ""
+    for lg in info.get("log") or []:
+        t = lg.get("topics") or []
+        if (len(t) >= 3 and t[0].lower() == topic and str(lg.get("address", "")).lower() == fac_hex
+                and to_b58(t[2]) == creator):
+            token = to_b58(t[1])
+    if not token:
+        return {"ok": False, "error": "no Ferzan launch event for this creator"}
+    r = _post("/wallet/triggerconstantcontract", {"owner_address": to_hex41(token), "contract_address": to_hex41(token),
+                                                  "function_selector": "totalSupply()", "parameter": ""})
+    total = int(((r.get("constant_result") or ["0"])[0]) or "0", 16)
+    if total != int(supply_raw):
+        return {"ok": False, "error": f"supply mismatch ({total})"}
+    return {"ok": True, "token": token}

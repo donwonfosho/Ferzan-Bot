@@ -43,7 +43,7 @@ from evm_launch import (
 )
 from solana_launch import build_unsigned_launch_tx as build_solana_plain_tx
 from meteora_launch import build_unsigned_meteora_tx
-from tron_launch import build_unsigned_launch_tx as build_tron_plain_tx
+import tron_launch as _tron
 from ton_launch import build_unsigned_launch_tx as build_ton_launch_tx, verify_launch as verify_ton_launch
 
 logging.basicConfig(level=logging.INFO)
@@ -287,25 +287,7 @@ def build_tx(request_id: str, body: BuildTxRequest):
                 raise HTTPException(400, f"Unknown Solana mode: {req.mode}")
 
         elif req.chain == "tron":
-            raise HTTPException(
-                501,
-                "Tron launch is not signable yet — Mini App has no TronWeb encoder. "
-                "Label is coming-soon until that ships.",
-            )
-            result = build_tron_plain_tx(
-                creator_address=body.wallet_address,
-                name=req.name,
-                symbol=req.symbol,
-                total_supply=total_supply,
-                project_url=req.extra_params.get("project_url", ""),
-            )
-            response = {
-                "chain": "tron",
-                "trigger": result.trigger,
-                "fee_transfer": result.fee_transfer,
-                "factory": result.factory,
-                "note": result.note,
-            }
+            raise HTTPException(400, "Tron coins launch from your Ferzan Trade Bot wallet, right in the Launch Bot chat.")
 
         elif req.chain == "ton":
             if (os.environ.get("TON_LAUNCH_LIVE") or "").strip() != "1":
@@ -440,6 +422,11 @@ def complete_request(request_id: str, body: CompleteRequest):
             raise HTTPException(400, "TON has not confirmed the coin yet. Wait a minute and check your wallet; "
                                      "do not launch again. (" + str(res.get("error", ""))[:120] + ")")
         body = CompleteRequest(tx_hash=body.tx_hash, result_token_address=minter, curve_address="")
+    elif req.chain == "tron":  # TRON_WALLET_LAUNCH: re-checked on-chain here, never taken from the caller
+        res = _tron.verify_launch(body.tx_hash, (req.wallet_address or "").strip(), int(req.total_supply))
+        if not res.get("ok"):
+            raise HTTPException(400, "Tron has not confirmed this launch: " + str(res.get("error", ""))[:120])
+        body = CompleteRequest(tx_hash=body.tx_hash, result_token_address=res["token"], curve_address="")
     elif _verifiable_launch(req):
         verified = _verify_site_launch(req, body)
         body = CompleteRequest(tx_hash=body.tx_hash, result_token_address=verified.get("token", ""),
@@ -447,7 +434,7 @@ def complete_request(request_id: str, body: CompleteRequest):
 
     token_addr = (body.result_token_address or "").strip()
     curve_addr = (body.curve_address or "").strip()
-    if body.tx_hash and (not token_addr or not curve_addr):
+    if body.tx_hash and (not token_addr or not curve_addr) and req.chain != "tron":
         parsed = _parse_launch_receipt(req.chain, body.tx_hash)
         token_addr = token_addr or parsed.get("token") or ""
         curve_addr = curve_addr or parsed.get("curve") or ""
@@ -460,7 +447,7 @@ def complete_request(request_id: str, body: CompleteRequest):
             db.set_curve_address(request_id, curve_addr)
         except Exception as exc:
             logger.warning("set_curve_address failed %s: %s", request_id, exc)
-    if req.wallet_address and req.telegram_user_id:
+    if req.wallet_address and req.telegram_user_id and req.chain not in ("tron", "ton"):  # payouts go to EVM/Solana wallets
         try:
             db.set_payout_wallet(req.telegram_user_id, req.wallet_address)
         except Exception as exc:
@@ -810,9 +797,9 @@ _EXPLORER = {
     "solana": "https://solscan.io/token/", "bsc": "https://bscscan.com/token/",
     "base": "https://basescan.org/token/", "ethereum": "https://etherscan.io/token/",
     "robinhood": "https://robinhoodchain.blockscout.com/token/", "arc": "https://explorer.arc.io/token/",
-    "ton": "https://tonviewer.com/",
+    "ton": "https://tonviewer.com/", "tron": "https://tronscan.org/#/token20/",
 }
-_CHAIN_NAME = {"solana": "Solana", "bsc": "BNB Chain", "base": "Base", "ethereum": "Ethereum", "robinhood": "Robinhood Chain", "arc": "Arc", "ton": "TON"}
+_CHAIN_NAME = {"solana": "Solana", "bsc": "BNB Chain", "base": "Base", "ethereum": "Ethereum", "robinhood": "Robinhood Chain", "arc": "Arc", "ton": "TON", "tron": "Tron"}
 
 
 def _launch_card(req, token_addr: str, curve_addr: str, tx_hash: str) -> str:

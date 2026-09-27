@@ -157,12 +157,14 @@ def main():
         m_abi, m_bin = built["FerzanTrc20"]
         f_abi, f_bin = built["FerzanTronFactory"]
         print(f"Bytecode       : master {len(m_bin) // 2:,} bytes, factory {len(f_bin) // 2:,} bytes, compiled OK")
-        print("Est. cost      : about 150-300 TRX of energy for both deploys if the wallet has no staked energy")
+        print("Est. cost      : about 90-180 TRX of energy for both deploys if the wallet has no staked energy")
         if net.get("factory"):
             print(f"Already deployed: factory {net['factory']} (master {net.get('master')})")
             return
+        need = 150  # a real deploy of both contracts burned 88 TRX
+        if MODE == "send" and bal < need * 1_000_000:
+            sys.exit(f"ABORT: the deployer has {bal / 1e6:,.2f} TRX; send about {need} TRX to {owner} first. Nothing was sent.")
         if MODE == "plan":
-            need = 400 if NET == "mainnet" else 1000
             if bal < need * 1_000_000:
                 where = "from the Nile faucet (https://nileex.io/join/getJoinPage)" if NET == "nile" else "on Tron"
                 print(f"\nNEXT: get about {need} TRX {where} to {owner}, then run plan again.")

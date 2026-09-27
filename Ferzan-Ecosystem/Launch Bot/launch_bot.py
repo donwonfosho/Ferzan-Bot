@@ -35,6 +35,7 @@ from telegram.ext import (
 
 import launch_bot_db as db
 import launch_extras as lx
+import tron_launch as tron
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -57,7 +58,7 @@ CHAINS = {
     "ton": "TON",
 }
 EVM_CHAINS = {"ethereum", "bsc", "base", "robinhood", "arc"}
-NATIVE = {"ethereum": "ETH", "bsc": "BNB", "base": "ETH", "robinhood": "ETH", "arc": "USDC", "solana": "SOL", "ton": "TON"}
+NATIVE = {"ethereum": "ETH", "bsc": "BNB", "base": "ETH", "robinhood": "ETH", "arc": "USDC", "solana": "SOL", "ton": "TON", "tron": "TRX"}
 # env-var prefix used by api.py for factory addresses
 FACTORY_KEY = {"ethereum": "ETH", "bsc": "BSC", "base": "BASE", "robinhood": "HOOD", "arc": "ARC"}
 # the plain factories' fixed launch fee (set in the contract at deploy time)
@@ -105,6 +106,8 @@ def _plain_live(chain: str) -> bool:
         return True
     if chain == "ton":
         return (os.environ.get("TON_LAUNCH_LIVE") or "").strip() == "1"
+    if chain == "tron":
+        return tron.live()
     key = FACTORY_KEY.get(chain)
     return bool(key and (os.environ.get(f"FACTORY_{key}_PLAIN") or "").strip())
 
@@ -936,20 +939,50 @@ async def _show_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rows.append(("Launch fee", f"{fee_ton:g} TON + about 0.3 TON for the contract (most comes back)"))
     elif mode == "plain" and chain in PLAIN_FEE_TEXT:
         rows.append(("Launch fee", PLAIN_FEE_TEXT[chain] + " + network gas"))
+    tinfo = {}
+    if chain == "tron":
+        tinfo = await tron.run("info", {"uid": update.effective_user.id}, timeout=45)
+        fee = tinfo.get("fee_trx")
+        rows.append(("Launch fee", (f"{fee:g} TRX" if fee is not None else "the Ferzan fee")
+                     + " + about 16 TRX of Tron network energy"))
+        rows.append(("Paid from", "your Ferzan Trade Bot wallet"))
     text = "<b>Review your launch</b>\n\n" + "\n".join(f"{_esc(k)}: <b>{_esc(v)}</b>" for k, v in rows)
-    text += ("\n\nNext you'll connect your wallet and see the exact cost before signing. "
-             "Ferzan never holds your keys.")
+    launch_btn = "✅ Launch now"
+    if chain == "tron":
+        launch_btn = "✅ Launch from my Trade Bot wallet"
+        text += "\n\n" + _tron_wallet_text(tinfo)
+    else:
+        text += ("\n\nNext you'll connect your wallet and see the exact cost before signing. "
+                 "Ferzan never holds your keys.")
+    first = [InlineKeyboardButton(launch_btn, callback_data="confirm:yes")]
+    if chain != "tron":  # Tron launches run from the chat, so there is no reminder flow for them
+        first.append(InlineKeyboardButton("⏰ Launch later", callback_data="confirm:later"))
     await update.effective_message.reply_text(
         text,
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("✅ Launch now", callback_data="confirm:yes"),
-             InlineKeyboardButton("⏰ Launch later", callback_data="confirm:later")],
+            first,
             [InlineKeyboardButton("🔄 Start over", callback_data="confirm:restart"),
              InlineKeyboardButton("❌ Cancel", callback_data="confirm:no")],
         ]),
     )
     return CONFIRMING
+
+
+def _tron_wallet_text(info: dict) -> str:
+    if info.get("error") == "no_wallet":
+        return (f"⚠️ You don't have a Ferzan Trade Bot wallet yet. Open @{_esc(TRADE)}, tap /wallet, "
+                "fund the TRON address it shows with TRX, then come back and tap Launch.")
+    if not info.get("ok"):
+        return "⚠️ Couldn't read your Trade Bot wallet right now. You can still tap Launch; it checks again first."
+    t = (f"Your Trade Bot TRON wallet: <code>{_esc(info['address'])}</code>\n"
+         f"Balance: <b>{info['balance_trx']:,.2f} TRX</b> (a launch needs about {info['need_trx']:g} TRX)")
+    if not info.get("enough"):
+        t += (f"\n\n⚠️ Not enough TRX yet. Send at least {info['need_trx'] - info['balance_trx']:,.2f} TRX "
+              "to the address above (Tron network), then tap Launch.")
+    else:
+        t += "\n\nNothing is sent until you tap Launch. The whole supply goes to this wallet."
+    return t
 
 
 async def confirmed(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -975,11 +1008,85 @@ async def confirmed(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
         return await _need_tz(update, context, "later")
+    if launch["chain"] == "tron":
+        return await _tron_go(update, context, launch)
 
     text, markup = _make_request(update.effective_user.id, update.effective_chat.id, launch)
     await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
     context.user_data.pop("launch", None)
     return ConversationHandler.END
+
+
+# ------------------------------------------------ Tron: launch from the Trade Bot wallet --
+LAUNCH_API = (os.environ.get("LAUNCH_API_URL") or "http://127.0.0.1:8000").rstrip("/")
+
+
+async def _tron_go(update: Update, context: ContextTypes.DEFAULT_TYPE, launch: dict):
+    q = update.callback_query
+    uid, chat_id = update.effective_user.id, update.effective_chat.id
+    req = db.create_launch_request(
+        telegram_user_id=uid, chat_id=chat_id, chain="tron", mode="plain", name=launch["name"],
+        symbol=launch["symbol"], total_supply=launch["total_supply_raw"], decimals=launch["decimals"],
+        description=launch.get("description") or "", image_url=launch.get("image_url") or "",
+        extra_params=dict(launch.get("extra_params") or {}, source="tradebot_wallet"),
+    )
+    context.user_data.pop("launch", None)
+    await q.edit_message_text(
+        f"⏳ Launching <b>{_esc(launch['name'])} (${_esc(launch['symbol'])})</b> on Tron from your Trade Bot "
+        "wallet. This takes about a minute. Please don't launch it again.", parse_mode="HTML")
+    context.application.create_task(_tron_run(context.bot, req.id, uid, chat_id, launch))
+    return ConversationHandler.END
+
+
+def _tron_complete(req_id: str, txid: str) -> tuple[bool, str]:
+    import requests
+
+    try:
+        r = requests.post(f"{LAUNCH_API}/api/launch-requests/{req_id}/complete", json={"tx_hash": txid}, timeout=120)
+        if r.status_code == 200:
+            return True, ""
+        return False, str((r.json() or {}).get("detail") or r.status_code)[:200]
+    except Exception as e:  # noqa: BLE001
+        return False, type(e).__name__
+
+
+async def _tron_run(bot, req_id: str, uid: int, chat_id: int, launch: dict):
+    say = lambda t: bot.send_message(chat_id=chat_id, text=t, parse_mode="HTML", disable_web_page_preview=True)  # noqa: E731
+    try:
+        res = await tron.run("launch", {"uid": uid, "request_id": req_id, "name": launch["name"],
+                                        "symbol": launch["symbol"], "supply_raw": launch["total_supply_raw"]})
+        txid, addr = res.get("txid") or "", res.get("address") or ""
+        if txid and addr:
+            db.update_status(req_id, "submitted", wallet_address=addr, tx_hash=txid)
+        if res.get("ok") or (txid and res.get("pending")):
+            for attempt in range(6):  # the API re-checks the launch on-chain, then posts the launch card
+                ok, why = await asyncio.to_thread(_tron_complete, req_id, txid)
+                if ok:
+                    return
+                await asyncio.sleep(30)
+            logger.warning("tron launch %s not recorded: %s", req_id, why)
+            await say(f"Your Tron launch was sent but isn't confirmed yet. Check it here and don't launch again:\n"
+                      f"https://tronscan.org/#/transaction/{_esc(txid)}")
+            return
+        err = res.get("error") or "unknown error"
+        if res.get("pending"):  # the helper is still waiting on Tron: it may have sent, so never say "nothing sent"
+            await say("⏳ Tron is slow right now. Your launch may still land: check /history in a few minutes "
+                      "and please don't launch it again.")
+            return
+        db.update_status(req_id, "failed", error_message=str(err)[:200])
+        if err == "low_balance":
+            await say(f"❌ Not launched: your Trade Bot TRON wallet has {res.get('balance_trx', 0):,.2f} TRX and a launch "
+                      f"needs about {res.get('need_trx', 0):g} TRX.\nSend TRX (Tron network) to "
+                      f"<code>{_esc(res.get('address', ''))}</code>, then /launch again. Nothing was spent.")
+        elif err == "no_wallet":
+            await say(f"❌ Not launched: you don't have a Ferzan Trade Bot wallet yet. Open @{_esc(TRADE)}, tap /wallet "
+                      "and fund its TRON address, then /launch again.")
+        else:
+            extra = f"\nTransaction: https://tronscan.org/#/transaction/{_esc(txid)}" if txid else " Nothing was sent."
+            await say(f"❌ The Tron launch didn't go through ({_esc(str(err)[:150])}).{extra}")
+    except Exception:
+        logger.exception("tron launch %s crashed", req_id)
+        await say("❌ Something went wrong with the Tron launch. Check /history before trying again.")
 
 
 def _make_request(user_id: int, chat_id: int, launch: dict, note: str = ""):
