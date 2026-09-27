@@ -44,7 +44,7 @@ from evm_launch import (
 from solana_launch import build_unsigned_launch_tx as build_solana_plain_tx
 from meteora_launch import build_unsigned_meteora_tx
 from tron_launch import build_unsigned_launch_tx as build_tron_plain_tx
-from ton_launch import build_unsigned_launch_tx as build_ton_fee_tx
+from ton_launch import build_unsigned_launch_tx as build_ton_launch_tx, verify_launch as verify_ton_launch
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -308,12 +308,27 @@ def build_tx(request_id: str, body: BuildTxRequest):
             }
 
         elif req.chain == "ton":
-            result = build_ton_fee_tx(request_id)
+            if (os.environ.get("TON_LAUNCH_LIVE") or "").strip() != "1":
+                raise HTTPException(501, "TON launches are not open yet.")
+            extra = dict(req.extra_params or {})
+            meta = extra.get("ton_meta") or ""
+            if not meta:  # upload once: the coin's address depends on it, so a retry must reuse it
+                try:
+                    from irys_upload import upload_token_metadata
+                    meta = upload_token_metadata(name=req.name, symbol=req.symbol, image_url=req.image_url or "",
+                                                 description=req.description or "")
+                except Exception as e:
+                    print(f"IRYS_METADATA_UPLOAD_FAILED ton: {e}")
+                meta = meta or f"{_PUBLIC_ORIGIN}/api/metadata/{request_id}"
+            result = build_ton_launch_tx(request_id, body.wallet_address, total_supply, meta)
+            extra.update(ton_meta=meta, ton_minter=result.minter)
+            _set_extra(request_id, extra)
             response = {
                 "chain": "ton",
-                "to": result.to,
-                "amount_nano": result.amount_nano,
-                "comment": result.comment,
+                "minter": result.minter,
+                "messages": result.messages,
+                "valid_until": result.valid_until,
+                "network": result.network,
                 "note": result.note,
             }
 
@@ -386,6 +401,15 @@ def build_tx(request_id: str, body: BuildTxRequest):
     return response
 
 
+def _set_extra(request_id: str, extra: dict) -> None:
+    import json as _json
+    from datetime import datetime as _dt, timezone as _tz
+
+    with db._get_conn() as conn:
+        conn.execute("UPDATE launch_requests SET extra_params = ?, updated_at = ? WHERE id = ?",
+                     (_json.dumps(extra), _dt.now(_tz.utc).isoformat(), request_id))
+
+
 def _verifiable_launch(req) -> bool:
     """VERIFY_ALL_BATCH21: which launches must be proven on chain before they are posted.
     Website launches always; Telegram launches when they are a Ferzan curve (EVM factory) or a
@@ -407,7 +431,16 @@ def complete_request(request_id: str, body: CompleteRequest):
         raise HTTPException(404, "Launch request not found")
     if req.status == "confirmed":
         return {"status": "ok", "already": True}  # a replayed call must not post to the channel again
-    if _verifiable_launch(req):
+    if req.chain == "ton":
+        minter = str((req.extra_params or {}).get("ton_minter") or "")
+        if not minter:
+            raise HTTPException(400, "This TON launch was never built.")
+        res = verify_ton_launch(minter, int(req.total_supply))
+        if not res.get("ok"):
+            raise HTTPException(400, "TON has not confirmed the coin yet. Wait a minute and check your wallet; "
+                                     "do not launch again. (" + str(res.get("error", ""))[:120] + ")")
+        body = CompleteRequest(tx_hash=body.tx_hash, result_token_address=minter, curve_address="")
+    elif _verifiable_launch(req):
         verified = _verify_site_launch(req, body)
         body = CompleteRequest(tx_hash=body.tx_hash, result_token_address=verified.get("token", ""),
                                curve_address=verified.get("curve", ""))
@@ -777,8 +810,9 @@ _EXPLORER = {
     "solana": "https://solscan.io/token/", "bsc": "https://bscscan.com/token/",
     "base": "https://basescan.org/token/", "ethereum": "https://etherscan.io/token/",
     "robinhood": "https://robinhoodchain.blockscout.com/token/", "arc": "https://explorer.arc.io/token/",
+    "ton": "https://tonviewer.com/",
 }
-_CHAIN_NAME = {"solana": "Solana", "bsc": "BNB Chain", "base": "Base", "ethereum": "Ethereum", "robinhood": "Robinhood Chain", "arc": "Arc"}
+_CHAIN_NAME = {"solana": "Solana", "bsc": "BNB Chain", "base": "Base", "ethereum": "Ethereum", "robinhood": "Robinhood Chain", "arc": "Arc", "ton": "TON"}
 
 
 def _launch_card(req, token_addr: str, curve_addr: str, tx_hash: str) -> str:

@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Launch on TON</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<script src="https://unpkg.com/@tonconnect/ui@2.0.9/dist/tonconnect-ui.min.js"></script>
+<style>
+  body { font-family: -apple-system, sans-serif; background: var(--tg-theme-bg-color, #fff);
+         color: var(--tg-theme-text-color, #000); padding: 16px; margin: 0; }
+  button { width: 100%; padding: 14px; font-size: 16px; border-radius: 10px; border: none; margin-top: 12px; cursor: pointer; }
+  button:disabled { opacity: .55; cursor: default; }
+  .primary { background: var(--tg-theme-button-color, #2481cc); color: var(--tg-theme-button-text-color, #fff); }
+  #status { margin-top: 16px; padding: 12px; border-radius: 8px; background: #f5f5f5; color:#111; font-size: 14px; line-height:1.4; word-break: break-word; white-space: pre-line; }
+  #status a { color: inherit; font-weight: 600; }
+  .error { background: #fde8e8 !important; color: #a00 !important; }
+  .success { background: #e6f7e6 !important; color: #060 !important; }
+  .hint { background:#eef4fb !important; color:#1a5591 !important; }
+  .detail-row { display: flex; justify-content: space-between; gap: 12px; padding: 6px 0; font-size: 14px; border-bottom: 1px solid #eee; }
+  .detail-row b { text-align: right; }
+  #tc { display:flex; justify-content:center; margin-top: 14px; }
+</style>
+</head>
+<body>
+  <h2>Review Your Launch</h2>
+  <div id="details">Loading launch details...</div>
+  <div id="tc"></div>
+  <div id="status" style="display:none"></div>
+  <button id="signBtn" class="primary" style="display:none">Review & Sign in Your Wallet</button>
+<script>
+  const tg = window.Telegram?.WebApp; tg?.ready(); tg?.expand();
+  const requestId = new URLSearchParams(location.search).get('request_id');
+  const API_BASE = 'https://launch.ferzaneco.com/api';
+  const detailsEl = document.getElementById('details'), statusEl = document.getElementById('status'), signBtn = document.getElementById('signBtn');
+  let launchReq = null;
+  const esc = (v) => String(v ?? '').replace(/[<&]/g, (c) => ({ '<': '&lt;', '&': '&amp;' }[c]));
+  function showStatus(msg, kind, html) { statusEl.style.display = 'block'; statusEl.className = kind || ''; statusEl[html ? 'innerHTML' : 'textContent'] = msg; }
+
+  const ui = new TON_CONNECT_UI.TonConnectUI({
+    manifestUrl: new URL('tonconnect-manifest.json', location.href).href,
+    buttonRootId: 'tc',
+    actionsConfiguration: { twaReturnUrl: 'https://t.me/Ferzan_Launch_Bot' },
+  });
+  ui.onStatusChange((w) => { signBtn.style.display = w && launchReq ? 'block' : 'none'; });
+
+  async function api(path, body) {
+    const r = await fetch(`${API_BASE}/launch-requests/${requestId}/${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
+    let d = {}; try { d = await r.json(); } catch (e) {}
+    if (!r.ok) throw new Error(d.detail || `server error ${r.status}`);
+    return d;
+  }
+
+  async function load() {
+    if (!requestId) { detailsEl.textContent = 'Missing request ID. Open this from the bot.'; return; }
+    const r = await fetch(`${API_BASE}/launch-requests/${requestId}`);
+    if (!r.ok) { detailsEl.textContent = 'Could not load launch details (may have expired).'; return; }
+    launchReq = await r.json();
+    const whole = BigInt(String(launchReq.total_supply || '0')) / 10n ** BigInt(launchReq.decimals || 9);
+    const rows = [['Name', launchReq.name], ['Symbol', launchReq.symbol], ['Chain', 'TON'], ['Mode', 'Standard token (jetton)'],
+      ['Supply', whole.toLocaleString('en-US')], ['Token', 'Fixed supply · no owner · can never be minted again'],
+      ['Cost', 'Launch fee + about 0.3 TON for the contract (most comes back), shown in your wallet']];
+    detailsEl.innerHTML = rows.map(([k, v]) => `<div class="detail-row"><span>${k}</span><b>${esc(v).slice(0, 90)}</b></div>`).join('');
+    if (launchReq.chain !== 'ton') { showStatus('This page is for TON launches.', 'error'); return; }
+    if (!ui.connected) showStatus('Connect Telegram Wallet, Tonkeeper or another TON wallet to continue.', 'hint');
+    else signBtn.style.display = 'block';
+  }
+
+  signBtn.addEventListener('click', async () => {
+    signBtn.disabled = true;
+    try {
+      const wallet = ui.account?.address;
+      if (!wallet) throw new Error('connect a TON wallet first');
+      showStatus('Building your launch...', 'hint');
+      const b = await api('build-tx', { wallet_address: wallet });
+      if (ui.account?.chain && b.network && ui.account.chain !== b.network) throw new Error(b.network === '-3' ? 'switch your wallet to the TON testnet' : 'switch your wallet to TON mainnet');
+      const total = b.messages.reduce((s, m) => s + Number(m.amount), 0) / 1e9;
+      showStatus(`Your wallet will show 3 transfers, about ${total.toFixed(2)} TON in total. ${b.note || ''}\n\nApprove in your wallet...`, 'hint');
+      const res = await ui.sendTransaction({ validUntil: b.valid_until, network: b.network, messages: b.messages });
+      showStatus('Sent. Waiting for TON to confirm (up to a minute)...', 'hint');
+      await api('complete', { tx_hash: 'ton:' + String(res?.boc || '').slice(0, 64), result_token_address: b.minter });
+      const view = (b.network === '-3' ? 'https://testnet.tonviewer.com/' : 'https://tonviewer.com/') + b.minter;
+      showStatus(`✅ Launched on TON!<br><a href="${view}" target="_blank" rel="noopener">View your coin</a>`, 'success', true);
+      signBtn.style.display = 'none';
+    } catch (e) {
+      const msg = /reject|declin|cancel/i.test(String(e?.message || e)) ? 'you rejected the request in your wallet' : (e?.message || String(e));
+      showStatus(`Failed: ${msg}`, 'error');
+      signBtn.disabled = false;
+    }
+  });
+  load();
+</script>
+</body>
+</html>

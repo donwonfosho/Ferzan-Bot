@@ -57,7 +57,7 @@ CHAINS = {
     "ton": "TON",
 }
 EVM_CHAINS = {"ethereum", "bsc", "base", "robinhood", "arc"}
-NATIVE = {"ethereum": "ETH", "bsc": "BNB", "base": "ETH", "robinhood": "ETH", "arc": "USDC", "solana": "SOL"}
+NATIVE = {"ethereum": "ETH", "bsc": "BNB", "base": "ETH", "robinhood": "ETH", "arc": "USDC", "solana": "SOL", "ton": "TON"}
 # env-var prefix used by api.py for factory addresses
 FACTORY_KEY = {"ethereum": "ETH", "bsc": "BSC", "base": "BASE", "robinhood": "HOOD", "arc": "ARC"}
 # the plain factories' fixed launch fee (set in the contract at deploy time)
@@ -103,6 +103,8 @@ def _short_num(n: int) -> str:
 def _plain_live(chain: str) -> bool:
     if chain == "solana":
         return True
+    if chain == "ton":
+        return (os.environ.get("TON_LAUNCH_LIVE") or "").strip() == "1"
     key = FACTORY_KEY.get(chain)
     return bool(key and (os.environ.get(f"FACTORY_{key}_PLAIN") or "").strip())
 
@@ -929,7 +931,10 @@ async def _show_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rows.append(("Trading opens", extra.get("start_display") or "right away"))
         mb = extra.get("max_buy") or "0"
         rows.append(("Max buy", "no limit" if mb == "0" else f"{mb} {unit} per wallet"))
-    if mode == "plain" and chain in PLAIN_FEE_TEXT:
+    if mode == "plain" and chain == "ton":
+        fee_ton = int(os.environ.get("LAUNCH_FEE_NANOTON") or "300000000") / 1e9
+        rows.append(("Launch fee", f"{fee_ton:g} TON + about 0.3 TON for the contract (most comes back)"))
+    elif mode == "plain" and chain in PLAIN_FEE_TEXT:
         rows.append(("Launch fee", PLAIN_FEE_TEXT[chain] + " + network gas"))
     text = "<b>Review your launch</b>\n\n" + "\n".join(f"{_esc(k)}: <b>{_esc(v)}</b>" for k, v in rows)
     text += ("\n\nNext you'll connect your wallet and see the exact cost before signing. "
@@ -1002,7 +1007,7 @@ def _make_request(user_id: int, chat_id: int, launch: dict, note: str = ""):
     if not live:
         return (f"✅ Request saved: {_esc(req.name)} ({_esc(req.symbol)}) on {_esc(req.chain)}\n"
                 f"ID: <code>{_esc(req.id)}</code>\n\nWallet signing is not live yet (no HTTPS Mini App)."), None
-    page = "solana.html" if launch["chain"] == "solana" else "evm.html"
+    page = {"solana": "solana.html", "ton": "ton.html"}.get(launch["chain"], "evm.html")
     mini_app_url = f"{MINI_APP_BASE_URL}/{page}?request_id={req.id}"
     text = ((f"<b>{_esc(launch['name'])} (${_esc(launch['symbol'])})</b>\n" if note else "")
             + "Tap below to connect your wallet and review the exact transaction before signing. "
