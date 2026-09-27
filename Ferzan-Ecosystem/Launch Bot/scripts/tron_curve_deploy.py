@@ -146,6 +146,16 @@ def call(contract, sig, params, owner, key, value=0, fee_limit=300_000_000, what
 
 
 # ------------------------------------------------------------ SunSwap discovery --
+def _check_hash(h: bytes, dex_factory: str, samples: list) -> str:
+    """'41' or 'ff' if this init-code hash reproduces every sample pair address, else ''."""
+    fac20 = hex41(dex_factory)[2:]
+    for prefix in ("41", "ff"):
+        if all(keccak(bytes.fromhex(prefix + fac20) + keccak(bytes.fromhex(t0 + t1)) + h)[12:].hex() == p
+               for p, t0, t1 in samples):
+            return prefix
+    return ""
+
+
 def find_pair_hash(dex_factory: str) -> tuple[str, str]:
     """Extracts candidate pair creation codes from the SunSwap factory bytecode and returns the one whose hash
     reproduces a real pair address (hash hex, create2 prefix)."""
@@ -164,25 +174,29 @@ def find_pair_hash(dex_factory: str) -> tuple[str, str]:
     code = (ts._post("/wallet/getcontract", {"value": hex41(dex_factory), "visible": False}).get("bytecode") or "").lower()
     if not code:
         sys.exit("ABORT: could not read the SunSwap factory bytecode")
-    fac20 = hex41(dex_factory)[2:]
-    starts = [i for i in range(2, len(code), 2) if code.startswith("6080604052", i)]
-    ends = []
-    for marker, tail in (("a265627a7a72315820", 64 + 10), ("a265627a7a72305820", 64 + 10), ("a165627a7a72305820", 64 + 4),
-                         ("a264697066735822", 68 + 18)):
-        j = code.find(marker)
-        while j != -1:
-            ends.append(j + len(marker) + tail)
-            j = code.find(marker, j + 1)
+    for sig in ("INIT_CODE_PAIR_HASH()", "INIT_CODE_HASH()", "pairCodeHash()"):  # some forks publish it directly
+        h = const(dex_factory, sig)
+        if h and len(h) == 64 and int(h, 16):
+            found = _check_hash(bytes.fromhex(h), dex_factory, samples)
+            if found:
+                return h, found
+    import re
+
+    # every Solidity metadata trailer (0.4 bzzr0, 0.5 bzzr0/bzzr1, 0.6+ ipfs) marks the end of a code blob
+    ends = sorted({m.end() for m in re.finditer(
+        r"(a165627a7a72305820[0-9a-f]{64}0029|a265627a7a7230(?:30|31)5820[0-9a-f]{64}64736f6c6343[0-9a-f]{6}0032"
+        r"|a265627a7a72(?:30|31)5820[0-9a-f]{64}64736f6c6343[0-9a-f]{6}0032"
+        r"|a264697066735822[0-9a-f]{68}64736f6c6343[0-9a-f]{6}0033)", code)})
+    starts = [m.start() for m in re.finditer("60806040", code) if m.start() % 2 == 0]
+    ends = sorted(set(ends) | set(starts[1:]) | {len(code)})  # no metadata (some Tron builds): blob boundaries
+    print(f"  (factory code {len(code) // 2:,} bytes, {len(samples)} sample pairs, {len(starts)} code starts, {len(ends)} code ends)")
     for s in starts:
-        for e in sorted(set(ends)):
-            if e <= s + 200 or e > len(code):
+        for e in ends:
+            if e <= s + 400:
                 continue
-            h = keccak(bytes.fromhex(code[s:e]))
-            for prefix in ("41", "ff"):
-                ok = all(keccak(bytes.fromhex(prefix + fac20) + keccak(bytes.fromhex(t0 + t1)) + h)[12:].hex() == p
-                         for p, t0, t1 in samples)
-                if ok:
-                    return h.hex(), prefix
+            found = _check_hash(keccak(bytes.fromhex(code[s:e])), dex_factory, samples)
+            if found:
+                return keccak(bytes.fromhex(code[s:e])).hex(), found
     sys.exit("ABORT: could not prove SunSwap's pair hash from its bytecode. Tell Claude; nothing was deployed.")
 
 
