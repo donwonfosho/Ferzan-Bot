@@ -51,7 +51,7 @@ CHAINS = {
     # (router 0x1f7d...2EfA -> factory 0x89e5...) and use the USDC editions of the contracts.
     "arc": {
         "rpc": "https://rpc.mainnet.arc.io", "rpc_env": "ARC_RPC_URL", "chain_id": 5042, "sym": "USDC",
-        "fee_wei": 10 * 10**18,
+        "fee_wei": 1 * 10**18,  # 1 USDC, in line with other Arc launchpads (Mercuri 1 USDC, Bullcheese free)
         "dex": "Uniswap V2 (Arc)", "dex_factory": "0x89e5DB8B5aA49aA85AC63f691524311AEB649eba",
         "weth": "0x3600000000000000000000000000000000000000", "weth_symbol": "USDC",
         "router": "0x1f7d7550B1b028f7571E69A784071F0205FD2EfA", "usdc_quote": True,
@@ -141,8 +141,18 @@ def main():
     if w3.eth.chain_id != c["chain_id"]:
         sys.exit(f"ABORT: RPC is on chain {w3.eth.chain_id}, expected {c['chain_id']}")
     if rec_key in record and w3.eth.get_code(record[rec_key]) not in (b"", b"\x00"):
-        print(f"Already deployed on {chain}: {record[rec_key]}\n{env_name}={record[rec_key]}")
-        return
+        fee_abi = [{"name": "launchFeeWei", "type": "function", "stateMutability": "view", "inputs": [],
+                    "outputs": [{"name": "", "type": "uint256"}]}]
+        old_fee = w3.eth.contract(address=record[rec_key], abi=fee_abi).functions.launchFeeWei().call()
+        if old_fee == c["fee_wei"]:
+            print(f"Already deployed on {chain}: {record[rec_key]}\n{env_name}={record[rec_key]}")
+            return
+        # The fee is fixed per factory: a new fee means a new factory. Keep the old address on record.
+        print(f"Recorded factory {record[rec_key]} charges {Web3.from_wei(old_fee, 'ether')} {c['sym']}; "
+              f"a new one at {Web3.from_wei(c['fee_wei'], 'ether')} {c['sym']} will be deployed")
+        if mode == "send":
+            record[f"{rec_key}_old_{old_fee}"] = record.pop(rec_key)
+            RECORD.write_text(json.dumps(record, indent=1))
 
     # --- prove the DEX factory + WETH addresses are the real ones on this chain (curves only use them)
     if kind == "plain":
