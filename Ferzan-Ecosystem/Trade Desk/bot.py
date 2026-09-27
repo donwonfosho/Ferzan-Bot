@@ -1319,7 +1319,7 @@ def _live_buy(
         import tron_signer
 
         label, liq_mark = "TRX", False
-        ok, msg = tron_signer.buy_tron(mint, usd, key_hex=evm_secret)
+        ok, msg = tron_signer.buy_tron(mint, usd, key_hex=evm_secret, slip_bps=_slip_bps(uid, "buy", "trx"))
     elif chain in {"ton"} or mint.startswith(("EQ", "UQ", "kQ")):
         import ton_signer
 
@@ -1561,7 +1561,7 @@ def _sell_any(uid: int, mint: str, pct: int = 100) -> tuple[bool, str, str]:
             return False, "TRON sells are full-bag only right now — tap 100%.", label
         import tron_signer
 
-        ok, msg = tron_signer.sell_tron(mint, key_hex=evm_secret)
+        ok, msg = tron_signer.sell_tron(mint, key_hex=evm_secret, slip_bps=_slip_bps(uid, "sell", "trx"))
     elif cid == "ton":
         import ton_signer
 
