@@ -659,9 +659,18 @@ FERZAN_API = (os.getenv("FERZAN_LAUNCH_API") or "https://launch.ferzaneco.com/ap
 _FZ_MISS: dict = {}
 
 
+def _fz_norm(ca: str) -> str:
+    """0x addresses lowercased; Tron (T...) addresses kept exactly (base58 is case-sensitive)."""
+    ca = (ca or "").strip()
+    if ca.startswith("T") and len(ca) == 34:
+        return ca
+    ca = ca.lower()
+    return ca if ca.startswith("0x") and len(ca) == 42 else ""
+
+
 def _ferzan_curve(ca: str, since: int = 0, kind: str = "buy") -> dict:
-    ca = (ca or "").strip().lower()
-    if not (ca.startswith("0x") and len(ca) == 42):
+    ca = _fz_norm(ca)
+    if not ca:
         return {}
     if since == 0 and time.time() - _FZ_MISS.get(ca, 0) < 300:
         return {}
@@ -680,7 +689,7 @@ def _ferzan_pool(ca: str) -> tuple[str, dict]:
     d = _ferzan_curve(ca)
     if not d or d.get("graduated"):
         return "", {}
-    return "ferzan:" + ca.strip().lower(), {
+    return "ferzan:" + _fz_norm(ca), {
         "name": d.get("name"), "symbol": d.get("symbol"), "address": ca, "dex": "ferzan curve",
         "source": "ferzan", "fdv_usd": d.get("mcap_usd"), "market_cap_usd": d.get("mcap_usd"),
     }

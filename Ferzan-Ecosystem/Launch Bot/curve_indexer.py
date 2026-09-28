@@ -71,12 +71,19 @@ CHAINS["solana"] = {  # Meteora DBC launches - read by sol_indexer.py, not by a 
     "kind": "solana", "factory_env": "", "rpc_env": "SOLANA_RPC_URL", "sym": "SOL", "dex": "Meteora",
     "fallback": [], "block_time": 0.4, "explorer": "https://solscan.io",
 }
-CHAIN_LABEL = {"bsc": "BNB Chain", "base": "Base", "ethereum": "Ethereum", "robinhood": "Robinhood Chain", "solana": "Solana", "arc": "Arc"}
+CHAINS["tron"] = {  # Ferzan Tron curves - read by tron_indexer.py (TronGrid), not by a ChainIndexer worker
+    "kind": "tron", "factory_env": "TRON_CURVE_FACTORY", "rpc_env": "", "sym": "TRX", "dex": "SunSwap",
+    "fallback": [], "block_time": 3.0, "explorer": "https://tronscan.org/#",
+}
+CHAIN_LABEL = {"bsc": "BNB Chain", "base": "Base", "ethereum": "Ethereum", "robinhood": "Robinhood Chain", "solana": "Solana",
+               "arc": "Arc", "tron": "Tron"}
 
 
 def _trade_url(r) -> str:
     if r["chain"] == "solana":
         return f"https://jup.ag/tokens/{r['token']}"
+    if r["chain"] == "tron":  # Tron curves trade in the Ferzan Trade Bot
+        return f"https://t.me/{(os.environ.get('FERZAN_BOT_USERNAME') or 'Ferzan_Trade_Bot').lstrip('@')}?start=buy_{r['token']}"
     base = (os.environ.get("MINI_APP_BASE_URL") or "https://launch.ferzaneco.com/miniapp").rstrip("/")
     return f"{base}/curve.html?chain={r['chain']}&curve={r['curve']}"
 CONFIRMATIONS = 2
@@ -477,7 +484,7 @@ def send_graduation_alerts() -> None:
             cfg = CHAINS[r["chain"]]
             name, sym = html.escape(r["name"] or "Token"), html.escape(r["symbol"] or "")
             raised = f"{(r['grad_native'] or 0):.4g}"
-            chart = (f"https://dexscreener.com/{r['chain']}/{r['token']}" if r["chain"] in ("bsc", "base", "ethereum", "solana")
+            chart = (f"https://dexscreener.com/{r['chain']}/{r['token']}" if r["chain"] in ("bsc", "base", "ethereum", "solana", "tron")
                      else f"{cfg['explorer']}/token/{r['token']}")
             text = (
                 f"🎓 <b>{name} (${sym}) just graduated!</b>\n\n"
@@ -503,6 +510,8 @@ KOTH_COOLDOWN = int(os.environ.get("FERZAN_KOTH_COOLDOWN_MIN") or 30) * 60
 def _trade_kb(r) -> dict:
     base = (os.environ.get("MINI_APP_BASE_URL") or "https://launch.ferzaneco.com/miniapp").rstrip("/")
     trade = (os.environ.get("FERZAN_BOT_USERNAME") or "Ferzan_Trade_Bot").lstrip("@")
+    if r["chain"] == "tron":
+        return {"inline_keyboard": [[{"text": "⚡ Buy / Sell in Ferzan Trade Bot", "url": _trade_url(r)}]]}
     return {"inline_keyboard": [
         [{"text": "🪐 Buy on Jupiter" if r["chain"] == "solana" else "📈 Buy / Sell on the curve", "url": _trade_url(r)}],
         [{"text": "⚡ Buy in Ferzan Trade Bot", "url": f"https://t.me/{trade}?start=buy_{r['token']}"}],
@@ -571,7 +580,7 @@ def send_growth_alerts() -> None:
 def main() -> None:
     init_db()
     once = "--once" in sys.argv
-    workers = [ChainIndexer(ch) for ch in CHAINS if CHAINS[ch].get("kind") != "solana"]
+    workers = [ChainIndexer(ch) for ch in CHAINS if CHAINS[ch].get("kind") not in ("solana", "tron")]
     while True:
         busy = False
         for w in workers:
@@ -586,6 +595,11 @@ def main() -> None:
             sol_indexer.run(idx_conn, LAUNCH_DB)
         except Exception as e:
             log.warning("solana pass failed: %s", str(e)[:200])
+        try:
+            import tron_indexer
+            tron_indexer.run(idx_conn, LAUNCH_DB, force=once)
+        except Exception as e:
+            log.warning("tron pass failed: %s", str(e)[:200])
         try:
             send_graduation_alerts()
         except Exception as e:

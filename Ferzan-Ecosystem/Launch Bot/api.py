@@ -1063,7 +1063,7 @@ async def sol_fees_confirm(body: SolConfirmBody):
 
 # --------------------------------------- curve index: chart, feed, track record --
 # curve_indexer.py (its own service) fills this read-only index from chain logs.
-_NATIVE_USD: dict = {"t": 0.0, "bsc": 0.0, "base": 0.0, "solana": 0.0}
+_NATIVE_USD: dict = {"t": 0.0, "bsc": 0.0, "base": 0.0, "solana": 0.0, "tron": 0.0}
 _NATIVE_SYM = {"bsc": "BNB", "base": "ETH", "ethereum": "ETH", "robinhood": "ETH", "solana": "SOL", "arc": "USDC",
                "tron": "TRX", "ton": "TON"}
 
@@ -1086,9 +1086,9 @@ def _native_usd(chain: str) -> float:
     if time.time() - _NATIVE_USD["t"] > 300:
         try:
             r = requests.get("https://api.coingecko.com/api/v3/simple/price",
-                             params={"ids": "binancecoin,ethereum,solana", "vs_currencies": "usd"}, timeout=8).json()
+                             params={"ids": "binancecoin,ethereum,solana,tron", "vs_currencies": "usd"}, timeout=8).json()
             _NATIVE_USD.update(t=time.time(), bsc=float(r["binancecoin"]["usd"]), base=float(r["ethereum"]["usd"]),
-                               solana=float(r["solana"]["usd"]))
+                               solana=float(r["solana"]["usd"]), tron=float((r.get("tron") or {}).get("usd") or 0))
         except Exception:
             _NATIVE_USD["t"] = time.time() - 240  # retry in a minute
     return float(_NATIVE_USD.get(chain) or 0.0)
@@ -1131,6 +1131,8 @@ def _trade_url(chain: str, curve: str, token: str) -> str:
     """Where to trade an indexed launch: Solana tokens trade on Jupiter, EVM curves on our trade page."""
     if chain == "solana":
         return f"https://jup.ag/tokens/{token}"
+    if chain == "tron":  # Tron curves trade in the Ferzan Trade Bot
+        return f"https://t.me/{(os.environ.get('FERZAN_BOT_USERNAME') or 'Ferzan_Trade_Bot').lstrip('@')}?start=buy_{token}"
     return f"{MINI_APP_BASE}/curve.html?chain={chain}&curve={curve}"
 
 
@@ -1564,9 +1566,11 @@ def curve_chart(curve: str, tf: int = 300):
 @app.get("/api/curve-by-token/{token}")
 def curve_by_token(token: str, since: int = 0, kind: str = "buy"):
     """For the Buy Bot: a Ferzan curve token's recent curve trades (buys or sells) after `since`."""
-    token = (token or "").lower()
-    if not _re.fullmatch(r"0x[0-9a-f]{40}", token):
-        return {"found": False}
+    token = (token or "").strip()
+    if not _re.fullmatch(r"T[1-9A-HJ-NP-Za-km-z]{33}", token):  # Tron addresses are case-sensitive
+        token = token.lower()
+        if not _re.fullmatch(r"0x[0-9a-f]{40}", token):
+            return {"found": False}
     c = _idx_db()
     if c is None:
         return {"found": False}

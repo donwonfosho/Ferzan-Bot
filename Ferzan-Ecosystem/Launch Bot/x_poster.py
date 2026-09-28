@@ -90,7 +90,8 @@ def _fmt(kind: str, r, base: str, extra: str = "") -> str:
     name, sym = (r["name"] or "Token")[:40], (r["symbol"] or "")[:12]
     chain = CHAIN_NAME.get(r["chain"], r["chain"])
     url = (f"https://jup.ag/tokens/{r['token']}" if r["chain"] == "solana"
-           else f"{base}/curve.html?chain={r['chain']}&curve={r['curve']}")
+           else f"https://t.me/{(os.environ.get('FERZAN_BOT_USERNAME') or 'Ferzan_Trade_Bot').lstrip('@')}?start=buy_{r['token']}"
+           if r["chain"] == "tron" else f"{base}/curve.html?chain={r['chain']}&curve={r['curve']}")
     head = {
         "launch": f"🚀 New on Ferzan: {name} (${sym}) on {chain}",
         "p90": f"🚀 {name} (${sym}) is 90% of the way to graduation on {chain}{extra}",
