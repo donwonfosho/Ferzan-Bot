@@ -2395,6 +2395,20 @@ from fastapi.responses import StreamingResponse as _Streaming  # noqa: E402
 
 _LIVE = {"subs": set(), "task": None, "trade": None, "curve": None, "grad": None}
 _LIVE_MAX = int(os.environ.get("LIVE_MAX_CLIENTS") or 3000)
+_LIVE_PER_IP = int(os.environ.get("LIVE_MAX_PER_IP") or 40)  # phones on one carrier can share an address, so generous
+_LIVE_IPS: dict = {}
+
+
+def _client_ip(request) -> str:
+    """The visitor's address as nginx saw it (CLIENT_IP_HEADER, set by the installer after checking nginx sends it).
+    '' when unknown, and then no per-address limit applies."""
+    h = (os.environ.get("CLIENT_IP_HEADER") or "").strip().lower()
+    if not h:
+        return ""
+    v = (request.headers.get(h) or "").strip()
+    if h == "x-forwarded-for":
+        v = v.split(",")[-1].strip()  # the entry nginx added; earlier ones come from the client
+    return "" if v in ("", "127.0.0.1", "::1") else v[:64]
 
 
 def _live_poll() -> list:
@@ -2468,6 +2482,11 @@ async def live_stream(request: Request):
     """Server-sent events: every trade, new coin and graduation on Ferzan as it is indexed (all chains)."""
     if len(_LIVE["subs"]) >= _LIVE_MAX:
         raise HTTPException(503, "live feed is full, the page refreshes on its own")
+    ip = _client_ip(request)
+    if ip and _LIVE_IPS.get(ip, 0) >= _LIVE_PER_IP:
+        raise HTTPException(429, "too many live connections from one address")
+    if ip:
+        _LIVE_IPS[ip] = _LIVE_IPS.get(ip, 0) + 1
     if _LIVE["task"] is None or _LIVE["task"].done():
         _LIVE["task"] = _asyncio.create_task(_live_loop())
     q: _asyncio.Queue = _asyncio.Queue(maxsize=400)
@@ -2485,6 +2504,12 @@ async def live_stream(request: Request):
                     yield ": ping\n\n"
         finally:
             _LIVE["subs"].discard(q)
+            if ip:
+                n = _LIVE_IPS.get(ip, 1) - 1
+                if n > 0:
+                    _LIVE_IPS[ip] = n
+                else:
+                    _LIVE_IPS.pop(ip, None)
 
     return _Streaming(gen(), media_type="text/event-stream",
                       headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"})
@@ -2492,7 +2517,8 @@ async def live_stream(request: Request):
 
 @app.get("/api/stream-status")
 def live_status():
-    return {"clients": len(_LIVE["subs"]), "max": _LIVE_MAX, "running": bool(_LIVE["task"] and not _LIVE["task"].done())}
+    return {"clients": len(_LIVE["subs"]), "max": _LIVE_MAX, "running": bool(_LIVE["task"] and not _LIVE["task"].done()),
+            "addresses": len(_LIVE_IPS), "busiest": max(_LIVE_IPS.values(), default=0), "per_address_max": _LIVE_PER_IP}
 
 
 # ---------------------------------------------------------------- holders + safety
@@ -3189,6 +3215,7 @@ def _call_credits(start: int, end: int) -> dict:
 def _call_credit_table(conn) -> None:
     conn.execute("CREATE TABLE IF NOT EXISTS call_credits (chain TEXT NOT NULL, tx TEXT NOT NULL, ref TEXT NOT NULL, "
                  "created_at INTEGER NOT NULL, PRIMARY KEY (chain, tx))")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_call_credits_ts ON call_credits (created_at)")
 
 
 def _callers(win: dict) -> list:
@@ -3279,10 +3306,17 @@ def call_credit(body: CallCreditBody):
     if body.chain not in ("solana", "ton") or not _re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{64,90}|[0-9a-fA-F]{64}|[A-Za-z0-9+/_=-]{43,48}", body.tx or "") \
             or not _re.fullmatch(_ADDR_ANY, body.ref or ""):
         raise HTTPException(400, "bad request")
+    now = int(time.time())
+    ref = _norm_addr(body.ref)
     with db._get_conn() as conn:
         _call_credit_table(conn)
+        day = now - 86400
+        mine = conn.execute("SELECT COUNT(*) FROM call_credits WHERE ref = ? AND created_at >= ?", (ref, day)).fetchone()[0]
+        total = conn.execute("SELECT COUNT(*) FROM call_credits WHERE created_at >= ?", (day,)).fetchone()[0]
+        if mine >= int(os.environ.get("CALL_CREDIT_PER_REF_DAY") or 300) or total >= int(os.environ.get("CALL_CREDIT_PER_DAY") or 20000):
+            raise HTTPException(429, "too many credits today")
         conn.execute("INSERT OR IGNORE INTO call_credits (chain, tx, ref, created_at) VALUES (?, ?, ?, ?)",
-                     (body.chain, body.tx, _norm_addr(body.ref), int(time.time())))
+                     (body.chain, body.tx, ref, now))
         conn.commit()
     return {"ok": True}
 

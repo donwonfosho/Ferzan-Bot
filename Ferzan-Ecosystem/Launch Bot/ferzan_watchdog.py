@@ -196,7 +196,13 @@ def run() -> int:
         parts.append("✅ Recovered\n" + "\n".join(fixed))
     if parts:
         admins("\n\n".join(parts))
-    else:
+    ping = (os.environ.get("HEALTHCHECK_PING_URL") or "").strip()
+    if ping.startswith("https://"):  # outside dead-man switch: if these pings stop, the droplet is down and you get told
+        try:
+            requests.get(ping, timeout=10)
+        except Exception:
+            pass
+    if not parts:
         print(f"all good ({len(SERVICES)} services for restart loops, {len(wallets())} wallets, Solana RPC, TronGrid)")
     return 0
 
