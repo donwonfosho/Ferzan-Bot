@@ -162,9 +162,12 @@ def main():
     net = rec.setdefault(NET, {})
     owner, key = deployer()
     env = env_file()
-    fee_trx = float(env.get("TRON_CURVE_FEE_TRX") or (1 if NET == "nile" else 5))
-    reward_trx = float(env.get("TRON_CURVE_GRAD_REWARD_TRX") or (5 if NET == "nile" else 300))
-    min_grad_trx = float(env.get("TRON_CURVE_MIN_GRAD_TRX") or (10 if NET == "nile" else 5000))
+    if NET == "nile":  # the .env settings are mainnet's: Nile always uses small test values
+        fee_trx, reward_trx, min_grad_trx = 1.0, 5.0, 10.0
+    else:
+        fee_trx = float(env.get("TRON_CURVE_FEE_TRX") or 5)
+        reward_trx = float(env.get("TRON_CURVE_GRAD_REWARD_TRX") or 300)
+        min_grad_trx = float(env.get("TRON_CURVE_MIN_GRAD_TRX") or 5000)
     treasury = owner if NET == "nile" else (env.get("PLATFORM_TREASURY_TRX") or "").strip()
     if not (treasury.startswith("T") and len(treasury) == 34):
         sys.exit("ABORT: set PLATFORM_TREASURY_TRX first")
@@ -185,10 +188,15 @@ def main():
         built = compile_all()
         for n, (_a, b) in built.items():
             print(f"Bytecode     : {n} {len(b) // 2:,} bytes")
-        if net.get("curve_factory_v2"):
-            print(f"Already deployed: curve factory v2 {net['curve_factory_v2']}")
-            return
-        need = 260_000_000 if net.get("curve_token_master") else 320_000_000  # v2 reuses the coin master
+        f2 = net.get("curve_factory_v2")
+        if f2:
+            live = (int(const(f2, "launchFeeSun()") or "0", 16), int(const(f2, "minGradTarget()") or "0", 16))
+            if live == (int(fee_trx * 1e6), int(min_grad_trx * 1e6)):
+                print(f"Already deployed: curve factory v2 {f2}")
+                return
+            print(f"Factory v2 {f2} has other settings (fee/min {live[0] / 1e6:g}/{live[1] / 1e6:g} TRX): a new factory is needed")
+            net.pop("curve_factory_v2")
+        need = (80_000_000 if net.get("curve_master_v2") else 260_000_000) if net.get("curve_token_master") else 320_000_000
         if bal < need:
             where = "from the Nile faucet (https://nileex.io/join/getJoinPage)" if NET == "nile" else "on Tron"
             print(f"\nNEXT: get about {need // 1_000_000} TRX {where} to {owner}, then run plan again.")
@@ -220,6 +228,9 @@ def main():
     fac = net.get("curve_factory_v2")
     if not fac:
         sys.exit("ABORT: deploy the v2 curve factory first (nile send)")
+    if bal < 350_000_000:  # launch + trades + ~48 TRX of buys + graduation (~230 TRX of energy)
+        sys.exit(f"NEXT: the test needs about 350 TRX; {owner} has {bal / 1e6:,.2f}. Get Nile TRX from "
+                 "https://nileex.io/join/getJoinPage and run it again.")
     fee_sun = int(const(fac, "launchFeeSun()") or "0", 16)
     grad = 30_000_000  # 30 TRX target keeps the test cheap
     supply = 1_000_000_000 * 10**6
