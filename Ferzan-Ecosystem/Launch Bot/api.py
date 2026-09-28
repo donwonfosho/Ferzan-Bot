@@ -1418,7 +1418,7 @@ def internal_revenue(request: Request):
             for p, since in periods.items():
                 for ch, amt, n_est in c.execute(
                         f"SELECT chain, SUM({fee_expr}), SUM(CASE WHEN {'fee IS NULL' if exact else '1'} THEN 1 ELSE 0 END) "
-                        f"FROM trades WHERE ts >= ? GROUP BY chain", (since,)):
+                        f"FROM trades WHERE ts >= ? AND chain != 'solana' GROUP BY chain", (since,)):  # Solana fees: claimed separately
                     rev[p]["curve"] += float(amt or 0) * px.get(ch, 0)
                     estimated = estimated or bool(n_est)
                     if p == "30d":
@@ -1963,6 +1963,8 @@ def pulse():
                              "usd": round(float(r["native"] or 0) * usd, 2), "who": (r["trader"] or "")[:4] + "…" + (r["trader"] or "")[-4:],
                              "url": _trade_url(r["chain"], r["curve"], r["token"])})
             try:  # Solana curves: one row per poll with the SOL that moved; direction from the price change
+                if c.execute("SELECT 1 FROM trades WHERE chain = 'solana' AND ts > ? LIMIT 1", (since,)).fetchone():
+                    raise LookupError("the Solana trade stream is recording real trades")
                 for r in c.execute(
                         "SELECT v.ts, v.pool, v.vol, v.trades, cv.token, cv.symbol FROM sol_vol v JOIN curves cv ON cv.chain = 'solana' "
                         "AND cv.curve = v.pool WHERE v.ts > ? ORDER BY v.ts DESC LIMIT 20", (since,)):
@@ -2052,7 +2054,7 @@ _SHARE_EVM = {"base", "bsc", "ethereum", "robinhood", "arc"}
 
 
 @app.get("/api/share/{chain}/{token}")
-def share_page(chain: str, token: str):
+def share_page(chain: str, token: str, w: str = ""):
     """Share link for a coin. Telegram / X / Discord read the coin card from this page (the website's own
     host replaces per-page share tags); people who open it are sent straight on to the coin page."""
     import html as _html
@@ -2090,6 +2092,15 @@ def share_page(chain: str, token: str):
     img = f"https://launch.ferzaneco.com/api/og/{chain}/{token}.png"
     title = f"${sym} · {name} on Ferzan" if sym else "Trade it on Ferzan Factory"
     desc = "Live chart, bonding curve and creator score. Trade it on Ferzan Factory or in the Ferzan Trade Bot."
+    if w and _re.fullmatch(r"0x[0-9a-fA-F]{40}|[1-9A-HJ-NP-Za-km-z]{32,48}|[EUk]Q[A-Za-z0-9_-]{46}", w):
+        try:  # a trader's profit card instead of the coin card
+            p = _pnl(chain, token, w)
+        except Exception:
+            p = {}
+        if p.get("traded"):
+            img = f"https://launch.ferzaneco.com/api/pnl/{chain}/{token}/{w}.png"
+            pct = p["pnl_pct"]
+            title = f"{'+' if pct >= 0 else ''}{pct:,.0f}% on ${p['symbol']} · Ferzan"
     e = lambda v: _html.escape(v, quote=True)  # noqa: E731
     body = (f'<!doctype html><html><head><meta charset="utf-8"><title>{e(title)}</title>'
             f'<meta property="og:type" content="website"><meta property="og:site_name" content="Ferzan Factory">'
@@ -2317,6 +2328,434 @@ def ferzan_perks_for(wallet: str):
     return dict(p, launch_fee_sol=base / 1e9, your_launch_fee_sol=fee / 1e9,
                 tiers=[{"tier": "holder", "min": p["holder_min"], "badge": "🔷 FERZAN holder", "launch_fee_off_pct": 50},
                        {"tier": "whale", "min": p["whale_min"], "badge": "🐋 FERZAN whale", "launch_fee_off_pct": 100}])
+
+
+# ---- BATCH_D: live push, holders + safety, profit cards, search ----
+_CHAIN_NAME = {"solana": "Solana", "base": "Base", "bsc": "BNB Chain", "ethereum": "Ethereum", "robinhood": "Robinhood Chain",
+               "arc": "Arc", "tron": "Tron", "ton": "TON"}
+_SITE_EVM = {"base", "bsc", "ethereum", "robinhood", "arc"}
+_ADDR_ANY = r"0x[0-9a-fA-F]{40}|[1-9A-HJ-NP-Za-km-z]{32,48}|[EUk]Q[A-Za-z0-9_-]{46}"
+
+
+def _site_path(chain: str, token: str, curve: str = "") -> str:
+    if chain == "solana":
+        return f"/coin/solana/{token}"
+    if chain in _SITE_EVM and curve:
+        return f"/coin/{chain}/{curve.lower()}"
+    if chain in ("tron", "ton", "arc"):
+        return f"/token/{chain}/{token}"
+    return f"/c/{chain}/{token.lower()}"
+
+
+def _coin_row(c, chain: str, token: str):
+    if c is None:
+        return None
+    return c.execute("SELECT * FROM curves WHERE chain = ? AND (token = ? OR token = ? OR curve = ? OR curve = ?)",
+                     (chain, token, token.lower(), token, token.lower())).fetchone()
+
+
+def _progress(r) -> float:
+    g = int(r["grad_target"] or 0)
+    return 100.0 if r["graduated"] else (min(100.0, int(r["real_eth"] or 0) * 100.0 / g) if g else 0.0)
+
+
+def _supply_whole(r) -> float:
+    return (int(r["total_supply"] or 0) / 1e18) or 1_000_000_000.0
+
+
+# ---------------------------------------------------------------- live push (server-sent events)
+import asyncio as _asyncio  # noqa: E402
+import json as _jsonmod  # noqa: E402
+from fastapi.responses import StreamingResponse as _Streaming  # noqa: E402
+
+_LIVE = {"subs": set(), "task": None, "trade": None, "curve": None, "grad": None}
+_LIVE_MAX = int(os.environ.get("LIVE_MAX_CLIENTS") or 3000)
+
+
+def _live_poll() -> list:
+    """New trades, new coins and graduations since the last look (runs in a worker thread, read-only)."""
+    c = _idx_db()
+    if c is None:
+        return []
+    out = []
+    try:
+        if _LIVE["trade"] is None:  # first look: start from now
+            _LIVE["trade"] = int(c.execute("SELECT COALESCE(MAX(rowid), 0) FROM trades").fetchone()[0])
+            _LIVE["curve"] = int(c.execute("SELECT COALESCE(MAX(rowid), 0) FROM curves").fetchone()[0])
+            _LIVE["grad"] = int(c.execute("SELECT COALESCE(MAX(grad_ts), 0) FROM curves").fetchone()[0])
+            return []
+        hide = _feed_hidden()
+        for r in c.execute("SELECT t.rowid AS rid, t.chain, t.ts, t.tx, t.trader, t.is_buy, t.native, t.tokens, cv.token, cv.curve, "
+                           "cv.symbol, cv.name, cv.mcap, cv.trades AS n, cv.graduated, cv.grad_target, cv.real_eth FROM trades t "
+                           "JOIN curves cv ON cv.chain = t.chain AND cv.curve = t.curve WHERE t.rowid > ? ORDER BY t.rowid LIMIT 300",
+                           (_LIVE["trade"],)).fetchall():
+            _LIVE["trade"] = max(_LIVE["trade"], int(r["rid"]))
+            if str(r["token"]).lower() in hide:
+                continue
+            usd = _native_usd(r["chain"])
+            who = r["trader"] or ""
+            out.append({"type": "trade", "chain": r["chain"], "token": r["token"], "curve": r["curve"], "symbol": r["symbol"],
+                        "ts": r["ts"], "tx": r["tx"], "side": "buy" if r["is_buy"] else "sell", "native": round(float(r["native"] or 0), 6),
+                        "unit": _NATIVE_SYM.get(r["chain"], ""), "usd": round(float(r["native"] or 0) * usd, 2), "trader": who,
+                        "who": (who[:4] + "…" + who[-4:]) if who else "", "tokens": float(r["tokens"] or 0),
+                        "mcap_usd": round(float(r["mcap"] or 0) * usd, 2), "progress": round(_progress(r), 2), "trades": int(r["n"] or 0),
+                        "graduated": bool(r["graduated"]), "path": _site_path(r["chain"], r["token"], r["curve"])})
+        for r in c.execute("SELECT rowid AS rid, * FROM curves WHERE rowid > ? ORDER BY rowid LIMIT 50", (_LIVE["curve"],)).fetchall():
+            _LIVE["curve"] = max(_LIVE["curve"], int(r["rid"]))
+            if str(r["token"]).lower() in hide:
+                continue
+            out.append({"type": "launch", "chain": r["chain"], "token": r["token"], "curve": r["curve"], "symbol": r["symbol"],
+                        "name": r["name"], "ts": r["launched_ts"] or int(time.time()), "path": _site_path(r["chain"], r["token"], r["curve"])})
+        for r in c.execute("SELECT * FROM curves WHERE graduated = 1 AND grad_ts > ? ORDER BY grad_ts LIMIT 20", (_LIVE["grad"],)).fetchall():
+            _LIVE["grad"] = max(_LIVE["grad"], int(r["grad_ts"] or 0))
+            if str(r["token"]).lower() in hide:
+                continue
+            out.append({"type": "grad", "chain": r["chain"], "token": r["token"], "curve": r["curve"], "symbol": r["symbol"],
+                        "name": r["name"], "ts": r["grad_ts"], "raised": round(float(r["grad_native"] or 0), 4),
+                        "unit": _NATIVE_SYM.get(r["chain"], ""), "path": _site_path(r["chain"], r["token"], r["curve"])})
+    finally:
+        c.close()
+    return out
+
+
+async def _live_loop():
+    while True:
+        await _asyncio.sleep(1.0)
+        if not _LIVE["subs"]:
+            continue
+        try:
+            events = await _asyncio.to_thread(_live_poll)
+        except Exception as e:
+            print(f"LIVE_POLL_FAILED: {str(e)[:160]}")
+            await _asyncio.sleep(3)
+            continue
+        for ev in events:
+            line = f"event: {ev['type']}\ndata: {_jsonmod.dumps(ev, separators=(',', ':'))}\n\n"
+            for q in list(_LIVE["subs"]):
+                try:
+                    q.put_nowait(line)
+                except _asyncio.QueueFull:
+                    pass  # a slow client misses a few; its page still refreshes on its own timer
+
+
+@app.get("/api/stream")
+async def live_stream(request: Request):
+    """Server-sent events: every trade, new coin and graduation on Ferzan as it is indexed (all chains)."""
+    if len(_LIVE["subs"]) >= _LIVE_MAX:
+        raise HTTPException(503, "live feed is full, the page refreshes on its own")
+    if _LIVE["task"] is None or _LIVE["task"].done():
+        _LIVE["task"] = _asyncio.create_task(_live_loop())
+    q: _asyncio.Queue = _asyncio.Queue(maxsize=400)
+    _LIVE["subs"].add(q)
+
+    async def gen():
+        try:
+            yield "retry: 4000\n\n"
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    yield await _asyncio.wait_for(q.get(), timeout=15)
+                except _asyncio.TimeoutError:
+                    yield ": ping\n\n"
+        finally:
+            _LIVE["subs"].discard(q)
+
+    return _Streaming(gen(), media_type="text/event-stream",
+                      headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"})
+
+
+@app.get("/api/stream-status")
+def live_status():
+    return {"clients": len(_LIVE["subs"]), "max": _LIVE_MAX, "running": bool(_LIVE["task"] and not _LIVE["task"].done())}
+
+
+# ---------------------------------------------------------------- holders + safety
+_HOLD_CACHE: dict = {}
+
+
+def _sol_largest(mint: str) -> list:
+    """[(owner, whole tokens)] for the 20 biggest token accounts of a Solana coin."""
+    r = _sol_rpc_sync("getTokenLargestAccounts", [mint, {"commitment": "confirmed"}], timeout=12)
+    accts = [(a["address"], float(a.get("uiAmount") or 0)) for a in ((r.get("result") or {}).get("value") or [])]
+    if not accts:
+        return []
+    m = _sol_rpc_sync("getMultipleAccounts", [[a for a, _ in accts], {"encoding": "jsonParsed"}], timeout=12)
+    vals = (m.get("result") or {}).get("value") or []
+    out = []
+    for (addr, amt), v in zip(accts, vals):
+        owner = ((((v or {}).get("data") or {}).get("parsed") or {}).get("info") or {}).get("owner") or addr
+        out.append((owner, amt))
+    return out
+
+
+@app.get("/api/holders/{chain}/{token}")
+def holders(chain: str, token: str):
+    """Top holders, dev share, snipers (bought in the first 15 s) and launch-block bundles for a Ferzan curve coin."""
+    if not _re.fullmatch(r"[a-z]{2,12}", chain or "") or not _re.fullmatch(_ADDR_ANY, token or ""):
+        raise HTTPException(404, "not found")
+    key = f"{chain}:{token}"
+    hit = _HOLD_CACHE.get(key)
+    if hit and time.time() - hit[0] < 20:
+        return hit[1]
+    c = _idx_db()
+    try:
+        r = _coin_row(c, chain, token)
+        if not r:
+            return {"found": False}
+        trades = c.execute("SELECT ts, block, trader, is_buy, tokens FROM trades WHERE chain = ? AND curve = ? ORDER BY ts, block, log_index",
+                           (chain, r["curve"])).fetchall()
+    finally:
+        if c is not None:
+            c.close()
+    supply = _supply_whole(r)
+    creator = _norm_addr(r["creator"] or "")
+    launched = int(r["launched_ts"] or (trades[0]["ts"] if trades else 0))
+    first_block = min((t["block"] for t in trades), default=None)
+    net, bought, sniper, bundle = {}, {}, set(), set()
+    for t in trades:
+        w = _norm_addr(t["trader"] or "")
+        amt = float(t["tokens"] or 0)
+        net[w] = net.get(w, 0.0) + (amt if t["is_buy"] else -amt)
+        if t["is_buy"]:
+            bought[w] = bought.get(w, 0.0) + amt
+            if w != creator and launched and t["ts"] - launched <= 15:
+                sniper.add(w)
+            if w != creator and first_block is not None and t["block"] == first_block:
+                bundle.add(w)
+    source = "trades"
+    rows = []
+    if chain == "solana":
+        try:
+            big = _sol_largest(r["token"])
+        except Exception:
+            big = []
+        if big:
+            source = "chain"
+            pa = ""
+            from solders.pubkey import Pubkey as _Pk
+            try:
+                pa = str(_Pk.find_program_address([b"pool_authority"], _Pk.from_string(_DBC_PROGRAM))[0])
+            except Exception:
+                pass
+            for owner, amt in big:
+                tag = "curve" if owner == pa else ""
+                if not tag:
+                    try:  # program-owned (pools, lockers, vesting escrows) addresses are off the ed25519 curve
+                        tag = "" if _Pk.from_string(owner).is_on_curve() else "program"
+                    except Exception:
+                        pass
+                rows.append((owner, amt, tag))
+    if not rows:
+        rows = [(w, a, "") for w, a in net.items() if a > supply * 1e-9]
+        if not r["graduated"]:
+            left = max(0.0, supply - sum(a for _, a, _ in rows))
+            rows.append(("curve", left, "curve"))
+    rows.sort(key=lambda x: x[1], reverse=True)
+    items = []
+    for w, a, tag in rows[:20]:
+        wn = _norm_addr(w)
+        tags = [tag] if tag else []
+        if wn == creator:
+            tags.append("dev")
+        if wn in sniper:
+            tags.append("sniper")
+        if wn in bundle:
+            tags.append("bundle")
+        items.append({"wallet": w, "short": (w[:4] + "…" + w[-4:]) if len(w) > 12 else w, "amount": a,
+                      "pct": round(a * 100 / supply, 3), "tags": tags})
+    people = [i for i in items if "curve" not in i["tags"] and "program" not in i["tags"]]
+    held = lambda ws: sum(max(0.0, net.get(w, 0.0)) for w in ws)  # noqa: E731
+    out = {
+        "found": True, "chain": chain, "token": r["token"], "symbol": r["symbol"], "source": source, "graduated": bool(r["graduated"]),
+        "holders": items, "holder_count": sum(1 for v in net.values() if v > supply * 1e-9),
+        "top10_pct": round(sum(i["pct"] for i in people[:10]), 2),
+        "dev_pct": round(max(0.0, net.get(creator, 0.0)) * 100 / supply, 2) if creator else None,
+        "snipers": {"wallets": len(sniper), "bought_pct": round(sum(bought.get(w, 0) for w in sniper) * 100 / supply, 2),
+                    "holding_pct": round(held(sniper) * 100 / supply, 2)},
+        "bundle": {"wallets": len(bundle), "bought_pct": round(sum(bought.get(w, 0) for w in bundle) * 100 / supply, 2),
+                   "holding_pct": round(held(bundle) * 100 / supply, 2)},
+        "trades_seen": len(trades),
+        "note": ("Snipers and bundles are counted from Ferzan's own trade records." if trades else
+                 "Trade details start with the new Solana trade stream; older trades are not in the snipers and bundles numbers."),
+    }
+    _HOLD_CACHE[key] = (time.time(), out)
+    if len(_HOLD_CACHE) > 500:
+        _HOLD_CACHE.clear()
+    return out
+
+
+# ---------------------------------------------------------------- profit / loss
+def _pnl(chain: str, token: str, wallet: str) -> dict:
+    c = _idx_db()
+    try:
+        r = _coin_row(c, chain, token)
+        if not r:
+            return {"found": False}
+        w = _norm_addr(wallet)
+        rows = c.execute("SELECT is_buy, native, tokens, ts FROM trades WHERE chain = ? AND curve = ? AND (trader = ? OR trader = ?)",
+                         (chain, r["curve"], wallet, w)).fetchall()
+    finally:
+        if c is not None:
+            c.close()
+    if not rows:
+        return {"found": True, "traded": False, "symbol": r["symbol"]}
+    spent = sum(float(x["native"] or 0) for x in rows if x["is_buy"])
+    got = sum(float(x["native"] or 0) for x in rows if not x["is_buy"])
+    bought = sum(float(x["tokens"] or 0) for x in rows if x["is_buy"])
+    sold = sum(float(x["tokens"] or 0) for x in rows if not x["is_buy"])
+    held = max(0.0, bought - sold)
+    price = float(r["price"] or 0)
+    value = held * price
+    pnl = got + value - spent
+    usd = _native_usd(chain)
+    supply = _supply_whole(r)
+    entry_mcap = (spent / bought) * supply * usd if bought else 0.0
+    return {"found": True, "traded": True, "chain": chain, "token": r["token"], "symbol": r["symbol"], "name": r["name"],
+            "unit": _NATIVE_SYM.get(chain, ""), "spent": spent, "received": got, "holding_tokens": held, "holding_value": value,
+            "pnl": pnl, "pnl_usd": pnl * usd, "pnl_pct": (pnl * 100 / spent) if spent else 0.0,
+            "entry_mcap_usd": entry_mcap, "mcap_usd": float(r["mcap"] or 0) * usd, "first_ts": min(x["ts"] for x in rows),
+            "wallet_short": wallet[:4] + "…" + wallet[-4:]}
+
+
+def _draw_pnl(p: dict, image: str) -> bytes:
+    from io import BytesIO
+    from PIL import Image, ImageDraw, ImageFont
+
+    def font(size, bold=False):
+        for d in ("/usr/share/fonts/truetype/dejavu", "/usr/share/fonts/dejavu"):
+            try:
+                return ImageFont.truetype(f"{d}/DejaVuSans{'-Bold' if bold else ''}.ttf", size)
+            except OSError:
+                continue
+        return ImageFont.load_default()
+
+    W, H = 1200, 630
+    up = p["pnl"] >= 0
+    bg, cyan, sell, fg, muted = (7, 9, 11), (62, 224, 230), (224, 122, 104), (244, 247, 247), (147, 164, 167)
+    tone = cyan if up else sell
+    im = Image.new("RGB", (W, H), bg)
+    d = ImageDraw.Draw(im)
+    for i in range(22):  # glow behind the number
+        a = 1 - i / 22
+        d.ellipse((380 - i * 26, 120 - i * 14, 1260 + i * 26, 520 + i * 14), fill=tuple(int(bg[k] + (tone[k] - bg[k]) * 0.035 * a) for k in range(3)))
+    logo = None
+    if image.startswith("https://") or image.startswith("/api/media/"):
+        try:
+            src = image if image.startswith("https://") else "http://127.0.0.1:8000/api/media/" + image.rsplit("/api/media/", 1)[1]
+            logo = Image.open(BytesIO(requests.get(src, timeout=6).content)).convert("RGB").resize((120, 120))
+        except Exception:
+            logo = None
+    if logo:
+        mask = Image.new("L", (120, 120), 0)
+        ImageDraw.Draw(mask).rounded_rectangle((0, 0, 120, 120), 24, fill=255)
+        im.paste(logo, (80, 70), mask)
+    tx = 230 if logo else 80
+    d.text((tx, 78), f"${p['symbol']}"[:14], font=font(58, True), fill=fg)
+    d.text((tx, 150), f"{_CHAIN_NAME.get(p['chain'], p['chain'])} · {p['wallet_short']}", font=font(28), fill=muted)
+    pct = p["pnl_pct"]
+    big = f"{'+' if pct >= 0 else ''}{pct:,.0f}%" if abs(pct) >= 10 else f"{'+' if pct >= 0 else ''}{pct:,.1f}%"
+    size = 170
+    while size > 90 and d.textlength(big, font=font(size, True)) > W - 160:
+        size -= 10
+    d.text((80, 230), big, font=font(size, True), fill=tone)
+    u = p["unit"]
+    fmt = lambda v: f"{v:,.4f}".rstrip("0").rstrip(".") if abs(v) < 100 else f"{v:,.1f}"  # noqa: E731
+    cap = lambda v: f"${v / 1e6:.2f}M" if v >= 1e6 else f"${v / 1e3:.1f}K" if v >= 1e3 else f"${v:,.0f}"  # noqa: E731
+    cols = [("Put in", f"{fmt(p['spent'])} {u}"), ("Now worth", f"{fmt(p['received'] + p['holding_value'])} {u}"),
+            ("Bought at", cap(p["entry_mcap_usd"]) + " mcap"), ("Now", cap(p["mcap_usd"]) + " mcap")]
+    x = 80
+    for label, val in cols:
+        d.text((x, 460), label, font=font(24), fill=muted)
+        d.text((x, 492), val, font=font(32, True), fill=fg)
+        x += 265
+    d.text((80, 568), "ferzan-factory.com", font=font(28, True), fill=fg)
+    tag = "Trade it on Ferzan"
+    d.text((W - 80 - d.textlength(tag, font=font(28)), 568), tag, font=font(28), fill=cyan)
+    buf = BytesIO()
+    im.save(buf, "PNG", optimize=True)
+    return buf.getvalue()
+
+
+_PNL_CACHE: dict = {}
+
+
+@app.get("/api/pnl/{chain}/{token}/{wallet}.png")
+def pnl_card(chain: str, token: str, wallet: str):
+    from fastapi.responses import Response
+
+    if not _re.fullmatch(r"[a-z]{2,12}", chain or "") or not _re.fullmatch(_ADDR_ANY, token or "") or not _re.fullmatch(_ADDR_ANY, wallet or ""):
+        raise HTTPException(404, "not found")
+    key = f"{chain}:{token}:{wallet}"
+    hit = _PNL_CACHE.get(key)
+    if hit and time.time() - hit[0] < 120:
+        return Response(hit[1], media_type="image/png", headers={"Cache-Control": "public, max-age=120"})
+    p = _pnl(chain, token, wallet)
+    if not p.get("traded"):
+        raise HTTPException(404, "no trades by this wallet")
+    image = ""
+    with db._get_conn() as conn:
+        row = conn.execute("SELECT image_url FROM launch_requests WHERE status = 'confirmed' AND (result_token_address = ? OR "
+                           "LOWER(result_token_address) = ?) LIMIT 1", (p["token"], p["token"].lower())).fetchone()
+    if row:
+        image = row[0] or ""
+    png = _draw_pnl(p, image)
+    _PNL_CACHE[key] = (time.time(), png)
+    if len(_PNL_CACHE) > 300:
+        _PNL_CACHE.clear()
+    return Response(png, media_type="image/png", headers={"Cache-Control": "public, max-age=120"})
+
+
+@app.get("/api/pnl/{chain}/{token}/{wallet}")
+def pnl_json(chain: str, token: str, wallet: str):
+    if not _re.fullmatch(r"[a-z]{2,12}", chain or "") or not _re.fullmatch(_ADDR_ANY, token or "") or not _re.fullmatch(_ADDR_ANY, wallet or ""):
+        raise HTTPException(404, "not found")
+    return _pnl(chain, token, wallet)
+
+
+# ---------------------------------------------------------------- search
+@app.get("/api/search")
+def search(q: str = "", limit: int = 12):
+    """Coins launched through Ferzan on any chain, by ticker, name or address."""
+    q = (q or "").strip()[:64]
+    limit = max(1, min(25, int(limit or 12)))
+    if len(q) < 2:
+        return {"items": []}
+    hide = _feed_hidden()
+    ql, like = q.lower(), f"%{q.lower()}%"
+    items, seen = [], set()
+    c = _idx_db()
+    try:
+        if c is not None:
+            extra = _launch_rows_by_curve()
+            for r in c.execute(
+                    "SELECT * FROM curves WHERE lower(symbol) = ? OR lower(token) = ? OR lower(curve) = ? OR lower(symbol) LIKE ? "
+                    "OR lower(name) LIKE ? ORDER BY (lower(symbol) = ?) DESC, graduated DESC, mcap DESC LIMIT ?",
+                    (ql, ql, ql, like, like, ql, limit * 2)).fetchall():
+                if str(r["token"]).lower() in hide:
+                    continue
+                usd = _native_usd(r["chain"])
+                seen.add((r["chain"], str(r["token"]).lower()))
+                items.append({"chain": r["chain"], "token": r["token"], "symbol": r["symbol"], "name": r["name"],
+                              "image": (extra.get(r["curve"]) or {}).get("image", ""), "mcap_usd": round(float(r["mcap"] or 0) * usd, 2),
+                              "progress": round(_progress(r), 1), "graduated": bool(r["graduated"]),
+                              "path": _site_path(r["chain"], r["token"], r["curve"])})
+    finally:
+        if c is not None:
+            c.close()
+    with db._get_conn() as conn:
+        for r in conn.execute(
+                "SELECT chain, name, symbol, image_url, result_token_address FROM launch_requests WHERE status = 'confirmed' "
+                "AND result_token_address IS NOT NULL AND (lower(symbol) = ? OR lower(result_token_address) = ? OR lower(symbol) LIKE ? "
+                "OR lower(name) LIKE ?) ORDER BY created_at DESC LIMIT ?", (ql, ql, like, like, limit * 2)).fetchall():
+            tok = r[4]
+            if (r[0], str(tok).lower()) in seen or str(tok).lower() in hide:
+                continue
+            seen.add((r[0], str(tok).lower()))
+            items.append({"chain": r[0], "token": tok, "symbol": r[2], "name": r[1], "image": r[3] or "", "mcap_usd": 0,
+                          "progress": None, "graduated": False, "path": _site_path(r[0], tok, "")})
+    items.sort(key=lambda i: (str(i["symbol"] or "").lower() != ql, -(i["mcap_usd"] or 0)))
+    return {"items": items[:limit]}
 
 
 @app.on_event("startup")
