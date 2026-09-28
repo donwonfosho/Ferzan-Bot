@@ -1896,6 +1896,227 @@ def creator_record(wallet: str):
     return out
 
 
+# ---- PULSE_BATCH_A: live trade tape, fresh graduations and the FERZAN hero, for the website ----
+_PULSE: dict = {"t": 0.0, "v": None}
+_FLAGSHIP_STATE = "/opt/ferzan/dbc-keys/ferzan-flagship-state.json"
+_FLYWHEEL_STATE = "/opt/ferzan/dbc-keys/flywheel-state.json"
+_FERZAN_LAUNCH_AT = 1791586800  # Fri Oct 9 2026 23:00 UTC (7:00 PM Eastern)
+
+
+def _feed_hidden() -> set:
+    return {h.strip().lower() for h in (os.environ.get("FEED_HIDE") or _env_file_value("/opt/ferzan/.env", "FEED_HIDE")
+                                        or "").split(",") if h.strip()}
+
+
+def _ferzan_block(c) -> dict:
+    """FERZAN before launch: just the time. After the launch is announced: address, price, market cap, progress, burned."""
+    import json as _json
+
+    out = {"launch_at": _FERZAN_LAUNCH_AT, "live": False}
+    try:
+        st = _json.loads(_Path(_FLAGSHIP_STATE).read_text())
+    except Exception:
+        st = {}
+    mint = str(st.get("mint") or "") if st.get("announced") else ""  # stays private until it is announced
+    if not mint:
+        return out
+    out.update(live=True, token=mint, url=f"https://ferzan-factory.com/coin/solana/{mint}")
+    try:
+        fw = _json.loads(_Path(_FLYWHEEL_STATE).read_text())
+        t = fw.get("totals") or {}
+        out["burned"] = int(t.get("burned_raw") or 0) / 1e6
+        out["bought_sol"] = float(t.get("bought_sol") or 0)
+    except Exception:
+        out["burned"], out["bought_sol"] = 0.0, 0.0
+    if c is not None:
+        r = c.execute("SELECT * FROM curves WHERE chain = 'solana' AND token = ?", (mint,)).fetchone()
+        if r:
+            usd = _native_usd("solana")
+            grad = int(r["grad_target"] or 0)
+            out.update(price_usd=(r["price"] or 0) * usd, mcap_usd=(r["mcap"] or 0) * usd, graduated=bool(r["graduated"]),
+                       progress=100.0 if r["graduated"] else (min(100.0, int(r["real_eth"] or 0) * 100.0 / grad) if grad else 0.0),
+                       vol_native=r["volume"] or 0, trades=r["trades"] or 0)
+    return out
+
+
+@app.get("/api/pulse")
+def pulse():
+    """Everything the website needs to feel live, in one cached call: the last trades across all chains (Solana curves
+    report per-poll moves), coins that graduated in the last 24 hours, and the FERZAN hero block."""
+    now = time.time()
+    if _PULSE["v"] is not None and now - _PULSE["t"] < 5:
+        return _PULSE["v"]
+    hide = _feed_hidden()
+    tape, grads = [], []
+    c = _idx_db()
+    try:
+        if c is not None:
+            since = int(now) - 3600
+            for r in c.execute(
+                    "SELECT t.chain, t.ts, t.trader, t.is_buy, t.native, t.tokens, cv.token, cv.symbol, cv.curve FROM trades t "
+                    "JOIN curves cv ON cv.chain = t.chain AND cv.curve = t.curve WHERE t.ts > ? ORDER BY t.ts DESC LIMIT 40", (since,)):
+                if str(r["token"]).lower() in hide:
+                    continue
+                usd = _native_usd(r["chain"])
+                tape.append({"chain": r["chain"], "ts": r["ts"], "side": "buy" if r["is_buy"] else "sell", "symbol": r["symbol"],
+                             "token": r["token"], "native": round(float(r["native"] or 0), 6), "unit": _NATIVE_SYM.get(r["chain"], ""),
+                             "usd": round(float(r["native"] or 0) * usd, 2), "who": (r["trader"] or "")[:4] + "…" + (r["trader"] or "")[-4:],
+                             "url": _trade_url(r["chain"], r["curve"], r["token"])})
+            try:  # Solana curves: one row per poll with the SOL that moved; direction from the price change
+                for r in c.execute(
+                        "SELECT v.ts, v.pool, v.vol, v.trades, cv.token, cv.symbol FROM sol_vol v JOIN curves cv ON cv.chain = 'solana' "
+                        "AND cv.curve = v.pool WHERE v.ts > ? ORDER BY v.ts DESC LIMIT 20", (since,)):
+                    if str(r["token"]).lower() in hide:
+                        continue
+                    px = c.execute("SELECT price FROM sol_px WHERE pool = ? AND ts <= ? ORDER BY ts DESC LIMIT 2", (r["pool"], r["ts"])).fetchall()
+                    up = len(px) < 2 or float(px[0][0] or 0) >= float(px[1][0] or 0)
+                    usd = _native_usd("solana")
+                    tape.append({"chain": "solana", "ts": r["ts"], "side": "buy" if up else "sell", "symbol": r["symbol"], "token": r["token"],
+                                 "native": round(float(r["vol"] or 0), 4), "unit": "SOL", "usd": round(float(r["vol"] or 0) * usd, 2),
+                                 "who": f"{int(r['trades'] or 0)} trade{'s' if int(r['trades'] or 0) != 1 else ''}",
+                                 "url": _trade_url("solana", r["pool"], r["token"])})
+            except Exception:
+                pass  # no Solana tables yet
+            tape.sort(key=lambda x: x["ts"], reverse=True)
+            tape = tape[:30]
+            launch_rows = _launch_rows_by_curve()
+            for r in c.execute("SELECT * FROM curves WHERE graduated = 1 AND grad_ts > ? ORDER BY grad_ts DESC LIMIT 5", (int(now) - 86400,)):
+                if str(r["token"]).lower() in hide:
+                    continue
+                grads.append({"chain": r["chain"], "token": r["token"], "symbol": r["symbol"], "name": r["name"], "ts": r["grad_ts"],
+                              "image": (launch_rows.get(r["curve"]) or launch_rows.get(str(r["curve"]).lower()) or {}).get("image", ""),
+                              "raised": round(float(r["grad_native"] or 0), 4), "unit": _NATIVE_SYM.get(r["chain"], ""),
+                              "url": _trade_url(r["chain"], r["curve"], r["token"])})
+        ferzan = _ferzan_block(c)
+        stats = {"graduated": 0, "curves": 0}
+        if c is not None:
+            row = c.execute("SELECT COUNT(*), COALESCE(SUM(graduated), 0) FROM curves").fetchone()
+            stats = {"curves": int(row[0] or 0), "graduated": int(row[1] or 0)}
+    finally:
+        if c is not None:
+            c.close()
+    with db._get_conn() as conn:
+        lr = conn.execute("SELECT COUNT(*), COUNT(DISTINCT chain) FROM launch_requests WHERE status = 'confirmed' "
+                          "AND result_token_address IS NOT NULL").fetchone()
+    stats.update(launches=int(lr[0] or 0), chains_used=int(lr[1] or 0), chains=8)
+    out = {"now": int(now), "tape": tape, "graduations": grads, "ferzan": ferzan, "stats": stats}
+    _PULSE.update(t=now, v=out)
+    return out
+
+
+# ---- SHARE_CARDS: a picture for every coin link shared on Telegram / X (og:image) ----
+_OG_CACHE: dict = {}
+
+
+@app.get("/api/og/{chain}/{token}.png")
+def og_card(chain: str, token: str):
+    """1200x630 PNG: logo, name, ticker, market cap, graduation progress, chain. Cached 5 minutes."""
+    from fastapi.responses import Response
+    from io import BytesIO
+
+    if not _re.fullmatch(r"[a-z]{2,12}", chain or "") or not _re.fullmatch(r"[0-9A-Za-z_-]{20,70}", token or ""):
+        raise HTTPException(404, "not found")
+    key = f"{chain}:{token}"
+    hit = _OG_CACHE.get(key)
+    if hit and time.time() - hit[0] < 300:
+        return Response(hit[1], media_type="image/png", headers={"Cache-Control": "public, max-age=300"})
+    name, sym, mcap, prog, grad, image = "Ferzan coin", "", 0.0, None, False, ""
+    r = None
+    c = _idx_db()
+    try:
+        r = c.execute("SELECT * FROM curves WHERE chain = ? AND (token = ? OR token = ? OR curve = ? OR curve = ?)",
+                      (chain, token, token.lower(), token, token.lower())).fetchone() if c else None  # coin pages use either
+        if r:
+            name, sym, grad = r["name"] or name, r["symbol"] or "", bool(r["graduated"])
+            mcap = (r["mcap"] or 0) * _native_usd(chain)
+            g = int(r["grad_target"] or 0)
+            prog = 100.0 if grad else (min(100.0, int(r["real_eth"] or 0) * 100.0 / g) if g else None)
+            image = (_launch_rows_by_curve().get(r["curve"]) or _launch_rows_by_curve().get(str(r["curve"]).lower()) or {}).get("image", "")
+    finally:
+        if c is not None:
+            c.close()
+    if not r:
+        with db._get_conn() as conn:
+            row = conn.execute("SELECT name, symbol, image_url FROM launch_requests WHERE status = 'confirmed' AND "
+                               "(result_token_address = ? OR LOWER(result_token_address) = ?) LIMIT 1", (token, token.lower())).fetchone()
+        if row:
+            name, sym, image = row[0] or name, row[1] or "", row[2] or ""
+    png = _draw_card(name, sym, chain, mcap, prog, grad, image)
+    _OG_CACHE[key] = (time.time(), png)
+    if len(_OG_CACHE) > 400:
+        _OG_CACHE.clear()
+    return Response(png, media_type="image/png", headers={"Cache-Control": "public, max-age=300"})
+
+
+def _draw_card(name: str, sym: str, chain: str, mcap: float, prog, grad: bool, image: str) -> bytes:
+    from io import BytesIO
+    from PIL import Image, ImageDraw, ImageFont
+
+    def font(size, bold=False):
+        for d in ("/usr/share/fonts/truetype/dejavu", "/usr/share/fonts/dejavu"):
+            try:
+                return ImageFont.truetype(f"{d}/DejaVuSans{'-Bold' if bold else ''}.ttf", size)
+            except OSError:
+                continue
+        return ImageFont.load_default()
+
+    W, H = 1200, 630
+    bg, cyan, fg, muted, line = (7, 9, 11), (62, 224, 230), (244, 247, 247), (147, 164, 167), (28, 42, 44)
+    im = Image.new("RGB", (W, H), bg)
+    glow = Image.new("RGB", (W, H), bg)
+    gd = ImageDraw.Draw(glow)
+    for i in range(18):  # soft cyan glow at the top, like the site
+        a = 1 - i / 18
+        gd.ellipse((W * 0.15 - i * 30, -420 - i * 10, W * 0.85 + i * 30, 180 + i * 6), fill=tuple(int(bg[k] + (cyan[k] - bg[k]) * 0.05 * a) for k in range(3)))
+    im = Image.blend(im, glow, 1.0)
+    d = ImageDraw.Draw(im)
+    logo = None
+    if image.startswith("https://") or image.startswith("/api/media/"):
+        try:
+            src = image if image.startswith("https://") else f"http://127.0.0.1:8000{image}"
+            if "/api/media/" in src:
+                src = "http://127.0.0.1:8000/api/media/" + src.rsplit("/api/media/", 1)[1]
+            logo = Image.open(BytesIO(requests.get(src, timeout=6).content)).convert("RGB").resize((220, 220))
+        except Exception:
+            logo = None
+    x0 = 80
+    if logo:
+        mask = Image.new("L", (220, 220), 0)
+        ImageDraw.Draw(mask).rounded_rectangle((0, 0, 220, 220), 36, fill=255)
+        im.paste(logo, (80, 150), mask)
+        x0 = 340
+    else:
+        d.rounded_rectangle((80, 150, 300, 370), 36, fill=(17, 24, 26), outline=line, width=2)
+        t = (sym or "?")[:3].upper()
+        f = font(80, True)
+        tw = d.textlength(t, font=f)
+        d.text((190 - tw / 2, 210), t, font=f, fill=cyan)
+        x0 = 340
+    title = (name or "Ferzan coin")[:32]
+    size = 64
+    while size > 34 and d.textlength(title, font=font(size, True)) > W - x0 - 80:
+        size -= 4
+    d.text((x0, 150 + (64 - size) // 2), title, font=font(size, True), fill=fg)
+    d.text((x0, 232), f"${sym}"[:14] if sym else "", font=font(44, True), fill=cyan)
+    chain_name = {"solana": "Solana", "base": "Base", "bsc": "BNB Chain", "ethereum": "Ethereum", "robinhood": "Robinhood Chain",
+                  "arc": "Arc", "tron": "Tron", "ton": "TON"}.get(chain, chain)
+    d.text((x0, 300), chain_name, font=font(32), fill=muted)
+    if mcap > 0:
+        m = f"${mcap / 1e6:.2f}M" if mcap >= 1e6 else f"${mcap / 1e3:.1f}K" if mcap >= 1e3 else f"${mcap:,.0f}"
+        d.text((80, 420), "Market cap", font=font(28), fill=muted)
+        d.text((80, 455), m, font=font(56, True), fill=fg)
+    if prog is not None:
+        bx, by, bw = 520, 470, 600
+        d.text((bx, 420), "Graduated" if grad else f"{prog:.0f}% to graduation", font=font(28), fill=cyan if grad else muted)
+        d.rounded_rectangle((bx, by, bx + bw, by + 24), 12, fill=line)
+        d.rounded_rectangle((bx, by, bx + max(24, int(bw * min(100.0, prog) / 100)), by + 24), 12, fill=cyan)
+    d.text((80, 560), "ferzan-factory.com", font=font(30, True), fill=fg)
+    d.text((W - 80 - d.textlength("Trade it on Ferzan", font=font(30)), 560), "Trade it on Ferzan", font=font(30), fill=cyan)
+    buf = BytesIO()
+    im.save(buf, "PNG", optimize=True)
+    return buf.getvalue()
+
+
 # ---- CREATOR_SCORE: a plain-language trust check on any coin launched through Ferzan ----
 _SCORE_CACHE: dict = {}
 
