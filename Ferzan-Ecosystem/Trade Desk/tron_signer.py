@@ -13,6 +13,8 @@ from evm_signer import live_enabled, max_usd
 TRONGRID = (os.getenv("TRONGRID_URL") or "https://api.trongrid.io").rstrip("/")
 ROUTER = "TNJVzGqKBWkJxJB5XYSqGAwUTV15U24pPq"
 WTRX = "TNUC9Qb1rRpS5CbWLmNMxXBjyFoydXjWFR"
+# Ferzan Tron bonding-curve factory (mainnet). Coins from it trade on their curve until they graduate.
+CURVE_FACTORY = (os.getenv("TRON_CURVE_FACTORY") or "TF6VBMbSbw5MgauSbbzxq3NqBqX7NNFBMT").strip()
 ALPH = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 
 
@@ -142,6 +144,8 @@ def _const(contract_hex: str, owner_hex: str, sig: str, param: str) -> list[int]
     res = (out.get("constant_result") or [""])[0] or ""
     if not res or (out.get("result") or {}).get("result") is False:
         return []
+    if any(r.get("ret") == "FAILED" for r in ((out.get("transaction") or {}).get("ret") or [])):
+        return []  # the call reverted: the bytes are an error message, not an answer
     return [int(res[i:i + 64], 16) for i in range(0, len(res), 64)]
 
 
@@ -171,6 +175,154 @@ def _send_and_wait(built: dict, key_hex: str, timeout_s: int = 60) -> tuple[str,
         if info.get("id"):
             return (info.get("receipt") or {}).get("result") or "SUCCESS", link, (info.get("fee") or 0) / 1e6
     return "unconfirmed", link, 0.0
+
+
+# ------------------------------------------------------------------ Ferzan Tron curves --
+_CURVE_CACHE: dict = {}
+
+
+def _word_addr(n: int) -> str:
+    return "41" + f"{int(n):040x}"
+
+
+def curve_info(token: str) -> dict:
+    """{} for normal tokens. For a coin made by the Ferzan Tron curve factory (checked both ways: the coin
+    names the curve, the curve names the coin and was made by our factory):
+    {'curve', 'complete', 'graduated', 'price_sun', 'real_sun', 'grad_sun', 'start', 'max_buy_sun', 'progress_bps'}"""
+    try:
+        token_hex = _to_hex(token)
+        fac_hex = _to_hex(CURVE_FACTORY)
+    except Exception:
+        return {}
+    hit = _CURVE_CACHE.get(token_hex)
+    if hit and time.time() - hit[0] < 20:
+        return hit[1]
+    info: dict = {}
+    try:
+        c = _const(token_hex, token_hex, "curve()", "")
+        if c and c[0]:
+            curve_hex = _word_addr(c[0])
+            f = _const(curve_hex, curve_hex, "factory()", "")
+            t = _const(curve_hex, curve_hex, "token()", "")
+            if f and t and _word_addr(f[0]) == fac_hex and _word_addr(t[0]) == token_hex:
+                q = lambda sig: (_const(curve_hex, curve_hex, sig, "") or [0])[0]  # noqa: E731
+                info = {"curve": curve_hex, "complete": bool(q("complete()")), "graduated": bool(q("graduated()")),
+                        "price_sun": q("spotPrice()"), "real_sun": q("realEth()"), "grad_sun": q("gradTarget()"),
+                        "start": q("startTime()"), "max_buy_sun": q("maxBuyPerWallet()"),
+                        "progress_bps": q("progressBps()")}
+    except Exception:
+        info = {}
+    _CURVE_CACHE[token_hex] = (time.time(), info)
+    return info
+
+
+def to_b58(hex41: str) -> str:
+    raw = bytes.fromhex(hex41)
+    return _b58encode(raw + _check(raw))
+
+
+def _str_call(contract_hex: str, sig: str) -> str:
+    out = _post("/wallet/triggerconstantcontract", {"owner_address": contract_hex, "contract_address": contract_hex,
+                                                    "function_selector": sig, "parameter": "", "visible": False})
+    h = (out.get("constant_result") or [""])[0] or ""
+    try:
+        ln = int(h[64:128], 16)
+        return bytes.fromhex(h[128:128 + ln * 2]).decode("utf-8", "ignore")
+    except Exception:
+        return ""
+
+
+def curve_meta(token: str) -> dict:
+    """Card data for a Ferzan Tron curve coin still on its curve ({} otherwise)."""
+    ci = curve_info(token)
+    if not ci or ci.get("graduated"):
+        return {}
+    try:
+        from price_fetcher import get_price_usd
+
+        trx = float(get_price_usd("tron") or 0)
+    except Exception:
+        trx = 0.0
+    token_hex = _to_hex(token)
+    supply = (_const(token_hex, token_hex, "totalSupply()", "") or [0])[0]
+    px = ci["price_sun"] / 1e6 * trx
+    return dict(ci, symbol=_str_call(token_hex, "symbol()"), name=_str_call(token_hex, "name()"), price_usd=px,
+                trx_usd=trx, fdv_usd=supply / 1e6 * px, liq_usd=ci["real_sun"] / 1e6 * trx)
+
+
+def _curve_buy(ci: dict, sun: int, usd: float, raw: str, addr_t: str, owner_hex: str, slip_bps: int) -> tuple[bool, str]:
+    curve_hex = ci["curve"]
+    if ci.get("complete"):
+        return False, "This Ferzan curve is full and is moving to SunSwap. Try again in a few minutes. Nothing sent."
+    if ci.get("start") and time.time() < ci["start"]:
+        return False, f"Trading on this curve opens in about {int((ci['start'] - time.time()) / 60) + 1} min. Nothing sent."
+    if ci.get("max_buy_sun"):
+        done = (_const(curve_hex, owner_hex, "boughtNative(address)", _w(owner_hex)) or [0])[0]
+        room = ci["max_buy_sun"] - done
+        if room <= 0:
+            return False, f"You've hit this curve's max buy of {ci['max_buy_sun'] / 1e6:,.0f} TRX per wallet. Nothing sent."
+        if sun > room:
+            sun = room
+    q = _const(curve_hex, owner_hex, "quoteBuy(uint256)", f"{sun:064x}")
+    if not q or q[0] <= 0:
+        return False, "The curve would not quote this buy. Nothing sent."
+    slip = max(10, min(5000, int(slip_bps)))
+    min_out = max(1, q[0] * (10_000 - slip) // 10_000)
+    built = _post("/wallet/triggersmartcontract", {
+        "owner_address": owner_hex, "contract_address": curve_hex, "function_selector": "buy(uint256,address)",
+        "parameter": f"{min_out:064x}" + "0" * 64, "fee_limit": 100_000_000, "call_value": sun, "visible": False})
+    result, link, burned = _send_and_wait(built, raw)
+    if result.startswith("not sent"):
+        return False, "Ferzan curve buy failed: " + result[10:] + ". Nothing sent."
+    if result == "SUCCESS":
+        _CURVE_CACHE.clear()
+        return True, (f"Live TRON curve buy ~${usd:.2f} ({sun / 1e6:,.2f} TRX, about {q[0] / 1e6:,.0f} coins, "
+                      f"max slippage {slip / 100:g}%) from {addr_t}\n{link}")
+    if result == "unconfirmed":
+        return False, f"Curve buy sent but not confirmed within a minute. Check before retrying:\n{link}"
+    return False, (f"Curve buy didn't fill ({result}): the price moved more than your {slip / 100:g}% slippage or the "
+                   f"curve filled. Your TRX stayed in the wallet; about {burned:.2f} TRX went to energy.\n{link}")
+
+
+def _curve_sell(ci: dict, token_hex: str, bal: int, raw: str, owner_hex: str, slip_bps: int) -> tuple[bool, str]:
+    curve_hex = ci["curve"]
+    if ci.get("complete"):
+        return False, "This Ferzan curve is full and is moving to SunSwap. Sell again in a few minutes. Nothing sent."
+    if ci.get("start") and time.time() < ci["start"]:
+        return False, "Trading on this curve hasn't opened yet. Nothing sent."
+    q = _const(curve_hex, owner_hex, "quoteSell(uint256)", f"{bal:064x}")
+    if not q or q[0] <= 0:
+        return False, "The curve would not quote this sell. Nothing sent."
+    if _trx_balance(owner_hex) < 2 * ENERGY_SPARE_SUN:
+        return False, f"Need about {2 * ENERGY_SPARE_SUN / 1e6:.0f} TRX in the wallet for network energy. Nothing sent."
+    allow_w = _const(token_hex, owner_hex, "allowance(address,address)", _w(owner_hex) + _w(curve_hex))
+    note = ""
+    if not allow_w or allow_w[0] < bal:
+        built = _post("/wallet/triggersmartcontract", {
+            "owner_address": owner_hex, "contract_address": token_hex, "function_selector": "approve(address,uint256)",
+            "parameter": _w(curve_hex) + "f" * 64, "fee_limit": 100_000_000, "call_value": 0, "visible": False})
+        res, link, _b = _send_and_wait(built, raw)
+        if res != "SUCCESS":
+            return False, f"Approve didn't confirm ({res}). Nothing sold.\n{link}"
+        note = f"Approved: {link}\n"
+        q = _const(curve_hex, owner_hex, "quoteSell(uint256)", f"{bal:064x}") or q  # fresh quote after the wait
+    slip = max(10, min(5000, int(slip_bps)))
+    min_out = max(1, q[0] * (10_000 - slip) // 10_000)
+    built2 = _post("/wallet/triggersmartcontract", {
+        "owner_address": owner_hex, "contract_address": curve_hex,
+        "function_selector": "sell(uint256,uint256,address)",
+        "parameter": f"{bal:064x}" + f"{min_out:064x}" + "0" * 64, "fee_limit": 100_000_000, "call_value": 0,
+        "visible": False})
+    result, link, burned = _send_and_wait(built2, raw)
+    if result.startswith("not sent"):
+        return False, note + "Ferzan curve sell failed: " + result[10:]
+    if result == "SUCCESS":
+        _CURVE_CACHE.clear()
+        return True, f"{note}Live TRON curve sell (~{q[0] / 1e6:,.2f} TRX quoted, max slippage {slip / 100:g}%)\n{link}"
+    if result == "unconfirmed":
+        return False, f"{note}Curve sell sent but not confirmed within a minute. Check before retrying:\n{link}"
+    return False, (f"{note}Curve sell didn't fill ({result}): price moved more than {slip / 100:g}%. Coins are still "
+                   f"in your wallet; about {burned:.2f} TRX went to energy.\n{link}")
 
 
 ENERGY_SPARE_SUN = 15_000_000  # ~15 TRX kept for the swap's energy (a SunSwap trade burns about 7-13 TRX)
@@ -203,6 +355,9 @@ def buy_tron(token: str, usd: float, key_hex: str | None = None, slip_bps: int =
     if bal < sun + ENERGY_SPARE_SUN:
         return False, (f"Not enough TRX on {addr_t}: {bal / 1e6:,.2f} TRX, this buy needs about "
                        f"{(sun + ENERGY_SPARE_SUN) / 1e6:,.2f} (incl. ~15 TRX for energy). Nothing sent.")
+    ci = curve_info(token)
+    if ci and not ci.get("graduated"):
+        return _curve_buy(ci, sun, usd, raw, addr_t, owner_hex, slip_bps)
     quoted = _quote_out(sun, [wtrx_hex, token_hex], owner_hex)
     if quoted <= 0:
         return False, "No SunSwap V2 pool with liquidity for this token yet. Nothing sent."
@@ -238,6 +393,9 @@ def sell_tron(token: str, key_hex: str | None = None, slip_bps: int = 1000) -> t
     bal = bal_w[0] if bal_w else 0
     if bal <= 0:
         return False, f"No TRC20 balance on {addr_t} for that token."
+    ci = curve_info(token)
+    if ci and not ci.get("graduated"):
+        return _curve_sell(ci, token_hex, bal, raw, owner_hex, slip_bps)
     quoted = _quote_out(bal, [token_hex, wtrx_hex], owner_hex)
     if quoted <= 0:
         return False, "No SunSwap V2 pool with liquidity for this token. Nothing sent."

@@ -318,6 +318,8 @@ def _jup_snap(query: str) -> MarketSnapshot | None:
 def _ferzan_curve_snap(query: str) -> MarketSnapshot | None:
     """Ferzan launchpad token still on its bonding curve (no DEX pool until graduation)."""
     ca = (query or "").strip()
+    if ca.startswith("T") and len(ca) == 34:
+        return _ferzan_tron_curve_snap(ca)
     if not (ca.lower().startswith("0x") and len(ca) == 42):
         return None
     try:
@@ -344,6 +346,25 @@ def _ferzan_curve_snap(query: str) -> MarketSnapshot | None:
         change_24h=0.0, fdv=fdv, buys_h1=0, sells_h1=0, pair_created_ms=None,
         url=f"https://launch.ferzaneco.com/miniapp/curve.html?chain={ {'eth': 'ethereum', 'hood': 'robinhood'}.get(chain, chain)}&curve={ci['curve']}",
         source="ferzan", extras={"ferzan_curve": ci["curve"]},
+    )
+
+
+def _ferzan_tron_curve_snap(ca: str) -> MarketSnapshot | None:
+    try:
+        import tron_signer
+
+        m = tron_signer.curve_meta(ca)
+    except Exception:
+        return None
+    if not m or m.get("price_usd", 0) <= 0:
+        return None
+    return MarketSnapshot(
+        query=ca, symbol=m.get("symbol") or "?", name=m.get("name") or m.get("symbol") or "Ferzan launch",
+        chain="tron", dex="ferzan-curve", pair_address=tron_signer.to_b58(m["curve"]), token_address=ca,
+        price_usd=m["price_usd"], liquidity_usd=m.get("liq_usd", 0.0), volume_24h=0.0, change_5m=0.0,
+        change_1h=0.0, change_6h=0.0, change_24h=0.0, fdv=m.get("fdv_usd", 0.0), buys_h1=0, sells_h1=0,
+        pair_created_ms=None, url=f"https://tronscan.org/#/token20/{ca}", source="ferzan",
+        extras={"ferzan_curve": tron_signer.to_b58(m["curve"]), "curve_progress_bps": m.get("progress_bps", 0)},
     )
 
 
