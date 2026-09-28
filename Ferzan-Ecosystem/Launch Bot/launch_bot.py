@@ -71,10 +71,13 @@ DEVBUY_PRESETS = {
     "solana": ["0.1", "0.5", "1", "2"],
     "bsc": ["0.01", "0.05", "0.1", "0.5"],
     "arc": ["10", "50", "100", "500"],
+    "tron": ["50", "100", "500", "1000"],
     "default": ["0.001", "0.005", "0.01", "0.05"],
 }
-GRAD_PRESETS = {"bsc": ["5", "10", "20"], "arc": ["5000", "10000", "25000"], "default": ["1", "2.5", "5"]}
-MAXBUY_PRESETS = {"bsc": ["0.1", "0.5", "1"], "arc": ["100", "500", "1000"], "default": ["0.01", "0.05", "0.1"]}
+GRAD_PRESETS = {"bsc": ["5", "10", "20"], "arc": ["5000", "10000", "25000"], "tron": ["10000", "25000", "50000"],
+                "default": ["1", "2.5", "5"]}
+MAXBUY_PRESETS = {"bsc": ["0.1", "0.5", "1"], "arc": ["100", "500", "1000"], "tron": ["500", "1000", "5000"],
+                  "default": ["0.01", "0.05", "0.1"]}
 
 (CHOOSING_CHAIN, CHOOSING_MODE, ENTERING_NAME, ENTERING_SYMBOL, ENTERING_SUPPLY, ENTERING_GRAD,
  ENTERING_VETH, ENTERING_VTOKEN, ENTERING_ALLOCS, ENTERING_DEVBUY, ENTERING_WINDOW, CONFIRMING,
@@ -114,6 +117,8 @@ def _plain_live(chain: str) -> bool:
 
 
 def _curve_live(chain: str) -> bool:
+    if chain == "tron":
+        return tron.curve_live()
     if chain == "solana":
         return bool((os.environ.get("METEORA_CONFIG") or "").strip())
     key = FACTORY_KEY.get(chain)
@@ -131,7 +136,7 @@ def _steps(launch: dict) -> list[str]:
         return ["type", "name", "symbol", "logo", "info", "devbuy"]
     s = ["type", "name", "symbol", "logo", "info", "supply"]
     if mode == "bonding_curve":
-        s += ["grad", "allocs", "devbuy", "window", "maxbuy"]
+        s += ["grad", "devbuy", "window", "maxbuy"] if chain == "tron" else ["grad", "allocs", "devbuy", "window", "maxbuy"]
     elif chain in EVM_CHAINS:
         s += ["allocs"]
     return s
@@ -647,11 +652,18 @@ async def _set_grad(update: Update, context: ContextTypes.DEFAULT_TYPE, amount: 
         await update.effective_message.reply_text("Graduation amount must be above 0.")
         return ENTERING_GRAD
     extra = launch["extra_params"]
-    extra["graduation_eth_threshold"] = str(int(round(amount * 10**18)))
+    if launch["chain"] == "tron" and amount < tron.curve_min_grad_trx():
+        await update.effective_message.reply_text(
+            f"Tron curves graduate at {tron.curve_min_grad_trx():,.0f} TRX or more (graduation opens a SunSwap pool, "
+            "which costs about 230 TRX of energy). Pick a bigger amount.")
+        return ENTERING_GRAD
+    extra["graduation_eth_threshold"] = str(int(round(amount * 10 ** (6 if launch["chain"] == "tron" else 18))))
     extra["graduation_display"] = f"{amount:g} {NATIVE.get(launch['chain'], '')}"
     # starting price / curve depth: sensible defaults (not asked any more)
     extra.setdefault("virtual_eth_reserve", str(10**18))
     extra.setdefault("virtual_token_reserve", str(int(launch["total_supply_raw"]) * 80 // 100))
+    if launch["chain"] == "tron":  # no team wallets on Tron curves: the coin only moves through the curve until graduation
+        return await _ask_devbuy(update, context)
     return await _ask_allocs(update, context)
 
 
@@ -942,10 +954,12 @@ async def _show_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rows.append(("Launch fee", PLAIN_FEE_TEXT[chain] + " + network gas"))
     tinfo = {}
     if chain == "tron":
-        tinfo = await tron.run("info", {"uid": update.effective_user.id}, timeout=45)
+        dev_sun = int(float(extra.get("dev_buy") or 0) * 1e6) if mode == "bonding_curve" else 0
+        tinfo = await tron.run("info", {"uid": update.effective_user.id, "curve": mode == "bonding_curve",
+                                        "dev_buy_sun": dev_sun}, timeout=45)
         fee = tinfo.get("fee_trx")
         rows.append(("Launch fee", (f"{fee:g} TRX" if fee is not None else "the Ferzan fee")
-                     + " + about 16 TRX of Tron network energy"))
+                     + f" + about {tinfo.get('energy_trx', 16)} TRX of Tron network energy"))
         rows.append(("Paid from", "your Ferzan Trade Bot wallet"))
     text = "<b>Review your launch</b>\n\n" + "\n".join(f"{_esc(k)}: <b>{_esc(v)}</b>" for k, v in rows)
     launch_btn = "✅ Launch now"
@@ -1052,7 +1066,7 @@ async def _tron_go(update: Update, context: ContextTypes.DEFAULT_TYPE, launch: d
     q = update.callback_query
     uid, chat_id = update.effective_user.id, update.effective_chat.id
     req = db.create_launch_request(
-        telegram_user_id=uid, chat_id=chat_id, chain="tron", mode="plain", name=launch["name"],
+        telegram_user_id=uid, chat_id=chat_id, chain="tron", mode=launch.get("mode") or "plain", name=launch["name"],
         symbol=launch["symbol"], total_supply=launch["total_supply_raw"], decimals=launch["decimals"],
         description=launch.get("description") or "", image_url=launch.get("image_url") or "",
         extra_params=dict(launch.get("extra_params") or {}, source="tradebot_wallet"),
@@ -1152,8 +1166,18 @@ def _tron_complete(req_id: str, txid: str) -> tuple[bool, str]:
 async def _tron_run(bot, req_id: str, uid: int, chat_id: int, launch: dict):
     say = lambda t: bot.send_message(chat_id=chat_id, text=t, parse_mode="HTML", disable_web_page_preview=True)  # noqa: E731
     try:
-        res = await tron.run("launch", {"uid": uid, "request_id": req_id, "name": launch["name"],
-                                        "symbol": launch["symbol"], "supply_raw": launch["total_supply_raw"]})
+        if launch.get("mode") == "bonding_curve":
+            ex = launch.get("extra_params") or {}
+            start = int(ex.get("start_at") or 0) or (int(time.time()) + int(ex.get("start_minutes") or 0) * 60
+                                                     if int(ex.get("start_minutes") or 0) else 0)
+            res = await tron.run("curve", {
+                "uid": uid, "request_id": req_id, "name": launch["name"], "symbol": launch["symbol"],
+                "supply_raw": launch["total_supply_raw"], "grad_sun": ex.get("graduation_eth_threshold"),
+                "start_time": start, "max_buy_sun": int(float(ex.get("max_buy") or 0) * 1e6),
+                "dev_buy_sun": int(float(ex.get("dev_buy") or 0) * 1e6)})
+        else:
+            res = await tron.run("launch", {"uid": uid, "request_id": req_id, "name": launch["name"],
+                                            "symbol": launch["symbol"], "supply_raw": launch["total_supply_raw"]})
         txid, addr = res.get("txid") or "", res.get("address") or ""
         if txid and addr:
             db.update_status(req_id, "submitted", wallet_address=addr, tx_hash=txid)

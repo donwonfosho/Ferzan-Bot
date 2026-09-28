@@ -50,12 +50,30 @@ def live() -> bool:
     return _setting("TRON_LAUNCH_LIVE") == "1" and f.startswith("T") and len(f) == 34
 
 
+def curve_factory() -> str:
+    return _setting("TRON_CURVE_FACTORY")
+
+
+def curve_live() -> bool:
+    f = curve_factory()
+    return live() and _setting("TRON_CURVE_LIVE") == "1" and f.startswith("T") and len(f) == 34
+
+
+def curve_min_grad_trx() -> float:
+    try:
+        return float(_setting("TRON_CURVE_MIN_GRAD_TRX") or 10000)
+    except ValueError:
+        return 10000.0
+
+
 async def run(cmd: str, args: dict, timeout: int = 150, script: str = "tron_launch_exec.py") -> dict:
     """Runs a Trade Desk launch helper (Tron or TON) with a clean environment; it loads the Trade Bot's
     own settings."""
     exe = EXEC.with_name(script)
     env = {k: os.environ[k] for k in ("PATH", "HOME", "LANG") if k in os.environ}
     env["TRON_FACTORY"] = factory()
+    if curve_factory():
+        env["TRON_CURVE_FACTORY"] = curve_factory()
     try:
         p = await asyncio.create_subprocess_exec(
             sys.executable, "-W", "ignore", str(exe), cmd, json.dumps(args), cwd=str(EXEC.parent), env=env,
@@ -166,3 +184,27 @@ def build_site_launch(owner: str, name: str, symbol: str, supply_raw) -> dict:
     if not tx.get("txID") or not (built.get("result") or {}).get("result"):
         raise ValueError("Tron could not prepare the launch: " + str(built.get("result") or built)[:120])
     return {"transaction": tx, "fee_sun": fee}
+
+
+def verify_curve_launch(txid: str, creator: str, wait_s: int = 60) -> dict:
+    """{'ok': True, 'token', 'curve'} only for a successful launch on the Ferzan Tron curve factory by `creator`."""
+    from eth_hash.auto import keccak
+
+    fac = curve_factory()
+    if not fac or not txid:
+        return {"ok": False, "error": "no curve factory or transaction"}
+    info, deadline = {}, time.time() + wait_s
+    while time.time() < deadline:
+        info = _post("/wallet/gettransactioninfobyid", {"value": txid})
+        if info.get("id"):
+            break
+        time.sleep(3)
+    if (info.get("receipt") or {}).get("result") != "SUCCESS":
+        return {"ok": False, "error": "transaction not confirmed as successful"}
+    topic, fac_hex = keccak(b"CurveLaunched(address,address,address)").hex(), to_hex41(fac)[2:]
+    for lg in info.get("log") or []:
+        t = lg.get("topics") or []
+        if (len(t) >= 4 and t[0].lower() == topic and str(lg.get("address", "")).lower() == fac_hex
+                and to_b58(t[3]) == creator):
+            return {"ok": True, "curve": to_b58(t[1]), "token": to_b58(t[2])}
+    return {"ok": False, "error": "no Ferzan curve launch for this creator"}

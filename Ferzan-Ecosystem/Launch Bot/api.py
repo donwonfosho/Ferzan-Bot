@@ -431,10 +431,14 @@ def complete_request(request_id: str, body: CompleteRequest):
                                      "do not launch again. (" + str(res.get("error", ""))[:120] + ")")
         body = CompleteRequest(tx_hash=body.tx_hash, result_token_address=minter, curve_address="")
     elif req.chain == "tron":  # TRON_WALLET_LAUNCH: re-checked on-chain here, never taken from the caller
-        res = _tron.verify_launch(body.tx_hash, (req.wallet_address or "").strip(), int(req.total_supply))
+        creator = (req.wallet_address or "").strip()
+        if req.mode == "bonding_curve":
+            res = _tron.verify_curve_launch(body.tx_hash, creator)
+        else:
+            res = _tron.verify_launch(body.tx_hash, creator, int(req.total_supply))
         if not res.get("ok"):
             raise HTTPException(400, "Tron has not confirmed this launch: " + str(res.get("error", ""))[:120])
-        body = CompleteRequest(tx_hash=body.tx_hash, result_token_address=res["token"], curve_address="")
+        body = CompleteRequest(tx_hash=body.tx_hash, result_token_address=res["token"], curve_address=res.get("curve", ""))
     elif _verifiable_launch(req):
         verified = _verify_site_launch(req, body)
         body = CompleteRequest(tx_hash=body.tx_hash, result_token_address=verified.get("token", ""),
@@ -829,7 +833,10 @@ def _launch_card(req, token_addr: str, curve_addr: str, tx_hash: str) -> str:
     esc = _html.escape
     mode_txt = {"plain": "Standard token", "meteora": "Meteora bonding curve",
                 "bonding_curve": "Bonding curve"}.get(req.mode, req.mode)
-    if req.mode == "bonding_curve":
+    if req.mode == "bonding_curve" and req.chain == "tron":
+        safety = ("Fixed supply, no owner. Trades only on the curve until it fills, then moves to a SunSwap pool at "
+                  "the same price and the LP is burned forever.")
+    elif req.mode == "bonding_curve":
         safety = ("Fixed supply, no owner. Trades on the curve, then moves to a DEX pool at the same price "
                   "and the pool liquidity is burned forever. Team tokens stay locked until graduation.")
     elif req.mode == "meteora":
@@ -847,7 +854,7 @@ def _launch_card(req, token_addr: str, curve_addr: str, tx_hash: str) -> str:
     ]
     if token_addr and req.chain in _EXPLORER:
         lines.append(f"Explorer: {_EXPLORER[req.chain]}{esc(token_addr)}")
-    if curve_addr and req.mode == "bonding_curve":
+    if curve_addr and req.mode == "bonding_curve" and req.chain != "tron":
         url = f"{MINI_APP_BASE}/curve.html?chain={req.chain}&curve={curve_addr}"
         lines.append(f"📈 Buy / sell on the curve: {esc(url)}")
     else:
