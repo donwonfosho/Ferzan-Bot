@@ -2064,7 +2064,7 @@ _SHARE_EVM = {"base", "bsc", "ethereum", "robinhood", "arc"}
 
 
 @app.get("/api/share/{chain}/{token}")
-def share_page(chain: str, token: str, w: str = ""):
+def share_page(chain: str, token: str, w: str = "", r: str = ""):
     """Share link for a coin. Telegram / X / Discord read the coin card from this page (the website's own
     host replaces per-page share tags); people who open it are sent straight on to the coin page."""
     import html as _html
@@ -2099,6 +2099,8 @@ def share_page(chain: str, token: str, w: str = ""):
         path = (f"/coin/solana/{token}" if chain == "solana" else f"/token/{chain}/{token}" if chain in ("tron", "ton", "arc")
                 else f"/c/{chain}/{token.lower()}")
     site = "https://ferzan-factory.com" + path
+    if r and _re.fullmatch(_ADDR_ANY, r):  # the sharer, so buys through this link credit them on the callers board
+        site += "?ref=" + r
     img = f"https://launch.ferzaneco.com/api/og/{chain}/{token}.png"
     title = f"${sym} · {name} on Ferzan" if sym else "Trade it on Ferzan Factory"
     desc = "Live chart, bonding curve and creator score. Trade it on Ferzan Factory or in the Ferzan Trade Bot."
@@ -3069,6 +3071,220 @@ def pnl_all(wallet: str):
     tot["coins"] = len(items)
     tot["wins"] = sum(1 for i in items if i["pnl"] > 0)
     return {"wallet": wallet, "items": items[:200], "totals": tot}
+
+
+# ---------------------------------------------------------------- weekly competition and callers
+_WEEK = 7 * 86400
+_COMPETE_START = int(os.environ.get("COMPETE_START") or 1791586800)  # FERZAN launch: Fri Oct 9 2026, 23:00 UTC
+_ZERO = ("", "0x0000000000000000000000000000000000000000", "T9yD14Nj9j7xAB4dbGeiX9h8unkKHxuWwb")
+_COMPETE_CACHE: dict = {}
+
+
+def _compete_window(prev: bool) -> dict:
+    now = int(time.time())
+    if now < _COMPETE_START:  # before launch: a practice round over the last 7 days
+        return {"week": 0, "start": now - _WEEK, "end": now, "practice": True, "starts_at": _COMPETE_START}
+    k = (now - _COMPETE_START) // _WEEK - (1 if prev else 0)
+    if k < 0:
+        return {"week": 0, "start": _COMPETE_START - _WEEK, "end": _COMPETE_START, "practice": True, "starts_at": _COMPETE_START}
+    s = _COMPETE_START + k * _WEEK
+    return {"week": int(k) + 1, "start": s, "end": s + _WEEK, "practice": False, "starts_at": _COMPETE_START}
+
+
+def _compete_excluded() -> set:
+    return {_norm_addr(x) for x in (os.environ.get("COMPETE_EXCLUDE") or "").split(",") if x.strip()}
+
+
+def _prizes() -> dict:
+    """Prizes switch on once FERZAN has graduated (or COMPETE_PRIZES=1)."""
+    live = os.environ.get("COMPETE_PRIZES") == "1"
+    if not live:
+        try:
+            import ferzan_perks as _fp
+            m = _fp.mint()
+        except Exception:
+            m = ""
+        if m:
+            c = _idx_db()
+            try:
+                r = c.execute("SELECT graduated FROM curves WHERE chain = 'solana' AND token = ?", (m,)).fetchone() if c else None
+            finally:
+                if c is not None:
+                    c.close()
+            live = bool(r and r["graduated"])
+    return {"live": live, "text": (os.environ.get("COMPETE_PRIZE_TEXT") or "").strip()[:200] if live else ""}
+
+
+def _short(w: str) -> str:
+    return w[:4] + "…" + w[-4:] if len(w) > 10 else w
+
+
+def _compete_boards(win: dict) -> dict:
+    out = {"volume": [], "profit": [], "traders": 0}
+    c = _idx_db()
+    if c is None:
+        return out
+    try:
+        rows = c.execute(
+            "SELECT t.trader, t.chain, t.curve, t.is_buy, SUM(t.native) AS n, SUM(t.tokens) AS k, COUNT(*) AS cnt, "
+            "cv.price, cv.creator, cv.symbol FROM trades t JOIN curves cv ON cv.chain = t.chain AND cv.curve = t.curve "
+            "WHERE t.ts >= ? AND t.ts < ? AND t.trader IS NOT NULL AND t.trader != '' "
+            "GROUP BY t.trader, t.chain, t.curve, t.is_buy", (win["start"], win["end"])).fetchall()
+    finally:
+        c.close()
+    skip = _compete_excluded()
+    usd: dict = {}
+    per: dict = {}
+    for r in rows:
+        w = _norm_addr(r["trader"])
+        if w in skip:
+            continue
+        ch = r["chain"]
+        if ch not in usd:
+            usd[ch] = _native_usd(ch)
+        if _norm_addr(r["creator"] or "") == w:  # trading your own coin never counts
+            continue
+        p = per.setdefault(w, {"vol": 0.0, "trades": 0, "coins": {}})
+        p["vol"] += float(r["n"] or 0) * usd[ch]
+        p["trades"] += int(r["cnt"] or 0)
+        it = p["coins"].setdefault((ch, r["curve"]), {"spent": 0.0, "got": 0.0, "bought": 0.0, "sold": 0.0, "price": float(r["price"] or 0), "usd": usd[ch], "symbol": r["symbol"]})
+        if r["is_buy"]:
+            it["spent"] += float(r["n"] or 0)
+            it["bought"] += float(r["k"] or 0)
+        else:
+            it["got"] += float(r["n"] or 0)
+            it["sold"] += float(r["k"] or 0)
+    min_spent = float(os.environ.get("COMPETE_MIN_SPENT_USD") or 20)
+    vol, prof = [], []
+    for w, p in per.items():
+        vol.append({"wallet": w, "short": _short(w), "volume_usd": round(p["vol"], 2), "trades": p["trades"]})
+        spent = pnl = 0.0
+        best = None
+        for it in p["coins"].values():
+            if it["spent"] <= 0:  # sold coins bought before the week: no cost basis this week
+                continue
+            held = max(0.0, it["bought"] - it["sold"])
+            v = (it["got"] + held * it["price"] - it["spent"]) * it["usd"]
+            spent += it["spent"] * it["usd"]
+            pnl += v
+            if best is None or v > best[0]:
+                best = (v, it["symbol"])
+        if spent >= min_spent:
+            prof.append({"wallet": w, "short": _short(w), "pnl_usd": round(pnl, 2), "pnl_pct": round(pnl * 100 / spent, 1),
+                         "spent_usd": round(spent, 2), "best": (best[1] if best and best[0] > 0 else "")})
+    vol.sort(key=lambda x: x["volume_usd"], reverse=True)
+    prof.sort(key=lambda x: x["pnl_usd"], reverse=True)
+    out.update(volume=vol[:25], profit=[x for x in prof if x["pnl_usd"] > 0][:25], traders=len(per))
+    return out
+
+
+def _call_credits(start: int, end: int) -> dict:
+    """Solana and TON buys that came in through a Ferzan share link (the site reports them; the trade itself is on-chain)."""
+    with db._get_conn() as conn:
+        _call_credit_table(conn)
+        return {(r[0], r[1]): r[2] for r in conn.execute("SELECT chain, tx, ref FROM call_credits WHERE created_at >= ? AND created_at < ?",
+                                                          (start - 3600, end + 3600))}
+
+
+def _call_credit_table(conn) -> None:
+    conn.execute("CREATE TABLE IF NOT EXISTS call_credits (chain TEXT NOT NULL, tx TEXT NOT NULL, ref TEXT NOT NULL, "
+                 "created_at INTEGER NOT NULL, PRIMARY KEY (chain, tx))")
+
+
+def _callers(win: dict) -> list:
+    credits = _call_credits(win["start"], win["end"])
+    c = _idx_db()
+    if c is None:
+        return []
+    try:
+        cols = {r[1] for r in c.execute("PRAGMA table_info(trades)")}
+        rows = []
+        if "referrer" in cols:
+            rows += [dict(r) for r in c.execute(
+                "SELECT t.chain, t.curve, t.ts, t.trader, t.native, t.price, t.referrer AS ref FROM trades t "
+                "WHERE t.ts >= ? AND t.ts < ? AND t.is_buy = 1 AND t.referrer IS NOT NULL AND t.referrer NOT IN (?, ?, ?)",
+                (win["start"], win["end"], *_ZERO))]
+        txs = [k[1] for k in credits]
+        for i in range(0, len(txs), 400):
+            part = txs[i:i + 400]
+            for r in c.execute(f"SELECT chain, curve, ts, trader, native, price, tx FROM trades WHERE is_buy = 1 AND tx IN ({','.join('?' * len(part))})", part):
+                ref = credits.get((r["chain"], r["tx"]))
+                if ref and win["start"] <= r["ts"] < win["end"]:
+                    d = dict(r)
+                    d["ref"] = ref
+                    rows.append(d)
+        coins = {(r["chain"], r["curve"]): r for r in c.execute("SELECT chain, curve, token, symbol, price, creator FROM curves")} if rows else {}
+    finally:
+        c.close()
+    skip = _compete_excluded()
+    min_buyers = int(os.environ.get("CALLER_MIN_BUYERS") or 2)
+    calls: dict = {}
+    for r in sorted(rows, key=lambda x: x["ts"]):
+        ref, trader = _norm_addr(r["ref"]), _norm_addr(r["trader"] or "")
+        cv = coins.get((r["chain"], r["curve"]))
+        if not cv or not ref or ref == trader or ref in skip or ref == _norm_addr(cv["creator"] or ""):
+            continue
+        k = (ref, r["chain"], r["curve"])
+        it = calls.setdefault(k, {"first_price": float(r["price"] or 0), "first_ts": r["ts"], "buyers": set(), "native": 0.0})
+        it["buyers"].add(trader)
+        it["native"] += float(r["native"] or 0)
+    usd: dict = {}
+    per: dict = {}
+    for (ref, ch, curve), it in calls.items():
+        if len(it["buyers"]) < min_buyers or it["first_price"] <= 0:
+            continue
+        cv = coins[(ch, curve)]
+        if ch not in usd:
+            usd[ch] = _native_usd(ch)
+        x = float(cv["price"] or 0) / it["first_price"]
+        p = per.setdefault(ref, {"calls": [], "vol": 0.0, "buyers": 0})
+        p["calls"].append({"chain": ch, "symbol": cv["symbol"], "multiple": round(x, 2), "buyers": len(it["buyers"]),
+                           "path": _site_path(ch, cv["token"], curve)})
+        p["vol"] += it["native"] * usd[ch]
+        p["buyers"] += len(it["buyers"])
+    out = []
+    for ref, p in per.items():
+        p["calls"].sort(key=lambda x: x["multiple"], reverse=True)
+        avg = sum(x["multiple"] for x in p["calls"]) / len(p["calls"])
+        out.append({"wallet": ref, "short": _short(ref), "best": p["calls"][0], "avg_multiple": round(avg, 2), "calls": len(p["calls"]),
+                    "buyers": p["buyers"], "volume_usd": round(p["vol"], 2), "top": p["calls"][:3]})
+    out.sort(key=lambda x: (x["best"]["multiple"], x["volume_usd"]), reverse=True)
+    return out[:25]
+
+
+@app.get("/api/compete")
+def compete(prev: int = 0):
+    """This week's trading competition (volume and profit) and callers board. Weeks start at the FERZAN launch."""
+    key = "prev" if prev else "now"
+    hit = _COMPETE_CACHE.get(key)
+    if hit and time.time() - hit[0] < 60:
+        return hit[1]
+    win = _compete_window(bool(prev))
+    body = {**win, "now": int(time.time()), "prizes": _prizes(), **_compete_boards(win), "callers": _callers(win),
+            "rules": {"min_spent_usd": float(os.environ.get("COMPETE_MIN_SPENT_USD") or 20), "caller_min_buyers": int(os.environ.get("CALLER_MIN_BUYERS") or 2)}}
+    _COMPETE_CACHE[key] = (time.time(), body)
+    return body
+
+
+class CallCreditBody(BaseModel):
+    chain: str
+    tx: str
+    ref: str
+
+
+@app.post("/api/call-credit")
+def call_credit(body: CallCreditBody):
+    """The site reports a Solana/TON buy that came through someone's share link. Only counted once the trade is on-chain
+    and the buyer is not the caller."""
+    if body.chain not in ("solana", "ton") or not _re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{64,90}|[0-9a-fA-F]{64}|[A-Za-z0-9+/_=-]{43,48}", body.tx or "") \
+            or not _re.fullmatch(_ADDR_ANY, body.ref or ""):
+        raise HTTPException(400, "bad request")
+    with db._get_conn() as conn:
+        _call_credit_table(conn)
+        conn.execute("INSERT OR IGNORE INTO call_credits (chain, tx, ref, created_at) VALUES (?, ?, ?, ?)",
+                     (body.chain, body.tx, _norm_addr(body.ref), int(time.time())))
+        conn.commit()
+    return {"ok": True}
 
 
 @app.on_event("startup")
