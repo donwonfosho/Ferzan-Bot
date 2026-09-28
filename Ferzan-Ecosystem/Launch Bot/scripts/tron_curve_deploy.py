@@ -188,9 +188,9 @@ def main():
         if net.get("curve_factory"):
             print(f"Already deployed: curve factory {net['curve_factory']}")
             return
-        if bal < 400_000_000:
+        if bal < 320_000_000:  # a full deploy measured 292 TRX on Nile
             where = "from the Nile faucet (https://nileex.io/join/getJoinPage)" if NET == "nile" else "on Tron"
-            print(f"\nNEXT: get about 400 TRX {where} to {owner}, then run plan again.")
+            print(f"\nNEXT: get about 320 TRX {where} to {owner}, then run plan again.")
             return
         if MODE == "plan":
             print("\nPlan OK - nothing sent. Run with 'send' to deploy.")
