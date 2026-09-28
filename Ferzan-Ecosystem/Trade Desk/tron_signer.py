@@ -379,7 +379,7 @@ def buy_tron(token: str, usd: float, key_hex: str | None = None, slip_bps: int =
                    f"Your TRX stayed in the wallet; about {burned:.2f} TRX went to network energy.\n{link}")
 
 
-def sell_tron(token: str, key_hex: str | None = None, slip_bps: int = 1000) -> tuple[bool, str]:
+def sell_tron(token: str, key_hex: str | None = None, slip_bps: int = 1000, pct: int = 100) -> tuple[bool, str]:
     """Sells the whole balance on SunSwap V2: approves only when needed (and waits for it), then swaps with
     a real minimum-out and reads the result back from the chain."""
     if not live_enabled():
@@ -390,9 +390,13 @@ def sell_tron(token: str, key_hex: str | None = None, slip_bps: int = 1000) -> t
     addr_t, _ = evm_key_to_tron(raw)
     token_hex, router_hex, owner_hex, wtrx_hex = _to_hex(token), _to_hex(ROUTER), _to_hex(addr_t), _to_hex(WTRX)
     bal_w = _const(token_hex, owner_hex, "balanceOf(address)", _w(owner_hex))
-    bal = bal_w[0] if bal_w else 0
-    if bal <= 0:
+    held = bal_w[0] if bal_w else 0
+    if held <= 0:
         return False, f"No TRC20 balance on {addr_t} for that token."
+    pct = max(1, min(100, int(pct)))
+    bal = held if pct >= 100 else held * pct // 100
+    if bal <= 0:
+        return False, "That share of the bag rounds to zero. Nothing sent."
     ci = curve_info(token)
     if ci and not ci.get("graduated"):
         return _curve_sell(ci, token_hex, bal, raw, owner_hex, slip_bps)

@@ -1575,11 +1575,9 @@ def _sell_any(uid: int, mint: str, pct: int = 100) -> tuple[bool, str, str]:
     if len(user_wallets.all_secrets(uid)) > 1:
         label = f"{label} · {wlabel}"
     if cid == "trx":
-        if pct < 100:
-            return False, "TRON sells are full-bag only right now — tap 100%.", label
         import tron_signer
 
-        ok, msg = tron_signer.sell_tron(mint, key_hex=evm_secret, slip_bps=_slip_bps(uid, "sell", "trx"))
+        ok, msg = tron_signer.sell_tron(mint, key_hex=evm_secret, slip_bps=_slip_bps(uid, "sell", "trx"), pct=pct)
     elif cid == "ton":
         import ton_signer
 

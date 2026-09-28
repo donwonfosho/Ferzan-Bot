@@ -469,7 +469,7 @@
       return x.toString();
     } catch (e) { return ""; }
   }
-  const fullBagOnly = (p) => /^(trx|tron)$/i.test(p.chain || "");
+  const fullBagOnly = (p) => false;  // every chain supports partial sells now
   function openTrade(p) {
     if (!p) return;
     sheetMint = p.mint; sheetSym = p.symbol || "TOKEN"; sheetPx = p.price || 0;
