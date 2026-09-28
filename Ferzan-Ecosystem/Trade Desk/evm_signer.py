@@ -87,7 +87,7 @@ def configured() -> bool:
 
 def max_usd() -> float:
     try:
-        return max(1.0, min(50.0, float(os.getenv("SIGNER_MAX_USD", "10"))))
+        return max(1.0, min(5000.0, float(os.getenv("SIGNER_MAX_USD", "10"))))  # same ceiling as signer.py
     except ValueError:
         return 10.0
 
