@@ -3,7 +3,7 @@
 // stdout: {pool, tx_b64, amount_in, amount_out, min_out, fee_bps?, sim_err?, sim_logs?} | {error}
 import fs from 'fs'
 import BN from 'bn.js'
-import { Connection, PublicKey } from '@solana/web3.js'
+import { ComputeBudgetProgram, Connection, PublicKey } from '@solana/web3.js'
 import { NATIVE_MINT } from '@solana/spl-token'
 import * as sdk from '@meteora-ag/dynamic-bonding-curve-sdk'
 import { simulate, allConfigs, findPool } from './common.mjs' // MULTI_CONFIG_B23
@@ -87,6 +87,9 @@ try {
         amountIn, minimumAmountOut: minOut, swapBaseForQuote, referralTokenAccount: null,
     })
     mark('serialize')
+    // Optional priority fee (the Trade Bot sets one so its direct buys land during a launch rush).
+    const prio = Math.min(2_000_000, Math.max(0, Math.floor(Number(inp.priorityMicroLamports || 0))))
+    if (prio > 0) tx.instructions.unshift(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: prio }))
     tx.feePayer = owner
     tx.recentBlockhash = (await conn.getLatestBlockhash('confirmed')).blockhash
     const raw = tx.serialize({ requireAllSignatures: false, verifySignatures: false })

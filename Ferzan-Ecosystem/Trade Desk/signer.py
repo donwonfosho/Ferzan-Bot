@@ -661,6 +661,52 @@ def keypair_from_secret(secret: str):
         return Keypair.from_bytes(raw)
 
 
+def _ferzan_dbc_swap(mint: str, side: str, amount_raw: int, kp, slip_bps: int | None, opts: dict) -> tuple[bool, str] | None:
+    """Direct Meteora route for coins on a Ferzan (Meteora DBC) curve, used when Jupiter has no route yet (a brand-new
+    pool, e.g. FERZAN in its first minutes) or refuses. The Launch API builds the swap with the Meteora SDK (same
+    builder as the website), we sign it here and send it. None = not a Ferzan curve coin: keep Jupiter's answer."""
+    import base64 as _b64
+    import time as _t
+
+    from solders.transaction import Transaction
+
+    base = (os.getenv("LAUNCH_API_URL") or "http://127.0.0.1:8000").rstrip("/")
+    prio = max(10_000, min(2_000_000, int(int(opts.get("fee_lamports") or 0) * 1_000_000 // 200_000)))
+    try:
+        r = requests.post(f"{base}/api/sol-swap", json={
+            "mint": mint, "wallet": str(kp.pubkey()), "side": side, "amount": str(int(amount_raw)),
+            "slippage_bps": int(slip_bps if slip_bps is not None else 1000), "priority_micro_lamports": prio}, timeout=60)
+        body = r.json() if r.content else {}
+    except Exception as exc:
+        return False, f"Direct Meteora route unavailable ({type(exc).__name__}). Nothing sent."
+    detail = str(body.get("detail") or body.get("error") or "")
+    if r.status_code != 200:
+        if "no Ferzan curve pool" in detail or "graduated" in detail or r.status_code in (404, 501):
+            return None
+        return False, f"Direct Meteora route: {detail[:200] or r.status_code}. Nothing sent."
+    try:
+        unsigned = Transaction.from_bytes(_b64.b64decode(body["tx_b64"]))
+        msg = unsigned.message
+        signed = Transaction([kp], msg, msg.recent_blockhash)
+    except Exception as exc:
+        return False, f"Direct Meteora route: could not sign ({exc}). Nothing sent."
+    wire, sig = _b64.b64encode(bytes(signed)).decode(), str(signed.signatures[0])
+    ok, err = _rpc_broadcast(wire)
+    if not ok:
+        return False, f"Direct Meteora route: {err}. Nothing sent."
+    opts["route_used"] = "Meteora direct (Ferzan curve)"
+    for _ in range(6):  # the same signed tx, re-sent: it can land at most once
+        _t.sleep(2)
+        state, _d = _status(sig)
+        if state in ("ok", "err"):
+            break
+        _rpc_broadcast(wire)
+    landed, why = _confirm(sig, None, timeout_s=60)
+    if landed:
+        return True, sig
+    return False, f"{why or 'not confirmed yet'}\nhttps://solscan.io/tx/{sig}"
+
+
 def buy_sol(
     output_mint: str,
     usd: float,
@@ -705,12 +751,20 @@ def buy_sol(
             timeout=15,
         )
         quote = qr.json() if qr.content else {}
+        jup_err = "" if qr.status_code < 400 and not quote.get("error") else str(
+            quote.get("error") or quote.get("message") or qr.text[:180])
     except requests.RequestException as exc:
-        return False, f"Jupiter quote failed: {exc}"
-    if qr.status_code >= 400 or quote.get("error"):
-        return False, str(quote.get("error") or quote.get("message") or qr.text[:180])
-
+        quote, jup_err = {}, f"Jupiter quote failed: {exc}"
     opts = exec_opts(user_id)
+    if jup_err:
+        direct = _ferzan_dbc_swap(mint, "buy", lamports, kp, slip_bps, opts)
+        if direct is None:
+            return False, jup_err
+        ok, res = direct
+        if not ok:
+            return False, res
+        return True, f"Live SOL buy ~${usd:.2f} · confirmed · {opts.get('route_used')}\nhttps://solscan.io/tx/{res}"
+
     ok, res = _swap_send_with_retry(quote, kp, opts)
     if not ok:
         return False, res
@@ -926,11 +980,20 @@ def sell_sol(
             timeout=15,
         )
         quote = qr.json() if qr.content else {}
+        jup_err = "" if qr.status_code < 400 and not quote.get("error") else str(
+            quote.get("error") or quote.get("message") or qr.text[:180])
     except requests.RequestException as exc:
-        return False, f"Jupiter quote failed: {exc}"
-    if qr.status_code >= 400 or quote.get("error"):
-        return False, str(quote.get("error") or quote.get("message") or qr.text[:180])
+        quote, jup_err = {}, f"Jupiter quote failed: {exc}"
     opts = exec_opts(user_id)
+    if jup_err:
+        direct = _ferzan_dbc_swap(mint, "sell", raw_amt, kp, slip_bps, opts)
+        if direct is None:
+            return False, jup_err
+        ok, res = direct
+        if not ok:
+            return False, res
+        bag_note = "full bag" if pct >= 100 else f"{pct}% of bag"
+        return True, f"Live SOL sell ({bag_note}) · confirmed · {opts.get('route_used')}\nhttps://solscan.io/tx/{res}"
     ok, res = _swap_send_with_retry(quote, kp, opts)
     if not ok:
         return False, res

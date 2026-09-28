@@ -1697,6 +1697,7 @@ class SolSwapBody(BaseModel):
     amount: str
     slippage_bps: int = 500
     simulate: bool = False
+    priority_micro_lamports: int = 0
 
 
 @app.post("/api/sol-swap")
@@ -1718,6 +1719,7 @@ def sol_swap(body: SolSwapBody, request: Request):
         p = _sp.run(["node", str(script)], input=_json.dumps({
             "rpc": RPC_URLS["solana"], "config": config, "mint": body.mint, "owner": body.wallet, "side": body.side,
             "amount": body.amount, "slippageBps": max(10, min(5000, int(body.slippage_bps))), "simulate": bool(body.simulate),
+            "priorityMicroLamports": max(0, min(2_000_000, int(body.priority_micro_lamports or 0))),
         }), capture_output=True, text=True, timeout=45, cwd=str(script.parent))
     except _sp.TimeoutExpired:
         raise HTTPException(504, "Solana did not answer in time")
