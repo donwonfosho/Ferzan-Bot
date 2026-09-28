@@ -86,6 +86,13 @@ def build_unsigned_meteora_tx(
         _mint_secret = sol_take_mint()
     except Exception:
         _mint_secret = None
+    _fee_lamports = int(os.environ.get("LAUNCH_FEE_LAMPORTS") or "50000000")
+    _perk_note = ""
+    try:  # FERZAN holders pay less (ferzan_perks.py); any problem there means the normal fee
+        from ferzan_perks import launch_fee_lamports
+        _fee_lamports, _perk_note = launch_fee_lamports(creator_pubkey, _fee_lamports)
+    except Exception:
+        pass
     payload = {
         "mintSecret": _mint_secret,
         "creator": creator_pubkey,
@@ -96,7 +103,7 @@ def build_unsigned_meteora_tx(
         "config": config,
         "rpc": rpc_url,
         "treasury": (os.environ.get("PLATFORM_TREASURY_SOL") or os.environ.get("TREASURY_SOL") or "").strip(),
-        "feeLamports": int(os.environ.get("LAUNCH_FEE_LAMPORTS") or "50000000"),
+        "feeLamports": _fee_lamports,
     }
     try:
         proc = subprocess.run(
@@ -128,5 +135,5 @@ def build_unsigned_meteora_tx(
         program_id=str(METEORA_DBC),
         config=config,
         note=f"Meteora bonding curve · pool {out.get('pool', '')} · {out.get('size', '?')} bytes",
-        cost_text=out.get("cost_text", ""),
+        cost_text=(out.get("cost_text", "") + (f" {_perk_note}." if _perk_note else "")).strip(),
     )

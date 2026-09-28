@@ -826,6 +826,29 @@ def _usd(v) -> str:
     return f"${x:,.2f}"
 
 
+_PERK_CACHE: dict = {}
+
+
+def _ferzan_badge(chain: str, wallet: str) -> str:
+    """'🔷 FERZAN holder' / '🐋 FERZAN whale' for a Solana buyer holding FERZAN, else ''. Cached 10 min, never raises."""
+    if chain not in ("sol", "solana") or not wallet:
+        return ""
+    hit = _PERK_CACHE.get(wallet)
+    if hit and time.time() - hit[0] < 600:
+        return hit[1]
+    badge = ""
+    try:
+        r = requests.get(f"{FERZAN_API}/ferzan-perks/{wallet}", timeout=1.5)
+        if r.status_code == 200:
+            badge = str(r.json().get("badge") or "")
+    except Exception:
+        return ""
+    if len(_PERK_CACHE) > 5000:
+        _PERK_CACHE.clear()
+    _PERK_CACHE[wallet] = (time.time(), badge)
+    return badge
+
+
 def _card(chain: str, ca: str, tr: dict, attrs: dict, emoji: str = "🟢", tg_url: str = "", cluster: int = 1, discord_url: str = "", x_url: str = "", whale: bool = False, vip: bool = False) -> tuple[str, InlineKeyboardMarkup]:
     usd = float(tr.get("volume_in_usd") or 0)
     got = tr.get("to_token_amount") or tr.get("to_token_output") or ""
@@ -951,6 +974,9 @@ def _card(chain: str, ca: str, tr: dict, attrs: dict, emoji: str = "🟢", tg_ur
     if extra:
         lines.append("⚠  " + " · ".join(extra))
     links = f"{_icon('BUYER', 6, '👤')}  <a href=\"{_esc(buyer_url)}\">Buyer</a>  ·  <a href=\"{_esc(scan)}\">Txn</a>"
+    _badge = _ferzan_badge(chain, buyer)
+    if _badge:
+        links = links.replace("</a>  ·  ", f"</a> {_esc(_badge)}  ·  ", 1)
     if tg:
         links += f"  ·  {_icon('TG', 8, '💬')} <a href=\"{_esc(tg)}\">Telegram</a>"
     xurl = (x_url or "").strip() or xurl

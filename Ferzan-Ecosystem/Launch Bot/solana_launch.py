@@ -174,6 +174,11 @@ def build_unsigned_launch_tx(
 
     treasury = (os.environ.get("PLATFORM_TREASURY_SOL") or os.environ.get("TREASURY_SOL") or "").strip()
     fee_lamports = int(os.environ.get("LAUNCH_FEE_LAMPORTS") or "50000000")
+    try:  # FERZAN holders pay less (ferzan_perks.py); any problem there means the normal fee
+        from ferzan_perks import launch_fee_lamports
+        fee_lamports, _ = launch_fee_lamports(creator_pubkey, fee_lamports)
+    except Exception:
+        pass
     if treasury and fee_lamports > 0:
         instructions.append(
             transfer(

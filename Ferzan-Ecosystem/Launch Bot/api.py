@@ -2048,6 +2048,68 @@ def og_card(chain: str, token: str):
     return Response(png, media_type="image/png", headers={"Cache-Control": "public, max-age=300"})
 
 
+_SHARE_EVM = {"base", "bsc", "ethereum", "robinhood", "arc"}
+
+
+@app.get("/api/share/{chain}/{token}")
+def share_page(chain: str, token: str):
+    """Share link for a coin. Telegram / X / Discord read the coin card from this page (the website's own
+    host replaces per-page share tags); people who open it are sent straight on to the coin page."""
+    import html as _html
+    from fastapi.responses import HTMLResponse
+
+    if not _re.fullmatch(r"[a-z]{2,12}", chain or "") or not _re.fullmatch(r"[0-9A-Za-z_-]{20,70}", token or ""):
+        raise HTTPException(404, "not found")
+    name, sym, path = "", "", ""
+    c = _idx_db()
+    try:
+        r = c.execute("SELECT name, symbol, curve, token FROM curves WHERE chain = ? AND (token = ? OR token = ? OR curve = ? OR curve = ?)",
+                      (chain, token, token.lower(), token, token.lower())).fetchone() if c else None
+    finally:
+        if c is not None:
+            c.close()
+    if r:
+        name, sym = r["name"] or "", r["symbol"] or ""
+        if chain == "solana":
+            path = f"/coin/solana/{r['token']}"
+        elif chain in _SHARE_EVM:
+            path = f"/coin/{chain}/{str(r['curve']).lower()}"
+        else:
+            path = f"/token/{chain}/{r['token']}"
+    else:
+        with db._get_conn() as conn:
+            row = conn.execute("SELECT name, symbol FROM launch_requests WHERE status = 'confirmed' AND chain = ? AND "
+                               "(result_token_address = ? OR LOWER(result_token_address) = ?) LIMIT 1",
+                               (chain, token, token.lower())).fetchone()
+        if row:
+            name, sym = row[0] or "", row[1] or ""
+    if not path:
+        path = (f"/coin/solana/{token}" if chain == "solana" else f"/token/{chain}/{token}" if chain in ("tron", "ton", "arc")
+                else f"/c/{chain}/{token.lower()}")
+    site = "https://ferzan-factory.com" + path
+    img = f"https://launch.ferzaneco.com/api/og/{chain}/{token}.png"
+    title = f"${sym} · {name} on Ferzan" if sym else "Trade it on Ferzan Factory"
+    desc = "Live chart, bonding curve and creator score. Trade it on Ferzan Factory or in the Ferzan Trade Bot."
+    e = lambda v: _html.escape(v, quote=True)  # noqa: E731
+    body = (f'<!doctype html><html><head><meta charset="utf-8"><title>{e(title)}</title>'
+            f'<meta property="og:type" content="website"><meta property="og:site_name" content="Ferzan Factory">'
+            f'<meta property="og:title" content="{e(title)}"><meta property="og:description" content="{e(desc)}">'
+            f'<meta property="og:url" content="{e(site)}"><meta property="og:image" content="{e(img)}">'
+            f'<meta property="og:image:width" content="1200"><meta property="og:image:height" content="630">'
+            f'<meta name="twitter:card" content="summary_large_image"><meta name="twitter:title" content="{e(title)}">'
+            f'<meta name="twitter:image" content="{e(img)}"><meta http-equiv="refresh" content="0; url={e(site)}">'
+            f'<link rel="canonical" href="{e(site)}"></head><body style="background:#07090b;color:#f4f7f7;font-family:sans-serif">'
+            f'<p><a style="color:#3ee0e6" href="{e(site)}">Open {e(title)}</a></p>'
+            f'<script>location.replace({_json_str(site)})</script></body></html>')
+    return HTMLResponse(body, headers={"Cache-Control": "public, max-age=300"})
+
+
+def _json_str(v: str) -> str:
+    import json as _json
+
+    return _json.dumps(v).replace("<", "\\u003c")
+
+
 def _draw_card(name: str, sym: str, chain: str, mcap: float, prog, grad: bool, image: str) -> bytes:
     from io import BytesIO
     from PIL import Image, ImageDraw, ImageFont
@@ -2224,6 +2286,14 @@ def creator_score(token: str):
             lines.append("✅ No dev buy")
     elif me["mode"] == "plain":
         lines.append("ℹ️ Standard coin: the creator received the whole supply at launch")
+    badge = ""
+    try:  # FERZAN holder badge for the creator's Solana wallet (information only, the score is unchanged)
+        import ferzan_perks as _fp
+        badge = _fp.perks(me["wallet_address"] or "").get("badge") or ""
+    except Exception:
+        badge = ""
+    if badge:
+        lines.append(f"{badge}: the creator holds FERZAN")
     score = max(0, min(100, score))
     if any(x.startswith("🚩") for x in lines):
         score = min(score, 59)  # a red flag always means at least "Caution", whatever the history
@@ -2231,9 +2301,22 @@ def creator_score(token: str):
     out = {"found": True, "score": score, "label": label, "lines": lines, "creator": me["wallet_address"] or "",
            "launches": len(others) + 1, "graduated_before": grads, "best_prior_mcap_usd": best,
            "launches_same_day": len(day), "dev_bought": dev_buy, "dev_sold": dev_sell, "dev_hold_pct": hold_pct,
-           "chain": me["chain"], "mode": me["mode"]}
+           "chain": me["chain"], "mode": me["mode"], "ferzan_badge": badge}
     _SCORE_CACHE[tok] = (time.time(), out)
     return out
+
+
+@app.get("/api/ferzan-perks/{wallet}")
+def ferzan_perks_for(wallet: str):
+    """What this Solana wallet gets for holding FERZAN. Before FERZAN is announced: active = false."""
+    import ferzan_perks as _fp
+
+    p = _fp.perks(wallet)
+    base = int(os.environ.get("LAUNCH_FEE_LAMPORTS") or "50000000")
+    fee, _ = _fp.launch_fee_lamports(wallet, base) if p.get("active") else (base, "")
+    return dict(p, launch_fee_sol=base / 1e9, your_launch_fee_sol=fee / 1e9,
+                tiers=[{"tier": "holder", "min": p["holder_min"], "badge": "🔷 FERZAN holder", "launch_fee_off_pct": 50},
+                       {"tier": "whale", "min": p["whale_min"], "badge": "🐋 FERZAN whale", "launch_fee_off_pct": 100}])
 
 
 @app.on_event("startup")
