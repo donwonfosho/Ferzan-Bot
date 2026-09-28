@@ -312,15 +312,33 @@ def _is_sol_mint(ca: str) -> bool:
 
 
 def _safety_line(chain: str, ca: str) -> str:
-    """Rug / honeypot summary for a card. Blocking (RPC / GoPlus)."""
+    """Rug / honeypot summary for a card, plus the Ferzan creator score for coins launched on Ferzan. Blocking."""
+    out = ""
     try:
         if ca.startswith("0x"):
-            return _security_line(chain, ca)
-        if _is_sol_mint(ca):
-            return rugcheck.security_line(rugcheck.sol_report(ca))
+            out = _security_line(chain, ca)
+        elif _is_sol_mint(ca):
+            out = rugcheck.security_line(rugcheck.sol_report(ca))
     except Exception:
         logger.exception("safety line failed for %s", ca)
-    return ""
+    cs = _creator_score_line(ca)
+    return (out + "\n" + cs).strip() if cs else out
+
+
+def _creator_score_line(ca: str) -> str:
+    """'🧑‍💻 Creator score 85/100 (Good) · …' from the Ferzan launch index; '' for coins not launched on Ferzan."""
+    if not ca:
+        return ""
+    base = (os.getenv("LAUNCH_API_URL") or "http://127.0.0.1:8000").rstrip("/")
+    try:
+        d = requests.get(f"{base}/api/creator-score/{ca}", timeout=3).json() or {}
+    except Exception:
+        return ""
+    if not d.get("found"):
+        return ""
+    lines = [str(x) for x in (d.get("lines") or [])][:3]
+    return f"🧑‍💻 Ferzan creator score {int(d.get('score') or 0)}/100 ({d.get('label', '')})" + (
+        "\n" + "\n".join(lines) if lines else "")
 
 
 def _age_ms(ms: int | None) -> str:

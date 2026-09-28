@@ -868,6 +868,15 @@ def _launch_card(req, token_addr: str, curve_addr: str, tx_hash: str) -> str:
     if req.description:
         lines.append(f"<i>{esc(req.description[:200])}</i>")
     lines += [f"Tx: <code>{esc(tx_hash or '')}</code>", "", f"🛡 {esc(safety)}"]
+    try:  # creator track record (the same check the Trade Bot shows on every Ferzan coin)
+        _SCORE_CACHE.pop(_norm_addr(token_addr), None)
+        cs = creator_score(token_addr)
+        if cs.get("found"):
+            hist = [x for x in cs.get("lines") or [] if "launch" in x.lower()][:2]
+            lines.append(f"🧑‍💻 Creator score {cs['score']}/100 ({cs['label']})" + ("\n" + "\n".join(esc(x) for x in hist) if hist else ""))
+            _SCORE_CACHE.pop(_norm_addr(token_addr), None)
+    except Exception as e:  # never block a launch card
+        logger.info("creator score skipped: %s", e)
     return "\n".join(lines)
 
 
@@ -1882,6 +1891,125 @@ def creator_record(wallet: str):
                          (w.lower() if evm else w,)).fetchone()[0] if evm else conn.execute(
             "SELECT COUNT(*) FROM launch_requests WHERE status = 'confirmed' AND wallet_address = ?", (w,)).fetchone()[0]
     out["launches"] = max(int(n or 0), len(out["tokens"]))
+    return out
+
+
+# ---- CREATOR_SCORE: a plain-language trust check on any coin launched through Ferzan ----
+_SCORE_CACHE: dict = {}
+
+
+def _norm_addr(v: str) -> str:
+    v = (v or "").strip()
+    return v.lower() if v.lower().startswith("0x") else v
+
+
+@app.get("/api/creator-score/{token}")
+def creator_score(token: str):
+    """Who launched this coin, what else they launched, and (on curves) what the dev bought and sold.
+    Only for coins launched through Ferzan; anything else answers {"found": false}."""
+    tok = _norm_addr(token)
+    if not (_re.fullmatch(r"0x[0-9a-f]{40}", tok) or _re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{32,48}|[EUk]Q[A-Za-z0-9_-]{46}", tok)):
+        return {"found": False}
+    hit = _SCORE_CACHE.get(tok)
+    if hit and time.time() - hit[0] < 60:
+        return hit[1]
+    import json as _json
+    from datetime import datetime as _dt
+
+    def ts(v):
+        try:
+            return int(_dt.fromisoformat(str(v).replace("Z", "+00:00")).timestamp())
+        except ValueError:
+            return 0
+
+    with db._get_conn() as conn:
+        rows = conn.execute(
+            "SELECT id, chain, mode, wallet_address, telegram_user_id, created_at, result_token_address, extra_params, total_supply "
+            "FROM launch_requests WHERE status = 'confirmed' AND result_token_address IS NOT NULL").fetchall()
+    me = next((r for r in rows if _norm_addr(r["result_token_address"]) == tok), None)
+    if not me:
+        out = {"found": False}
+        _SCORE_CACHE[tok] = (time.time(), out)
+        return out
+    wallet, uid = _norm_addr(me["wallet_address"] or ""), int(me["telegram_user_id"] or 0)
+    mine = [r for r in rows if (wallet and _norm_addr(r["wallet_address"] or "") == wallet) or (uid > 0 and int(r["telegram_user_id"] or 0) == uid)]
+    now, born = time.time(), ts(me["created_at"])
+    others = [r for r in mine if r["id"] != me["id"]]
+    day = [r for r in mine if abs(ts(r["created_at"]) - born) < 86400]
+    grads = best = 0
+    dev_buy = dev_sell = 0.0
+    supply_whole = 0.0
+    curve = ""
+    try:
+        curve = (_json.loads(me["extra_params"] or "{}").get("curve_address") or "").strip()
+    except ValueError:
+        pass
+    c = _idx_db()
+    if c is not None:
+        try:
+            toks = [_norm_addr(r["result_token_address"]) for r in others]
+            for t_ in toks[:200]:
+                g = c.execute("SELECT graduated, mcap, chain FROM curves WHERE token = ? OR token = ?", (t_, t_.lower())).fetchone()
+                if g:
+                    grads += 1 if g["graduated"] else 0
+                    best = max(best, (g["mcap"] or 0) * _native_usd(g["chain"]))
+            if curve and me["mode"] == "bonding_curve":
+                cv = c.execute("SELECT total_supply FROM curves WHERE curve = ? OR curve = ?", (curve, curve.lower())).fetchone()
+                supply_whole = int(cv["total_supply"] or 0) / 1e18 if cv else 0.0
+                for t in c.execute("SELECT is_buy, tokens FROM trades WHERE (curve = ? OR curve = ?) AND (trader = ? OR trader = ?)",
+                                   (curve, curve.lower(), wallet, wallet.lower())):
+                    if t["is_buy"]:
+                        dev_buy += float(t["tokens"] or 0)
+                    else:
+                        dev_sell += float(t["tokens"] or 0)
+        finally:
+            c.close()
+    score, lines = 100, []
+    if len(day) >= 10:
+        score -= 50
+        lines.append(f"🚩 Launched {len(day)} coins within a day of this one")
+    elif len(day) >= 3:
+        score -= 25
+        lines.append(f"⚠️ Launched {len(day)} coins within a day of this one")
+    if others:
+        lines.append(f"🧑‍💻 {len(others) + 1} launches by this creator · {grads} graduated")
+        if grads:
+            score += 10
+        elif len(others) >= 3:
+            score -= 15
+    else:
+        lines.append("🆕 First launch by this creator")
+    hold_pct = None
+    if me["mode"] == "bonding_curve" and supply_whole > 0:
+        held = max(0.0, dev_buy - dev_sell)
+        hold_pct = held * 100 / supply_whole
+        if dev_buy > 0 and dev_sell >= dev_buy * 0.5:
+            score -= 30
+            lines.append(f"🚩 Dev sold {dev_sell * 100 / dev_buy:.0f}% of what they bought")
+        elif dev_sell > 0:
+            score -= 10
+            lines.append(f"⚠️ Dev has sold some ({dev_sell * 100 / dev_buy:.0f}% of their buy)" if dev_buy else "⚠️ Dev has sold")
+        if hold_pct >= 20:
+            score -= 30
+            lines.append(f"🚩 Dev holds {hold_pct:.1f}% of the supply")
+        elif hold_pct >= 10:
+            score -= 15
+            lines.append(f"⚠️ Dev holds {hold_pct:.1f}% of the supply")
+        elif dev_buy > 0:
+            lines.append(f"✅ Dev holds {hold_pct:.1f}% of the supply")
+        else:
+            lines.append("✅ No dev buy")
+    elif me["mode"] == "plain":
+        lines.append("ℹ️ Standard coin: the creator received the whole supply at launch")
+    score = max(0, min(100, score))
+    if any(x.startswith("🚩") for x in lines):
+        score = min(score, 59)  # a red flag always means at least "Caution", whatever the history
+    label = "Good" if score >= 80 else "Caution" if score >= 50 else "Risky"
+    out = {"found": True, "score": score, "label": label, "lines": lines, "creator": me["wallet_address"] or "",
+           "launches": len(others) + 1, "graduated_before": grads, "best_prior_mcap_usd": best,
+           "launches_same_day": len(day), "dev_bought": dev_buy, "dev_sold": dev_sell, "dev_hold_pct": hold_pct,
+           "chain": me["chain"], "mode": me["mode"]}
+    _SCORE_CACHE[tok] = (time.time(), out)
     return out
 
 
