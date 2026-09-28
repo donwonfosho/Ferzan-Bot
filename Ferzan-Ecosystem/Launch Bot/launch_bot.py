@@ -224,8 +224,87 @@ def _auto_symbol(name: str) -> str:
 
 
 # ------------------------------------------------------------------ home --
+# ---- creator follows: ferzan-factory.com/creator/<wallet> "Follow" opens /start follow_<wallet> ----
+_FOLLOW_ADDR = re.compile(r"0x[0-9a-fA-F]{40}|[1-9A-HJ-NP-Za-km-z]{32,48}|[EUk]Q[A-Za-z0-9_-]{46}")
+
+
+def _follow_conn():
+    import sqlite3
+    conn = sqlite3.connect(db.DB_PATH, timeout=10)
+    conn.execute("CREATE TABLE IF NOT EXISTS creator_follows (user_id INTEGER NOT NULL, wallet TEXT NOT NULL, created_at INTEGER, "
+                 "PRIMARY KEY (user_id, wallet))")
+    return conn
+
+
+def _norm_wallet(w: str) -> str:
+    w = (w or "").strip()
+    return w.lower() if w.lower().startswith("0x") else w
+
+
+def _short(w: str) -> str:
+    return f"{w[:4]}…{w[-4:]}" if len(w) > 12 else w
+
+
+async def _follow_start(update: Update, wallet: str) -> None:
+    uid = update.effective_user.id
+    if not _FOLLOW_ADDR.fullmatch(wallet or ""):
+        await update.effective_message.reply_text("That creator link looks wrong. Open it again from the creator's page on ferzan-factory.com.")
+        return
+    conn = _follow_conn()
+    n = conn.execute("SELECT COUNT(*) FROM creator_follows WHERE user_id = ?", (uid,)).fetchone()[0]
+    if n >= 200:
+        conn.close()
+        await update.effective_message.reply_text("You follow 200 creators already. Remove some with /following first.")
+        return
+    conn.execute("INSERT OR IGNORE INTO creator_follows (user_id, wallet, created_at) VALUES (?, ?, ?)", (uid, _norm_wallet(wallet), int(time.time())))
+    conn.commit()
+    conn.close()
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("👤 Their launches", url=f"https://ferzan-factory.com/creator/{wallet}")],
+        [InlineKeyboardButton("📋 Everyone I follow", callback_data="fol:list")],
+    ])
+    await update.effective_message.reply_text(
+        f"✅ Following creator {_short(wallet)}.\n\nYou'll get a message here the moment they launch a new coin on Ferzan. "
+        "Manage or stop alerts any time with /following.", reply_markup=kb)
+
+
+def _following_view(uid: int):
+    conn = _follow_conn()
+    rows = [r[0] for r in conn.execute("SELECT wallet FROM creator_follows WHERE user_id = ? ORDER BY created_at DESC LIMIT 40", (uid,))]
+    conn.close()
+    if not rows:
+        return ("You don't follow any creators yet. Open a creator's page on ferzan-factory.com and tap Follow.", None)
+    buttons = [[InlineKeyboardButton(f"❌ Unfollow {_short(w)}", callback_data=f"fol:x:{w}"[:64])] for w in rows]
+    return (f"You follow {len(rows)} creator{'s' if len(rows) != 1 else ''}. You get a DM when any of them launches.", InlineKeyboardMarkup(buttons))
+
+
+async def following_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text, kb = _following_view(update.effective_user.id)
+    await update.effective_message.reply_text(text, reply_markup=kb)
+
+
+async def following_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+    data = q.data or ""
+    if data.startswith("fol:x:"):
+        conn = _follow_conn()
+        conn.execute("DELETE FROM creator_follows WHERE user_id = ? AND wallet = ?", (uid, data[6:]))
+        conn.commit()
+        conn.close()
+    text, kb = _following_view(uid)
+    try:
+        await q.edit_message_text(text, reply_markup=kb)
+    except Exception:
+        await q.message.reply_text(text, reply_markup=kb)
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
+    if context.args and (context.args[0] or "").startswith("follow_"):
+        await _follow_start(update, context.args[0][len("follow_"):])
+        return
     if context.args:
         raw = (context.args[0] or "").replace("ref_", "").replace("ref", "")
         if raw.isdigit():
@@ -1713,6 +1792,8 @@ def main():
     app.add_handler(CommandHandler("help", start))
     app.add_handler(conv)
     app.add_handler(CommandHandler("history", history))
+    app.add_handler(CommandHandler("following", following_cmd))
+    app.add_handler(CallbackQueryHandler(following_cb, pattern="^fol:"))
     app.add_handler(CommandHandler("refer", refer_cmd))
     app.add_handler(CommandHandler("referwallet", referwallet_cmd))
     app.add_handler(CommandHandler("lplock", lplock_cmd))
@@ -1738,6 +1819,7 @@ def main():
                 BotCommand("new", "New launches & King of the Hill"),
                 BotCommand("top", "Top creators leaderboard"),
                 BotCommand("history", "Your launches"),
+                BotCommand("following", "Creators you follow"),
                 BotCommand("drafts", "Scheduled launches"),
                 BotCommand("claim", "Claim your trading fees"),
                 BotCommand("timezone", "Set your time zone"),

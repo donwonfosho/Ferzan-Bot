@@ -471,6 +471,10 @@ def complete_request(request_id: str, body: CompleteRequest):
     if channel:
         _notify_telegram(channel, text, photo=req.image_url or "",
                          markup=_growth_buttons(req, token_addr, curve_addr, trade_only=True))
+    try:  # people who follow this creator get a DM (Launch Bot /start follow_<wallet>)
+        _notify_followers(req, token_addr, curve_addr or "")
+    except Exception as exc:
+        logger.warning("follower alerts failed %s: %s", request_id, exc)
     return {"status": "ok", "token": token_addr, "curve": curve_addr}
 
 
@@ -2756,6 +2760,209 @@ def search(q: str = "", limit: int = 12):
                           "progress": None, "graduated": False, "path": _site_path(r[0], tok, "")})
     items.sort(key=lambda i: (str(i["symbol"] or "").lower() != ql, -(i["mcap_usd"] or 0)))
     return {"items": items[:limit]}
+
+
+# ---- BATCH_E: transparency, creator pages, follow alerts ----
+_TRANS_CACHE: dict = {"t": 0.0, "v": None}
+
+
+@app.get("/api/transparency")
+def transparency():
+    """Public numbers: every FERZAN buyback and burn with its transactions, fees paid to creators,
+    and launches, graduations and volume per chain. Cached one minute."""
+    import json as _json
+    import sqlite3 as _sq
+
+    now = time.time()
+    if _TRANS_CACHE["v"] is not None and now - _TRANS_CACHE["t"] < 60:
+        return _TRANS_CACHE["v"]
+    burns, totals = [], {"claimed_sol": 0.0, "bought_sol": 0.0, "burned": 0.0, "forward_sol": 0.0}
+    try:
+        fw = _json.loads(_Path(_FLYWHEEL_STATE).read_text())
+        t = fw.get("totals") or {}
+        totals = {"claimed_sol": float(t.get("claimed_sol") or 0), "bought_sol": float(t.get("bought_sol") or 0),
+                  "burned": int(t.get("burned_raw") or 0) / 1e6, "forward_sol": float(t.get("forward_sol") or 0)}
+        for day, d in sorted((fw.get("days") or {}).items(), reverse=True):
+            if not d.get("live"):
+                continue  # plan-only runs sent nothing
+            ok = lambda s: s if isinstance(s, str) and _re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{60,100}", s) else ""  # noqa: E731
+            burns.append({"day": day, "claimed_sol": float(d.get("claimed_sol") or 0), "bought_sol": float(d.get("bought_sol") or 0),
+                          "burned": int(d.get("burned_raw") or 0) / 1e6, "forward_sol": float(d.get("forward_sol") or 0),
+                          "buy_tx": ok(d.get("buy_sig")), "burn_tx": ok(d.get("burn_sig")),
+                          "claim_txs": [ok(x) for x in (d.get("claim_sigs") or []) if ok(x)][:10]})
+    except Exception:
+        pass
+    chains: dict = {}
+    creators_native: dict = {}
+    trades_24h = traders_24h = trades_all = 0
+    c = _idx_db()
+    try:
+        if c is not None:
+            cols = {r[1] for r in c.execute("PRAGMA table_info(trades)")}
+            for r in c.execute("SELECT chain, COUNT(*) AS n, SUM(graduated) AS g, SUM(volume) AS v FROM curves GROUP BY chain"):
+                chains.setdefault(r["chain"], {}).update(curves=int(r["n"] or 0), graduated=int(r["g"] or 0), volume_native=float(r["v"] or 0))
+            since = int(now) - 86400
+            for r in c.execute("SELECT chain, COUNT(*) AS n, SUM(native) AS v FROM trades WHERE ts > ? GROUP BY chain", (since,)):
+                chains.setdefault(r["chain"], {}).update(trades_24h=int(r["n"] or 0), volume_24h_native=float(r["v"] or 0))
+            row = c.execute("SELECT COUNT(*), COUNT(DISTINCT trader) FROM trades WHERE ts > ?", (since,)).fetchone()
+            trades_24h, traders_24h = int(row[0] or 0), int(row[1] or 0)
+            trades_all = int(c.execute("SELECT COUNT(*) FROM trades").fetchone()[0] or 0)
+            if "fee" in cols:  # creators get half of every curve trading fee (EVM and Tron curves record the exact fee)
+                for r in c.execute("SELECT chain, SUM(fee) FROM trades WHERE fee IS NOT NULL AND chain != 'solana' GROUP BY chain"):
+                    creators_native[r[0]] = float(r[1] or 0) * 0.5
+    finally:
+        if c is not None:
+            c.close()
+    with db._get_conn() as conn:
+        for ch, n in conn.execute("SELECT chain, COUNT(*) FROM launch_requests WHERE status = 'confirmed' "
+                                  "AND result_token_address IS NOT NULL GROUP BY chain"):
+            chains.setdefault(ch, {})["launches"] = int(n or 0)
+    rows = []
+    for ch, d in chains.items():
+        usd = _native_usd(ch)
+        rows.append({"chain": ch, "name": _CHAIN_NAME.get(ch, ch), "unit": _NATIVE_SYM.get(ch, ""),
+                     "launches": d.get("launches", d.get("curves", 0)), "graduated": d.get("graduated", 0),
+                     "volume_usd": round(d.get("volume_native", 0) * usd, 2), "volume_24h_usd": round(d.get("volume_24h_native", 0) * usd, 2),
+                     "trades_24h": d.get("trades_24h", 0), "creator_fees_native": round(creators_native.get(ch, 0.0), 6),
+                     "creator_fees_usd": round(creators_native.get(ch, 0.0) * usd, 2)})
+    rows.sort(key=lambda x: (x["launches"], x["volume_usd"]), reverse=True)
+    sol = _native_usd("solana")
+    out = {"now": int(now), "ferzan_live": bool(_ferzan_block(None).get("live")), "burn": {**totals, "bought_usd": round(totals["bought_sol"] * sol, 2)},
+           "burns": burns[:60], "chains": rows,
+           "totals": {"launches": sum(r["launches"] for r in rows), "graduated": sum(r["graduated"] for r in rows),
+                      "volume_usd": round(sum(r["volume_usd"] for r in rows), 2), "creator_fees_usd": round(sum(r["creator_fees_usd"] for r in rows), 2),
+                      "trades_24h": trades_24h, "traders_24h": traders_24h, "trades_all": trades_all},
+           "multisig": "2vWqwX72ijo24vgvPQW6yBQh2qXE4jrEd18YDdEbWKLG"}
+    _TRANS_CACHE.update(t=now, v=out)
+    return out
+
+
+def _follow_db():
+    import sqlite3 as _sq
+
+    conn = _sq.connect(db.DB_PATH, timeout=10)
+    conn.execute("CREATE TABLE IF NOT EXISTS creator_follows (user_id INTEGER NOT NULL, wallet TEXT NOT NULL, created_at INTEGER, "
+                 "PRIMARY KEY (user_id, wallet))")
+    return conn
+
+
+def _followers(wallet: str) -> list:
+    try:
+        conn = _follow_db()
+        rows = [int(r[0]) for r in conn.execute("SELECT user_id FROM creator_follows WHERE wallet = ?", (_norm_addr(wallet),))]
+        conn.close()
+        return rows
+    except Exception:
+        return []
+
+
+def _notify_followers(req, token: str, curve: str) -> None:
+    """DM everyone who follows this creator (from the Launch Bot), in the background."""
+    users = _followers(req.wallet_address or "")
+    if not users or not TELEGRAM_BOT_TOKEN:
+        return
+    import threading
+
+    path = _site_path(req.chain, token, curve or "")
+    who = (req.wallet_address or "")[:4] + "…" + (req.wallet_address or "")[-4:]
+    text = (f"🆕 A creator you follow ({who}) just launched <b>{_html.escape(req.name or '')}</b> "
+            f"(${_html.escape(req.symbol or '')}) on {_CHAIN_NAME.get(req.chain, req.chain)}.\n\n"
+            f"https://ferzan-factory.com{path}\n\nStop these alerts: /following")
+
+    def go():
+        for uid in users[:5000]:
+            try:
+                requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                              json={"chat_id": uid, "text": text, "parse_mode": "HTML", "disable_web_page_preview": False}, timeout=10)
+            except Exception:
+                pass
+            time.sleep(0.05)  # stays under Telegram's 30 messages a second
+
+    threading.Thread(target=go, daemon=True).start()
+
+
+_CREATOR_CACHE: dict = {}
+
+
+@app.get("/api/creator/{wallet}")
+def creator_page(wallet: str):
+    """Everything one wallet launched through Ferzan, with its track record and FERZAN badge."""
+    import json as _json
+    from datetime import datetime as _dt
+
+    if not _re.fullmatch(_ADDR_ANY, wallet or ""):
+        raise HTTPException(404, "not found")
+    key = _norm_addr(wallet)
+    hit = _CREATOR_CACHE.get(key)
+    if hit and time.time() - hit[0] < 60:
+        return hit[1]
+    hide = _feed_hidden()
+    with db._get_conn() as conn:
+        rows = conn.execute(
+            "SELECT id, chain, mode, name, symbol, image_url, result_token_address, extra_params, created_at, wallet_address FROM launch_requests "
+            "WHERE status = 'confirmed' AND result_token_address IS NOT NULL AND (wallet_address = ? OR LOWER(wallet_address) = ?) "
+            "ORDER BY created_at DESC LIMIT 200", (wallet, key.lower())).fetchall()
+    if not rows:
+        out = {"found": False}
+        _CREATOR_CACHE[key] = (time.time(), out)
+        return out
+
+    def ts(v):
+        try:
+            return int(_dt.fromisoformat(str(v).replace("Z", "+00:00")).timestamp())
+        except ValueError:
+            return 0
+
+    items, grads, best, vol = [], 0, 0.0, 0.0
+    c = _idx_db()
+    try:
+        for r in rows:
+            tok = r["result_token_address"]
+            if str(tok).lower() in hide:
+                continue
+            try:
+                curve = (_json.loads(r["extra_params"] or "{}").get("curve_address") or "").strip()
+            except ValueError:
+                curve = ""
+            cv = _coin_row(c, r["chain"], tok) if c is not None else None
+            usd = _native_usd(r["chain"])
+            it = {"chain": r["chain"], "token": tok, "name": r["name"], "symbol": r["symbol"],
+                  "image": r["image_url"] if str(r["image_url"] or "").startswith("https://") else "",
+                  "launched_ts": ts(r["created_at"]), "mode": r["mode"], "mcap_usd": 0.0, "progress": None, "graduated": False,
+                  "volume_usd": 0.0, "path": _site_path(r["chain"], tok, curve)}
+            if cv:
+                it.update(mcap_usd=round(float(cv["mcap"] or 0) * usd, 2), progress=round(_progress(cv), 1), graduated=bool(cv["graduated"]),
+                          volume_usd=round(float(cv["volume"] or 0) * usd, 2), path=_site_path(cv["chain"], cv["token"], cv["curve"]))
+                grads += 1 if cv["graduated"] else 0
+                best = max(best, it["mcap_usd"])
+                vol += it["volume_usd"]
+            items.append(it)
+    finally:
+        if c is not None:
+            c.close()
+    score = {}
+    if items:
+        try:
+            s = creator_score(items[0]["token"])
+            if s.get("found"):
+                score = {"score": s["score"], "label": s["label"], "lines": s["lines"][:6]}
+        except Exception:
+            score = {}
+    badge = ""
+    try:
+        import ferzan_perks as _fp
+        badge = _fp.perks(rows[0]["wallet_address"] or "").get("badge") or ""
+    except Exception:
+        pass
+    firsts = [i["launched_ts"] for i in items if i["launched_ts"]]
+    out = {"found": True, "wallet": rows[0]["wallet_address"], "launches": len(items), "graduated": grads, "best_mcap_usd": best,
+           "volume_usd": round(vol, 2), "chains": sorted({i["chain"] for i in items}), "first_launch_ts": min(firsts) if firsts else 0,
+           "followers": len(_followers(rows[0]["wallet_address"] or "")), "badge": badge, "score": score, "items": items[:100],
+           "follow_url": f"https://t.me/{(os.environ.get('LAUNCH_BOT_USERNAME') or 'Ferzan_Launch_Bot').lstrip('@')}?start=follow_{rows[0]['wallet_address']}"}
+    _CREATOR_CACHE[key] = (time.time(), out)
+    if len(_CREATOR_CACHE) > 500:
+        _CREATOR_CACHE.clear()
+    return out
 
 
 @app.on_event("startup")
