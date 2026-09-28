@@ -119,13 +119,14 @@ def _graduate(curve: str) -> dict:
 
 def _admin_note(idx_conn, key: str, text: str) -> None:
     """One Telegram note to the admin per key (e.g. 'the keeper wallet needs TRX')."""
-    admin = (os.environ.get("ADMIN_TELEGRAM_ID") or "").split(",")[0].strip()
+    admins = {x.strip() for x in ((os.environ.get("FERZAN_ADMIN_IDS") or "") + "," +
+                                  (os.environ.get("ADMIN_TELEGRAM_ID") or "")).split(",") if x.strip()}
     with idx_conn() as c:
         if c.execute("SELECT 1 FROM alert_state WHERE k = ?", (key,)).fetchone():
             return
         c.execute("INSERT OR REPLACE INTO alert_state (k, v) VALUES (?, ?)", (key, str(int(time.time()))))
     token = os.environ.get("LAUNCHBOT_TOKEN") or os.environ.get("TELEGRAM_BOT_TOKEN") or ""
-    if admin and token:
+    for admin in admins if token else ():
         try:
             requests.post(f"https://api.telegram.org/bot{token}/sendMessage",
                           json={"chat_id": admin, "text": text, "disable_web_page_preview": True}, timeout=15)
