@@ -33,6 +33,47 @@ def _jito_headers() -> dict:
 
 
 DEFAULT_FEE_LAMPORTS = 1_000_000  # 0.001 SOL — what the bot always spent
+JITO_TIP_FLOOR = "https://bundles.jito.wtf/api/v1/bundles/tip_floor"
+_TIP_CACHE: dict = {"t": 0.0, "row": {}}
+
+
+def _tip_floor_row() -> dict:
+    """Jito's live landed-tip percentiles (SOL), cached 20 s. {} when Jito doesn't answer."""
+    import time as _t
+
+    if _t.time() - _TIP_CACHE["t"] < 20:
+        return _TIP_CACHE["row"]
+    row: dict = {}
+    try:
+        d = requests.get(JITO_TIP_FLOOR, timeout=4).json()
+        row = (d[0] if isinstance(d, list) and d else d) or {}
+    except Exception:
+        row = {}
+    _TIP_CACHE.update(t=_t.time(), row=row if isinstance(row, dict) else {})
+    return _TIP_CACHE["row"]
+
+
+def auto_tip_lamports() -> int:
+    """Dynamic tip: what it takes to land in the next blocks right now, instead of a fixed 0.001 SOL.
+    Uses Jito's live landed-tip percentile (TIP_AUTO_PCTL, default 75), capped at TIP_AUTO_MAX_SOL (0.01).
+    Quiet network -> tiny tip; launch rush -> higher tip, never above the cap. Jito down -> the old default."""
+    try:
+        pctl = int(os.getenv("TIP_AUTO_PCTL", "75"))
+        cap = int(float(os.getenv("TIP_AUTO_MAX_SOL", "0.01")) * 1_000_000_000)
+    except ValueError:
+        pctl, cap = 75, 10_000_000
+    pctl = pctl if pctl in (25, 50, 75, 95, 99) else 75
+    row = _tip_floor_row()
+    sol = row.get(f"landed_tips_{pctl}th_percentile")
+    try:
+        lamports = int(float(sol) * 1_000_000_000 * 1.1)  # +10% headroom over the recent landed level
+    except (TypeError, ValueError):
+        return DEFAULT_FEE_LAMPORTS
+    return max(JITO_MIN_TIP, min(cap, lamports))
+
+
+def tip_auto_on() -> bool:
+    return (os.getenv("TIP_AUTO", "1").strip().lower()) not in {"0", "false", "off", "no"}
 
 
 def exec_opts(user_id: int | None) -> dict:
@@ -48,12 +89,16 @@ def exec_opts(user_id: int | None) -> dict:
             gas_sol = float(db.get_chain_trade(int(user_id), "sol").get("gas") or 0)
         except Exception:
             pass
-    fee = int(gas_sol * 1_000_000_000) if gas_sol > 0 else int(
-        os.getenv("PRIORITY_FEE_LAMPORTS", str(DEFAULT_FEE_LAMPORTS))
-    )
+    auto = gas_sol <= 0 and tip_auto_on()  # the user's own ⛽ gas always wins over the automatic tip
+    if gas_sol > 0:
+        fee = int(gas_sol * 1_000_000_000)
+    elif auto:
+        fee = auto_tip_lamports()
+    else:
+        fee = int(os.getenv("PRIORITY_FEE_LAMPORTS", str(DEFAULT_FEE_LAMPORTS)))
     if anti_mev_paused():
         anti_mev = False  # desk-wide pause: nobody pays a tip for protection they aren't getting
-    return {"anti_mev": bool(anti_mev), "fee_lamports": max(JITO_MIN_TIP, fee)}
+    return {"anti_mev": bool(anti_mev), "fee_lamports": max(JITO_MIN_TIP, fee), "tip_auto": auto}
 
 
 def anti_mev_paused() -> bool:
@@ -228,6 +273,7 @@ def _swap_send_sender(quote: dict, kp, opts: dict, _retry: bool = True) -> tuple
 
     mev = bool(opts.get("anti_mev"))
     prio, tip = sender.fees(mev, int(opts["fee_lamports"]))
+    opts["tip_paid"] = tip
     rpc = _rpc()
     try:
         wire, sig, last_valid = sender.build(quote, kp, rpc, prio, tip)
@@ -353,6 +399,8 @@ def _swap_send_jito(quote: dict, kp, tip: int, opts: dict | None = None) -> tupl
 
     try:
         swap = _jupiter_swap_tx(quote, kp, {"jitoTipLamports": max(JITO_MIN_TIP, tip)})
+        if opts is not None:
+            opts["tip_paid"] = max(JITO_MIN_TIP, tip)
     except requests.RequestException as exc:
         return False, f"Jupiter swap failed: {exc}"
     raw_tx = swap.get("swapTransaction")
@@ -667,7 +715,14 @@ def buy_sol(
     if not ok:
         return False, res
     route = opts.get("route_used") or ("Jito · MEV-protected" if opts["anti_mev"] else "priority fee")
-    return True, f"Live SOL buy ~${usd:.2f} · confirmed · {route}\nhttps://solscan.io/tx/{res}"
+    return True, f"Live SOL buy ~${usd:.2f} · confirmed · {route}{_tip_note(opts)}\nhttps://solscan.io/tx/{res}"
+
+
+def _tip_note(opts: dict) -> str:
+    t = opts.get("tip_paid")
+    if not t:
+        return ""
+    return f" · tip {t / 1e9:.5f} SOL" + (" (auto)" if opts.get("tip_auto") else "")
 
 
 def _token_raw_balance(mint: str, kp=None) -> int:
@@ -881,4 +936,4 @@ def sell_sol(
         return False, res
     bag_note = "full bag" if pct >= 100 else f"{pct}% of bag"
     route = opts.get("route_used") or ("Jito · MEV-protected" if opts["anti_mev"] else "priority fee")
-    return True, f"Live SOL sell ({bag_note}) · confirmed · {route}\nhttps://solscan.io/tx/{res}"
+    return True, f"Live SOL sell ({bag_note}) · confirmed · {route}{_tip_note(opts)}\nhttps://solscan.io/tx/{res}"

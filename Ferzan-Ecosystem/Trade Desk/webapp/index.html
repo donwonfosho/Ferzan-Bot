@@ -95,6 +95,16 @@
   .sheet .x { background: var(--sunk); border: 0; border-radius: 999px; width: 32px; height: 32px; font-size: 16px; color: var(--ink); }
   .sheet .px { color: var(--muted); font-size: 13px; margin: 0 0 12px; }
   .sec { background: var(--card); border-radius: 14px; padding: 12px; margin-bottom: 12px; }
+  .chartbox { width: 100%; height: 340px; border: 0; border-radius: 12px; background: var(--sunk); display: block; }
+  .slide { display: grid; gap: 10px; }
+  .slide .big { font-size: 34px; font-weight: 800; text-align: center; font-variant-numeric: tabular-nums; }
+  .slide .big small { display: block; font-size: 13px; font-weight: 500; color: var(--muted); }
+  .slide input[type=range] { width: 100%; height: 36px; accent-color: var(--btn); touch-action: none; }
+  .slide .marks { display: flex; gap: 6px; }
+  .slide .marks button { flex: 1; border: 0; border-radius: 999px; padding: 8px 0; font: inherit; font-size: 13px; font-weight: 700;
+                         background: var(--sunk); color: var(--ink); }
+  .slide .marks button:disabled { opacity: .35; }
+  .slide .go { width: 100%; padding: 14px; font-size: 16px; }
   .sec h3 { font-size: 15px; margin: 0 0 2px; }
   .sec .why { color: var(--muted); font-size: 12px; margin: 0 0 10px; }
   .field { display: grid; grid-template-columns: 1fr 110px; align-items: center; gap: 8px; margin-bottom: 8px; font-size: 14px; }
@@ -282,9 +292,10 @@
           <div class="actions">
             <div class="arow">${sellPcts().map((v) => `<span class="act primary" data-sellpct="${v}" data-mint="${esc(p.mint)}" data-sym="${esc(p.symbol)}">Sell ${v}%</span>`).join("")}</div>
             <div class="arow">
+              <span class="act ghost" data-trade="${i}">🎚 Slide to sell</span>
               <span class="act ghost" data-rules="${esc(p.mint)}" data-sym="${esc(p.symbol)}" data-px="${p.price || 0}">⚙️ Rules</span>
               ${p.pnl != null ? `<span class="act ghost" data-card="${esc(p.mint)}">📸 Card</span>` : ""}
-              ${p.chart ? `<span class="act ghost" data-chart="${esc(p.chart)}">📈 Chart</span>` : ""}
+              ${p.chart ? `<span class="act ghost" data-${embedUrl(p.chart) ? "trade" : "chart"}="${embedUrl(p.chart) ? i : esc(p.chart)}">📈 Chart</span>` : ""}
               <span class="act ghost" data-sell="${esc(p.mint)}">💬 Bot</span>
             </div>
           </div>
@@ -302,6 +313,8 @@
     const sp = e.target.closest("[data-sellpct]");
     if (sp) { order({ side: "sell", mint: sp.dataset.mint, amount: +sp.dataset.sellpct, unit: "pct" },
                     `Sell ${sp.dataset.sellpct}% of $${sp.dataset.sym}?`); return; }
+    const tr = e.target.closest("[data-trade]");
+    if (tr) { openTrade(data.positions[+tr.dataset.trade]); return; }
     const ru = e.target.closest("[data-rules]");
     if (ru) { openRules(ru.dataset.rules, ru.dataset.sym, +ru.dataset.px); return; }
     const cd = e.target.closest("[data-card]");
@@ -394,7 +407,8 @@
           <input id="alertTarget" placeholder="🔔 Alert at 2m, +50%, price 0.0012" aria-label="Alert target">
           <button class="btn ghost" type="submit">Set</button></form>
         <div class="btnrow" style="margin-top:8px"><button class="btn ghost" data-rules="${esc(t.mint)}" data-sym="${esc(t.symbol)}" data-px="${t.price || 0}">⏳ Limit buy · 📅 DCA</button></div>
-        ${t.chart ? `<p style="margin:10px 0 0"><a href="#" data-chart="${esc(t.chart)}" style="color:var(--link)">Open chart ↗</a></p>` : ""}`;
+        ${embedUrl(t.chart) ? `<iframe class="chartbox" style="margin-top:10px" loading="lazy" title="Chart" src="${esc(embedUrl(t.chart))}"></iframe>` : ""}
+        ${t.chart ? `<p style="margin:10px 0 0"><a href="#" data-chart="${esc(t.chart)}" style="color:var(--link)">Open full chart ↗</a></p>` : ""}`;
     } catch (err) {
       box.innerHTML = `<div class="error" style="padding:12px">${esc(err.message)}</div>`;
     } finally { $("findBtn").disabled = false; $("findBtn").textContent = "Find"; }
@@ -443,6 +457,51 @@
       await api("/api/card", { mint });
       toast("📸 Card on its way to your chat — forward it anywhere.", 4000);
     } catch (err) { toast("🔴 " + err.message, 4000); }
+  }
+
+  // ---- trade sheet: live chart + slide-to-sell -----------------------------
+  function embedUrl(u) {
+    try {
+      const x = new URL(u);
+      if (!/(^|\.)dexscreener\.com$/.test(x.hostname)) return "";
+      const th = document.documentElement.dataset.theme === "dark" ? "dark" : "light";
+      x.search = `?embed=1&loadChartSettings=0&trades=0&tabs=0&info=0&chartLeftToolbar=0&chartDefaultOnMobile=1&chartTheme=${th}&theme=${th}&chartStyle=1&chartType=usd&interval=5`;
+      return x.toString();
+    } catch (e) { return ""; }
+  }
+  const fullBagOnly = (p) => /^(trx|tron)$/i.test(p.chain || "");
+  function openTrade(p) {
+    if (!p) return;
+    sheetMint = p.mint; sheetSym = p.symbol || "TOKEN"; sheetPx = p.price || 0;
+    $("sheetTitle").textContent = `$${sheetSym}`;
+    $("sheetPx").textContent = (p.priced ? `Bag ${usd(p.value)}` : "Bag unpriced") + (sheetPx ? ` · $${px(sheetPx)}` : "");
+    const emb = p.chart ? embedUrl(p.chart) : "";
+    const only100 = fullBagOnly(p);
+    $("sheetBody").innerHTML = `
+      ${emb ? `<div class="sec" style="padding:6px"><iframe class="chartbox" title="Chart" src="${esc(emb)}"></iframe></div>` : ""}
+      <div class="sec slide">
+        <div class="big" id="slPct">${only100 ? 100 : 50}%<small id="slUsd"></small></div>
+        <input type="range" id="slRange" min="1" max="100" step="1" value="${only100 ? 100 : 50}" ${only100 ? "disabled" : ""} aria-label="Percent of the bag to sell">
+        <div class="marks">${[10, 25, 50, 75, 100].map((v) => `<button type="button" data-mark="${v}" ${only100 && v < 100 ? "disabled" : ""}>${v}%</button>`).join("")}</div>
+        ${only100 ? `<p class="why">Tron sells are whole-bag only for now.</p>` : ""}
+        <button class="btn go" id="slGo" type="button">Sell 50%</button>
+      </div>`;
+    const range = $("slRange");
+    const paint = () => {
+      const v = +range.value;
+      $("slPct").firstChild.nodeValue = `${v}%`;
+      $("slUsd").textContent = p.priced && p.value ? `≈ ${usd(p.value * v / 100)}` : "";
+      $("slGo").textContent = `Sell ${v}% of $${sheetSym}`;
+    };
+    range.addEventListener("input", () => { paint(); tg && tg.HapticFeedback && tg.HapticFeedback.selectionChanged(); });
+    $("sheetBody").querySelectorAll("[data-mark]").forEach((b) => b.addEventListener("click", () => { range.value = b.dataset.mark; paint(); }));
+    $("slGo").addEventListener("click", () => {
+      const v = +range.value;
+      closeSheet();
+      order({ side: "sell", mint: p.mint, amount: v, unit: "pct" }, `Sell ${v}% of $${sheetSym || p.symbol}?`);
+    });
+    paint();
+    $("sheet").hidden = false; $("sheetBg").hidden = false;
   }
 
   // ---- rules sheet: exit rules, limit buys, DCA -------------------------
