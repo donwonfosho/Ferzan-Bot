@@ -185,33 +185,41 @@ def main():
         built = compile_all()
         for n, (_a, b) in built.items():
             print(f"Bytecode     : {n} {len(b) // 2:,} bytes")
-        if net.get("curve_factory"):
-            print(f"Already deployed: curve factory {net['curve_factory']}")
+        if net.get("curve_factory_v2"):
+            print(f"Already deployed: curve factory v2 {net['curve_factory_v2']}")
             return
-        if bal < 320_000_000:  # a full deploy measured 292 TRX on Nile
+        need = 260_000_000 if net.get("curve_token_master") else 320_000_000  # v2 reuses the coin master
+        if bal < need:
             where = "from the Nile faucet (https://nileex.io/join/getJoinPage)" if NET == "nile" else "on Tron"
-            print(f"\nNEXT: get about 320 TRX {where} to {owner}, then run plan again.")
+            print(f"\nNEXT: get about {need // 1_000_000} TRX {where} to {owner}, then run plan again.")
             return
         if MODE == "plan":
             print("\nPlan OK - nothing sent. Run with 'send' to deploy.")
             return
-        for label, name in (("curve_token_master", "FerzanTronCurveToken"), ("curve_master", "FerzanTronCurve")):
-            if not net.get(label):
-                net[label] = deploy(name, *built[name], "", owner, key)
-                RECORD.write_text(json.dumps(rec, indent=1))
-        params = encode(["address", "address", "address", "address", "address", "uint256", "uint256", "uint256"], [
-            "0x" + hex41(net["curve_token_master"])[2:], "0x" + hex41(net["curve_master"])[2:], "0x" + hex41(dexf)[2:],
-            "0x" + hex41(wtrx)[2:], "0x" + hex41(treasury)[2:], int(fee_trx * 1e6), int(reward_trx * 1e6),
+        if not net.get("curve_token_master"):  # the coin master is unchanged in v2, so an existing one is reused
+            net["curve_token_master"] = deploy("FerzanTronCurveToken", *built["FerzanTronCurveToken"], "", owner, key)
+            RECORD.write_text(json.dumps(rec, indent=1))
+        if not net.get("curve_master_v2"):  # shared settings are immutables of the curve master in v2
+            cparams = encode(["address", "address", "address", "uint256"], [
+                "0x" + hex41(treasury)[2:], "0x" + hex41(wtrx)[2:], "0x" + hex41(dexf)[2:], int(reward_trx * 1e6)]).hex()
+            net["curve_master_v2"] = deploy("FerzanTronCurve", *built["FerzanTronCurve"], cparams, owner, key)
+            RECORD.write_text(json.dumps(rec, indent=1))
+        params = encode(["address", "address", "uint256", "uint256"], [
+            "0x" + hex41(net["curve_token_master"])[2:], "0x" + hex41(net["curve_master_v2"])[2:], int(fee_trx * 1e6),
             int(min_grad_trx * 1e6)]).hex()
-        net["curve_factory"] = deploy("FerzanTronCurveFactory", *built["FerzanTronCurveFactory"], params, owner, key)
+        net["curve_factory_v2"] = deploy("FerzanTronCurveFactory", *built["FerzanTronCurveFactory"], params, owner, key)
         RECORD.write_text(json.dumps(rec, indent=1))
-        print(f"\nTRON_CURVE_FACTORY_{'NILE' if NET == 'nile' else 'MAINNET'}={net['curve_factory']}")
+        f2 = net["curve_factory_v2"]
+        print(f"  factory reads: treasury {b58(word_addr(const(f2, 'platformTreasury()')))}, "
+              f"reward {int(const(f2, 'gradRewardSun()') or '0', 16) / 1e6:g} TRX, fee {int(const(f2, 'launchFeeSun()') or '0', 16) / 1e6:g} TRX, "
+              f"min graduation {int(const(f2, 'minGradTarget()') or '0', 16) / 1e6:g} TRX")
+        print(f"\nTRON_CURVE_FACTORY_{'NILE' if NET == 'nile' else 'MAINNET'}={f2}")
         return
 
     # ---------------- live test on Nile: launch -> buy -> sell -> fill -> graduate -> check the pool
-    fac = net.get("curve_factory")
+    fac = net.get("curve_factory_v2")
     if not fac:
-        sys.exit("ABORT: deploy the curve factory first")
+        sys.exit("ABORT: deploy the v2 curve factory first (nile send)")
     fee_sun = int(const(fac, "launchFeeSun()") or "0", 16)
     grad = 30_000_000  # 30 TRX target keeps the test cheap
     supply = 1_000_000_000 * 10**6

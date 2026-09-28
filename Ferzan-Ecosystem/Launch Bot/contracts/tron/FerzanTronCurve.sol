@@ -36,6 +36,9 @@ interface IV2Factory {
 ///     the caller to cover that energy) and the matching coins at the curve's final price, burns the LP tokens
 ///     and burns the leftover coins. Ferzan's server calls it automatically.
 ///   - No owner, no admin, no upgrade, no pause.
+///   - v2 (lower launch energy): settings shared by every curve (treasury, WTRX, SunSwap factory, graduation
+///     reward) are immutables in the master copy, so a launch does not write them again; the per-curve state is
+///     packed into 5 storage slots instead of 15. Same public interface as v1.
 contract FerzanTronCurve {
     uint256 public constant FEE_BPS = 100;
     uint256 public constant CREATOR_SHARE_BPS = 5000;
@@ -44,29 +47,33 @@ contract FerzanTronCurve {
     uint256 private constant DUST_BPS = 1;        // complete when within 0.01% of the target
     address public constant DEAD = address(0xdead);
 
-    address public factory;
-    address public token;
-    address public creator;
-    address public platformTreasury;
-    address public wtrx;
-    address public dexFactory;
-    address public pool;          // the SunSwap pair, set at graduation
-    uint256 public gradTarget;    // net TRX (sun) raised that completes the curve
-    uint256 public virtualEth;
-    uint256 public virtualToken;
-    uint256 public curveSupply;
-    uint256 public startTime;
-    uint256 public maxBuyPerWallet;
-    uint256 public gradReward;    // sun paid to whoever calls graduate()
+    // shared by every clone (read from the master's code, never written per launch)
+    address public immutable platformTreasury;
+    address public immutable wtrx;
+    address public immutable dexFactory;
+    uint256 public immutable gradReward; // sun paid to whoever calls graduate()
 
-    uint256 public realEth;
-    uint256 public tokensSold;
+    // slot 0
+    address public token;
+    uint40 public startTime;
     bool public complete;
     bool public graduated;
-    mapping(address => uint256) public boughtNative;
-
     bool private _initialized;
-    uint256 private _lock = 1;
+    uint8 private _lock;
+    // slot 1
+    address public creator;
+    uint96 public gradTarget;      // net TRX (sun) raised that completes the curve
+    // slot 2
+    address public factory;
+    uint96 public maxBuyPerWallet;
+    // slot 3
+    uint96 public realEth;
+    uint160 public tokensSold;
+    // slot 4
+    uint256 public curveSupply;
+    // written at graduation only
+    address public pool;           // the SunSwap pair
+    mapping(address => uint256) public boughtNative;
 
     event Trade(
         address indexed trader,
@@ -89,56 +96,56 @@ contract FerzanTronCurve {
         _lock = 1;
     }
 
-    constructor() {
+    constructor(address platformTreasury_, address wtrx_, address dexFactory_, uint256 gradReward_) {
+        require(platformTreasury_ != address(0) && wtrx_ != address(0) && dexFactory_ != address(0), "zero");
+        platformTreasury = platformTreasury_;
+        wtrx = wtrx_;
+        dexFactory = dexFactory_;
+        gradReward = gradReward_;
         _initialized = true; // lock the master copy
     }
 
     struct Init {
         address token;
         address creator;
-        address platformTreasury;
-        address wtrx;
-        address dexFactory;
         uint256 curveSupply;
         uint256 gradTarget;
         uint256 startTime;
         uint256 maxBuyPerWallet;
-        uint256 gradReward;
     }
 
     function initialize(Init calldata p) external {
         require(!_initialized, "initialized");
-        require(
-            p.token != address(0) && p.creator != address(0) && p.platformTreasury != address(0) && p.wtrx != address(0)
-                && p.dexFactory != address(0),
-            "zero"
-        );
+        require(p.token != address(0) && p.creator != address(0), "zero");
         require(p.gradTarget >= 1e6 && p.gradTarget <= 1e17, "grad target");
         require(p.curveSupply >= 1e6 && p.curveSupply <= 2.5e30, "supply");
+        require(p.startTime <= type(uint40).max && p.maxBuyPerWallet <= type(uint96).max, "range");
+        token = p.token;
+        startTime = uint40(p.startTime);
         _initialized = true;
         _lock = 1;
-        factory = msg.sender;
-        token = p.token;
         creator = p.creator;
-        platformTreasury = p.platformTreasury;
-        wtrx = p.wtrx;
-        dexFactory = p.dexFactory;
+        gradTarget = uint96(p.gradTarget);
+        factory = msg.sender;
+        maxBuyPerWallet = uint96(p.maxBuyPerWallet);
         curveSupply = p.curveSupply;
-        gradTarget = p.gradTarget;
-        startTime = p.startTime;
-        maxBuyPerWallet = p.maxBuyPerWallet;
-        gradReward = p.gradReward;
-        virtualEth = p.gradTarget / 3;
-        virtualToken = (p.curveSupply * 16) / 15;
     }
 
     // ------------------------------------------------------------ views --
+    function virtualEth() public view returns (uint256) {
+        return uint256(gradTarget) / 3;
+    }
+
+    function virtualToken() public view returns (uint256) {
+        return (curveSupply * 16) / 15;
+    }
+
     function ethReserve() public view returns (uint256) {
-        return virtualEth + realEth;
+        return virtualEth() + realEth;
     }
 
     function tokenReserve() public view returns (uint256) {
-        return virtualToken - tokensSold;
+        return virtualToken() - tokensSold;
     }
 
     /// Price of 1 whole coin (1e6 units) in sun.
@@ -148,7 +155,7 @@ contract FerzanTronCurve {
 
     function progressBps() external view returns (uint256) {
         if (complete) return 10_000;
-        return (realEth * 10_000) / gradTarget;
+        return (uint256(realEth) * 10_000) / gradTarget;
     }
 
     function quoteBuy(uint256 nativeIn)
@@ -159,7 +166,7 @@ contract FerzanTronCurve {
         require(!complete, "curve complete");
         require(nativeIn > 0, "zero in");
         uint256 net = nativeIn - (nativeIn * FEE_BPS) / 10_000;
-        uint256 room = gradTarget - realEth;
+        uint256 room = uint256(gradTarget) - realEth;
         grossUsed = nativeIn;
         if (net >= room) {
             net = room;
@@ -203,8 +210,8 @@ contract FerzanTronCurve {
         (uint256 out, uint256 fee) = quoteSell(tokenIn);
         require(out >= minNativeOut, "slippage");
         require(ITrc20(token).transferFrom(msg.sender, address(this), tokenIn), "transferFrom");
-        tokensSold -= tokenIn;
-        realEth -= out + fee;
+        tokensSold -= uint160(tokenIn);
+        realEth -= uint96(out + fee);
         emit Trade(msg.sender, false, out, tokenIn, fee, referrer, realEth, tokensSold);
         _splitFee(fee, referrer, msg.sender);
         _send(msg.sender, out);
@@ -218,12 +225,12 @@ contract FerzanTronCurve {
             require(boughtNative[to] + grossUsed <= maxBuyPerWallet, "max buy per wallet");
         }
         if (capped) boughtNative[to] += grossUsed;
-        tokensSold += tokensOut;
-        realEth += grossUsed - fee;
+        tokensSold += uint160(tokensOut);
+        realEth += uint96(grossUsed - fee);
         require(ITrc20(token).transfer(to, tokensOut), "transfer");
         emit Trade(to, true, grossUsed, tokensOut, fee, referrer, realEth, tokensSold);
         _splitFee(fee, referrer, to);
-        if (realEth + (gradTarget * DUST_BPS) / 10_000 >= gradTarget) {
+        if (uint256(realEth) + (uint256(gradTarget) * DUST_BPS) / 10_000 >= gradTarget) {
             complete = true;
             emit Completed(realEth, tokensSold);
         }

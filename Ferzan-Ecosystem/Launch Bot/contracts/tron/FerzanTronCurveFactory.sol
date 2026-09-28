@@ -5,8 +5,8 @@ import {FerzanTronCurve} from "./FerzanTronCurve.sol";
 import {FerzanTronCurveToken} from "./FerzanTronCurveToken.sol";
 
 /// @notice Launches a Ferzan Tron bonding curve: a coin (clone) + its curve (clone) in one cheap transaction.
-/// No owner, no admin. Master copies, SunSwap V2 factory, WTRX, treasury, launch fee, graduation reward and
-/// minimum graduation target are fixed at deploy time.
+/// No owner, no admin. Master copies, launch fee and minimum graduation target are fixed at deploy time; the
+/// treasury, WTRX, SunSwap V2 factory and graduation reward live in the curve master (v2) and are read from it.
 /// msg.value = launchFeeSun + optional dev buy.
 contract FerzanTronCurveFactory {
     uint256 public constant MAX_START_DELAY = 7 days;
@@ -24,28 +24,16 @@ contract FerzanTronCurveFactory {
     event CurveLaunched(address indexed curve, address indexed token, address indexed creator);
     event CurveDetails(address indexed curve, address pool, uint256 gradTarget, uint256 startTime, uint256 devBuyWei);
 
-    constructor(
-        address tokenImpl_,
-        address curveImpl_,
-        address dexFactory_,
-        address wtrx_,
-        address platformTreasury_,
-        uint256 launchFeeSun_,
-        uint256 gradRewardSun_,
-        uint256 minGradTarget_
-    ) {
-        require(
-            tokenImpl_ != address(0) && curveImpl_ != address(0) && dexFactory_ != address(0) && wtrx_ != address(0)
-                && platformTreasury_ != address(0),
-            "zero"
-        );
+    constructor(address tokenImpl_, address curveImpl_, uint256 launchFeeSun_, uint256 minGradTarget_) {
+        require(tokenImpl_ != address(0) && curveImpl_ != address(0), "zero");
         tokenImpl = tokenImpl_;
         curveImpl = curveImpl_;
-        dexFactory = dexFactory_;
-        wtrx = wtrx_;
-        platformTreasury = platformTreasury_;
+        FerzanTronCurve master = FerzanTronCurve(curveImpl_);
+        dexFactory = master.dexFactory();
+        wtrx = master.wtrx();
+        platformTreasury = master.platformTreasury();
+        gradRewardSun = master.gradReward();
         launchFeeSun = launchFeeSun_;
-        gradRewardSun = gradRewardSun_;
         minGradTarget = minGradTarget_;
     }
 
@@ -71,14 +59,10 @@ contract FerzanTronCurveFactory {
             FerzanTronCurve.Init({
                 token: tokenAddress,
                 creator: msg.sender,
-                platformTreasury: platformTreasury,
-                wtrx: wtrx,
-                dexFactory: dexFactory,
                 curveSupply: totalSupply,
                 gradTarget: gradTarget,
                 startTime: start,
-                maxBuyPerWallet: maxBuyPerWallet,
-                gradReward: gradRewardSun
+                maxBuyPerWallet: maxBuyPerWallet
             })
         );
         if (launchFeeSun > 0) {
