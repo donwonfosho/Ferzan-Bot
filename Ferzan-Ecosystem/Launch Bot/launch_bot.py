@@ -300,8 +300,173 @@ async def following_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.message.reply_text(text, reply_markup=kb)
 
 
+# ---- coin alerts: ferzan-factory.com coin page "Alerts" opens /start watch_<chain>_<token> ----
+_WATCH_KINDS = {
+    "p50": "reaches 50% of its curve", "p90": "reaches 90% of its curve", "grad": "graduates",
+    "up50": "is up 50%", "x2": "does a 2x", "dn30": "is down 30%",
+}
+_WATCH_EVM = {"base", "bsc", "ethereum", "robinhood", "arc"}
+
+
+def _index_ro():
+    import sqlite3
+    path = os.environ.get("CURVE_INDEX_DB") or os.path.join(os.path.dirname(db.DB_PATH) or ".", "curve_index.db")
+    c = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=10)
+    c.row_factory = sqlite3.Row
+    return c
+
+
+def _watch_conn():
+    import sqlite3
+    conn = sqlite3.connect(db.DB_PATH, timeout=10)
+    conn.executescript(
+        "CREATE TABLE IF NOT EXISTS watch_coins (id INTEGER PRIMARY KEY AUTOINCREMENT, chain TEXT NOT NULL, token TEXT NOT NULL, "
+        "curve TEXT NOT NULL, symbol TEXT, UNIQUE (chain, token));"
+        "CREATE TABLE IF NOT EXISTS watch_alerts (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, coin_id INTEGER NOT NULL, "
+        "kind TEXT NOT NULL, base_price REAL, created_at INTEGER, fired_at INTEGER, UNIQUE (user_id, coin_id, kind));")
+    return conn
+
+
+def _coin_state(chain: str, token: str):
+    try:
+        c = _index_ro()
+        r = c.execute("SELECT * FROM curves WHERE chain = ? AND (token = ? OR lower(token) = lower(?))", (chain, token, token)).fetchone()
+        c.close()
+        return r
+    except Exception:
+        return None
+
+
+def _coin_progress(r) -> float:
+    g = int(r["grad_target"] or 0)
+    return 100.0 if r["graduated"] else (min(100.0, int(r["real_eth"] or 0) * 100.0 / g) if g else 0.0)
+
+
+def _coin_link(chain: str, token: str, curve: str) -> str:
+    if chain == "solana":
+        return f"https://ferzan-factory.com/coin/solana/{token}"
+    if chain in _WATCH_EVM:
+        return f"https://ferzan-factory.com/coin/{chain}/{curve.lower()}"
+    return f"https://t.me/{TRADE}?start=buy_{token}"
+
+
+async def _watch_start(update: Update, arg: str) -> None:
+    chain, _, token = arg.partition("_")
+    r = _coin_state(chain, token) if re.fullmatch(r"[a-z]{2,12}", chain) and _FOLLOW_ADDR.fullmatch(token or "") else None
+    if not r:
+        await update.effective_message.reply_text("Alerts work for coins on a Ferzan curve. I can't find this one; open it again from its page on ferzan-factory.com.")
+        return
+    conn = _watch_conn()
+    conn.execute("INSERT OR IGNORE INTO watch_coins (chain, token, curve, symbol) VALUES (?, ?, ?, ?)", (r["chain"], r["token"], r["curve"], r["symbol"]))
+    cid = conn.execute("SELECT id FROM watch_coins WHERE chain = ? AND token = ?", (r["chain"], r["token"])).fetchone()[0]
+    conn.commit()
+    conn.close()
+    prog = _coin_progress(r)
+    row1 = [InlineKeyboardButton(label, callback_data=f"wa:{k}:{cid}") for k, label, show in (
+        ("p50", "50% of curve", prog < 50 and not r["graduated"]), ("p90", "90% of curve", prog < 90 and not r["graduated"]),
+        ("grad", "🎓 Graduates", not r["graduated"])) if show]
+    row2 = [InlineKeyboardButton("📈 +50%", callback_data=f"wa:up50:{cid}"), InlineKeyboardButton("🚀 2x", callback_data=f"wa:x2:{cid}"),
+            InlineKeyboardButton("📉 −30%", callback_data=f"wa:dn30:{cid}")]
+    kb = InlineKeyboardMarkup([x for x in (row1, row2) if x] + [[InlineKeyboardButton("📋 My alerts", callback_data="wl:list")]])
+    await update.effective_message.reply_text(
+        f"🔔 Alerts for ${r['symbol']}\n{'Graduated' if r['graduated'] else f'{prog:.0f}% of the way to graduation'}.\n\n"
+        "Pick when I should message you. Price alerts count from the price right now.", reply_markup=kb)
+
+
+async def watch_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+    parts = (q.data or "").split(":")
+    conn = _watch_conn()
+    try:
+        if parts[0] == "wa" and len(parts) == 3 and parts[1] in _WATCH_KINDS and parts[2].isdigit():
+            coin = conn.execute("SELECT chain, token, symbol FROM watch_coins WHERE id = ?", (int(parts[2]),)).fetchone()
+            if not coin:
+                return
+            active = conn.execute("SELECT COUNT(*) FROM watch_alerts WHERE user_id = ? AND fired_at IS NULL", (uid,)).fetchone()[0]
+            if active >= 50:
+                await q.message.reply_text("You have 50 alerts waiting already. Remove some with /alerts first.")
+                return
+            r = _coin_state(coin[0], coin[1])
+            conn.execute("INSERT OR REPLACE INTO watch_alerts (user_id, coin_id, kind, base_price, created_at, fired_at) VALUES (?, ?, ?, ?, ?, NULL)",
+                         (uid, int(parts[2]), parts[1], float(r["price"] or 0) if r else 0.0, int(time.time())))
+            conn.commit()
+            await q.message.reply_text(f"✅ I'll message you when ${coin[2]} {_WATCH_KINDS[parts[1]]}. See all: /alerts")
+            return
+        if parts[0] == "wd" and len(parts) == 2 and parts[1].isdigit():
+            conn.execute("DELETE FROM watch_alerts WHERE id = ? AND user_id = ?", (int(parts[1]), uid))
+            conn.commit()
+        text, kb = _alerts_view(conn, uid)
+        try:
+            await q.edit_message_text(text, reply_markup=kb)
+        except Exception:
+            await q.message.reply_text(text, reply_markup=kb)
+    finally:
+        conn.close()
+
+
+def _alerts_view(conn, uid: int):
+    rows = conn.execute("SELECT a.id, a.kind, c.symbol FROM watch_alerts a JOIN watch_coins c ON c.id = a.coin_id "
+                        "WHERE a.user_id = ? AND a.fired_at IS NULL ORDER BY a.created_at DESC LIMIT 40", (uid,)).fetchall()
+    if not rows:
+        return ("No alerts waiting. Open a coin on ferzan-factory.com and tap Alerts.", None)
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton(f"❌ ${sym} {_WATCH_KINDS.get(kind, kind)}", callback_data=f"wd:{aid}")] for aid, kind, sym in rows])
+    return (f"{len(rows)} alert{'s' if len(rows) != 1 else ''} waiting. Tap one to remove it.", kb)
+
+
+async def alerts_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    conn = _watch_conn()
+    try:
+        text, kb = _alerts_view(conn, update.effective_user.id)
+    finally:
+        conn.close()
+    await update.effective_message.reply_text(text, reply_markup=kb)
+
+
+async def _watch_loop(application: Application):
+    """Every 30s: fire coin alerts whose condition is met (one message each, then done)."""
+    while True:
+        await asyncio.sleep(30)
+        try:
+            conn = _watch_conn()
+            rows = conn.execute("SELECT a.id, a.user_id, a.kind, a.base_price, c.chain, c.token, c.curve, c.symbol FROM watch_alerts a "
+                                "JOIN watch_coins c ON c.id = a.coin_id WHERE a.fired_at IS NULL LIMIT 5000").fetchall()
+            states: dict = {}
+            fired = []
+            for aid, uid, kind, base, chain, token, curve, sym in rows:
+                if (chain, token) not in states:
+                    states[(chain, token)] = _coin_state(chain, token)
+                r = states[(chain, token)]
+                if not r:
+                    continue
+                prog, price, base = _coin_progress(r), float(r["price"] or 0), float(base or 0)
+                hit = {"p50": prog >= 50, "p90": prog >= 90, "grad": bool(r["graduated"]),
+                       "up50": base > 0 and price >= base * 1.5, "x2": base > 0 and price >= base * 2,
+                       "dn30": base > 0 and 0 < price <= base * 0.7}.get(kind, False)
+                if hit:
+                    fired.append((aid, uid, kind, chain, token, curve, sym))
+            for aid, uid, kind, chain, token, curve, sym in fired[:300]:
+                conn.execute("UPDATE watch_alerts SET fired_at = ? WHERE id = ?", (int(time.time()), aid))
+                conn.commit()
+                icon = {"grad": "🎓", "dn30": "📉", "x2": "🚀", "up50": "📈"}.get(kind, "🔔")
+                try:
+                    await application.bot.send_message(
+                        chat_id=uid, text=f"{icon} ${sym} {_WATCH_KINDS[kind]}.\n{_coin_link(chain, token, curve)}",
+                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⚡ Trade it", url=f"https://t.me/{TRADE}?start=buy_{token}")]]))
+                except Exception as e:
+                    logger.info("alert %s not delivered: %s", aid, str(e)[:80])
+                await asyncio.sleep(0.05)
+            conn.close()
+        except Exception as e:
+            logger.warning("watch loop: %s", str(e)[:160])
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
+    if context.args and (context.args[0] or "").startswith("watch_"):
+        await _watch_start(update, context.args[0][len("watch_"):])
+        return
     if context.args and (context.args[0] or "").startswith("follow_"):
         await _follow_start(update, context.args[0][len("follow_"):])
         return
@@ -1793,6 +1958,8 @@ def main():
     app.add_handler(conv)
     app.add_handler(CommandHandler("history", history))
     app.add_handler(CommandHandler("following", following_cmd))
+    app.add_handler(CommandHandler("alerts", alerts_cmd))
+    app.add_handler(CallbackQueryHandler(watch_cb, pattern="^w[adl]:"))
     app.add_handler(CallbackQueryHandler(following_cb, pattern="^fol:"))
     app.add_handler(CommandHandler("refer", refer_cmd))
     app.add_handler(CommandHandler("referwallet", referwallet_cmd))
@@ -1820,6 +1987,7 @@ def main():
                 BotCommand("top", "Top creators leaderboard"),
                 BotCommand("history", "Your launches"),
                 BotCommand("following", "Creators you follow"),
+                BotCommand("alerts", "Your coin alerts"),
                 BotCommand("drafts", "Scheduled launches"),
                 BotCommand("claim", "Claim your trading fees"),
                 BotCommand("timezone", "Set your time zone"),
@@ -1834,6 +2002,7 @@ def main():
     async def _post_all(application):
         await _post(application)
         application.create_task(_draft_loop(application))
+        application.create_task(_watch_loop(application))
 
     app.post_init = _post_all
     logger.info("Ferzan Launch starting...")

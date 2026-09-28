@@ -1223,6 +1223,12 @@ def launches_feed(sort: str = "new", limit: int = 30, chain: str = "", q: str = 
         stats = _creator_stats(c, [r["creator"] for r in rows])
         extra = _launch_rows_by_curve()
         items = [_curve_item(r, _native_usd(r["chain"]), extra.get(r["curve"], {}), vol.get(r["curve"], 0.0), stats) for r in rows]
+        try:  # Safe launch badge
+            safe = _safe_flags(c, rows)
+            for it in items:
+                it["safe"] = bool(safe.get(it["curve"]))
+        except Exception:
+            pass
         c.close()
     if sort == "new" and chain in ("", "solana") and not (q or "").strip():
         with db._get_conn() as conn:
@@ -2301,6 +2307,19 @@ def creator_score(token: str):
             lines.append("✅ No dev buy")
     elif me["mode"] == "plain":
         lines.append("ℹ️ Standard coin: the creator received the whole supply at launch")
+    safe = False
+    c2 = _idx_db()
+    try:  # Safe launch badge (same rule as the board)
+        cvr = c2.execute("SELECT * FROM curves WHERE token = ? OR token = ?", (tok, tok.lower())).fetchone() if c2 is not None else None
+        if cvr:
+            safe = bool(_safe_flags(c2, [cvr]).get(cvr["curve"]))
+    except Exception:
+        safe = False
+    finally:
+        if c2 is not None:
+            c2.close()
+    if safe:
+        lines.insert(0, "🛡️ Safe launch: small or no dev buy, no dev selling, no launch spree")
     badge = ""
     try:  # FERZAN holder badge for the creator's Solana wallet (information only, the score is unchanged)
         import ferzan_perks as _fp
@@ -2316,7 +2335,7 @@ def creator_score(token: str):
     out = {"found": True, "score": score, "label": label, "lines": lines, "creator": me["wallet_address"] or "",
            "launches": len(others) + 1, "graduated_before": grads, "best_prior_mcap_usd": best,
            "launches_same_day": len(day), "dev_bought": dev_buy, "dev_sold": dev_sell, "dev_hold_pct": hold_pct,
-           "chain": me["chain"], "mode": me["mode"], "ferzan_badge": badge}
+           "chain": me["chain"], "mode": me["mode"], "ferzan_badge": badge, "safe": safe}
     _SCORE_CACHE[tok] = (time.time(), out)
     return out
 
@@ -2963,6 +2982,91 @@ def creator_page(wallet: str):
     if len(_CREATOR_CACHE) > 500:
         _CREATOR_CACHE.clear()
     return out
+
+
+# ---- BATCH_F: Safe launch badge, portfolio profit ----
+def _safe_flags(c, rows) -> dict:
+    """curve -> True when the launch looks clean: the dev bought at most 5% of the supply, has not sold,
+    and did not launch 3+ coins within a day. Solana coins count only once the trade stream has their trades."""
+    if c is None or not rows:
+        return {}
+    curves = [r["curve"] for r in rows]
+    q = ",".join("?" for _ in curves)
+    dev: dict = {}
+    for cv_, buy, amt in c.execute(
+            f"SELECT t.curve, t.is_buy, SUM(t.tokens) FROM trades t JOIN curves cv ON cv.chain = t.chain AND cv.curve = t.curve "
+            f"AND lower(t.trader) = lower(cv.creator) WHERE t.curve IN ({q}) GROUP BY t.curve, t.is_buy", curves):
+        dev.setdefault(cv_, [0.0, 0.0])[0 if buy else 1] += float(amt or 0)
+    creators = list({r["creator"] for r in rows if r["creator"]})[:200]
+    times: dict = {}
+    if creators:
+        qc = ",".join("?" for _ in creators)
+        for cr, ts in c.execute(f"SELECT creator, launched_ts FROM curves WHERE creator IN ({qc})", creators):
+            times.setdefault(cr, []).append(int(ts or 0))
+    sol_start = c.execute("SELECT MIN(ts) FROM trades WHERE chain = 'solana'").fetchone()[0]
+    out = {}
+    for r in rows:
+        if r["chain"] == "solana" and (not sol_start or int(r["launched_ts"] or 0) < int(sol_start) - 60):
+            out[r["curve"]] = False  # launched before per-trade Solana data: the dev buy is not known
+            continue
+        bought, sold = dev.get(r["curve"], [0.0, 0.0])
+        born = int(r["launched_ts"] or 0)
+        spree = sum(1 for t in times.get(r["creator"], []) if born and abs(t - born) < 86400)
+        out[r["curve"]] = bought <= _supply_whole(r) * 0.05 and sold <= 0 and spree < 3
+    return out
+
+
+@app.get("/api/pnl-all/{wallet}")
+def pnl_all(wallet: str):
+    """A wallet's profit and loss on every Ferzan curve coin it traded, best first."""
+    if not _re.fullmatch(_ADDR_ANY, wallet or ""):
+        raise HTTPException(404, "not found")
+    w = _norm_addr(wallet)
+    c = _idx_db()
+    if c is None:
+        return {"items": [], "totals": {}}
+    try:
+        rows = c.execute(
+            "SELECT t.chain, t.curve, t.is_buy, SUM(t.native) AS n, SUM(t.tokens) AS k, MIN(t.ts) AS first, COUNT(*) AS cnt, "
+            "cv.token, cv.symbol, cv.name, cv.price, cv.mcap, cv.total_supply, cv.graduated FROM trades t JOIN curves cv "
+            "ON cv.chain = t.chain AND cv.curve = t.curve WHERE t.trader = ? OR t.trader = ? GROUP BY t.chain, t.curve, t.is_buy LIMIT 2000",
+            (wallet, w)).fetchall()
+    finally:
+        c.close()
+    coins: dict = {}
+    for r in rows:
+        k = (r["chain"], r["curve"])
+        it = coins.setdefault(k, {"chain": r["chain"], "token": r["token"], "symbol": r["symbol"], "name": r["name"], "price": float(r["price"] or 0),
+                                  "mcap": float(r["mcap"] or 0), "supply": (int(r["total_supply"] or 0) / 1e18) or 1e9, "graduated": bool(r["graduated"]),
+                                  "spent": 0.0, "received": 0.0, "bought": 0.0, "sold": 0.0, "trades": 0, "first": int(r["first"] or 0), "curve": r["curve"]})
+        if r["is_buy"]:
+            it["spent"] += float(r["n"] or 0)
+            it["bought"] += float(r["k"] or 0)
+        else:
+            it["received"] += float(r["n"] or 0)
+            it["sold"] += float(r["k"] or 0)
+        it["trades"] += int(r["cnt"] or 0)
+        it["first"] = min(it["first"], int(r["first"] or 0)) if it["first"] else int(r["first"] or 0)
+    items = []
+    tot = {"spent_usd": 0.0, "value_usd": 0.0, "pnl_usd": 0.0}
+    for it in coins.values():
+        usd = _native_usd(it["chain"])
+        held = max(0.0, it["bought"] - it["sold"])
+        value = held * it["price"]
+        pnl = it["received"] + value - it["spent"]
+        items.append({"chain": it["chain"], "token": it["token"], "symbol": it["symbol"], "name": it["name"], "unit": _NATIVE_SYM.get(it["chain"], ""),
+                      "spent": it["spent"], "received": it["received"], "holding_value": value, "pnl": pnl, "pnl_usd": pnl * usd,
+                      "pnl_pct": (pnl * 100 / it["spent"]) if it["spent"] else 0.0, "trades": it["trades"], "first_ts": it["first"],
+                      "mcap_usd": it["mcap"] * usd, "graduated": it["graduated"], "holding": held > it["supply"] * 1e-9,
+                      "path": _site_path(it["chain"], it["token"], it["curve"])})
+        tot["spent_usd"] += it["spent"] * usd
+        tot["value_usd"] += (it["received"] + value) * usd
+        tot["pnl_usd"] += pnl * usd
+    items.sort(key=lambda x: x["pnl_usd"], reverse=True)
+    tot["pnl_pct"] = (tot["pnl_usd"] * 100 / tot["spent_usd"]) if tot["spent_usd"] else 0.0
+    tot["coins"] = len(items)
+    tot["wins"] = sum(1 for i in items if i["pnl"] > 0)
+    return {"wallet": wallet, "items": items[:200], "totals": tot}
 
 
 @app.on_event("startup")
