@@ -1992,6 +1992,7 @@ async def dca_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 "Usage: /dca &lt;CA&gt; &lt;$amount&gt; &lt;hourly|daily|weekly&gt;\n"
                 "Example: /dca 7xKX... 25 daily — buys $25 of that token every day.\n\n"
                 "/dca off &lt;CA&gt; — cancel a plan.\n"
+                "/dca calm on|off — wait out big pumps/dumps before buying (on by default).\n"
                 "/dca with no args — list your active plans.\n\n"
                 "Each scheduled buy still runs through your normal safety checks "
                 "(score floor, rug/honeypot). If your wallet doesn't have enough "
@@ -2010,6 +2011,14 @@ async def dca_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 f"next in {_fmt_countdown(next_in)}"
             )
         await update.effective_message.reply_text("\n".join(lines), parse_mode="HTML")
+        return
+    if args[0].lower() == "calm":
+        on = not (len(args) > 1 and args[1].lower() in ("off", "0", "no"))
+        db.set_flag(uid, "dca_vol", on)
+        await update.effective_message.reply_text(
+            f"📅 Calm-market DCA {'ON' if on else 'OFF'}: "
+            + (f"a scheduled buy waits (retries every 30 min) while the price moves {_dca_vol_pct():.0f}%+ in an hour."
+               if on else "scheduled buys go through on time whatever the price is doing."))
         return
     if args[0].lower() == "off":
         if len(args) < 2:
@@ -2957,7 +2966,7 @@ async def settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         f"{'🟢' if gate else '🔴'} Block buy if score under floor\n"
         f"{'🟢' if rug else '🔴'} Block buys if liq is thin / gone\n"
         f"{'🟢' if honey else '🔴'} Block buys if honeypot / unsellable\n"
-        f"{'🟢' if lpw else '🔴'} Auto-sell if LP is yanked after you're in\n"
+        f"{'🟢' if lpw else '🔴'} Rug Guard: auto-sell if LP is pulled, the dev dumps or top holders dump\n"
         f"DM alerts {'on' if user.get('alerts_on') else 'off'}",
         reply_markup=InlineKeyboardMarkup(
             [
@@ -2990,7 +2999,7 @@ async def settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     callback_data="flg:honeypot",
                 )],
                 [InlineKeyboardButton(
-                    f"{'🟢' if lpw else '🔴'} LP yank auto-sell",
+                    f"{'🟢' if lpw else '🔴'} Rug Guard auto-sell",
                     callback_data="flg:lp_watch",
                 )],
                 [InlineKeyboardButton(
@@ -6694,6 +6703,70 @@ async def buy_limit_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             logger.exception("buy limit notify")
 
 
+# ---- Rug Guard: besides a pulled LP (below), sell when the dev or the top holders dump after you bought.
+# Baselines are taken the first time a position is seen, so a dump that happened BEFORE you bought never
+# triggers a sell. Reactive, not predictive: it acts on the next check after the dump shows on-chain.
+_RUG_BASE: dict = {}
+RUG_DEV_SOLD_FRAC = 0.5    # the dev has sold half or more of what they bought, since you bought
+RUG_TOP10_DROP = 1 / 3     # top-10 holders' share fell by a third or more since you bought ...
+RUG_PX_DROP = 0.25         # ... and the price fell 25%+ since you bought
+
+
+def _rug_signal(uid: int, mint: str) -> str:
+    """'' = fine, else the reason to exit. Blocking."""
+    key = (uid, mint)
+    base = _RUG_BASE.get(key)
+    if base and base.get("hold_until", 0) > time.time():
+        return ""  # a sell just failed: give it two minutes before retrying
+    now = {"px": _token_mark_usd(mint)}
+    cs = {}
+    try:
+        base_url = (os.getenv("LAUNCH_API_URL") or "http://127.0.0.1:8000").rstrip("/")
+        cs = requests.get(f"{base_url}/api/creator-score/{mint}", timeout=3).json() or {}
+    except Exception:
+        cs = {}
+    if cs.get("found") and cs.get("mode") == "bonding_curve":
+        now["dev_sold"], now["dev_bought"] = float(cs.get("dev_sold") or 0), float(cs.get("dev_bought") or 0)
+    if _is_sol_mint(mint):
+        try:
+            rep = rugcheck.sol_report(mint)
+            if rep.get("ok") and rep.get("top10_pct") is not None:
+                now["top10"] = float(rep["top10_pct"])
+        except Exception:
+            pass
+    if base is None:
+        _RUG_BASE[key] = now
+        return ""
+    if "dev_sold" in now and now.get("dev_bought", 0) > 0:
+        sold_since = now["dev_sold"] - float(base.get("dev_sold") or 0)
+        if sold_since > 0 and now["dev_sold"] >= now["dev_bought"] * RUG_DEV_SOLD_FRAC:
+            return f"the dev sold {now['dev_sold'] * 100 / now['dev_bought']:.0f}% of their coins"
+    b10, n10, bpx, npx = base.get("top10"), now.get("top10"), float(base.get("px") or 0), float(now.get("px") or 0)
+    if b10 and n10 is not None and b10 >= 15 and n10 <= b10 * (1 - RUG_TOP10_DROP) and bpx > 0 and 0 < npx <= bpx * (1 - RUG_PX_DROP):
+        return f"top holders dumped (top-10 share {b10:.0f}% → {n10:.0f}%, price −{(1 - npx / bpx) * 100:.0f}%)"
+    return ""
+
+
+async def _rug_guard_sell(context: ContextTypes.DEFAULT_TYPE, uid: int, mint: str, why: str) -> None:
+    try:
+        _ok, msg, _label = await _off(uid, _sell_any, uid, mint, 100)
+    except Exception as exc:
+        _ok, msg = False, str(exc)
+    if _ok:
+        db.clear_live_cost(uid, mint)
+        db.clear_live_exit(uid, mint)
+        _RUG_BASE.pop((uid, mint), None)
+    elif "Nothing to sell" in str(msg) or "holds 0" in str(msg):
+        _RUG_BASE.pop((uid, mint), None)
+        return
+    else:
+        _RUG_BASE.setdefault((uid, mint), {})["hold_until"] = time.time() + 120
+    try:
+        await context.bot.send_message(uid, f"🛡 Rug Guard: {why}\n{'Sold your bag.' if _ok else 'Tried to sell:'}\n{msg}")
+    except Exception:
+        logger.exception("rug guard notify")
+
+
 async def lp_watch_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         with db.get_conn() as conn:
@@ -6708,6 +6781,10 @@ async def lp_watch_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         except Exception:
             continue
         for mint in db.live_mints(uid):
+            why = await asyncio.to_thread(_rug_signal, uid, mint)
+            if why:
+                await _rug_guard_sell(context, uid, mint, why)
+                continue
             liq = await asyncio.to_thread(_token_liq_usd, mint)
             if liq < 0:
                 continue
@@ -7003,8 +7080,9 @@ async def _dca_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     now = int(time.time())
     for plan in db.list_due_dca_plans(now):
+        paused = False
         try:
-            await _dca_run_one(context, plan)
+            paused = await _dca_run_one(context, plan) == "paused"
         except Exception:
             logger.exception("dca job: plan #%s failed", plan["id"])
             await _notify_admins(
@@ -7015,10 +7093,39 @@ async def _dca_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         finally:
             # Always advance, even on failure -- a broken plan should skip a
             # cycle and retry later, not hammer the same error every 5 minutes.
-            db.advance_dca_plan(plan["id"], now + int(plan["interval_seconds"]))
+            # A volatility pause retries sooner (30 min, never later than the normal interval).
+            step = int(plan["interval_seconds"])
+            db.advance_dca_plan(plan["id"], now + (min(DCA_PAUSE_RETRY_S, step) if paused else step))
 
 
-async def _dca_run_one(context: ContextTypes.DEFAULT_TYPE, plan: dict) -> None:
+DCA_PAUSE_RETRY_S = 1800
+_DCA_PAUSED: dict = {}
+
+
+def _dca_vol_pct() -> float:
+    try:
+        return max(3.0, min(80.0, float(os.getenv("DCA_VOL_PAUSE_PCT", "15"))))
+    except ValueError:
+        return 15.0
+
+
+def _dca_too_wild(card) -> str:
+    """'' = calm enough to buy; else why this DCA buy waits. Pumping or dumping hard in the last hour
+    (or a sharp 5-minute move) means a bad entry either way."""
+    s = card.snapshot
+    lim = _dca_vol_pct()
+    try:
+        h1, m5 = float(getattr(s, "change_1h", 0) or 0), float(getattr(s, "change_5m", 0) or 0)
+    except (TypeError, ValueError):
+        return ""
+    if abs(h1) >= lim:
+        return f"{'up' if h1 > 0 else 'down'} {abs(h1):.0f}% in the last hour"
+    if abs(m5) >= lim * 0.6:
+        return f"{'up' if m5 > 0 else 'down'} {abs(m5):.0f}% in 5 minutes"
+    return ""
+
+
+async def _dca_run_one(context: ContextTypes.DEFAULT_TYPE, plan: dict) -> str:
     uid = int(plan["user_id"])
     mint = plan["mint"]
     usd = float(plan["usd_per_buy"])
@@ -7032,6 +7139,19 @@ async def _dca_run_one(context: ContextTypes.DEFAULT_TYPE, plan: dict) -> None:
         except Exception:
             logger.exception("dca notify failed")
         return
+    wild = _dca_too_wild(card) if db.flag_on(uid, "dca_vol", 1) else ""
+    if wild:
+        first = plan["id"] not in _DCA_PAUSED
+        _DCA_PAUSED[plan["id"]] = time.time()
+        if first:  # one note per pause, not one every 30 minutes
+            try:
+                await context.bot.send_message(
+                    uid, f"📅 DCA buy ${usd:.0f} waiting: the price is {wild}. Retrying in 30 min once it calms down.\n"
+                         "(/dca calm off buys on schedule no matter what.)")
+            except Exception:
+                logger.exception("dca notify failed")
+        return "paused"
+    _DCA_PAUSED.pop(plan["id"], None)
     # force=False -- same score_gate / rug_buy / honeypot checks a manual
     # buy goes through. If the wallet is short on funds, the signer's own
     # error message (e.g. "insufficient balance") comes back here and gets
