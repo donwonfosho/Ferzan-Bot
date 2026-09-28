@@ -446,6 +446,8 @@ def _db() -> sqlite3.Connection:
         "ALTER TABLE settings ADD COLUMN quiet_hours_enabled INTEGER DEFAULT 0",
         "ALTER TABLE settings ADD COLUMN quiet_hours_start INTEGER",
         "ALTER TABLE settings ADD COLUMN quiet_hours_end INTEGER",
+        "ALTER TABLE settings ADD COLUMN caguard_enabled INTEGER DEFAULT 0",
+        "ALTER TABLE settings ADD COLUMN official_cas TEXT",
         "ALTER TABLE scheduled_posts ADD COLUMN tz_name TEXT",
         "ALTER TABLE scheduled_posts ADD COLUMN local_hour INTEGER",
         "ALTER TABLE scheduled_posts ADD COLUMN local_minute INTEGER",
@@ -1310,8 +1312,139 @@ def _check_duplicate_spam(chat_id: int, user_id: int, text: str, now_ts: float) 
 # ---- Federated scam intel — auto-promotes repeatedly-reported CAs/domains ecosystem-wide ----
 
 FEDERATION_THRESHOLD = 3
+_CAGUARD_NOTICE: dict = {}
 CA_RE = re.compile(r"\b(0x[a-fA-F0-9]{40}|[1-9A-HJ-NP-Za-km-z]{32,44})\b")
 DOMAIN_RE = re.compile(r"\b(?:[a-z0-9-]+\.)+(?:com|net|org|io|xyz|app|so|fun|gg|me|co|finance|vip)\b", re.I)
+
+
+# ---- CA guard: in a project chat, only the official address(es) and coins launched on Ferzan may be posted.
+# Fake contract addresses are the #1 launch-day scam; admins and /gapprove'd users are never touched. ----
+_FZ_CAS: dict = {"t": 0.0, "set": set()}
+LAUNCH_DB = os.getenv("LAUNCH_DB_PATH") or "/opt/ferzan/app/launch/launch_bot.db"
+
+
+def _ca_norm(v: str) -> str:
+    v = (v or "").strip()
+    return v.lower() if v.lower().startswith("0x") else v
+
+
+def _ferzan_launch_cas() -> set:
+    """Every coin (and its curve/pool) launched through Ferzan, re-read every 2 minutes."""
+    if time.time() - _FZ_CAS["t"] < 120:
+        return _FZ_CAS["set"]
+    out: set = set()
+    try:
+        c = sqlite3.connect(f"file:{LAUNCH_DB}?mode=ro", uri=True, timeout=10)
+        for tok, extra in c.execute(
+                "SELECT result_token_address, extra_params FROM launch_requests WHERE status = 'confirmed'"):
+            if tok:
+                out.add(_ca_norm(tok))
+            try:
+                cv = json.loads(extra or "{}").get("curve_address")
+            except ValueError:
+                cv = None
+            if cv:
+                out.add(_ca_norm(cv))
+        c.close()
+    except Exception as exc:
+        log.warning("ca guard: launch list unreadable: %s", exc)
+        if _FZ_CAS["set"]:
+            return _FZ_CAS["set"]
+    _FZ_CAS.update(t=time.time(), set=out)
+    return out
+
+
+FLAGSHIP_STATE = Path(os.getenv("FERZAN_FLAGSHIP_STATE") or "/opt/ferzan/dbc-keys/ferzan-flagship-state.json")
+
+
+def _ferzan_live_mint() -> str:
+    """The FERZAN address, but only once the launch has been announced (it stays private until then)."""
+    try:
+        st = json.loads(FLAGSHIP_STATE.read_text())
+    except Exception:
+        return ""
+    return str(st.get("mint") or "") if st.get("announced") else ""
+
+
+def _caguard(chat_id: int) -> tuple[bool, list[str]]:
+    """(on, official addresses). The word FERZAN in the list stands for the FERZAN address once it is live."""
+    con = _db()
+    row = con.execute("SELECT caguard_enabled, official_cas FROM settings WHERE chat_id=?", (chat_id,)).fetchone()
+    con.close()
+    if not row:
+        return False, []
+    out = []
+    for x in (row[1] or "").split():
+        if x.upper() == "FERZAN":
+            x = _ferzan_live_mint()
+        if x and x not in out:
+            out.append(x)
+    return bool(row[0]), out
+
+
+def _caguard_raw(chat_id: int) -> list[str]:
+    con = _db()
+    row = con.execute("SELECT official_cas FROM settings WHERE chat_id=?", (chat_id,)).fetchone()
+    con.close()
+    return [x for x in ((row[0] if row else "") or "").split() if x]
+
+
+def _foreign_cas(chat_id: int, text: str) -> list[str]:
+    on, official = _caguard(chat_id)
+    if not on:
+        return []
+    allowed = {_ca_norm(x) for x in official} | _ferzan_launch_cas()
+    return [m for m in CA_RE.findall(text or "") if _ca_norm(m) not in allowed]
+
+
+async def gcaguard_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/gcaguard on|off · /gcaguard add <address> · /gcaguard remove <address> · /gcaguard list"""
+    if not await _is_admin(update, context):
+        return
+    chat_id = update.effective_chat.id
+    args = context.args or []
+    on, _shown = _caguard(chat_id)
+    official = _caguard_raw(chat_id)
+    sub = args[0].lower() if args else "list"
+    if sub in ("on", "off"):
+        on = sub == "on"
+    elif sub in ("add", "remove") and len(args) > 1 and (CA_RE.fullmatch(args[1].strip()) or args[1].upper() == "FERZAN"):
+        a = args[1].strip()
+        a = "FERZAN" if a.upper() == "FERZAN" else a
+        official = [x for x in official if _ca_norm(x) != _ca_norm(a)] + ([a] if sub == "add" else [])
+    elif sub != "list":
+        await update.effective_message.reply_text(
+            "Usage: /gcaguard on|off · /gcaguard add <address> · /gcaguard remove <address> · /gcaguard list")
+        return
+    con = _db()
+    con.execute(
+        "INSERT INTO settings(chat_id, caguard_enabled, official_cas) VALUES(?,?,?) "
+        "ON CONFLICT(chat_id) DO UPDATE SET caguard_enabled=excluded.caguard_enabled, official_cas=excluded.official_cas",
+        (chat_id, 1 if on else 0, " ".join(official)),
+    )
+    con.commit()
+    con.close()
+    if sub != "list":
+        _config_audit(chat_id, update.effective_user.id, "caguard", f"{sub} {args[1] if len(args) > 1 else ''}".strip())
+    lines = [f"🛡 CA guard: {'ON' if on else 'OFF'}",
+             "Members can post only the official address(es) below and coins launched on Ferzan; any other "
+             "contract address is deleted. Admins and approved users are never touched."]
+    lines += [("• FERZAN (added automatically the moment FERZAN is live)" if x == "FERZAN" else f"• <code>{_esc(x)}</code>")
+              for x in official] or ["(no official address yet)"]
+    await update.effective_message.reply_text("\n".join(lines), parse_mode="HTML")
+
+
+async def ca_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/ca — the official address(es) for this chat."""
+    if update.effective_chat.type == "private":
+        return
+    _on, official = _caguard(update.effective_chat.id)
+    if not official:
+        await update.effective_message.reply_text("No official address yet. Only trust addresses posted by the admins.")
+        return
+    await update.effective_message.reply_text(
+        "✅ Official address:\n" + "\n".join(f"<code>{_esc(x)}</code>" for x in official)
+        + "\n\nAnyone else posting an address is not us.", parse_mode="HTML")
 
 
 def _extract_scam_candidates(text: str) -> list[tuple[str, str]]:
@@ -5842,6 +5975,27 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     link_text = _strip_whitelisted_links(chat_id, text_raw)
 
+    foreign = _foreign_cas(chat_id, text_raw)
+    if foreign:
+        try:
+            await msg.delete()
+        except Exception as exc:
+            log.warning("ca guard delete %s", exc)
+        await _log(context, f"🛡 CA guard removed an unknown address from {_esc(user.full_name)} "
+                            f"(<code>{user.id}</code>): <code>{_esc(foreign[0])}</code>", chat_id)
+        key = (chat_id, user.id)
+        if now_ts - _CAGUARD_NOTICE.get(key, 0) > 300:  # one reminder per person per 5 minutes
+            _CAGUARD_NOTICE[key] = now_ts
+            try:
+                note = await context.bot.send_message(
+                    chat_id, f"🛡 {_esc(user.first_name or 'Hey')}, only the official address and coins launched on "
+                             "Ferzan can be posted here. Type /ca for the official one.", parse_mode="HTML")
+                if context.job_queue:
+                    context.job_queue.run_once(_delete_later, 30, data={"chat_id": chat_id, "message_id": note.message_id})
+            except Exception as exc:
+                log.warning("ca guard notice %s", exc)
+        return
+
     if link_text and _linkscan_enabled(chat_id):
         for u in URL_RE.findall(link_text):
             domain = _url_host(u)
@@ -6313,6 +6467,8 @@ def main() -> None:
     app.add_handler(CommandHandler("exportmembers", exportmembers_cmd))
     app.add_handler(CommandHandler("gdigest", gdigest_cmd))
     app.add_handler(CommandHandler("glinkscan", glinkscan_cmd))
+    app.add_handler(CommandHandler("gcaguard", gcaguard_cmd))
+    app.add_handler(CommandHandler("ca", ca_cmd))
     app.add_handler(CommandHandler("gblocksticker", gblocksticker))
     app.add_handler(CommandHandler("gunblocksticker", gunblocksticker))
     app.add_handler(CommandHandler("gstickerblocklist", gstickerblocklist))
@@ -6453,6 +6609,8 @@ def main() -> None:
             BotCommand("exportmembers", "Export recorded joins for this group (CSV)"),
             BotCommand("gdigest", "Owner: ecosystem-wide health digest now"),
             BotCommand("glinkscan", "Toggle live link safety scanning"),
+            BotCommand("gcaguard", "Only official / Ferzan addresses may be posted"),
+            BotCommand("ca", "Show the official contract address"),
             BotCommand("gblocksticker", "Block a sticker pack or GIF (reply)"),
             BotCommand("gunblocksticker", "Unblock a sticker pack or GIF"),
         ]
