@@ -1,8 +1,10 @@
 """Launch-night load test: opens thousands of live-feed viewers and hammers the busiest API pages at the same time,
 then reports how fast the API answered and whether anything failed.
 
-  python3 loadtest.py                      2500 viewers, 30 page requests a second, for 90 seconds
-  python3 loadtest.py 1000 20 60           viewers, requests per second, seconds
+  python3 loadtest.py                      2500 viewers arriving over 60 s, 30 page requests a second, for 120 seconds
+  python3 loadtest.py 1000 20 60 30        viewers, requests per second, seconds, ramp-up seconds
+
+Note: the test's own TLS work runs on this same droplet, so it is harsher than real visitors (their phones do that part).
 
 It goes through nginx on this droplet (127.0.0.1:443 with the real certificate), exactly like visitors do. It reads
 only: no trades, no posts, nothing written. Real visitors keep working, but leave room: run it when things are quiet,
@@ -15,7 +17,8 @@ PAGES = ["/api/launches?limit=30", "/api/launches?sort=koth&limit=30", "/api/pul
          "/api/transparency"]
 viewers = int(sys.argv[1]) if len(sys.argv) > 1 else 2500
 rps = int(sys.argv[2]) if len(sys.argv) > 2 else 30
-seconds = int(sys.argv[3]) if len(sys.argv) > 3 else 90
+seconds = int(sys.argv[3]) if len(sys.argv) > 3 else 120
+ramp = float(sys.argv[4]) if len(sys.argv) > 4 else 60.0
 
 soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
 resource.setrlimit(resource.RLIMIT_NOFILE, (min(hard, max(soft, viewers + 2000)), hard))
@@ -29,7 +32,7 @@ errs: dict = {}
 
 
 async def viewer(i: int, until: float):
-    await asyncio.sleep(i * 0.004)  # ramp up over ~10 s for 2500 viewers
+    await asyncio.sleep(i * ramp / max(1, viewers))  # viewers arrive spread over the ramp-up time
     try:
         r, w = await asyncio.wait_for(asyncio.open_connection(ADDR, PORT, ssl=ctx, server_hostname=HOST), 20)
         w.write(f"GET /api/stream HTTP/1.1\r\nHost: {HOST}\r\nAccept: text/event-stream\r\n\r\n".encode())
@@ -88,7 +91,7 @@ def api_cpu() -> str:
 
 async def main():
     until = time.time() + seconds
-    print(f"load test: {viewers} live viewers + {rps} page requests/s for {seconds}s via nginx ({HOST})")
+    print(f"load test: {viewers} live viewers (arriving over {ramp:.0f}s) + {rps} page requests/s for {seconds}s via nginx ({HOST})")
     tasks = [asyncio.create_task(viewer(i, until)) for i in range(viewers)]
     reqs = []
     k = 0
