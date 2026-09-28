@@ -1,10 +1,11 @@
-"""Ferzan watchdog: every few minutes, checks what would hurt users if it quietly broke, and DMs the admins.
+"""Ferzan watchdog: every 10 minutes, checks what would hurt users if it quietly broke, and DMs the admins.
+(Services, the site/API, disk, memory and backup age are already covered by /opt/ferzan/ops/ferzan_health.py;
+this adds what that one does not see.)
 
-  * services   every ferzan-* service that should be running is running, and is not restart-looping
+  * services   restart loops (a service that keeps crashing and coming back looks "active" to the health check)
   * wallets    the automatic wallets have enough to do their job (flywheel SOL, FERZAN launcher SOL until the
                launch, Tron graduation keeper TRX when a Tron curve is close to filling)
-  * networks   the Solana RPC, TronGrid and the Launch API answer
-  * disk       the droplet is not filling up
+  * networks   the Solana RPC and TronGrid answer (trades and launches stop without them)
 
 Read-only: it never signs or sends a transaction. It alerts when something goes bad, repeats every 6 hours while
 it stays bad, and says so once when it recovers.   Usage: ferzan_watchdog.py [run|status]
@@ -81,9 +82,7 @@ def check_services(prev: dict) -> dict:
             continue
         last = int((prev.get("restarts") or {}).get(s, nr))
         prev.setdefault("restarts", {})[s] = nr
-        if active != "active":
-            out[f"svc:{s}"] = f"{s} is {active or 'not running'}"
-        elif nr - last >= 3:
+        if active == "active" and nr - last >= 3:
             out[f"svc:{s}"] = f"{s} restarted {nr - last} times in the last check window (crash loop?)"
     return out
 
@@ -149,12 +148,6 @@ def check_networks() -> dict:
             out["net:tron"] = f"TronGrid answered HTTP {r.status_code}" + (" (API key limit?)" if r.status_code in (403, 429) else "")
     except Exception as e:
         out["net:tron"] = f"TronGrid not answering ({type(e).__name__})"
-    try:
-        r = requests.get(f"{LAUNCH_API}/api/launches", params={"limit": 1}, timeout=12)
-        if r.status_code != 200:
-            out["net:api"] = f"Launch API answered HTTP {r.status_code}"
-    except Exception as e:
-        out["net:api"] = f"Launch API not answering ({type(e).__name__})"
     return out
 
 
@@ -174,7 +167,7 @@ def run() -> int:
     except Exception:
         st = {}
     problems = {}
-    for fn in (lambda: check_services(st), check_wallets, check_networks, check_disk):
+    for fn in (lambda: check_services(st), check_wallets, check_networks):
         try:
             problems.update(fn())
         except Exception as e:
@@ -204,7 +197,7 @@ def run() -> int:
     if parts:
         admins("\n\n".join(parts))
     else:
-        print(f"all good ({len(SERVICES)} services, {len(wallets())} wallets, 3 networks, disk)")
+        print(f"all good ({len(SERVICES)} services for restart loops, {len(wallets())} wallets, Solana RPC, TronGrid)")
     return 0
 
 
