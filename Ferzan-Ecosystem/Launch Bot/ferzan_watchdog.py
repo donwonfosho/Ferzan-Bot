@@ -37,7 +37,7 @@ INDEX_DB = os.environ.get("CURVE_INDEX_DB") or "/opt/ferzan/app/launch/curve_ind
 SERVICES = ["ferzan-trade", "ferzan-trade-api", "ferzan-webapp", "ferzan-launch", "ferzan-launch-api",
             "ferzan-buy", "ferzan-guardian", "ferzan-curve-indexer", "ferzan-liq"]
 DEFAULT_WALLETS = [
-    ("sol", "J8yrufechFRtMfCz3MRdv4w1TTkv1eHqjiub3t3v6317", 0.05, "Flywheel wallet (daily claim, buy + burn)"),
+    ("sol", "J8yrufechFRtMfCz3MRdv4w1TTkv1eHqjiub3t3v6317", 0.01, "Flywheel wallet (daily claim, buy + burn)"),  # it keeps a 0.02 reserve itself
     ("sol", "95Mu227mZ7cFjaRULv966B3erithUZHVEhSFUZ7YR8Yo", 0.08, "FERZAN launcher (creates the pool on Oct 9)"),
     ("tron", "TNtgqHLXQdLHevwNt14mzoTPuFqbPkaKRz", 260.0, "Tron graduation keeper"),
 ]
