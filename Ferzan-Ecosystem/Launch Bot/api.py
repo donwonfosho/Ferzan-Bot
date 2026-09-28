@@ -2357,7 +2357,7 @@ def ferzan_perks_for(wallet: str):
 _CHAIN_NAME = {"solana": "Solana", "base": "Base", "bsc": "BNB Chain", "ethereum": "Ethereum", "robinhood": "Robinhood Chain",
                "arc": "Arc", "tron": "Tron", "ton": "TON"}
 _SITE_EVM = {"base", "bsc", "ethereum", "robinhood", "arc"}
-_ADDR_ANY = r"0x[0-9a-fA-F]{40}|[1-9A-HJ-NP-Za-km-z]{32,48}|[EUk]Q[A-Za-z0-9_-]{46}"
+_ADDR_ANY = r"0x[0-9a-fA-F]{40}|[1-9A-HJ-NP-Za-km-z]{32,48}|[EUk]Q[A-Za-z0-9_-]{46}|-?[01]:[0-9a-fA-F]{64}"  # last: raw TON wallets
 
 
 def _site_path(chain: str, token: str, curve: str = "") -> str:
@@ -2804,6 +2804,8 @@ def transparency():
         for day, d in sorted((fw.get("days") or {}).items(), reverse=True):
             if not d.get("live"):
                 continue  # plan-only runs sent nothing
+            if not (float(d.get("claimed_sol") or 0) or float(d.get("bought_sol") or 0) or d.get("burn_sig")):
+                continue  # a day with nothing to claim (before launch): nothing to show
             ok = lambda s: s if isinstance(s, str) and _re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{60,100}", s) else ""  # noqa: E731
             burns.append({"day": day, "claimed_sol": float(d.get("claimed_sol") or 0), "bought_sol": float(d.get("bought_sol") or 0),
                           "burned": int(d.get("burned_raw") or 0) / 1e6, "forward_sol": float(d.get("forward_sol") or 0),
