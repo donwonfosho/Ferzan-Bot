@@ -2007,7 +2007,7 @@ MENU_SECTIONS: dict[str, tuple[str, str]] = {
         "Welcome the new, see off the ones who leave.\n\n"
         "• <code>/setwelcome text</code> — supports <code>{first}</code> / <code>{chatname}</code>\n"
         "• <code>/welcome on|off</code>\n"
-        "• <code>/welcomedelete 60</code> — delete the welcome message after 60 seconds (also 5m, 1h; <code>off</code> keeps it)\n"
+        "• <code>/welcomedelete 60</code> — delete welcome and goodbye messages after 60 seconds (also 5m, 1h; <code>off</code> keeps it)\n"
         "• <code>/setwelcomebtn Label | https://link</code> — add a tappable button to the welcome message\n"
         "• <code>/delwelcomebtn</code> — remove it\n"
         "• <code>/setgoodbye text</code> — supports <code>{first}</code> / <code>{chatname}</code>\n"
@@ -4788,7 +4788,7 @@ async def welcomedelete_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if not context.args:
         cur = _welcome_delete_seconds(chat_id)
         await update.effective_message.reply_text(
-            "Welcome messages are deleted "
+            "Welcome and goodbye messages are deleted "
             + (f"{cur} seconds after they are posted." if cur else "never (they stay).")
             + "\nUsage: /welcomedelete 60  (seconds; also 5m, 1h)  or  /welcomedelete off"
         )
@@ -4808,9 +4808,9 @@ async def welcomedelete_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     con.commit()
     con.close()
     await update.effective_message.reply_text(
-        f"Welcome messages will be deleted {secs} seconds after they are posted."
+        f"Welcome and goodbye messages will be deleted {secs} seconds after they are posted."
         if secs
-        else "Welcome messages will stay in the chat (auto-delete off)."
+        else "Welcome and goodbye messages will stay in the chat (auto-delete off)."
     )
 
 
@@ -5479,7 +5479,12 @@ async def on_member(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 chatname=_esc(update.effective_chat.title or ""),
             )
             try:
-                await context.bot.send_message(chat_id, farewell)
+                sent_bye = await context.bot.send_message(chat_id, farewell)
+                del_after = _welcome_delete_seconds(chat_id)
+                if del_after and context.job_queue and sent_bye is not None:
+                    context.job_queue.run_once(
+                        _delete_later, del_after, data={"chat_id": chat_id, "message_id": sent_bye.message_id}
+                    )
             except Exception as exc:
                 log.warning("goodbye %s", exc)
         return
