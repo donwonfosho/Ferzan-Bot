@@ -2203,7 +2203,41 @@ QUICKSTART_TEXT = (
 )
 
 
+NOG_ALIASES: set = set()  # names (without the g) that now work as /name as well as /gname
+NOG_SKIP = {"goodbye", "giveaway"}  # start with g but are not g-prefixed commands
+
+
+def _nog(text: str) -> str:
+    """Show the short command names (/settings, /ban ...) wherever help text still says /gsettings, /gban ..."""
+    if not NOG_ALIASES:
+        return text
+    pat = "|".join(sorted(map(re.escape, NOG_ALIASES), key=len, reverse=True))
+    return re.sub(rf"/g(?=(?:{pat})\b)", "/", text)
+
+
+def _add_nog_aliases(app) -> None:
+    """Every /gxxx command also answers to /xxx. The old names keep working; names already taken by a
+    different command (filter, menu, scamadd, votemute ...) are left alone."""
+    taken, found = set(), []
+    for grp, hs in app.handlers.items():
+        for h in hs:
+            if isinstance(h, CommandHandler):
+                taken |= set(h.commands)
+                found.append((grp, h))
+    for grp, h in found:
+        for c in list(h.commands):
+            short = c[1:]
+            if c.startswith("g") and c not in NOG_SKIP and len(short) > 2 and short not in taken:
+                app.add_handler(CommandHandler(short, h.callback, filters=h.filters, block=h.block), group=grp)
+                taken.add(short)
+                NOG_ALIASES.add(short)
+
+
 def _menu_text(section: str) -> str:
+    return _nog(_menu_text_raw(section))
+
+
+def _menu_text_raw(section: str) -> str:
     if section == "main":
         return (
             "🛡 <b>Ferzan Guardian</b>\n\n"
@@ -2542,7 +2576,7 @@ async def gsetup_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await update.effective_message.reply_text("Run /gsetup inside your group.")
         return
     chat_id = update.effective_chat.id
-    await update.effective_message.reply_text(_tier_home_text(chat_id), parse_mode="HTML", reply_markup=_tier_home_kb())
+    await update.effective_message.reply_text(_nog(_tier_home_text(chat_id)), parse_mode="HTML", reply_markup=_tier_home_kb())
 
 
 async def gaddons_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2552,7 +2586,7 @@ async def gaddons_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await update.effective_message.reply_text("Run /gaddons inside your group.")
         return
     await update.effective_message.reply_text(
-        _ADDONS_TEXT, parse_mode="HTML", reply_markup=_addons_kb(update.effective_chat.id))
+        _nog(_ADDONS_TEXT), parse_mode="HTML", reply_markup=_addons_kb(update.effective_chat.id))
 
 
 async def tier_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2568,7 +2602,7 @@ async def tier_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     async def show(text, kb):
         try:
-            await q.edit_message_text(text, parse_mode="HTML", reply_markup=kb)
+            await q.edit_message_text(_nog(text), parse_mode="HTML", reply_markup=kb)
         except Exception as exc:
             log.warning("tier edit %s", exc)
 
@@ -6953,6 +6987,8 @@ def main() -> None:
         )
     )
 
+    _add_nog_aliases(app)
+
     async def _post(application):
         cmds = [
             BotCommand("start", "Welcome and add to group"),
@@ -7060,6 +7096,7 @@ def main() -> None:
             if len(cmds) > 100:
                 log.warning("guardian cmds list has %d entries (>100) — trimming for set_my_commands", len(cmds))
                 cmds = cmds[:100]
+            cmds = [BotCommand(c.command[1:] if c.command.startswith("g") and c.command[1:] in NOG_ALIASES else c.command, c.description) for c in cmds]
             await application.bot.set_my_commands(cmds)
         except Exception as exc:
             log.error("set_my_commands failed, continuing without updating the menu: %s", exc)
