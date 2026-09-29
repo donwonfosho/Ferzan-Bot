@@ -3,7 +3,8 @@
 //   run  : does the graduation for one filled curve, one stage at a time, skipping stages already done:
 //            1 graduate  - call graduate() on the curve; the raised TON and the remaining coins arrive here
 //            2 pool      - open the STON.fi pool with ALL of it (TON + coins)
-//            3 burn      - burn every LP token the keeper received, so the liquidity can never be pulled
+//            3 lock      - send every LP token the keeper received to the null address (0:000..0), so the liquidity can never be pulled.
+//                          NOT a burn: on STON.fi burning LP tokens WITHDRAWS the liquidity, it does not lock it.
 //          Without --send it only prints what it would do.  The key never leaves this process.
 // Key file: /opt/ferzan/dbc-keys/ton-keeper.json = {"mnemonic": ["word", ... 24]}; nothing here prints it.
 // Prints one JSON line at the end: {ok, stage, ...}.
@@ -123,27 +124,34 @@ async function main() {
     markDone(curve, "router", sim.router.address.toString());
   }
 
-  // ---- 3. burn every LP token we received
-  const routerAddr = readDone(curve).router;
-  // The pool is already open, so a fresh "Initial" simulation no longer works. Ask STON.fi for the router itself
-  // (it carries the dex version and the pTON master the SDK needs).
-  const routerInfo = await api.getRouter(routerAddr);
-  const contracts2 = dexFactory(routerInfo);
-  const router2 = client.open(contracts2.Router.create(routerInfo.address));
-  const pton2 = contracts2.pTON.create(routerInfo.ptonMasterAddress);
-  const poolAddr = await router2.getPoolAddress({ token0: pton2.address.toString(), token1: minter });
-  const pool = client.open(contracts2.Pool.create(poolAddr));
-  const lpWallet = await waitFor(async () => {
-    const w = await pool.getWallet(wallet.address);
-    const b = await w.getWalletData().then((d) => d.balance).catch(() => 0n);
-    return b > 0n ? { w, b } : null; }, "LP tokens to reach the keeper", 40, 6000).catch(() => null);
-  if (!lpWallet) out({ ok: false, stage: "pool", error: "LP tokens have not arrived yet (pool may still be opening)" });
-  if (!send) out({ ok: true, dry_run: true, would: "burn " + lpWallet.b.toString() + " LP", pool: poolAddr.toString() });
-  const burn = beginCell().storeUint(OP_BURN, 32).storeUint(Math.floor(Date.now() / 1000), 64).storeCoins(lpWallet.b).storeAddress(wallet.address).storeBit(0).endCell();
-  await sendMessages(wallet, kp, [{ to: lpWallet.w.address, value: toNano("0.3"), body: burn }]);
-  await waitFor(async () => (await lpWallet.w.getWalletData().then((d) => d.balance).catch(() => 0n)) === 0n, "the LP burn to land", 30, 5000);
+  // ---- 3. lock every LP token we received by sending it to the null address.
+  // Do NOT use the jetton burn op here: STON.fi treats burning LP as "remove liquidity" and pays the pool out.
+  const NULL_ADDR = Address.parseRaw("0:" + "0".repeat(64));
+  const findLp = async () => {
+    const r = await fetch("https://toncenter.com/api/v3/jetton/wallets?limit=100&offset=0&owner_address=" + encodeURIComponent(kaddr),
+      { headers: process.env.TONCENTER_API_KEY ? { "X-API-Key": process.env.TONCENTER_API_KEY } : {} });
+    if (!r.ok) throw new Error("toncenter jetton list " + r.status);
+    const list = (await r.json()).jetton_wallets || [];
+    for (const jw of list) {
+      if (BigInt(jw.balance || "0") <= 0n) continue;
+      if (same(jw.jetton, minter)) continue;            // the coin itself, not an LP token
+      let pool; try { pool = await api.getPool(Address.parse(jw.jetton).toString()); } catch { continue; }
+      const strs = []; (function walk(o) { if (typeof o === "string") strs.push(o); else if (o && typeof o === "object") Object.values(o).forEach(walk); })(pool);
+      const hasCoin = strs.some((x) => { try { return Address.parse(x).equals(Address.parse(minter)); } catch { return false; } });
+      if (hasCoin) return { pool: Address.parse(jw.jetton).toString(), wallet: Address.parse(jw.address), b: BigInt(jw.balance) };
+    }
+    return null;
+  };
+  const lpBalance = async (w) => (await client.runMethod(w, "get_wallet_data")).stack.readBigNumber();
+  const lp = await waitFor(findLp, "the LP tokens to show up in the keeper wallet", 40, 6000).catch(() => null);
+  if (!lp) out({ ok: false, stage: "lock", error: "no LP tokens for this coin found in the keeper wallet" });
+  if (!send) out({ ok: true, dry_run: true, would: "lock " + lp.b.toString() + " LP (send to the null address)", pool: lp.pool, lp_wallet: lp.wallet.toString() });
+  const xfer = beginCell().storeUint(0x0f8a7ea5, 32).storeUint(Math.floor(Date.now() / 1000), 64).storeCoins(lp.b)
+    .storeAddress(NULL_ADDR).storeAddress(wallet.address).storeBit(0).storeCoins(0).storeBit(0).endCell();
+  await sendMessages(wallet, kp, [{ to: lp.wallet, value: toNano("0.1"), body: xfer }]);
+  await waitFor(async () => (await lpBalance(lp.wallet).catch(() => lp.b)) === 0n, "the LP transfer to land", 30, 5000);
   markDone(curve, "burned");
-  out({ ok: true, stage: "done", pool: poolAddr.toString(), lp_burned: lpWallet.b.toString(),
-        proof: (TESTNET ? "https://testnet.tonviewer.com/" : "https://tonviewer.com/") + poolAddr.toString() });
+  out({ ok: true, stage: "done", pool: lp.pool, lp_locked: lp.b.toString(), locked_to: "null address (0:000...0)",
+        proof: (TESTNET ? "https://testnet.tonviewer.com/" : "https://tonviewer.com/") + lp.pool });
 }
 main().catch((e) => out({ ok: false, error: String(e && e.message || e).slice(0, 300) }));
