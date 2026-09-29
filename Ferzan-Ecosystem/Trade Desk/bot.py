@@ -4742,11 +4742,15 @@ async def _xbuy_execute(bot, chat_id: int, uid: int, msg) -> None:
             await _done(bot, chat_id, None, res)
             return
         ok, text, _info = res
+        logger.info("xbuy sent uid=%s %s->%s amt=%s got=%s", uid, p["src"], p["dst"], p.get("amt"), (_info or {}).get("got"))
         if not ok:
             await _done(bot, chat_id, None, f"🔴 {text}")
             return
-        await _done(bot, chat_id, None, f"{text}\n\n⏳ Waiting for it to land on {dst_name} (up to 7 min)…")
-        landed = await asyncio.to_thread(crossbuy.wait_arrival, uid, p["dst"], before, p["want_out"])
+        await _done(bot, chat_id, None, f"{text}\n\n⏳ Waiting for it to land on {dst_name} (up to 15 min)…")
+        landed = await asyncio.to_thread(
+            crossbuy.wait_arrival, uid, p["dst"], before, p["want_out"], crossbuy.ARRIVAL_WAIT, 6,
+            float((_info or {}).get("got") or 0), float(before) + float(p["want_out"]))
+        logger.info("xbuy arrival uid=%s dst=%s landed=%s", uid, p["dst"], landed)
         if not landed:
             await _done(
                 bot, chat_id, None,

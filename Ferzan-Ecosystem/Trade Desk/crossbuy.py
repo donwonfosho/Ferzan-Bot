@@ -55,7 +55,7 @@ PAD = 1.05  # extra on the top-up for fees / price drift
 MIN_BRIDGE_USD = 3.0
 MIN_OUT_RATIO = 0.90  # abort if the live quote delivers under 90% of the shortfall
 PENDING_TTL = 300
-ARRIVAL_WAIT = 420
+ARRIVAL_WAIT = 900
 
 INFLIGHT: set[int] = set()  # users with a bridge running: no second offer until it finishes
 _PENDING: dict[int, dict] = {}
@@ -253,13 +253,17 @@ def run(uid: int, p: dict) -> tuple[bool, str, dict]:
     return True, text, info
 
 
-def wait_arrival(uid: int, dst: str, before: float, want: float, timeout: int = ARRIVAL_WAIT, step: int = 6) -> bool:
-    """Poll the destination balance until it has grown by ~90% of what we expect. Blocking."""
-    target = before + max(want, 0.0) * 0.9
+def wait_arrival(uid: int, dst: str, before: float, want: float, timeout: int = ARRIVAL_WAIT, step: int = 6,
+                 got: float = 0.0, need_total: float = 0.0) -> bool:
+    """Poll the destination balance until the bridge has landed. Blocking.
+    Landed = grew by 80% of what the route promised (the smaller of the quote and what we need), OR the wallet
+    now holds enough to make the buy anyway."""
+    expect = min(want, got) if (want and got) else (want or got)
+    target = before + max(expect, 0.0) * 0.8
     end = time.time() + timeout
     while time.time() < end:
         now = native_balance(uid, dst)
-        if now is not None and now >= target:
+        if now is not None and (now >= target or (need_total and now >= need_total)):
             return True
         time.sleep(step)
     return False
