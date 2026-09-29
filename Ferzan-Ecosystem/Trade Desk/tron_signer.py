@@ -328,6 +328,35 @@ def _curve_sell(ci: dict, token_hex: str, bal: int, raw: str, owner_hex: str, sl
 ENERGY_SPARE_SUN = 15_000_000  # ~15 TRX kept for the swap's energy (a SunSwap trade burns about 7-13 TRX)
 
 
+def plain_meta(token: str) -> dict:
+    """Card data for a normal (non-curve) TRC-20 straight from SunSwap V2, for tokens DexScreener does not list
+    yet. {} if it is not a token. price_usd is 0 when there is no pool with liquidity yet."""
+    try:
+        token_hex = _to_hex(token)
+        sym = _str_call(token_hex, "symbol()")
+        if not sym:
+            return {}
+        name = _str_call(token_hex, "name()") or sym
+        dec = (_const(token_hex, token_hex, "decimals()", "") or [6])[0]
+        supply = (_const(token_hex, token_hex, "totalSupply()", "") or [0])[0]
+    except Exception:
+        return {}
+    px = 0.0
+    trx = 0.0
+    try:
+        from price_fetcher import get_price_usd
+
+        trx = float(get_price_usd("tron") or 0)
+        probe = 100_000_000  # 100 TRX
+        out = _quote_out(probe, [_to_hex(WTRX), token_hex], token_hex)
+        if out > 0 and trx > 0:
+            px = (100.0 * trx) / (out / 10 ** dec)
+    except Exception:
+        px = 0.0
+    return {"symbol": sym, "name": name, "decimals": dec, "price_usd": px,
+            "fdv_usd": (supply / 10 ** dec) * px, "trx_usd": trx, "has_pool": px > 0}
+
+
 def buy_tron(token: str, usd: float, key_hex: str | None = None, slip_bps: int = 1000) -> tuple[bool, str]:
     """SunSwap V2 buy with a real minimum-out (quote minus your slippage), a balance check first,
     and a result read back from the chain."""

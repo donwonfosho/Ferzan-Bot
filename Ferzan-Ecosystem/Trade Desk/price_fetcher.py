@@ -478,6 +478,33 @@ def _ferzan_tron_curve_snap(ca: str) -> MarketSnapshot | None:
     )
 
 
+def _tron_plain_snap(ca: str) -> MarketSnapshot | None:
+    """A normal TRC-20 (no Ferzan curve) priced straight from the SunSwap V2 pool."""
+    ca = (ca or "").strip()
+    if not (ca.startswith("T") and len(ca) == 34):
+        return None
+    try:
+        import tron_signer
+
+        m = tron_signer.plain_meta(ca)
+    except Exception:
+        return None
+    if not m:
+        return None
+    if m.get("price_usd", 0) <= 0:
+        raise PriceFetchError(
+            f"{m.get('symbol') or 'This token'} is a TRON token but has no SunSwap pool with liquidity yet, "
+            "so there is nothing to buy. Try again once liquidity is added."
+        )
+    return MarketSnapshot(
+        query=ca, symbol=m.get("symbol") or "?", name=m.get("name") or m.get("symbol") or "TRON token",
+        chain="tron", dex="sunswap", pair_address="", token_address=ca, price_usd=m["price_usd"],
+        liquidity_usd=0.0, volume_24h=0.0, change_5m=0.0, change_1h=0.0, change_6h=0.0, change_24h=0.0,
+        fdv=m.get("fdv_usd", 0.0), buys_h1=0, sells_h1=0, pair_created_ms=None,
+        url=f"https://tronscan.org/#/token20/{ca}", source="sunswap", extras={"sunswap_direct": True},
+    )
+
+
 def load_market(query: str) -> MarketSnapshot:
     snap = search_dex(query)
     if snap and snap.price_usd > 0:
@@ -485,6 +512,9 @@ def load_market(query: str) -> MarketSnapshot:
     fz = _ferzan_curve_snap(query)
     if fz:
         return fz
+    tp = _tron_plain_snap(query)  # normal TRC-20 DexScreener has not indexed
+    if tp:
+        return tp
     if _looks_ca(query):
         g = _gecko_snap(query)
         if g:
