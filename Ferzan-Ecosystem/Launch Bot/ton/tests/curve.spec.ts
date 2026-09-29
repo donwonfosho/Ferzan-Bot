@@ -113,6 +113,17 @@ describe("Ferzan TON curve", () => {
     console.log("DIAG\n" + lines.join("\n"));
   });
 
+
+  // Only runs when the installer has generated fingerprints from the Python launch builder (ton_curve.py golden).
+  (process.env.TON_GOLDEN ? it : it.skip)("the Python launch builder produces byte-identical curve storage and address", () => {
+    const g = JSON.parse(fs.readFileSync(process.env.TON_GOLDEN as string, "utf8"));
+    const [t, c, m, k] = ["1", "2", "3", "4"].map((d) => Address.parseRaw("0:" + d.repeat(64)));
+    const data = curveData(t, c, m, k, 1_700_000_000);
+    expect(curveCode.hash().toString("hex")).toBe(g.curve_code_hash);
+    expect(data.hash().toString("hex")).toBe(g.data_hash);
+    expect(contractAddress(0, { code: curveCode, data }).hash.toString("hex")).toBe(g.address_hash);
+  });
+
   it("buy pays out exactly the quoted coins and takes 1% (creator 50%, platform the rest)", async () => {
     const spend = toNano("10");
     const q = (await bc.runGetMethod(curve, "get_quote_buy", [{ type: "int", value: spend }])).stackReader;
