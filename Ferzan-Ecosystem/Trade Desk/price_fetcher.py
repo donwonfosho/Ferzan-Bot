@@ -526,6 +526,35 @@ def _ston_asset_snap(ca: str) -> MarketSnapshot | None:
     )
 
 
+def _evm_token_probe(ca: str) -> list[tuple[str, str, str]]:
+    """Which EVM chains have a token contract at this address? [(chain id, label, symbol)]. Checks every chain Ferzan
+    knows, in parallel, with a short timeout; used only to explain a lookup that found no market."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from chains import CHAINS
+
+    ca = ca.strip()
+
+    def one(item):
+        cid, c = item
+        if c.get("kind") != "evm" or not c.get("rpc"):
+            return None
+        try:
+            r = requests.post(c["rpc"], json={"jsonrpc": "2.0", "id": 1, "method": "eth_call",
+                              "params": [{"to": ca, "data": "0x95d89b41"}, "latest"]}, timeout=4)
+            h = (r.json() or {}).get("result") or "0x"
+            if len(h) < 130:
+                return None
+            ln = int(h[66:130], 16)
+            sym = bytes.fromhex(h[130:130 + ln * 2]).decode("utf-8", "ignore").strip("\x00")
+            return (cid, c.get("label") or cid, sym) if sym else None
+        except Exception:
+            return None
+
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        return [x for x in ex.map(one, list(CHAINS.items())) if x]
+
+
 def load_market(query: str) -> MarketSnapshot:
     snap = search_dex(query)
     if snap and snap.price_usd > 0:
@@ -559,6 +588,19 @@ def load_market(query: str) -> MarketSnapshot:
 
     coins = search_coin(query)
     if not coins:
+        q = (query or "").strip()
+        if q.lower().startswith("0x") and len(q) == 42:
+            try:
+                found = _evm_token_probe(q)
+            except Exception:
+                found = []
+            if found:
+                where = ", ".join(f"{lbl} (${sym})" for _cid, lbl, sym in found[:3])
+                raise PriceFetchError(
+                    f"Found the token on {where}, but no DEX pool with liquidity for it is indexed yet, so there is "
+                    "no price to trade against. It can be bought once a pool exists (DexScreener usually lists a "
+                    "new pool within a few minutes)."
+                )
         raise PriceFetchError(f"No market data for '{query}'")
     coin = coins[0]
     price = get_price_usd(coin["id"])
