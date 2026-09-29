@@ -449,6 +449,12 @@ def _db() -> sqlite3.Connection:
         "ALTER TABLE settings ADD COLUMN quiet_hours_end INTEGER",
         "ALTER TABLE settings ADD COLUMN caguard_enabled INTEGER DEFAULT 0",
         "ALTER TABLE settings ADD COLUMN official_cas TEXT",
+        "ALTER TABLE settings ADD COLUMN protection_tier TEXT",
+        "ALTER TABLE settings ADD COLUMN tier_backup TEXT",
+        "ALTER TABLE settings ADD COLUMN announce_only INTEGER DEFAULT 0",
+        "ALTER TABLE settings ADD COLUMN digest_enabled INTEGER DEFAULT 0",
+        "ALTER TABLE settings ADD COLUMN digest_hour INTEGER",
+        "ALTER TABLE settings ADD COLUMN last_digest_day TEXT",
         "ALTER TABLE scheduled_posts ADD COLUMN tz_name TEXT",
         "ALTER TABLE scheduled_posts ADD COLUMN local_hour INTEGER",
         "ALTER TABLE scheduled_posts ADD COLUMN local_minute INTEGER",
@@ -2373,6 +2379,290 @@ async def config_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await q.answer("Refreshed.")
         return
     await q.answer()
+
+
+# ------------------------------------------------------------------ protection tiers (/gsetup) + add-ons
+TIER_ORDER = ("standard", "shield", "fortress")
+_STANDARD = {"captcha_enabled": 1, "captcha_mode": "button", "antilink": 1, "welcome_enabled": 1,
+             "goodbye_enabled": 1, "cleanservice_enabled": 1, "warn_limit": 3}
+_SHIELD = {**_STANDARD, "linkscan_enabled": 1, "newacct_enabled": 1, "adaptive_slowmode_enabled": 1,
+           "rules_gate_enabled": 1}
+_FORTRESS = {**_SHIELD, "lock_links": 1, "lock_forwards": 1, "warn_limit": 2, "votemute_enabled": 1}
+TIERS = {
+    "standard": {
+        "name": "🟢 Standard", "set": _STANDARD, "min": {},
+        "blurb": "Clean joins for a normal community: one-message join check, new-member link lock, welcome/goodbye "
+                 "cleanup, 3 strikes.",
+    },
+    "shield": {
+        "name": "🟡 Shield", "set": _SHIELD, "min": {},
+        "blurb": "Standard + scam-link scanning, extra checks on brand-new accounts, adaptive slow mode when the chat "
+                 "floods, rules gate before posting, CA guard (once you add the official address).",
+    },
+    "fortress": {
+        "name": "🔴 Fortress", "set": _FORTRESS, "min": {"slowmode_seconds": 10},
+        "blurb": "Shield + no links or forwards from members, vote-mute, 2 strikes, 10s slow mode. For launch day or "
+                 "a raid.",
+    },
+}
+_COL_LABEL = {
+    "captcha_enabled": "Join check", "captcha_mode": "Join check style", "antilink": "New-member link lock",
+    "welcome_enabled": "Welcome message", "goodbye_enabled": "Goodbye message", "cleanservice_enabled": "Clean service",
+    "warn_limit": "Strike limit", "linkscan_enabled": "Scam-link scan", "newacct_enabled": "New-account scrutiny",
+    "adaptive_slowmode_enabled": "Adaptive slow mode", "rules_gate_enabled": "Rules gate", "lock_links": "Lock links",
+    "lock_forwards": "Lock forwards", "votemute_enabled": "Vote-mute", "slowmode_seconds": "Slow mode (s)",
+    "caguard_enabled": "CA guard",
+}
+
+
+def _tier_plan(chat_id: int, tier: str) -> tuple[dict, list[str]]:
+    """({column: new value}, [things left alone and why]). Never touches texts, media, filters or mods."""
+    spec = TIERS[tier]
+    plan = dict(spec["set"])
+    notes = []
+    con = _db()
+    row = con.execute(
+        "SELECT rules_text, official_cas, slowmode_seconds FROM settings WHERE chat_id=?", (chat_id,)
+    ).fetchone()
+    con.close()
+    rules, cas, slow = (row or (None, None, 0))
+    if plan.get("rules_gate_enabled") and not (rules or "").strip():
+        plan.pop("rules_gate_enabled")
+        notes.append("Rules gate skipped: no rules set yet (use /setrules, then pick this level again).")
+    for col, floor in spec["min"].items():
+        if (slow or 0) < floor:
+            plan[col] = floor
+    if tier in ("shield", "fortress"):
+        if (cas or "").strip():
+            plan["caguard_enabled"] = 1
+        else:
+            notes.append("CA guard skipped: add the official address first (/gcaguard add <address>).")
+    return plan, notes
+
+
+def _tier_current(chat_id: int) -> str:
+    con = _db()
+    row = con.execute("SELECT protection_tier FROM settings WHERE chat_id=?", (chat_id,)).fetchone()
+    con.close()
+    return (row[0] if row and row[0] else "") or ""
+
+
+def _tier_apply(chat_id: int, tier: str, admin_id: int) -> tuple[dict, list[str]]:
+    plan, notes = _tier_plan(chat_id, tier)
+    con = _db()
+    con.execute("INSERT OR IGNORE INTO settings(chat_id) VALUES(?)", (chat_id,))
+    cols = list(plan)
+    old = con.execute(f"SELECT {', '.join(cols)}, protection_tier FROM settings WHERE chat_id=?", (chat_id,)).fetchone()
+    backup = dict(zip(cols, old[:-1]))
+    backup["__tier"] = old[-1]
+    sets = ", ".join(f"{c}=?" for c in cols) + ", protection_tier=?, tier_backup=?"
+    con.execute(f"UPDATE settings SET {sets} WHERE chat_id=?",
+                [plan[c] for c in cols] + [tier, json.dumps(backup), chat_id])
+    con.commit()
+    con.close()
+    _config_audit(chat_id, admin_id, "tier", tier)
+    return plan, notes
+
+
+def _tier_undo(chat_id: int, admin_id: int) -> bool:
+    con = _db()
+    row = con.execute("SELECT tier_backup FROM settings WHERE chat_id=?", (chat_id,)).fetchone()
+    if not row or not row[0]:
+        con.close()
+        return False
+    try:
+        backup = json.loads(row[0])
+    except Exception:
+        con.close()
+        return False
+    prev = backup.pop("__tier", None)
+    valid = {r[1] for r in con.execute("PRAGMA table_info(settings)").fetchall()}
+    cols = [c for c in backup if c in valid]
+    sets = ", ".join(f"{c}=?" for c in cols + ["protection_tier"]) + ", tier_backup=NULL"
+    con.execute(f"UPDATE settings SET {sets} WHERE chat_id=?", [backup[c] for c in cols] + [prev, chat_id])
+    con.commit()
+    con.close()
+    _config_audit(chat_id, admin_id, "tier_undo", "")
+    return True
+
+
+def _tier_home_text(chat_id: int) -> str:
+    cur = _tier_current(chat_id)
+    lines = ["🛡 <b>Guardian protection setup</b>", "",
+             "Pick a level. It only changes protection switches (never your welcome text, filters, mods or "
+             "media) and you can Undo it.", ""]
+    for t in TIER_ORDER:
+        mark = " ← current" if t == cur else ""
+        lines.append(f"<b>{TIERS[t]['name']}</b>{mark}\n{_esc(TIERS[t]['blurb'])}\n")
+    return "\n".join(lines)
+
+
+def _tier_home_kb() -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(TIERS[t]["name"], callback_data=f"tier:pick:{t}") for t in TIER_ORDER],
+            [InlineKeyboardButton("➕ Add-ons", callback_data="tier:addons"),
+             InlineKeyboardButton("↩️ Undo last", callback_data="tier:undo")]]
+    return InlineKeyboardMarkup(rows)
+
+
+ADDONS = {
+    "caguard": ("caguard_enabled", "🧷 CA guard (only official addresses)"),
+    "linkscan": ("linkscan_enabled", "🔎 Scam-link scan"),
+    "quiet": ("quiet_hours_enabled", "🌙 Quiet hours (23:00–07:00 group time)"),
+    "announce": ("announce_only", "📢 Announcement mode (admins/approved only)"),
+    "digest": ("digest_enabled", "🗞 Daily digest (to the log chat)"),
+    "adaptive": ("adaptive_slowmode_enabled", "🐢 Adaptive slow mode"),
+}
+
+
+def _addons_kb(chat_id: int) -> InlineKeyboardMarkup:
+    con = _db()
+    cols = [v[0] for v in ADDONS.values()]
+    row = con.execute(f"SELECT {', '.join(cols)} FROM settings WHERE chat_id=?", (chat_id,)).fetchone()
+    con.close()
+    vals = dict(zip(cols, row)) if row else {}
+    rows = []
+    for key, (col, label) in ADDONS.items():
+        mark = "✅" if vals.get(col) else "⬜️"
+        rows.append([InlineKeyboardButton(f"{mark} {label}", callback_data=f"tier:tg:{key}")])
+    rows.append([InlineKeyboardButton("↩️ Back", callback_data="tier:home")])
+    return InlineKeyboardMarkup(rows)
+
+
+_ADDONS_TEXT = (
+    "➕ <b>Add-ons</b>\nTap to switch on or off.\n\n"
+    "Trusted members: reply to someone with /gapprove and Guardian never moderates them.\n"
+    "Announcement mode lets only admins, Guardian mods and approved members post."
+)
+
+
+async def gsetup_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _is_admin(update, context):
+        return
+    if update.effective_chat.type == "private":
+        await update.effective_message.reply_text("Run /gsetup inside your group.")
+        return
+    chat_id = update.effective_chat.id
+    await update.effective_message.reply_text(_tier_home_text(chat_id), parse_mode="HTML", reply_markup=_tier_home_kb())
+
+
+async def gaddons_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _is_admin(update, context):
+        return
+    if update.effective_chat.type == "private":
+        await update.effective_message.reply_text("Run /gaddons inside your group.")
+        return
+    await update.effective_message.reply_text(
+        _ADDONS_TEXT, parse_mode="HTML", reply_markup=_addons_kb(update.effective_chat.id))
+
+
+async def tier_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    chat_id = update.effective_chat.id
+    if not await _is_admin(update, context):
+        await q.answer("Admins only.", show_alert=True)
+        return
+    parts = (q.data or "").split(":")
+    act = parts[1] if len(parts) > 1 else ""
+    arg = parts[2] if len(parts) > 2 else ""
+    admin_id = update.effective_user.id
+
+    async def show(text, kb):
+        try:
+            await q.edit_message_text(text, parse_mode="HTML", reply_markup=kb)
+        except Exception as exc:
+            log.warning("tier edit %s", exc)
+
+    if act == "home":
+        await show(_tier_home_text(chat_id), _tier_home_kb())
+        await q.answer()
+    elif act == "pick" and arg in TIERS:
+        plan, notes = _tier_plan(chat_id, arg)
+        lines = [f"<b>{TIERS[arg]['name']}</b> will switch on:"]
+        lines += [f"• {_COL_LABEL.get(c, c)}" + (f" = {v}" if v not in (0, 1) else "") for c, v in plan.items() if v != 0]
+        lines += [f"\nℹ️ {_esc(n)}" for n in notes]
+        lines.append("\nYour welcome text, filters and mods are not touched. You can Undo.")
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Apply", callback_data=f"tier:apply:{arg}"),
+                                    InlineKeyboardButton("↩️ Back", callback_data="tier:home")]])
+        await show("\n".join(lines), kb)
+        await q.answer()
+    elif act == "apply" and arg in TIERS:
+        plan, notes = _tier_apply(chat_id, arg, admin_id)
+        text = f"✅ <b>{TIERS[arg]['name']}</b> is on for this group."
+        if notes:
+            text += "\n\n" + "\n".join(f"ℹ️ {_esc(n)}" for n in notes)
+        await show(text, InlineKeyboardMarkup([[InlineKeyboardButton("➕ Add-ons", callback_data="tier:addons"),
+                                                 InlineKeyboardButton("↩️ Undo", callback_data="tier:undo")]]))
+        await q.answer("Applied.")
+    elif act == "undo":
+        ok = _tier_undo(chat_id, admin_id)
+        await show(("↩️ Restored your previous settings.\n\n" if ok else "Nothing to undo.\n\n") + _tier_home_text(chat_id),
+                   _tier_home_kb())
+        await q.answer("Undone." if ok else "Nothing to undo.")
+    elif act == "addons":
+        await show(_ADDONS_TEXT, _addons_kb(chat_id))
+        await q.answer()
+    elif act == "tg" and arg in ADDONS:
+        col, label = ADDONS[arg]
+        con = _db()
+        con.execute("INSERT OR IGNORE INTO settings(chat_id) VALUES(?)", (chat_id,))
+        row = con.execute(f"SELECT {col}, official_cas, quiet_hours_start, quiet_hours_end, digest_hour "
+                          f"FROM settings WHERE chat_id=?", (chat_id,)).fetchone()
+        new = 0 if row[0] else 1
+        if arg == "caguard" and new and not (row[1] or "").strip():
+            con.close()
+            await q.answer("Add the official address first: /gcaguard add <address>", show_alert=True)
+            return
+        con.execute(f"UPDATE settings SET {col}=? WHERE chat_id=?", (new, chat_id))
+        if arg == "quiet" and new and (row[2] is None or row[3] is None):
+            con.execute("UPDATE settings SET quiet_hours_start=23, quiet_hours_end=7 WHERE chat_id=?", (chat_id,))
+        if arg == "digest" and new and row[4] is None:
+            con.execute("UPDATE settings SET digest_hour=9 WHERE chat_id=?", (chat_id,))
+        con.commit()
+        con.close()
+        _config_audit(chat_id, admin_id, "addon", f"{arg} {'on' if new else 'off'}")
+        await show(_ADDONS_TEXT, _addons_kb(chat_id))
+        await q.answer(f"{label.split(' (')[0]}: {'ON' if new else 'OFF'}")
+    else:
+        await q.answer()
+
+
+def _announce_only(chat_id: int) -> bool:
+    con = _db()
+    row = con.execute("SELECT announce_only FROM settings WHERE chat_id=?", (chat_id,)).fetchone()
+    con.close()
+    return bool(row and row[0])
+
+
+async def _daily_digest(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Hourly tick: sends each opted-in chat one digest per local day, at its digest hour, to the log chat."""
+    con = _db()
+    rows = con.execute(
+        "SELECT s.chat_id, COALESCE(s.digest_hour, 9), s.last_digest_day, k.title FROM settings s "
+        "LEFT JOIN known_chats k ON k.chat_id=s.chat_id WHERE s.digest_enabled=1"
+    ).fetchall()
+    for chat_id, hour, last_day, title in rows:
+        try:
+            now_local = _dt.now(_tz_for_chat(chat_id))
+            today = now_local.strftime("%Y-%m-%d")
+            if now_local.hour < hour or last_day == today:
+                continue
+            since = int(time.time()) - 86400
+            yday = time.strftime("%Y-%m-%d", time.gmtime(time.time() - 86400))
+            msgs = (con.execute("SELECT COALESCE(SUM(count),0) FROM msg_counts WHERE chat_id=? AND day=?",
+                                (chat_id, yday)).fetchone() or [0])[0]
+            joins = con.execute("SELECT COUNT(*) FROM joins WHERE chat_id=? AND joined_ts>=?",
+                                (chat_id, since)).fetchone()[0]
+            acts = con.execute("SELECT action, COUNT(*) FROM audit_log WHERE chat_id=? AND ts>=? "
+                               "GROUP BY action ORDER BY 2 DESC LIMIT 4", (chat_id, since)).fetchall()
+            text = (f"🗞 <b>Daily digest — {_esc(title or chat_id)}</b>\n\nMessages yesterday (UTC): {msgs}\n"
+                    f"New joins (24h): {joins}\n"
+                    + ("Mod actions (24h): " + ", ".join(f"{a} {n}" for a, n in acts) if acts else "Mod actions (24h): none"))
+            await _log(context, text, chat_id)
+            con.execute("UPDATE settings SET last_digest_day=? WHERE chat_id=?", (today, chat_id))
+            con.commit()
+        except Exception as exc:
+            log.warning("daily digest %s: %s", chat_id, exc)
+    con.close()
 
 
 async def _is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -4364,7 +4654,7 @@ def _reload_scheduled_posts(app: Application) -> None:
 
 def _config_columns() -> list[str]:
     con = _db()
-    cols = [r[1] for r in con.execute("PRAGMA table_info(settings)").fetchall() if r[1] != "chat_id"]
+    cols = [r[1] for r in con.execute("PRAGMA table_info(settings)").fetchall() if r[1] not in ("chat_id", "tier_backup", "last_digest_day")]
     con.close()
     return cols
 
@@ -5937,6 +6227,13 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     except Exception:
         return
 
+    if _announce_only(chat_id) and not _is_approved(chat_id, user.id) and not _is_guardian_mod(chat_id, user.id):
+        try:
+            await msg.delete()
+        except Exception as exc:
+            log.warning("announce delete %s", exc)
+        return
+
     if not is_edit and text_raw.startswith("/"):
         trap = _honeypot_cmd(chat_id)
         if trap:
@@ -6563,6 +6860,8 @@ def main() -> None:
     app.add_handler(CommandHandler("ghealth", ghealth_cmd))
     app.add_handler(CommandHandler("gbroadcast", gbroadcast))
     app.add_handler(CommandHandler("gsettings", gsettings_cmd))
+    app.add_handler(CommandHandler("gsetup", gsetup_cmd))
+    app.add_handler(CommandHandler("gaddons", gaddons_cmd))
     app.add_handler(CommandHandler("linkwhitelist", linkwhitelist_cmd))
     app.add_handler(CommandHandler("exportconfig", exportconfig_cmd))
     app.add_handler(CommandHandler("importconfig", importconfig_cmd))
@@ -6577,6 +6876,7 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(captcha_button, pattern=r"^cap:"))
     app.add_handler(CallbackQueryHandler(menu_callback, pattern=r"^gm:"))
     app.add_handler(CallbackQueryHandler(config_callback, pattern=r"^cfg:"))
+    app.add_handler(CallbackQueryHandler(tier_callback, pattern=r"^tier:"))
     app.add_handler(CommandHandler("giveaway", giveaway_cmd))
     app.add_handler(CommandHandler("gendgiveaway", gendgiveaway))
     app.add_handler(CommandHandler("gvotemute", gvotemute_toggle))
@@ -6720,6 +7020,8 @@ def main() -> None:
             BotCommand("gstats", "Group activity stats"),
             BotCommand("ghealth", "Composite group health score"),
             BotCommand("gsettings", "Live settings panel (buttons)"),
+            BotCommand("gsetup", "One-tap protection level: Standard / Shield / Fortress"),
+            BotCommand("gaddons", "Add-ons: CA guard, announcement mode, digest"),
             BotCommand("gmodadd", "Add a Guardian-only mod"),
             BotCommand("gmodremove", "Remove a Guardian-only mod"),
             BotCommand("gmods", "List this group's Guardian mods"),
@@ -6770,6 +7072,7 @@ def main() -> None:
         app.job_queue.run_repeating(_db_backup, interval=DB_BACKUP_HOURS * 3600, first=600)
     if app.job_queue and WEEKLY_DIGEST_ENABLED:
         app.job_queue.run_daily(_weekly_digest, time=dtime(hour=13, minute=0), days=(0,))
+        app.job_queue.run_repeating(_daily_digest, interval=3600, first=120)
     if app.job_queue and PHISHING_SYNC_HOURS > 0:
         app.job_queue.run_repeating(_sync_phishing_feed, interval=PHISHING_SYNC_HOURS * 3600, first=120)
     if app.job_queue and OWNER_DIGEST_HOURS > 0:
