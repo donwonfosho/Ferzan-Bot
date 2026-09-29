@@ -45,6 +45,12 @@ from solana_launch import build_unsigned_launch_tx as build_solana_plain_tx
 from meteora_launch import build_unsigned_meteora_tx
 import tron_launch as _tron
 from ton_launch import build_unsigned_launch_tx as build_ton_launch_tx, verify_launch as verify_ton_launch
+import ton_curve as _ton_curve
+
+
+def _ton_curve_live() -> bool:
+    return ((os.environ.get("TON_CURVE_LIVE") or "").strip() == "1" and bool((os.environ.get("TON_CURVE_MASTER") or "").strip())
+            and bool((os.environ.get("TON_KEEPER_ADDRESS") or "").strip()))
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -308,7 +314,7 @@ def build_tx(request_id: str, body: BuildTxRequest):
                         else "Sign in TronLink. About 16 TRX of energy + the launch fee."}
 
         elif req.chain == "ton":
-            if (os.environ.get("TON_LAUNCH_LIVE") or "").strip() != "1":
+            if (os.environ.get("TON_LAUNCH_LIVE") or "").strip() != "1" and not (req.mode == "bonding_curve" and _ton_curve_live()):
                 raise HTTPException(501, "TON launches are not open yet.")
             extra = dict(req.extra_params or {})
             meta = extra.get("ton_meta") or ""
@@ -320,11 +326,23 @@ def build_tx(request_id: str, body: BuildTxRequest):
                 except Exception as e:
                     print(f"IRYS_METADATA_UPLOAD_FAILED ton: {e}")
                 meta = meta or f"{_PUBLIC_ORIGIN}/api/metadata/{request_id}"
-            result = build_ton_launch_tx(request_id, body.wallet_address, total_supply, meta)
-            extra.update(ton_meta=meta, ton_minter=result.minter)
+            if req.mode == "bonding_curve":  # TON bonding curve (keeper-assisted graduation)
+                if not _ton_curve_live():
+                    raise HTTPException(501, "TON bonding curves are not open yet.")
+                try:
+                    result = _ton_curve.build_curve_launch_tx(
+                        request_id, body.wallet_address, int(total_supply), meta,
+                        int(ex_grad(extra)))
+                except ValueError as e:
+                    raise HTTPException(400, str(e))
+                extra.update(ton_meta=meta, ton_minter=result.minter, ton_curve=result.curve)
+            else:
+                result = build_ton_launch_tx(request_id, body.wallet_address, total_supply, meta)
+                extra.update(ton_meta=meta, ton_minter=result.minter)
             _set_extra(request_id, extra)
             response = {
                 "chain": "ton",
+                "curve": getattr(result, "curve", "") if req.mode == "bonding_curve" else "",
                 "minter": result.minter,
                 "messages": result.messages,
                 "valid_until": result.valid_until,
@@ -424,6 +442,10 @@ def _verifiable_launch(req) -> bool:
     return req.mode == "bonding_curve" and bool(FACTORY_ADDRESSES.get(req.chain, {}).get("bonding_curve"))
 
 
+def ex_grad(extra: dict) -> int:
+    return int(str((extra or {}).get("graduation_eth_threshold") or "0") or 0)
+
+
 @app.post("/api/launch-requests/{request_id}/complete")
 def complete_request(request_id: str, body: CompleteRequest):
     req = db.get_launch_request(request_id)
@@ -436,11 +458,17 @@ def complete_request(request_id: str, body: CompleteRequest):
         minter = str((req.extra_params or {}).get("ton_minter") or "")
         if not minter:
             raise HTTPException(400, "This TON launch was never built.")
-        res = verify_ton_launch(minter, int(req.total_supply))
+        if req.mode == "bonding_curve":  # proves right code, whole supply in the curve, nobody can mint more
+            curve = str((req.extra_params or {}).get("ton_curve") or "")
+            res = _ton_curve.verify_curve_launch(curve, minter, int(req.total_supply),
+                                                 (req.wallet_address or (req.extra_params or {}).get("site_wallet") or "").strip())
+        else:
+            curve = ""
+            res = verify_ton_launch(minter, int(req.total_supply))
         if not res.get("ok"):
             raise HTTPException(400, "TON has not confirmed the coin yet. Wait a minute and check your wallet; "
                                      "do not launch again. (" + str(res.get("error", ""))[:120] + ")")
-        body = CompleteRequest(tx_hash=body.tx_hash, result_token_address=minter, curve_address="")
+        body = CompleteRequest(tx_hash=body.tx_hash, result_token_address=minter, curve_address=curve)
     elif req.chain == "tron":  # TRON_WALLET_LAUNCH: re-checked on-chain here, never taken from the caller
         creator = (req.wallet_address or "").strip()
         if req.mode == "bonding_curve":
@@ -597,7 +625,7 @@ def site_launch(body: SiteLaunchBody, request: Request):
     elif chain == "ton":
         if not _re.fullmatch(r"(0|-1):[0-9a-fA-F]{64}|[A-Za-z0-9_-]{48}", wallet):
             raise HTTPException(400, "TON wallet looks wrong")
-        if (os.environ.get("TON_LAUNCH_LIVE") or "").strip() != "1":
+        if (os.environ.get("TON_LAUNCH_LIVE") or "").strip() != "1" and not _ton_curve_live():
             raise HTTPException(501, "TON launches are not open yet")
     elif not _re.fullmatch(r"0x[0-9a-fA-F]{40}", wallet):
         raise HTTPException(400, "Wallet looks wrong")
@@ -620,6 +648,16 @@ def site_launch(body: SiteLaunchBody, request: Request):
         if mins and dev > 0:
             raise HTTPException(400, "A dev buy needs trading to open right away")
         extra["start_minutes"] = str(mins)
+    elif chain == "ton" and body.mode != "plain" and _ton_curve_live():  # TON bonding curve, signed by TON Connect
+        decimals, mode = 9, "bonding_curve"
+        whole = int(_site_num(body.supply_whole, "Supply", Decimal(1), Decimal(10**9)))
+        total_supply = str(whole * 10**9)
+        grad = _site_num(body.grad_native, "Graduation", Decimal(_ton_curve.min_grad_nano()) / Decimal(10**9), Decimal(10_000_000))
+        extra["graduation_eth_threshold"] = str(int(grad * 10**9))  # nanoTON
+        extra["graduation_display"] = f"{grad.normalize():f}"
+        if dev > 0 or _site_num(body.max_buy, "Max buy", Decimal(0), Decimal(10**9), allow_zero=True) > 0:
+            raise HTTPException(400, "TON curves have no dev buy or max buy yet")
+        extra["dev_buy"], extra["max_buy"], extra["start_minutes"] = "0", "0", "0"
     elif chain in ("tron", "ton"):  # SITE_TRON_TON: standard fixed-supply coins, signed by TronLink / TON Connect
         decimals = 6 if chain == "tron" else 9
         whole = int(_site_num(body.supply_whole, "Supply", Decimal(1), Decimal(10**12)))
@@ -1256,7 +1294,7 @@ def chain_status():
         out["tron"] = {"curve": bool(_tron.curve_live()), "plain": bool(_tron.live())}
     except Exception:  # noqa: BLE001
         out["tron"] = {"curve": False, "plain": False}
-    out["ton"] = {"curve": flag("TON_CURVE_LIVE") and bool(_env("TON_CURVE_MASTER")), "plain": flag("TON_LAUNCH_LIVE")}
+    out["ton"] = {"curve": _ton_curve_live(), "plain": flag("TON_LAUNCH_LIVE"), "min_grad": _ton_curve.min_grad_nano() / 1e9}
     return {"chains": out, "now": int(time.time())}
 
 
