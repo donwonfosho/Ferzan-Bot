@@ -505,6 +505,27 @@ def _tron_plain_snap(ca: str) -> MarketSnapshot | None:
     )
 
 
+def _ston_asset_snap(ca: str) -> MarketSnapshot | None:
+    """A TON jetton that trades on STON.fi but DexScreener has not indexed yet (a fresh graduation)."""
+    ca = (ca or "").strip()
+    if not (ca.startswith(("EQ", "UQ", "kQ")) and len(ca) == 48):
+        return None
+    try:
+        a = ((requests.get(f"https://api.ston.fi/v1/assets/{ca}", timeout=TIMEOUT).json() or {}).get("asset") or {})
+        px = float(a.get("dex_price_usd") or a.get("third_party_usd_price") or 0)
+    except Exception:
+        return None
+    if px <= 0:
+        return None
+    sym = str(a.get("symbol") or "?")
+    return MarketSnapshot(
+        query=ca, symbol=sym, name=str(a.get("display_name") or sym), chain="ton", dex="ston.fi", pair_address="",
+        token_address=ca, price_usd=px, liquidity_usd=0.0, volume_24h=0.0, change_5m=0.0, change_1h=0.0,
+        change_6h=0.0, change_24h=0.0, fdv=0.0, buys_h1=0, sells_h1=0, pair_created_ms=None,
+        url=f"https://tonviewer.com/{ca}", source="ston.fi", extras={"ston_asset": True},
+    )
+
+
 def load_market(query: str) -> MarketSnapshot:
     snap = search_dex(query)
     if snap and snap.price_usd > 0:
@@ -515,6 +536,9 @@ def load_market(query: str) -> MarketSnapshot:
     tp = _tron_plain_snap(query)  # normal TRC-20 DexScreener has not indexed
     if tp:
         return tp
+    ts = _ston_asset_snap(query)  # graduated TON coin DexScreener has not indexed yet
+    if ts:
+        return ts
     if _looks_ca(query):
         g = _gecko_snap(query)
         if g:

@@ -226,6 +226,35 @@ async def _send_one(provider, wallet, destination, value: int, body, **msg_kwarg
     return cell.hash.hex(), seqno
 
 
+def _sdk_swap(direction: str, wallet: str, jetton: str, units: int, slip: str) -> dict:
+    """Swap message for pools the hand-built v1 code cannot make (STON.fi v2): built by the official SDK in node,
+    which signs and sends nothing. Returns {to, value, body_b64, ...} or {"error": ...}."""
+    import json
+    import subprocess
+    from pathlib import Path
+
+    d = Path(os.getenv("TON_SDK_DIR") or (Path(__file__).resolve().parent.parent / "Launch Bot" / "scripts" / "ton-keeper"))
+    script = d / "ton_swap_params.mjs"
+    if not script.exists():
+        return {"error": "the STON.fi v2 helper is not installed on this server"}
+    arg = json.dumps({"dir": direction, "wallet": wallet, "jetton": jetton, "units": str(units), "slip": slip})
+    try:
+        r = subprocess.run(["node", str(script), arg], cwd=str(d), capture_output=True, text=True, timeout=60)
+        data = json.loads((r.stdout or "").strip().splitlines()[-1])
+    except Exception as exc:  # noqa: BLE001
+        return {"error": f"v2 helper failed: {str(exc)[:120]}"}
+    return data if data.get("ok") else {"error": data.get("error") or "v2 helper failed"}
+
+
+async def _send_sdk_params(provider, wallet, p: dict) -> tuple[str, int]:
+    import base64
+
+    from pytoniq_core import Address, Cell
+
+    body = Cell.one_from_boc(base64.b64decode(p["body_b64"]))
+    return await _send_one(provider, wallet, Address(p["to"]), int(p["value"]), body)
+
+
 def _swap_body(ask_wallet: str, min_out: int, to_address):
     from pytoniq_core import Address, begin_cell
 
@@ -324,6 +353,8 @@ def jetton_holding(secret: str, jetton: str) -> tuple[float, str]:
 
 
 async def _swap_jetton_to_ton(seed64: bytes, jetton: str, pct: int, slip: str) -> tuple[bool, str]:
+    import asyncio
+
     from pytoniq import LiteBalancer, WalletV4R2
     from pytoniq_core import Address, begin_cell
 
@@ -341,7 +372,15 @@ async def _swap_jetton_to_ton(seed64: bytes, jetton: str, pct: int, slip: str) -
         if sim.get("error"):
             return False, "STON.fi quote failed: " + str(sim["error"])[:180]
         if str((sim.get("router") or {}).get("major_version", 1)) != "1":
-            return False, "STON.fi routed this token to a non-v1 pool — not supported yet, nothing sent."
+            p = await asyncio.to_thread(_sdk_swap, "sell", wallet.address.to_str(), jetton, amount, slip)
+            if p.get("error"):
+                return False, "STON.fi v2 sell failed: " + p["error"] + ". Nothing sent."
+            h, seqno = await _send_sdk_params(provider, wallet, p)
+            if not await _await_seqno(wallet, seqno):
+                return False, ("TON sell sent but not confirmed on-chain within 60s — check the wallet before "
+                               f"retrying: https://tonviewer.com/{wallet.address.to_str()}")
+            return True, (f"Sold {pct}% via STON.fi v2 · ~{int(p.get('ask_units') or 0) / 1e9:.4f} TON expected\n"
+                          f"Wallet: https://tonviewer.com/{wallet.address.to_str()}")
         router_addr = sim.get("router_address") or (sim.get("router") or {}).get("address")
         ask_wallet = sim.get("ask_jetton_wallet")  # router's pTON wallet
         min_out = int(sim.get("min_ask_units") or 0)
@@ -560,6 +599,26 @@ def _curve_sell(ci: dict, jetton: str, pct: int, seed64: bytes, slip_bps: int) -
                    f"to you. Check before retrying:\n{link}")
 
 
+async def _buy_v2(seed64: bytes, jetton: str, nano: int, slip_bps: int):
+    import asyncio
+
+    from pytoniq import LiteBalancer, WalletV4R2
+
+    provider = LiteBalancer.from_mainnet_config(trust_level=2)
+    await provider.start_up()
+    try:
+        wallet = await WalletV4R2.from_private_key(provider, seed64)
+        slip = f"{max(100, int(slip_bps or 1000)) / 10000:.4f}"
+        p = await asyncio.to_thread(_sdk_swap, "buy", wallet.address.to_str(), jetton, nano, slip)
+        if p.get("error"):
+            return wallet.address.to_str(), "STON.fi v2 buy failed: " + p["error"] + ". Nothing sent.", 0.0
+        h, seqno = await _send_sdk_params(provider, wallet, p)
+        ok = await _await_seqno(wallet, seqno)
+        return wallet.address.to_str(), ok, int(p["value"]) / 1e9
+    finally:
+        await provider.close_all()
+
+
 def buy_ton(jetton: str, usd: float, secret: str | None = None, slip_bps: int = 0) -> tuple[bool, str]:
     if not live_enabled():
         return False, "Live buys OFF."
@@ -606,8 +665,21 @@ def buy_ton(jetton: str, usd: float, secret: str | None = None, slip_bps: int = 
     if not router_addr or not pton_wallet or not ask_wallet or min_out <= 0:
         return False, "STON.fi quote missing router/pool fields — pool may not exist for this token."
     if str(router.get("major_version", 1)) != "1":
-        # This code builds v1 messages only; a v2 router needs a different payload.
-        return False, "STON.fi routed this token to a non-v1 pool — not supported yet, nothing sent."
+        # v2 router: the official SDK builds the message, we sign it.
+        try:
+            seed64 = _ton_keypair_bytes(secret)
+        except Exception as exc:
+            return False, f"TON key: {exc}"
+        try:
+            addr, confirmed, spent = _run_async(_buy_v2(seed64, jetton, nano, slip_bps))
+        except Exception as exc:
+            return False, f"TON send failed: {exc}"
+        if isinstance(confirmed, str):
+            return False, confirmed
+        if not confirmed:
+            return False, (f"TON buy sent (~{spent:.3f} TON) but not confirmed on-chain within 60s — "
+                           f"check before retrying: https://tonviewer.com/{addr}")
+        return True, f"~{spent:.3f} TON in (incl. gas) · STON.fi v2 swap confirmed by wallet\nWallet: https://tonviewer.com/{addr}"
 
     gas = sim.get("gas_params") or {}
     try:
