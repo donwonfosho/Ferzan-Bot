@@ -16,6 +16,6 @@
     "@types/node": "*",
     "jest": "*",
     "ts-jest": "*",
-    "typescript": "*"
+    "typescript": "^5.6.0"
   }
 }
