@@ -476,9 +476,21 @@ def _card_wallet(uid: int | None, ca: str, chain: str) -> str:
     return (
         "<blockquote>"
         f"💰 <b>{html.escape(label)}</b>  {native:.4f} {html.escape(native_sym)}\n"
-        f"🪙 {html.escape(bag)} {tok:.4g}"
+        f"🪙 {html.escape(bag)} {_fmt_amt(tok)}"
         "</blockquote>"
     )
+
+
+def _fmt_amt(v: float) -> str:
+    """800000000 -> 800M, 1234.5 -> 1,234.5, 0.000123 -> 0.000123 (never 8e+08)."""
+    v = float(v or 0)
+    a = abs(v)
+    for div, suf in ((1e12, "T"), (1e9, "B"), (1e6, "M"), (1e4, "K")):
+        if a >= div:
+            return f"{v / div:,.2f}".rstrip("0").rstrip(".") + suf
+    if a >= 1:
+        return f"{v:,.2f}".rstrip("0").rstrip(".")
+    return f"{v:.6g}"
 
 
 def _token_amount(uid: int, ca: str, chain: str) -> float:
@@ -1807,7 +1819,17 @@ def _token_meta(mint: str) -> dict:
         )
         pairs = (r.json() or {}).get("pairs") or []
         if not pairs:
-            return _curve_token_meta(mint, out)
+            out = _curve_token_meta(mint, out)
+            if out.get("px", 0) <= 0:
+                try:  # TON / Tron curve coins and plain tokens: same lookup the buy card uses
+                    from price_fetcher import load_market
+
+                    m = load_market(mint)
+                    out.update(px=float(m.price_usd or 0), symbol=m.symbol or "", name=m.name or "",
+                               chain=m.chain or "")
+                except Exception:
+                    pass
+            return out
         p = pairs[0]
         base = p.get("baseToken") or {}
         out["px"] = float(p.get("priceUsd") or 0)
@@ -1848,6 +1870,9 @@ def _bag_panel(
     elif mint.startswith(("EQ", "UQ", "kQ")):
         href = f"https://tonviewer.com/{mint}"
         venue = "TON"
+    elif mint.startswith("T") and len(mint) == 34 and chain in ("tron", "trx"):
+        href = f"https://tronscan.org/#/token20/{mint}"
+        venue = "TRX"
     else:
         href = f"https://solscan.io/token/{mint}"
         venue = "SOL"
@@ -1877,7 +1902,7 @@ def _bag_panel(
         f"<b>{title}</b>\n"
         f"<a href=\"{href}\">Chart / scan</a>\n"
         f"<code>{html.escape(mint)}</code>\n"
-        f"Tokens: <b>{amount:g}</b>\n"
+        f"Tokens: <b>{_fmt_amt(amount)}</b>\n"
         f"{pnl_line}\n"
     )
     ex = db.get_live_exit(uid, mint) or {}
@@ -2658,6 +2683,12 @@ def _bag_position_amount(uid: int, mint: str) -> tuple[float, str, str]:
 
         amount, owner = ton_signer.jetton_holding(sol_secret, mint)
         return amount, owner, "TON"
+    if mint.startswith("T") and len(mint) == 34 and (_token_meta(mint).get("chain") or "") in ("tron", "trx"):
+        import tron_signer
+
+        _sol, evm_secret = user_wallets.secrets(uid)
+        addr_t, _ = tron_signer.evm_key_to_tron(evm_secret.replace("0x", ""))
+        return _token_amount(uid, mint, "trx"), addr_t, "TRX"
     if mint.startswith("0x"):
         evm_addr = (db.get_user_wallet(uid) or {}).get("evm_pub") or ""
         try:
@@ -5752,43 +5783,13 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if data.startswith("slc:"):
         mint = data[4:].strip()
         try:
-            card = await asyncio.to_thread(analyze, mint)
-            text = render_card(card, uid)
-            chain = card.snapshot.chain or ""
-            ca = card.snapshot.token_address or mint
-        except Exception:
-            card, ca, chain = None, mint, ""
-            text = ""
-        if chain:
-            non_sol = (resolve_chain(chain) or "sol") != "sol"
-        else:
-            non_sol = mint.startswith("0x") or (mint.startswith("T") and len(mint) == 34 and mint[1:].isalnum() and "0" not in mint and "O" not in mint) or (mint.startswith(("EQ", "UQ", "kQ")) and len(mint) == 48)
-        if non_sol:
-            # EVM, Tron and TON: same sell pad as Solana, with the real token balance on that chain.
-            amount = await asyncio.to_thread(_token_amount, uid, ca, chain)
-            if card is None:
-                await context.bot.send_message(uid, "Could not load this token right now. Try again in a moment.")
-                return
-            kb = sell_keyboard(ca, ca, chain, uid, amount)
-            await context.bot.send_message(uid, text, reply_markup=kb, parse_mode="HTML")
+            amount, owner, venue = await asyncio.to_thread(_bag_position_amount, uid, mint)
+            text, kb = await asyncio.to_thread(_bag_panel, mint, amount, owner, uid, None, venue)
+        except Exception as exc:
+            await context.bot.send_message(uid, f"Could not open the sell panel right now: {exc}")
             return
-        sol_secret, evm_secret = user_wallets.secrets(uid)
-        amount = 0.0
-        addr = ""
-        try:
-            kp = signer.keypair_from_secret(sol_secret)
-            addr = str(kp.pubkey())
-            for row in await asyncio.to_thread(signer.holdings, sol_secret):
-                if row.get("mint") == mint:
-                    amount = float(row.get("amount") or 0)
-                    break
-        except Exception:
-            pass
-        if card is None:
-            text = (await asyncio.to_thread(_bag_panel, mint, amount, addr, uid))[0]
-            chain = "sol"
-        kb = sell_keyboard(mint, mint, chain, uid, amount)
-        await context.bot.send_message(uid, text, reply_markup=kb, parse_mode="HTML")
+        await context.bot.send_message(uid, text, reply_markup=kb, parse_mode="HTML",
+                                       disable_web_page_preview=True)
         return
     if data.startswith("xsell:"):
         # xsell:<pos_id>[:<pct>] — old buttons without a pct mean 100%.
