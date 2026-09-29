@@ -558,6 +558,7 @@ def card_keyboard(
     unit = {
         "sol": "SOL", "bsc": "BNB", "eth": "ETH", "base": "ETH",
         "arb": "ETH", "avax": "AVAX", "pol": "POL", "hood": "ETH",
+        "ton": "TON", "trx": "TRX", "arc": "USDC",
     }.get(cid, "ETH")
     presets = db.buy_presets(uid, cid)
     multi_n = len(db.multi_buy_slots(uid)) if uid else 0
@@ -645,6 +646,7 @@ def sell_keyboard(
     unit = {
         "sol": "SOL", "bsc": "BNB", "eth": "ETH", "base": "ETH",
         "arb": "ETH", "avax": "AVAX", "pol": "POL", "hood": "ETH",
+        "ton": "TON", "trx": "TRX", "arc": "USDC",
     }.get(cid, "ETH")
     rows = [
         [
@@ -4546,11 +4548,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await _done(context.bot, chat_id, status, str(exc))
             return
         cid = resolve_chain(card.snapshot.chain) or "sol"
-        gecko = {"sol": "solana", "bsc": "binancecoin", "avax": "avalanche-2"}.get(cid, "ethereum")
-        try:
-            px = await asyncio.to_thread(get_price_usd, gecko)
-        except Exception:
-            px = 0
+        px = await asyncio.to_thread(_native_usd, cid)  # 0 when unknown: the buy is refused below, never guessed
         if px <= 0:
             await _done(context.bot, chat_id, status, "Couldn't read the live price for that coin right now, so nothing was bought. "
                         "Try again in a minute, or use a $ button (Buy $25).")
@@ -5624,18 +5622,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await _done(context.bot, uid, status, str(exc))
             return
         cid = resolve_chain(card.snapshot.chain) or "sol"
-        gecko = {
-            "sol": "solana",
-            "bsc": "binancecoin",
-            "eth": "ethereum",
-            "base": "ethereum",
-            "arb": "ethereum",
-            "avax": "avalanche-2",
-        }.get(cid, "ethereum")
-        try:
-            px = await asyncio.to_thread(get_price_usd, gecko)
-        except Exception:
-            px = 0
+        px = await asyncio.to_thread(_native_usd, cid)  # 0 when unknown: the buy is refused below, never guessed
         if px <= 0:
             await _done(context.bot, uid, status, "Couldn't read the live price for that coin right now, so nothing was bought. "
                         "Try again in a minute, or use a $ button (Buy $25).")
@@ -5767,16 +5754,18 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 _NATIVE_GECKO = {
     "sol": "solana", "bsc": "binancecoin", "eth": "ethereum", "base": "ethereum", "arb": "ethereum",
-    "hood": "ethereum", "avax": "avalanche-2", "ton": "the-open-network",
+    "hood": "ethereum", "avax": "avalanche-2", "ton": "the-open-network", "trx": "tron",
 }
 _NATIVE_UNIT = {
     "sol": "SOL", "bsc": "BNB", "eth": "ETH", "base": "ETH", "arb": "ETH", "hood": "ETH",
-    "avax": "AVAX", "ton": "TON",
+    "avax": "AVAX", "ton": "TON", "trx": "TRX", "arc": "USDC",
 }
 
 
 def _native_usd(cid: str) -> float:
     """USD price of a chain's native coin, 0 if unavailable. Blocking."""
+    if cid == "arc":  # Arc's gas coin is USDC
+        return 1.0
     try:
         return float(get_price_usd(_NATIVE_GECKO.get(cid, "ethereum")) or 0)
     except Exception:
