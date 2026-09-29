@@ -5440,6 +5440,16 @@ async def _admin_users(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> list
         return []
 
 
+def _is_already_member(old) -> bool:
+    """True if this ChatMember record (the state BEFORE the update) was already inside the chat."""
+    st = old.status
+    if st in (ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER):
+        return True
+    if st == ChatMemberStatus.RESTRICTED:
+        return bool(getattr(old, "is_member", True))
+    return False
+
+
 async def on_member(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     cmu = update.chat_member
     if not cmu:
@@ -5490,6 +5500,11 @@ async def on_member(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     if new.status not in (ChatMemberStatus.MEMBER, ChatMemberStatus.RESTRICTED):
+        return
+    if _is_already_member(old):
+        # Not a join: a member who was muted (captcha) or unmuted (after tapping "I'm not a bot") is still
+        # in the chat. Without this, Guardian's own mute/unmute re-ran the whole join flow, so the welcome and
+        # the captcha were posted again and again.
         return
     user = new.user
     now_ts = time.time()
