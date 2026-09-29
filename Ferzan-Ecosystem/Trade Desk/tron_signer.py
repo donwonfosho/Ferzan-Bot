@@ -14,7 +14,7 @@ TRONGRID = (os.getenv("TRONGRID_URL") or "https://api.trongrid.io").rstrip("/")
 ROUTER = "TNJVzGqKBWkJxJB5XYSqGAwUTV15U24pPq"
 WTRX = "TNUC9Qb1rRpS5CbWLmNMxXBjyFoydXjWFR"
 # Ferzan Tron bonding-curve factory (mainnet). Coins from it trade on their curve until they graduate.
-CURVE_FACTORY = (os.getenv("TRON_CURVE_FACTORY") or "TF6VBMbSbw5MgauSbbzxq3NqBqX7NNFBMT").strip()
+CURVE_FACTORY = (os.getenv("TRON_CURVE_FACTORY") or "TPS1aM5TwfmJHjzuA1XMy6wWme2LYqZ1BN").strip()
 ALPH = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 
 
