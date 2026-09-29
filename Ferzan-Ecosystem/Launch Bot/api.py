@@ -1163,6 +1163,27 @@ def _curve_item(r, usd: float, extra: dict, vol24: float, stats: dict) -> dict:
     }
 
 
+@app.get("/api/chains")
+def chain_status():
+    """Which launch modes are open on each chain right now, so the website only claims what works.
+    Read from the same settings the launch endpoints check; names only, no addresses or keys."""
+    def flag(name: str) -> bool:
+        return (os.environ.get(name) or "").strip() == "1"
+
+    out: dict = {}
+    for ch in ("ethereum", "bsc", "base", "robinhood", "arc"):
+        f = FACTORY_ADDRESSES.get(ch, {})
+        gate = flag("ARC_LAUNCH_LIVE") if ch == "arc" else True
+        out[ch] = {"curve": bool(f.get("bonding_curve")) and gate, "plain": bool(f.get("plain")) and gate}
+    out["solana"] = {"curve": True, "plain": True}
+    try:
+        out["tron"] = {"curve": bool(_tron.curve_live()), "plain": bool(_tron.live())}
+    except Exception:  # noqa: BLE001
+        out["tron"] = {"curve": False, "plain": False}
+    out["ton"] = {"curve": flag("TON_CURVE_LIVE") and bool(_env("TON_CURVE_MASTER")), "plain": flag("TON_LAUNCH_LIVE")}
+    return {"chains": out, "now": int(time.time())}
+
+
 @app.get("/api/launches")
 def launches_feed(sort: str = "new", limit: int = 30, chain: str = "", q: str = ""):
     """New launches (all chains), King of the Hill (closest to graduating) and top 24h volume."""
