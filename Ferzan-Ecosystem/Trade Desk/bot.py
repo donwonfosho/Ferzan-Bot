@@ -4582,17 +4582,29 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 # ---------------------------------------------------------------- cross-chain buy
-_XB_PX: dict = {"t": 0.0, "v": {}}
+_XB_PX: dict = {"t": 0.0, "v": {}, "busy": False}
 
 
 def _xb_prices() -> dict:
+    """CACHED native prices only; never waits on the network (the buy path calls this). A stale or
+    empty cache starts a background refresh and the cached values (or {}) are returned at once."""
+    import threading
     import time as _t
 
-    if _XB_PX["v"] and _t.time() - _XB_PX["t"] < 60:
-        return _XB_PX["v"]
-    v = _native_prices()
-    if v:
-        _XB_PX.update(t=_t.time(), v=v)
+    if _t.time() - _XB_PX["t"] > 60 and not _XB_PX["busy"]:
+        _XB_PX["busy"] = True
+
+        def _refresh() -> None:
+            try:
+                v = _native_prices()
+                if v:
+                    _XB_PX.update(t=_t.time(), v=v)
+            except Exception:
+                pass
+            finally:
+                _XB_PX["busy"] = False
+
+        threading.Thread(target=_refresh, daemon=True).start()
     return _XB_PX["v"]
 
 
@@ -7720,6 +7732,7 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(panic_cb, pattern=r"^pnc:"), group=-1)
     app.add_handler(CallbackQueryHandler(xbuy_cb, pattern=r"^xb:"), group=-1)
     app.add_handler(CommandHandler("xbuy", xbuy_cmd))
+    _xb_prices()  # warm the price cache in the background so the first buy after a restart can check
     app.add_handler(CommandHandler("stake", stake_cmd))
     app.add_handler(CommandHandler("lpguard", lpguard_cmd))
     app.add_handler(CommandHandler("buylimit", buylimit_cmd))

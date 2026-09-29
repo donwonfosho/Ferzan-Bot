@@ -121,20 +121,34 @@ def offer_text(p: dict, usd: float, sym: str, est_out: float | None) -> str:
     )
 
 
-def check(uid: int, dst: str, usd: float, prices_fn, cap_usd: float = 500.0) -> tuple[dict | None, dict, str]:
-    """(plan or None, prices, note). Reads ONLY the destination balance first, so a funded wallet
-    (the normal case) costs one cheap read; the other chains are read only when it is short."""
+def check(uid: int, dst: str, usd: float, prices_fn, cap_usd: float = 500.0, budget: float = 1.5) -> tuple[dict | None, dict, str]:
+    """(plan or None, prices, note). This sits in front of a manual buy, so it can never slow it down:
+    it reads ONLY the destination balance (one cheap read), uses CACHED prices only, and gives up after
+    `budget` seconds (the buy then proceeds exactly as it always did). The other chains are read, and a
+    route quoted, only after the wallet is found short, when the buy would have failed anyway."""
     from concurrent.futures import ThreadPoolExecutor
+    from concurrent.futures import TimeoutError as _Timeout
 
     info = CHAINS.get(dst)
     if not info or not info["dst"]:
         return None, {}, ""
-    have = native_balance(uid, dst)
-    if have is None:
-        return None, {}, ""
     prices = dict(prices_fn() or {})
     prices.setdefault("arc", 1.0)
-    if need_native(dst, usd, prices) is None or have >= need_native(dst, usd, prices):
+    if not prices.get(dst):
+        return None, prices, ""  # no cached price yet: skip this once (a refresh is running)
+    ex = ThreadPoolExecutor(max_workers=1)
+    fut = ex.submit(native_balance, uid, dst)
+    try:
+        have = fut.result(timeout=budget)
+    except _Timeout:
+        log.info("crossbuy: balance read over budget, skipping the check")
+        return None, prices, ""
+    finally:
+        ex.shutdown(wait=False)
+    if have is None:
+        return None, prices, ""
+    need = need_native(dst, usd, prices)
+    if need is None or have >= need:
         return None, prices, ""
     if uid in INFLIGHT:
         return None, prices, "busy"
