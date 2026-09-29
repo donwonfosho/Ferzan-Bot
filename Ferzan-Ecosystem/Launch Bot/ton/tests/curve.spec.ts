@@ -90,6 +90,29 @@ describe("Ferzan TON curve", () => {
     expect(await coins(curve)).toBe(SUPPLY);
   });
 
+
+  it("DIAG one buy: every transaction, exit code and action result", async () => {
+    const names = new Map<string, string>();
+    const put = (n: string, a: Address) => names.set(a.toString(), n);
+    put("creator", creator.address); put("treasury", treasury.address); put("keeper", keeper.address);
+    put("alice", alice.address); put("minter", minter); put("CURVE", curve);
+    put("curveWallet", await walletOf(curve)); put("aliceWallet", await walletOf(alice.address));
+    const label = (a: any) => (a ? names.get(a.toString()) ?? a.toString().slice(0, 10) : "?");
+    const res = await buy(alice, toNano("10"));
+    const lines: string[] = [];
+    for (const tx of res.transactions) {
+      const d: any = tx.description, info: any = tx.inMessage?.info;
+      const cp = d.computePhase, ap = d.actionPhase;
+      const comp = cp ? (cp.type === "vm" ? `exit ${cp.exitCode} gas ${cp.gasUsed} ok=${cp.success}` : `skipped:${cp.reason}`) : "none";
+      const act = ap ? `ok=${ap.success} valid=${ap.valid} code=${ap.resultCode} actions=${ap.totalActions} skipped=${ap.skippedActions}` : "none";
+      lines.push(`${label(info?.src)} -> ${label(info?.dest)} value=${info?.value?.coins} bounce=${info?.bounce} compute[${comp}] action[${act}] aborted=${d.aborted}`);
+    }
+    const s = await state();
+    lines.push(`state after: real=${s.real} sold=${s.sold} complete=${s.complete}`);
+    lines.push(`alice coins=${await coins(alice.address)}  curve balance=${await ton(curve)}`);
+    console.log("DIAG\n" + lines.join("\n"));
+  });
+
   it("buy pays out exactly the quoted coins and takes 1% (creator 50%, platform the rest)", async () => {
     const spend = toNano("10");
     const q = (await bc.runGetMethod(curve, "get_quote_buy", [{ type: "int", value: spend }])).stackReader;
