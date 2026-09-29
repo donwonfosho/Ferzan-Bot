@@ -72,10 +72,14 @@ def _dex_native_price(coin_id: str) -> float:
     best_liq, best_px = 0.0, 0.0
     for p in pairs:
         try:
-            if str((p.get("baseToken") or {}).get("address", "")).lower() != addr.lower():
-                continue
             liq = float((p.get("liquidity") or {}).get("usd") or 0)
             px = float(p.get("priceUsd") or 0)
+            if str((p.get("baseToken") or {}).get("address", "")).lower() != addr.lower():
+                # The coin can be the QUOTE side (e.g. USDT0/WHYPE): its USD price is priceUsd / priceNative.
+                if str((p.get("quoteToken") or {}).get("address", "")).lower() != addr.lower():
+                    continue
+                pn = float(p.get("priceNative") or 0)
+                px = px / pn if pn > 0 else 0.0
         except (TypeError, ValueError):
             continue
         if px > 0 and liq > best_liq:
