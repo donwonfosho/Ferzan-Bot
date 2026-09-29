@@ -48,6 +48,11 @@ _WRAPPED = {
     "the-open-network": "0x582d872A1B094FC48F5DE31D3B73F2D9bE47def1",
     "avalanche-2": "0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7",
     "matic-network": "0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270",  # WPOL on Polygon
+    "polygon-ecosystem-token": "0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270",  # the bot's id for POL
+    "hyperliquid": "0x5555555555555555555555555555555555555555",  # WHYPE
+    "sonic-3": "0x039e2fB66102314Ce7b64Ce5Ce3E5183bc94aD38",  # wS
+    "monad": "0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A",  # WMON
+    "pulsechain": "0xA1077a294dDE1B09bB078844df40758a5D0f9a27",  # WPLS
 }
 _LAST: dict[str, tuple[float, float]] = {}  # coin id -> (time, last good price)
 _LAST_MAX_AGE = 1800.0

@@ -96,7 +96,7 @@ CHAINS = {
               router="STON.fi",
               notes="Buy + sell live via STON.fi v1 (WalletV4R2)."),
     "pol": _c("pol", "Polygon", "evm", "polygon", "polygon_pos", "POL",
-              chain_id=137, rpc="https://polygon-rpc.com",
+              chain_id=137, rpc="https://polygon-bor-rpc.publicnode.com",
               explorer="https://polygonscan.com", router="0x / QuickSwap"),
     "pulse": _c("pulse", "PulseChain", "evm", "pulsechain", "pulsechain", "PLS",
                 chain_id=369, rpc="https://rpc.pulsechain.com",
@@ -115,6 +115,18 @@ CHAINS = {
 }
 
 # 0x Swap API as of 2026. Pulse / TON / TRON / Arc / Stable are not on that list.
+def _rpc_overrides() -> None:
+    """RPC_<KEY>_URL in the env replaces a chain's RPC (e.g. RPC_POL_URL), so a dead public RPC is a .env edit."""
+    import os
+
+    for k, m in CHAINS.items():
+        u = (os.getenv(f"RPC_{k.upper()}_URL") or "").strip()
+        if u.startswith("http"):
+            m["rpc"] = u
+
+
+_rpc_overrides()
+
 ZEROX_LIVE = {
     "eth", "bsc", "base", "arb", "avax", "pol", "op", "linea",
     "sonic", "hype", "hood", "ink", "monad",
