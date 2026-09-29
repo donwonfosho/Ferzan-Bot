@@ -1,0 +1,21 @@
+{
+  "name": "ferzan-ton-curve",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Ferzan TON bonding curve: compile and sandbox tests",
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "node build.mjs && jest --runInBand"
+  },
+  "devDependencies": {
+    "@ton-community/func-js": "*",
+    "@ton/core": "*",
+    "@ton/crypto": "*",
+    "@ton/sandbox": "*",
+    "@types/jest": "*",
+    "@types/node": "*",
+    "jest": "*",
+    "ts-jest": "*",
+    "typescript": "*"
+  }
+}
