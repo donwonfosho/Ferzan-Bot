@@ -4807,6 +4807,24 @@ BRIDGE = {
 }
 
 
+def _bridge_extend() -> None:
+    """Every chain in bridge.CHAINS gets a picker entry (Relay page slug = the desk's DexScreener slug)."""
+    try:
+        import bridge as _b
+        from chains import CHAINS as _DESK
+
+        for k, m in _b.CHAINS.items():
+            if k in BRIDGE:
+                continue
+            BRIDGE[k] = {"name": m["name"], "id": _b.chain_id(k), "slug": (_DESK.get(k) or {}).get("dexscreener") or k,
+                         "unit": m["unit"], "zero": "0x0000000000000000000000000000000000000000"}
+    except Exception:
+        pass
+
+
+_bridge_extend()
+
+
 def _bridge_state(context) -> dict:
     st = context.user_data.setdefault("bridge", {"from": "sol", "to": "eth", "amt": "0.1"})
     return st
@@ -4835,7 +4853,7 @@ def _bridge_bal(uid: int, key: str) -> str:
     if not addr:
         return f"Available · open /wallet"
     try:
-        if key in {"trx", "arc", "hood"}:
+        if key in {"trx", "arc", "hood", "ton"}:
             amt = crossbuy.native_balance(uid, key)
             if amt is None:
                 raise RuntimeError("no balance")
@@ -7578,6 +7596,7 @@ def _native_prices() -> dict[str, float]:
         if px > 0:
             out[cid] = px
     out.setdefault("arc", 1.0)  # Arc's gas coin is USDC
+    out.setdefault("stable", 1.0)  # Stable's gas coin is a dollar stablecoin
     return out
 
 

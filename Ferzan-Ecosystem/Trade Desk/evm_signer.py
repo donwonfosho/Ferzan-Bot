@@ -224,10 +224,10 @@ def curve_meta(token: str) -> tuple[float, str, str, str]:
         px = float(get_price_usd(NATIVE_CG.get(cid, "ethereum")) or 0)
     except Exception:
         px = 0.0
-    if px <= 0:
-        px = 600.0 if cid == "bsc" else 3000.0
     if cid == "arc":  # Arc's gas coin is USDC: $1, not ETH
         px = 1.0
+    if px <= 0:
+        return 0.0, "", "", ""  # no live native price: show nothing rather than a guessed one
     sym = name = ""
     try:
         for sel, attr in (("0x95d89b41", "sym"), ("0x06fdde03", "name")):
@@ -338,10 +338,10 @@ def buy_curve(
         px = float(get_price_usd(NATIVE_CG.get(cid, "ethereum")) or 0)
     except Exception:
         px = 0.0
-    if px <= 0:
-        px = 600.0 if cid == "bsc" else 3000.0
     if cid == "arc":  # Arc's gas coin is USDC: $1, not ETH
         px = 1.0
+    if px <= 0:
+        return False, f"{cid.upper()} price feed is down, buy skipped. Nothing sent."
     wei = max(10**12, int((usd / max(px, 1e-9)) * 10 ** _native_decimals(cid)))
     acct = Account.from_key("0x" + raw)
     quoted = _quote_curve_tokens(meta["rpc"], curve, wei)

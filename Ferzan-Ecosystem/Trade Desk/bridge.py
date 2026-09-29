@@ -26,16 +26,32 @@ CHAINS = {
     "arc": {"name": "Arc", "id": 0, "unit": "USDC", "kind": "evm", "dec": 18, "currency": NATIVE_EVM},
     "trx": {"name": "Tron", "id": 0, "unit": "TRX", "kind": "tron", "dec": 6, "currency": NATIVE_EVM},
 }
+
+
+def _extend_from_desk() -> None:
+    """Every EVM chain the desk trades gets a bridge entry (id from the desk table; 0 = resolved from its RPC)."""
+    try:
+        from chains import CHAINS as DESK
+    except Exception:
+        return
+    for k, m in DESK.items():
+        if k in CHAINS or m.get("kind") != "evm":
+            continue
+        CHAINS[k] = {"name": m.get("label") or k.upper(), "id": int(m.get("chain_id") or 0),
+                     "unit": m.get("native") or "ETH", "kind": "evm", "dec": 18, "currency": NATIVE_EVM}
+
+
+_extend_from_desk()
 MAX_NATIVE = {"TRX": 20000.0, "USDC": 5000.0}  # per-bridge size cap in native units (default 25)
 
 
 def chain_id(key: str) -> int:
     """EVM chain id. Arc's comes from the desk's chain table (set from its RPC)."""
-    if key == "arc":
-        from chains import CHAINS as DESK
+    if int(CHAINS[key]["id"] or 0):
+        return int(CHAINS[key]["id"])
+    from chains import CHAINS as DESK
 
-        return int((DESK.get("arc") or {}).get("chain_id") or 0)
-    return int(CHAINS[key]["id"])
+    return int((DESK.get(key) or {}).get("chain_id") or 0)
 
 
 def _amount_raw(key: str, amt: str) -> str:
@@ -93,9 +109,35 @@ def dln_chain(key: str):
     raw = (os.getenv(f"DLN_ID_{key.upper()}") or "").strip()
     if raw.isdigit():
         return int(raw)
-    if key == "arc":
-        return chain_id("arc") or None
-    return DLN_CHAIN.get(key)
+    if key in DLN_CHAIN and DLN_CHAIN[key]:
+        return DLN_CHAIN[key]
+    if key in CHAINS and CHAINS[key]["kind"] == "evm":
+        cid = chain_id(key)
+        return _dln_live().get(cid) if cid else None
+    return None
+
+
+_DLN_LIVE: dict = {"t": 0.0, "v": {}}
+
+
+def _dln_live() -> dict:
+    """{original EVM chain id: deBridge chain id} from deBridge's own list, cached 1h. {} if unreachable."""
+    import time as _t
+
+    if _DLN_LIVE["v"] and _t.time() - _DLN_LIVE["t"] < 3600:
+        return _DLN_LIVE["v"]
+    try:
+        r = requests.get("https://dln.debridge.finance/v1.0/supported-chains-info", timeout=8).json()
+        out = {}
+        for c in r.get("chains") or []:
+            o, i = c.get("originalChainId"), c.get("chainId")
+            if o and i:
+                out[int(o)] = int(i)
+        if out:
+            _DLN_LIVE.update(t=_t.time(), v=out)
+        return out
+    except Exception:
+        return _DLN_LIVE["v"]
 DLN_TOKEN = {
     "sol": SOL_NATIVE,
     "eth": NATIVE_EVM,
@@ -112,7 +154,7 @@ DLN_TOKEN = {
 
 
 def dln_token(key: str) -> str:
-    return (os.getenv(f"DLN_NATIVE_{key.upper()}") or "").strip() or DLN_TOKEN[key]
+    return (os.getenv(f"DLN_NATIVE_{key.upper()}") or "").strip() or DLN_TOKEN.get(key) or NATIVE_EVM
 
 
 def wallet_addr(uid: int, key: str) -> str:
