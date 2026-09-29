@@ -36,7 +36,6 @@ RESERVE = {"sol": 0.012, "eth": 0.0015, "base": 0.0004, "bsc": 0.0025, "hood": 0
 # the bridge's own flat fee, paid in the source chain's native coin (deBridge table)
 SRC_FEE = {"sol": 0.015, "eth": 0.001, "base": 0.001, "bsc": 0.005, "hood": 0.001, "arc": 1.0}
 # The rest of the desk's EVM chains. dst=True only where the desk can also BUY the token (0x route);
-# PulseChain and Stable have no swap route yet, so they can fund others but not be topped up to buy.
 _MORE = {
     "arb": ("Arbitrum", "ETH", 0.0004, 0.0005, True),
     "op": ("Optimism", "ETH", 0.0004, 0.0005, True),
@@ -47,8 +46,6 @@ _MORE = {
     "sonic": ("Sonic", "S", 3.0, 1.0, True),
     "hype": ("HyperEVM", "HYPE", 0.1, 0.05, True),
     "monad": ("Monad", "MON", 5.0, 2.0, True),
-    "pulse": ("PulseChain", "PLS", 20000.0, 5000.0, False),
-    "stable": ("Stable", "USDT0", 1.0, 0.5, False),
 }
 for _k, (_n, _u, _r, _f, _d) in _MORE.items():
     CHAINS.setdefault(_k, {"name": _n, "unit": _u, "src": True, "dst": _d})
@@ -153,7 +150,6 @@ def check(uid: int, dst: str, usd: float, prices_fn, cap_usd: float = 500.0, bud
         return None, {}, ""
     prices = dict(prices_fn() or {})
     prices.setdefault("arc", 1.0)
-    prices.setdefault("stable", 1.0)
     if not prices.get(dst):
         return None, prices, ""  # no cached price yet: skip this once (a refresh is running)
     ex = ThreadPoolExecutor(max_workers=1)

@@ -28,6 +28,10 @@ CHAINS = {
 }
 
 
+# Checked live on the droplet: neither Relay nor deBridge lists these, so they stay out of the picker.
+_NO_ROUTE = {"pulse", "stable"}
+
+
 def _extend_from_desk() -> None:
     """Every EVM chain the desk trades gets a bridge entry (id from the desk table; 0 = resolved from its RPC)."""
     try:
@@ -35,7 +39,7 @@ def _extend_from_desk() -> None:
     except Exception:
         return
     for k, m in DESK.items():
-        if k in CHAINS or m.get("kind") != "evm":
+        if k in CHAINS or m.get("kind") != "evm" or k in _NO_ROUTE:
             continue
         CHAINS[k] = {"name": m.get("label") or k.upper(), "id": int(m.get("chain_id") or 0),
                      "unit": m.get("native") or "ETH", "kind": "evm", "dec": 18, "currency": NATIVE_EVM}

@@ -7596,7 +7596,6 @@ def _native_prices() -> dict[str, float]:
         if px > 0:
             out[cid] = px
     out.setdefault("arc", 1.0)  # Arc's gas coin is USDC
-    out.setdefault("stable", 1.0)  # Stable's gas coin is a dollar stablecoin
     return out
 
 
