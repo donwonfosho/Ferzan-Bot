@@ -4551,7 +4551,11 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             px = await asyncio.to_thread(get_price_usd, gecko)
         except Exception:
             px = 0
-        usd_o = amt * px if px > 0 else _default_buy_usd(uid)
+        if px <= 0:
+            await _done(context.bot, chat_id, status, "Couldn't read the live price for that coin right now, so nothing was bought. "
+                        "Try again in a minute, or use a $ button (Buy $25).")
+            return
+        usd_o = amt * px
         live_msg = await _off(uid, _live_buy_followup, uid, card, pending, True, True, usd_override=usd_o, multi=True, xbuy=True, _busy=BUSY_MSG)
         await _done(context.bot, chat_id, status, f"{amt:g} native ≈ ${usd_o:.2f}\n{live_msg}")
         return
@@ -5632,7 +5636,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             px = await asyncio.to_thread(get_price_usd, gecko)
         except Exception:
             px = 0
-        usd_o = amt * px if px > 0 else _default_buy_usd(uid)
+        if px <= 0:
+            await _done(context.bot, uid, status, "Couldn't read the live price for that coin right now, so nothing was bought. "
+                        "Try again in a minute, or use a $ button (Buy $25).")
+            return
+        usd_o = amt * px
         usd_o = min(signer.max_usd(), max(1.0, usd_o))
         live_msg = await _off(uid, _live_buy_followup, uid, card, name, True, True, usd_override=usd_o, multi=True, _busy=BUSY_MSG)
         await _done(context.bot, uid, status, f"{amt:g} native ≈ ${usd_o:.2f}\n{live_msg or ''}")
@@ -7513,20 +7521,15 @@ CG_NATIVE = {
 
 
 def _native_prices() -> dict[str, float]:
-    ids = ",".join(dict.fromkeys(CG_NATIVE.values()))
+    ids = list(dict.fromkeys(CG_NATIVE.values()))
     try:
-        r = requests.get(
-            "https://api.coingecko.com/api/v3/simple/price",
-            params={"ids": ids, "vs_currencies": "usd"},
-            timeout=12,
-        )
-        data = r.json() if r.ok else {}
+        data = get_prices_usd(ids)  # CoinGecko, then DexScreener for the big coins, then the last good price
     except Exception:
         data = {}
     out: dict[str, float] = {}
     for cid, gid in CG_NATIVE.items():
         try:
-            px = float((data.get(gid) or {}).get("usd") or 0)
+            px = float(data.get(gid) or 0)
         except (TypeError, ValueError):
             px = 0.0
         if px > 0:

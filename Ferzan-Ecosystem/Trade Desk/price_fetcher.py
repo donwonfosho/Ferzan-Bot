@@ -38,6 +38,56 @@ def search_coin(query: str) -> list[dict]:
     return exact if exact else coins[:10]
 
 
+# CoinGecko refuses many datacenter IPs (HTTP 403). These are the wrapped native coins, priced from
+# DexScreener (already used below) so the desk never has to guess a dollar amount.
+_WRAPPED = {
+    "binancecoin": "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c",
+    "ethereum": "0x4200000000000000000000000000000000000006",
+    "solana": "So11111111111111111111111111111111111111112",
+    "tron": "TNUC9Qb1rRpS5CbWLmNMxXBjyFoydXjWFR",
+    "the-open-network": "0x582d872A1B094FC48F5DE31D3B73F2D9bE47def1",
+    "avalanche-2": "0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7",
+}
+_LAST: dict[str, tuple[float, float]] = {}  # coin id -> (time, last good price)
+_LAST_MAX_AGE = 1800.0
+
+
+def _dex_native_price(coin_id: str) -> float:
+    """USD price of a native coin from its most liquid wrapped-token pool. 0.0 if unavailable."""
+    addr = _WRAPPED.get(coin_id)
+    if not addr:
+        return 0.0
+    try:
+        resp = requests.get(DEX_TOKEN.format(addr=addr), timeout=TIMEOUT)
+        resp.raise_for_status()
+        pairs = resp.json().get("pairs") or []
+    except (requests.RequestException, ValueError):
+        return 0.0
+    best_liq, best_px = 0.0, 0.0
+    for p in pairs:
+        try:
+            if str((p.get("baseToken") or {}).get("address", "")).lower() != addr.lower():
+                continue
+            liq = float((p.get("liquidity") or {}).get("usd") or 0)
+            px = float(p.get("priceUsd") or 0)
+        except (TypeError, ValueError):
+            continue
+        if px > 0 and liq > best_liq:
+            best_liq, best_px = liq, px
+    return best_px if best_liq >= 50_000 else 0.0
+
+
+def _remember(coin_id: str, px: float) -> float:
+    if px > 0:
+        _LAST[coin_id] = (time.time(), px)
+    return px
+
+
+def _last_good(coin_id: str) -> float:
+    t, px = _LAST.get(coin_id, (0.0, 0.0))
+    return px if px > 0 and time.time() - t <= _LAST_MAX_AGE else 0.0
+
+
 def get_price_usd(coin_id: str) -> float:
     try:
         resp = requests.get(
@@ -46,18 +96,22 @@ def get_price_usd(coin_id: str) -> float:
             timeout=TIMEOUT,
         )
         resp.raise_for_status()
-    except requests.RequestException as exc:
-        raise PriceFetchError(f"Price request failed: {exc}") from exc
-
-    data = resp.json()
-    if coin_id not in data or "usd" not in data[coin_id]:
-        raise PriceFetchError(f"No USD price returned for {coin_id}")
-    return float(data[coin_id]["usd"])
+        data = resp.json()
+        if coin_id in data and "usd" in data[coin_id]:
+            return _remember(coin_id, float(data[coin_id]["usd"]))
+        reason = f"No USD price returned for {coin_id}"
+    except (requests.RequestException, ValueError) as exc:
+        reason = f"Price request failed: {exc}"
+    px = _dex_native_price(coin_id) or _last_good(coin_id)
+    if px > 0:
+        return _remember(coin_id, px) if coin_id not in _LAST or px != _last_good(coin_id) else px
+    raise PriceFetchError(reason)
 
 
 def get_prices_usd(coin_ids: list[str]) -> dict[str, float]:
     if not coin_ids:
         return {}
+    out: dict[str, float] = {}
     try:
         resp = requests.get(
             f"{COINGECKO}/simple/price",
@@ -65,11 +119,18 @@ def get_prices_usd(coin_ids: list[str]) -> dict[str, float]:
             timeout=TIMEOUT,
         )
         resp.raise_for_status()
-    except requests.RequestException as exc:
-        raise PriceFetchError(f"Batch price request failed: {exc}") from exc
-
-    data = resp.json()
-    return {cid: v["usd"] for cid, v in data.items() if "usd" in v}
+        out = {cid: _remember(cid, float(v["usd"])) for cid, v in resp.json().items() if "usd" in v}
+    except (requests.RequestException, ValueError):
+        pass
+    for cid in sorted(set(coin_ids)):
+        if out.get(cid, 0) > 0:
+            continue
+        px = _dex_native_price(cid) or _last_good(cid)
+        if px > 0:
+            out[cid] = px
+    if not out:
+        raise PriceFetchError("Batch price request failed: no price source answered")
+    return out
 
 
 def _num(v: Any, default: float = 0.0) -> float:
