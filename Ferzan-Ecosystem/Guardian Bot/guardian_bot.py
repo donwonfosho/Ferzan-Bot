@@ -525,7 +525,11 @@ def _captcha_mode(chat_id: int) -> str:
     row = con.execute("SELECT captcha_mode FROM settings WHERE chat_id=?", (chat_id,)).fetchone()
     con.close()
     mode = (row[0] if row else None) or "button"
-    return mode if mode in ("button", "math") else "button"
+    # "button" is the column's untouched default, so it now means the standard flow: ONE message that first asks
+    # "I'm human" and then, in that same message, a quick sum. "simple" (stored as "tap") stays a single tap.
+    if mode == "tap":
+        return "tap"
+    return "math" if mode == "math" else "full"
 
 
 def _welcome_settings(chat_id: int) -> tuple[str | None, bool]:
@@ -1670,6 +1674,7 @@ async def _captcha_timeout(context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     _pending_captcha.pop((chat_id, user_id), None)
     _captcha_answers.pop((chat_id, user_id), None)
+    _captcha_greeting.pop((chat_id, user_id), None)
     try:
         await context.bot.ban_chat_member(chat_id, user_id)
         await context.bot.unban_chat_member(chat_id, user_id)
@@ -1679,6 +1684,33 @@ async def _captcha_timeout(context: ContextTypes.DEFAULT_TYPE) -> None:
         await context.bot.delete_message(chat_id, msg_id)
     except Exception:
         pass
+
+
+_captcha_greeting: dict[tuple[int, int], str] = {}
+
+
+def _math_challenge(chat_id: int, user_id: int) -> tuple[str, InlineKeyboardMarkup]:
+    """A fresh 'a + b' question with four answer buttons; remembers the right answer."""
+    a, b = random.randint(1, 9), random.randint(1, 9)
+    correct = a + b
+    options = {correct}
+    while len(options) < 4:
+        options.add(max(0, correct + random.randint(-6, 6)))
+    option_list = list(options)
+    random.shuffle(option_list)
+    _captcha_answers[(chat_id, user_id)] = correct
+    kb = InlineKeyboardMarkup(
+        [[InlineKeyboardButton(str(o), callback_data=f"cap:{chat_id}:{user_id}:{o}") for o in option_list]]
+    )
+    return f"\U0001F512 Quick check — what's {a} + {b}? Tap the right answer within {CAPTCHA_TIMEOUT_SECONDS // 60} min to unlock chat.", kb
+
+
+async def _edit_captcha_message(msg, text: str, kb: InlineKeyboardMarkup) -> None:
+    """Change the captcha message in place (caption if it carries media, text otherwise)."""
+    if msg.photo or msg.animation or msg.video or msg.caption is not None:
+        await msg.edit_caption(caption=text, reply_markup=kb)
+    else:
+        await msg.edit_text(text, reply_markup=kb)
 
 
 async def captcha_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1692,17 +1724,36 @@ async def captcha_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if q.from_user.id != user_id:
         await q.answer("This isn't your verification.", show_alert=True)
         return
+    if len(parts) >= 4 and parts[3] == "h":
+        # Step 1 of the one-message flow: they tapped "I'm human". Turn this SAME message into the sum.
+        question, kb = _math_challenge(chat_id, user_id)
+        greeting = _captcha_greeting.get((chat_id, user_id)) or ""
+        try:
+            await _edit_captcha_message(q.message, (greeting + "\n\n" if greeting else "") + question, kb)
+            await q.answer("Thanks — one quick question.")
+        except Exception as exc:
+            log.warning("captcha step edit %s", exc)
+            await q.answer("Try again in a moment.", show_alert=True)
+        return
     if len(parts) >= 4:
-        # Math-mode captcha — verify the tapped answer before unlocking.
+        # Math captcha — verify the tapped answer before unlocking.
         try:
             chosen = int(parts[3])
         except ValueError:
             chosen = None
         correct = _captcha_answers.get((chat_id, user_id))
         if correct is None or chosen != correct:
-            await q.answer("Wrong answer — try again.", show_alert=True)
+            # Wrong: new sum in the same message, so it can't be brute-forced by re-tapping.
+            question, kb = _math_challenge(chat_id, user_id)
+            greeting = _captcha_greeting.get((chat_id, user_id)) or ""
+            try:
+                await _edit_captcha_message(q.message, (greeting + "\n\n" if greeting else "") + "❌ Not quite. " + question, kb)
+            except Exception:
+                pass
+            await q.answer("Wrong answer — new question.", show_alert=False)
             return
         _captcha_answers.pop((chat_id, user_id), None)
+    _captcha_greeting.pop((chat_id, user_id), None)
     _pending_captcha.pop((chat_id, user_id), None)
     try:
         chat = await context.bot.get_chat(chat_id)
@@ -1991,8 +2042,8 @@ MENU_SECTIONS: dict[str, tuple[str, str]] = {
         "🤖 <b>Join CAPTCHA</b>\n\n"
         "New members must tap a button before they can chat.\n\n"
         "• <code>/gcaptcha on|off</code>\n"
-        "• <code>/gcaptcha mode simple|math</code> — simple is one tap, math asks them to solve "
-        "\"3 + 5 = ?\" from 4 options, harder for a bot to click through blind\n\n"
+        "• <code>/gcaptcha mode full|math|simple</code> — full (default): one message, the member taps \"I'm human\" and "
+        "then answers a quick sum in that same message; math: sum only; simple: one tap\n\n"
         "Anyone who doesn't verify is auto-kicked after 5 minutes. Welcome/goodbye messages also "
         "auto-translate to the joining member's Telegram language when you haven't set a custom one.\n\n"
         "📜 <b>Rules-acceptance gate</b> — an alternative to captcha: new members must tap \"I agree to "
@@ -4985,10 +5036,12 @@ async def gcaptcha(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     args = context.args or []
     if args and args[0].lower() == "mode":
-        if len(args) < 2 or args[1].lower() not in ("simple", "math"):
-            await update.effective_message.reply_text("Usage: /gcaptcha mode simple|math")
+        if len(args) < 2 or args[1].lower() not in ("simple", "math", "full"):
+            await update.effective_message.reply_text(
+                "Usage: /gcaptcha mode full|math|simple\nfull = tap \"I'm human\" then a quick sum, all in the same message (default)"
+            )
             return
-        mode = "button" if args[1].lower() == "simple" else "math"
+        mode = {"simple": "tap", "math": "math", "full": "button"}[args[1].lower()]
         con = _db()
         con.execute(
             "INSERT INTO settings(chat_id, captcha_mode) VALUES(?,?) "
@@ -5002,7 +5055,7 @@ async def gcaptcha(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     if not args or args[0].lower() not in ("on", "off"):
         await update.effective_message.reply_text(
-            "Usage: /gcaptcha on|off\n/gcaptcha mode simple|math — math is harder to click through blind"
+            "Usage: /gcaptcha on|off\n/gcaptcha mode full|math|simple — full (default) is one message: tap, then a quick sum"
         )
         return
     val = 1 if args[0].lower() == "on" else 0
@@ -5640,21 +5693,18 @@ async def on_member(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await context.bot.restrict_chat_member(chat_id, user.id, ChatPermissions(can_send_messages=False))
         except Exception as exc:
             log.warning("captcha mute %s", exc)
-        if _captcha_mode(chat_id) == "math":
-            a, b = random.randint(1, 9), random.randint(1, 9)
-            correct = a + b
-            options = {correct}
-            while len(options) < 4:
-                options.add(max(0, correct + random.randint(-6, 6)))
-            option_list = list(options)
-            random.shuffle(option_list)
-            _captcha_answers[(chat_id, user.id)] = correct
+        mode = _captcha_mode(chat_id)
+        if mode == "math":
+            question, kb = _math_challenge(chat_id, user.id)
+            prompt = f"{greeting}\n\n{question}"
+        elif mode == "full":
+            _captcha_greeting[(chat_id, user.id)] = greeting
             kb = InlineKeyboardMarkup(
-                [[InlineKeyboardButton(str(o), callback_data=f"cap:{chat_id}:{user.id}:{o}") for o in option_list]]
+                [[InlineKeyboardButton("✅ I'm human", callback_data=f"cap:{chat_id}:{user.id}:h")]]
             )
             prompt = (
-                f"{greeting}\n\n\U0001F512 Quick check — what's {a} + {b}? Tap the right answer within "
-                f"{CAPTCHA_TIMEOUT_SECONDS // 60} min to unlock chat."
+                f"{greeting}\n\n\U0001F512 Tap below to confirm you're human, then answer one quick question "
+                f"(within {CAPTCHA_TIMEOUT_SECONDS // 60} min) to unlock chat."
             )
         else:
             kb = InlineKeyboardMarkup(
