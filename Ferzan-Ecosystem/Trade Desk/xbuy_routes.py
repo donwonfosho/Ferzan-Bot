@@ -22,8 +22,8 @@ for line in open("/opt/ferzan/.env") if os.path.exists("/opt/ferzan/.env") else 
         if k in {"RELAY_API_KEY", "ARC_RPC_URL", "ARC_CHAIN_ID"} or k.startswith(("DLN_ID_", "DLN_NATIVE_")):
             os.environ.setdefault(k, v.strip().strip('"').strip("'"))
 
-SOL = "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM"
-EVM = "0x000000000000000000000000000000000000dEaD"
+SOL = "Gh9ZwEmdLJ8DscKNTkTqPbNwLNNBjuSzaG9Vp2KGtKJr"  # ordinary address; burn addresses are refused by deBridge compliance
+EVM = "0x5B38Da6a701c568545dCfcB03FcB875f56beddC4"
 uw = types.ModuleType("user_wallets")
 uw.ensure = lambda uid: {"sol_pub": SOL, "evm_pub": EVM}
 uw.secrets = lambda uid: ("unused", "0x" + "11" * 32)

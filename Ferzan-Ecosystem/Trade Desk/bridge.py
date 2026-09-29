@@ -71,7 +71,7 @@ DLN_TOKEN = {
     "op": NATIVE_EVM,
     "hood": NATIVE_EVM,
     "arc": NATIVE_EVM,
-    "trx": NATIVE_EVM,
+    "trx": "T9yD14Nj9j7xAB4dbGeiX9h8unkKHxuWwb",  # deBridge's id for native TRX (base58, not the 0x zero address)
 }
 
 
