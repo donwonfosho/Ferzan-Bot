@@ -48,6 +48,42 @@ def _amount_raw(key: str, amt: str) -> str:
 
 
 DLN = "https://dln.debridge.finance/v1.0/dln/order/create-tx"
+
+# ---- Ferzan bridge fee (same as the website): a small cut of what is bridged, paid to the treasury by the provider.
+# FERZAN holders pay less (tiers live in the Launch Bot's ferzan_perks; the Trade Bot only asks its local API).
+_FEE_EVM = "0x4d5955afb9ABF5943729CB74A0196498483e4622"  # public treasury addresses, same as the website
+_FEE_SOL = "6yxsKcSeqAcoLXgyKDtVVW7Hb2d4uLYVT8X9zGa64HRp"
+_TIER_CACHE: dict = {}
+
+
+def fee_bps(uid: int) -> int:
+    """Bridge fee in basis points for this user (0 = none). Never raises: any problem means the normal fee."""
+    base = int(os.getenv("BRIDGE_FEE_BPS", "25") or 25)
+    base = max(0, min(100, base))
+    if base == 0:
+        return 0
+    try:
+        sol = wallet_addr(uid, "sol")
+        if not sol:
+            return base
+        import time as _t
+        hit = _TIER_CACHE.get(sol)
+        if hit and _t.time() - hit[0] < 300:
+            return hit[1]
+        api = os.getenv("LAUNCH_API_LOCAL", "http://127.0.0.1:8000").rstrip("/")
+        r = requests.get(f"{api}/api/ferzan-perks/{sol}", timeout=2.5).json()
+        bps = int(r.get("bridge_fee_bps")) if r.get("active") else base
+        bps = max(0, min(base, bps))
+        _TIER_CACHE[sol] = (_t.time(), bps)
+        return bps
+    except Exception:
+        return base
+
+
+def _fee_wallet(kind: str) -> str:
+    if kind == "sol":
+        return (os.getenv("BRIDGE_FEE_WALLET_SOL") or _FEE_SOL).strip()
+    return (os.getenv("BRIDGE_FEE_WALLET_EVM") or _FEE_EVM).strip()
 DLN_CHAIN = {"sol": 7565164, "eth": 1, "base": 8453, "bsc": 56, "arb": 42161, "pol": 137, "avax": 43114, "op": 10,
              "hood": 4663, "arc": None, "trx": 100000026}
 
@@ -108,14 +144,15 @@ def quote(uid: int, src: str, dst: str, amt: str) -> dict:
     user, recv = wallet_addr(uid, src), wallet_addr(uid, dst)
     if not user_wallets_ok or not user or not recv:
         raise ValueError("Open /wallet first so Ferzan can create your desk addresses.")
+    bps = fee_bps(uid)
     if "sol" in {src, dst} or "trx" in {src, dst}:
-        return _quote_dln(user, recv, src, dst, amt)
+        return _quote_dln(user, recv, src, dst, amt, bps)
     try:
-        return _quote_relay(user, recv, src, dst, amt)
+        return _quote_relay(user, recv, src, dst, amt, bps)
     except Exception as relay_err:
         # Relay doesn't list every chain (Robinhood, Arc): deBridge is the fallback.
         try:
-            return _quote_dln(user, recv, src, dst, amt)
+            return _quote_dln(user, recv, src, dst, amt, bps)
         except Exception as dln_err:
             raise RuntimeError(f"No route: Relay said {str(relay_err)[:90]}; deBridge said {str(dln_err)[:90]}")
 
@@ -129,7 +166,7 @@ def user_wallets_ensure(uid: int) -> bool:
         return False
 
 
-def _quote_relay(user: str, recv: str, src: str, dst: str, amt: str) -> dict:
+def _quote_relay(user: str, recv: str, src: str, dst: str, amt: str, bps: int = 0) -> dict:
     if not chain_id(src) or not chain_id(dst):
         raise ValueError("chain id unknown")
     body = {
@@ -143,25 +180,33 @@ def _quote_relay(user: str, recv: str, src: str, dst: str, amt: str) -> dict:
         "tradeType": "EXACT_INPUT",
         "includeProtocolData": True,
     }
+    if bps > 0:
+        body["appFees"] = [{"recipient": _fee_wallet("evm"), "fee": str(bps)}]
     headers = {"content-type": "application/json"}
     key = (os.getenv("RELAY_API_KEY") or "").strip()
     if key:
         headers["x-api-key"] = key
     r = requests.post(RELAY, headers=headers, json=body, timeout=25)
     data = r.json() if r.content else {}
+    if r.status_code >= 400 and bps > 0:
+        # If the provider rejects the fee request, still offer the bridge, without our fee, and say so in the log.
+        import logging
+        logging.getLogger("bridge").warning("relay rejected appFees (%s): %s", r.status_code, r.text[:160])
+        body.pop("appFees", None)
+        bps = 0
+        r = requests.post(RELAY, headers=headers, json=body, timeout=25)
+        data = r.json() if r.content else {}
     if r.status_code >= 400:
         msg = data.get("message") or data.get("error") or r.text[:240]
         raise RuntimeError(str(msg))
-    return {"raw": data, "user": user, "recv": recv, "src": src, "dst": dst, "amt": amt, "via": "relay"}
+    return {"raw": data, "user": user, "recv": recv, "src": src, "dst": dst, "amt": amt, "via": "relay", "fee_bps": bps}
 
 
-def _quote_dln(user: str, recv: str, src: str, dst: str, amt: str) -> dict:
+def _quote_dln(user: str, recv: str, src: str, dst: str, amt: str, bps: int = 0) -> dict:
     sid, did = dln_chain(src), dln_chain(dst)
     if not sid or not did:
         raise ValueError("That pair is not on deBridge yet.")
-    r = requests.get(
-        DLN,
-        params={
+    params = {
             "srcChainId": sid,
             "srcChainTokenIn": dln_token(src),
             "srcChainTokenInAmount": _amount_raw(src, amt),
@@ -171,15 +216,30 @@ def _quote_dln(user: str, recv: str, src: str, dst: str, amt: str) -> dict:
             "dstChainTokenOutRecipient": recv,
             "srcChainOrderAuthorityAddress": user,
             "dstChainOrderAuthorityAddress": recv,
-        },
-        timeout=25,
-    )
+    }
+    if bps > 0:
+        params["affiliateFeePercent"] = f"{bps / 100:g}"
+        params["affiliateFeeRecipient"] = _fee_wallet("sol" if CHAINS[src]["kind"] == "sol" else "evm")
+    r = requests.get(DLN, params=params, timeout=25)
     data = r.json() if r.content else {}
+    if (r.status_code >= 400 or data.get("error")) and bps > 0:
+        import logging
+        logging.getLogger("bridge").warning("deBridge rejected the affiliate fee (%s): %s", r.status_code, r.text[:160])
+        params.pop("affiliateFeePercent", None)
+        params.pop("affiliateFeeRecipient", None)
+        bps = 0
+        r = requests.get(DLN, params=params, timeout=25)
+        data = r.json() if r.content else {}
     if r.status_code >= 400 or data.get("error"):
         raise RuntimeError(str(data.get("error") or data.get("message") or r.text[:240]))
     if not ((data.get("tx") or {}).get("data") or (data.get("tx") or {}).get("to")):
         raise RuntimeError(str(data.get("errorMessage") or "deBridge returned no tx."))
-    return {"raw": data, "user": user, "recv": recv, "src": src, "dst": dst, "amt": amt, "via": "dln"}
+    return {"raw": data, "user": user, "recv": recv, "src": src, "dst": dst, "amt": amt, "via": "dln", "fee_bps": bps}
+
+
+def _fee_line(pack: dict) -> str:
+    bps = int(pack.get("fee_bps") or 0)
+    return f"Ferzan fee {bps / 100:g}% (included; FERZAN holders pay less)\n" if bps > 0 else ""
 
 
 def summarize(pack: dict) -> str:
@@ -200,6 +260,7 @@ def summarize(pack: dict) -> str:
             f"To {CHAINS[pack['dst']]['name']}   {outn} {CHAINS[pack['dst']]['unit']}\n"
             f"Send {pack['user'][:12]}…\n"
             f"Receive {pack['recv'][:12]}…\n"
+            f"{_fee_line(pack)}"
             "via deBridge · signed on this desk"
         )
     details = data.get("details") or {}
@@ -222,6 +283,7 @@ def summarize(pack: dict) -> str:
         f"To {CHAINS[pack['dst']]['name']}   {outn} {CHAINS[pack['dst']]['unit']}\n"
         f"Send {pack['user'][:12]}…\n"
         f"Receive {pack['recv'][:12]}…\n"
+        f"{_fee_line(pack)}"
         f"{fee}"
     )
 

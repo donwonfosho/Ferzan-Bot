@@ -1,9 +1,10 @@
 """FERZAN holder perks: what holding FERZAN in a Solana wallet gets you on Ferzan.
 
-  Holder  (FERZAN_PERK_HOLDER, default 1,000,000 FERZAN = 0.1% of supply)
-          -> FERZAN holder badge, half-price Solana launch fee
-  Whale   (FERZAN_PERK_WHALE, default 10,000,000 FERZAN = 1% of supply)
-          -> whale badge, free Solana launch fee
+  Holder  (FERZAN_PERK_HOLDER,  default  1,000,000 = 0.1% of supply) half-price Solana launch, bridge fee 0.15%
+  Booster (FERZAN_PERK_BOOSTER, default  5,000,000 = 0.5%)           half-price Solana launch, bridge fee 0.10%
+  Whale   (FERZAN_PERK_WHALE,   default 10,000,000 = 1%)             free Solana launch, bridge fee 0.05%
+  Titan   (FERZAN_PERK_TITAN,   default 25,000,000 = 2.5%)           free Solana launch, no bridge fee
+  Bridge fee for everyone else: BRIDGE_FEE_BPS (default 25 = 0.25%). Trade Bot fee discounts are listed in ladder().
 
 The perks switch on by themselves when FERZAN is announced (the mint is read from the flagship
 state file, and stays private until then). FERZAN_PERK_MINT in /opt/ferzan/.env overrides the mint
@@ -44,6 +45,37 @@ def whale_min() -> float:
     return max(holder_min(), _num("FERZAN_PERK_WHALE", 10_000_000))
 
 
+def booster_min() -> float:
+    """Between holder and whale (default 5,000,000 = 0.5% of supply)."""
+    return min(max(holder_min(), _num("FERZAN_PERK_BOOSTER", 5_000_000)), whale_min())
+
+
+def titan_min() -> float:
+    """At or above whale (default 25,000,000 = 2.5% of supply)."""
+    return max(whale_min(), _num("FERZAN_PERK_TITAN", 25_000_000))
+
+
+def base_bridge_bps() -> int:
+    """Ferzan's bridge fee for everyone without a holder discount, in basis points (25 = 0.25%)."""
+    return int(max(0, min(100, _num("BRIDGE_FEE_BPS", 25))))
+
+
+# tier, minimum, launch fee off %, badge, bridge fee bps, Trade Bot fee discount %  (highest first)
+def _tiers() -> list[tuple]:
+    return [
+        ("titan", titan_min(), 100, "👑 FERZAN titan", 0, 40),
+        ("whale", whale_min(), 100, "🐋 FERZAN whale", 5, 25),
+        ("booster", booster_min(), 50, "🔶 FERZAN booster", 10, 15),
+        ("holder", holder_min(), 50, "🔷 FERZAN holder", 15, 10),
+    ]
+
+
+def ladder() -> list[dict]:
+    """The public tier table, lowest first, for the API and the website."""
+    return [{"tier": t, "min": m, "badge": b, "launch_fee_off_pct": off, "bridge_fee_bps": min(bps, base_bridge_bps()),
+             "trade_fee_discount_pct": disc} for (t, m, off, b, bps, disc) in reversed(_tiers())]
+
+
 def mint() -> str:
     """The FERZAN mint once it is announced ('' before that)."""
     if os.environ.get("FERZAN_PERKS_OFF") == "1":
@@ -81,10 +113,12 @@ def balance(owner: str, mint_addr: str) -> float | None:
 
 
 def perks(owner: str) -> dict:
-    """{'active', 'tier' (none|holder|whale), 'balance', 'launch_fee_off_pct', 'badge', 'holder_min', 'whale_min'}"""
+    """{'active', 'tier' (none|holder|booster|whale|titan), 'balance', 'launch_fee_off_pct', 'badge', 'holder_min',
+    'whale_min', 'booster_min', 'titan_min', 'bridge_fee_bps', 'trade_fee_discount_pct', 'next_tier', 'next_min'}"""
     owner = (owner or "").strip()
     base = {"active": False, "tier": "none", "balance": 0.0, "launch_fee_off_pct": 0, "badge": "",
-            "holder_min": holder_min(), "whale_min": whale_min()}
+            "holder_min": holder_min(), "whale_min": whale_min(), "booster_min": booster_min(), "titan_min": titan_min(),
+            "bridge_fee_bps": base_bridge_bps(), "trade_fee_discount_pct": 0, "next_tier": "holder", "next_min": holder_min()}
     m = mint()
     if not m or not _SOL.fullmatch(owner):
         return base
@@ -97,10 +131,14 @@ def perks(owner: str) -> dict:
         out["error"] = "balance unavailable"
         return out  # not cached: try again next time
     out["balance"] = bal
-    if bal >= whale_min():
-        out.update(tier="whale", launch_fee_off_pct=100, badge="🐋 FERZAN whale")
-    elif bal >= holder_min():
-        out.update(tier="holder", launch_fee_off_pct=50, badge="🔷 FERZAN holder")
+    ups = list(reversed(_tiers()))  # lowest first
+    out["next_tier"], out["next_min"] = "", None
+    for (t, mn, off, badge, bps, disc) in ups:
+        if bal >= mn:
+            out.update(tier=t, launch_fee_off_pct=off, badge=badge, bridge_fee_bps=min(bps, base_bridge_bps()),
+                       trade_fee_discount_pct=disc)
+        elif not out["next_tier"]:
+            out["next_tier"], out["next_min"] = t, mn
     _CACHE[owner] = (time.time(), dict(out, _mint=m))
     return out
 

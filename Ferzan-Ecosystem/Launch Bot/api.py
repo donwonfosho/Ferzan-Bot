@@ -2576,8 +2576,7 @@ def ferzan_perks_for(wallet: str):
     base = int(os.environ.get("LAUNCH_FEE_LAMPORTS") or "50000000")
     fee, _ = _fp.launch_fee_lamports(wallet, base) if p.get("active") else (base, "")
     return dict(p, launch_fee_sol=base / 1e9, your_launch_fee_sol=fee / 1e9,
-                tiers=[{"tier": "holder", "min": p["holder_min"], "badge": "🔷 FERZAN holder", "launch_fee_off_pct": 50},
-                       {"tier": "whale", "min": p["whale_min"], "badge": "🐋 FERZAN whale", "launch_fee_off_pct": 100}])
+                tiers=_fp.ladder(), base_bridge_fee_bps=_fp.base_bridge_bps())
 
 
 # ---- BATCH_D: live push, holders + safety, profit cards, search ----
