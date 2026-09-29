@@ -381,6 +381,8 @@ def _ferzan_curve_snap(query: str) -> MarketSnapshot | None:
     ca = (query or "").strip()
     if ca.startswith("T") and len(ca) == 34:
         return _ferzan_tron_curve_snap(ca)
+    if ca.startswith(("EQ", "UQ", "kQ")) and len(ca) == 48:
+        return _ferzan_ton_curve_snap(ca)
     if not (ca.lower().startswith("0x") and len(ca) == 42):
         return None
     try:
@@ -407,6 +409,53 @@ def _ferzan_curve_snap(query: str) -> MarketSnapshot | None:
         change_24h=0.0, fdv=fdv, buys_h1=0, sells_h1=0, pair_created_ms=None,
         url=f"https://launch.ferzaneco.com/miniapp/curve.html?chain={ {'eth': 'ethereum', 'hood': 'robinhood'}.get(chain, chain)}&curve={ci['curve']}",
         source="ferzan", extras={"ferzan_curve": ci["curve"]},
+    )
+
+
+def _ton_curve_row(ca: str) -> dict:
+    """The curve-index row for a Ferzan TON curve coin still on its curve ({} otherwise). The pasted address
+    may be the coin (jetton) or its curve; both find the same row."""
+    import sqlite3
+
+    import ton_signer
+
+    want = ton_signer._raw(ca)
+    c = sqlite3.connect(f"file:{ton_signer._index_db()}?mode=ro", uri=True, timeout=5)
+    c.row_factory = sqlite3.Row
+    try:
+        rows = c.execute("SELECT curve, token, name, symbol, price, mcap, real_eth, graduated FROM curves "
+                         "WHERE chain = 'ton'").fetchall()
+    finally:
+        c.close()
+    for r in rows:
+        try:
+            if want in (ton_signer._raw(r["token"]), ton_signer._raw(r["curve"])):
+                return {} if r["graduated"] else dict(r)
+        except Exception:
+            continue
+    return {}
+
+
+def _ferzan_ton_curve_snap(ca: str) -> MarketSnapshot | None:
+    try:
+        row = _ton_curve_row(ca)
+        if not row:
+            return None
+        ton = get_price_usd("the-open-network")  # falls back to DexScreener; raises rather than guess
+        price_ton = float(row.get("price") or 0)
+        px = price_ton * ton
+        if px <= 0:
+            return None
+        liq = float(int(row.get("real_eth") or 0)) / 1e18 * ton  # index stores 9-decimal TON x 1e9
+        fdv = float(row.get("mcap") or 0) * ton
+    except Exception:
+        return None
+    return MarketSnapshot(
+        query=ca, symbol=row.get("symbol") or "?", name=row.get("name") or row.get("symbol") or "Ferzan launch",
+        chain="ton", dex="ferzan-curve", pair_address=row["curve"], token_address=row["token"], price_usd=px,
+        liquidity_usd=liq, volume_24h=0.0, change_5m=0.0, change_1h=0.0, change_6h=0.0, change_24h=0.0, fdv=fdv,
+        buys_h1=0, sells_h1=0, pair_created_ms=None, url=f"https://ferzan-factory.com/coin/ton/{row['curve']}",
+        source="ferzan", extras={"ferzan_curve": row["curve"]},
     )
 
 

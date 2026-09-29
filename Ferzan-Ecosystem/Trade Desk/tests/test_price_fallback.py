@@ -69,3 +69,45 @@ class Fallback(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TonCurveLookup(unittest.TestCase):
+    """The Trade Bot finds a Ferzan TON curve coin from its coin address or its curve address."""
+
+    def setUp(self):
+        import sqlite3, tempfile, types
+        self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        c = sqlite3.connect(self.tmp.name)
+        c.execute("CREATE TABLE curves (chain TEXT, curve TEXT, token TEXT, name TEXT, symbol TEXT, price REAL, "
+                  "mcap REAL, real_eth TEXT, graduated INTEGER)")
+        self.curve, self.token = "EQ" + "C" * 46, "EQ" + "T" * 46
+        c.execute("INSERT INTO curves VALUES ('ton', ?, ?, 'Herman', 'HTM', 0.000002, 2000.0, '3000000000000000000', 0)",
+                  (self.curve, self.token))
+        c.commit(); c.close()
+        fake = types.ModuleType("ton_signer")
+        fake._index_db = lambda: self.tmp.name
+        fake._raw = lambda a: a.lower()
+        sys.modules["ton_signer"] = fake
+        self.p = mock.patch.object(pf, "get_price_usd", return_value=3.0)
+        self.p.start()
+
+    def tearDown(self):
+        self.p.stop()
+        sys.modules.pop("ton_signer", None)
+        os.unlink(self.tmp.name)
+
+    def test_by_coin_and_by_curve(self):
+        for addr in (self.token, self.curve):
+            s = pf._ferzan_ton_curve_snap(addr)
+            self.assertIsNotNone(s)
+            self.assertEqual((s.symbol, s.chain, s.dex, s.token_address), ("HTM", "ton", "ferzan-curve", self.token))
+            self.assertAlmostEqual(s.price_usd, 0.000006)
+            self.assertAlmostEqual(s.liquidity_usd, 9.0)
+
+    def test_unknown_address_is_none(self):
+        self.assertIsNone(pf._ferzan_ton_curve_snap("EQ" + "Z" * 46))
+
+    def test_load_market_routes_ton(self):
+        with mock.patch.object(pf, "search_dex", return_value=None):
+            s = pf.load_market(self.token)
+        self.assertEqual(s.symbol, "HTM")
