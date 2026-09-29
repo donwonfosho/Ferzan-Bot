@@ -4,13 +4,13 @@ Launch a TON coin from a user's Ferzan Trade Bot wallet (called by the Launch Bo
   python ton_launch_exec.py info   '{"uid": 123, "need_nano": 600000000}'
   python ton_launch_exec.py launch '{"uid": 123, "request_id": "...", "messages": [...]}'
 
-`messages` are the same three launch messages the Mini App hands to TonConnect wallets (built by the Launch
+`messages` are the same launch messages (three for a plain coin, four for a bonding curve) the Mini App hands to TonConnect wallets (built by the Launch
 Bot API from the pinned jetton code): deploy+mint, drop admin, Ferzan fee. Here the Trade Bot's own TON
 wallet (WalletV4R2, same key the Trade Bot trades with) signs all three in one external message.
 
 Safety (same rules as tron_launch_exec.py):
   - the Trade Bot's own settings + existing wallet only; the decrypted key must match the stored Solana address
-  - the launch messages are checked: at most 3, the first must deploy exactly the address it is sent to,
+  - the launch messages are checked: at most 4 (3 plain, 4 curve), the first must deploy exactly the address it is sent to,
     and the total can never exceed MAX_TOTAL_NANO
   - balance must cover the messages + wallet gas before anything is signed
   - one launch per request id, and never a second launch once the coin contract exists
@@ -27,7 +27,8 @@ from pathlib import Path
 import tron_launch_exec as common  # loads the Trade Bot settings exactly like the Tron helper
 
 out = common.out
-MAX_TOTAL_NANO = 2_000_000_000   # 2 TON: a launch sends about 0.6
+MAX_TOTAL_NANO = 2_000_000_000   # 2 TON: a launch sends about 0.6 (a curve launch about 0.65)
+MAX_MESSAGES = 4                 # plain: deploy+mint, drop admin, fee (3). Curve: + the curve contract deploy (4)
 GAS_SPARE_NANO = 100_000_000     # 0.1 TON left for the wallet's own fees (and its first-use deploy)
 LAUNCH_TTL_S = 120               # the signed launch is valid this long; we wait past it, so "not confirmed" = can't land
 LOG = Path(os.getenv("TON_LAUNCH_LOG") or "/opt/ferzan/app/ton_launches.json")
@@ -58,10 +59,10 @@ def _log(fn):
 
 
 def _parse(messages):
+    if not isinstance(messages, list) or not 1 <= len(messages) <= MAX_MESSAGES:
+        out(ok=False, error="bad launch messages")
     from pytoniq_core import Address, Cell, StateInit
 
-    if not isinstance(messages, list) or not 1 <= len(messages) <= 3:
-        out(ok=False, error="bad launch messages")
     parsed, total = [], 0
     for i, m in enumerate(messages):
         to = Address(str(m["address"]))

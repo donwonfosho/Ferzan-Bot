@@ -34,7 +34,10 @@ from telegram.ext import (
 )
 
 import launch_bot_db as db
+import ferzan_perks as fp
 import launch_extras as lx
+import ton_curve as tcv
+import ton_launch as tl
 import tron_launch as tron
 import tron_liquidity
 
@@ -116,9 +119,39 @@ def _plain_live(chain: str) -> bool:
     return bool(key and (os.environ.get(f"FACTORY_{key}_PLAIN") or "").strip())
 
 
+def ton_curve_live() -> bool:
+    """Same three conditions api.py uses (_ton_curve_live), read like tron_launch._setting()
+    (service env, /opt/ferzan/.env, Launch Bot/.env)."""
+    s = tron._setting
+    return s("TON_CURVE_LIVE") == "1" and bool(s("TON_CURVE_MASTER")) and bool(s("TON_KEEPER_ADDRESS"))
+
+
+def ton_curve_min_grad() -> float:
+    """Smallest TON graduation target (TON_CURVE_MIN_GRAD_TON, default 2000)."""
+    try:
+        v = float(tron._setting("TON_CURVE_MIN_GRAD_TON") or 2000)
+    except ValueError:
+        return 2000.0
+    return v if v > 0 else 2000.0
+
+
+TON_CURVE_MAX_SUPPLY = 10**9          # whole coins; the API caps TON curve supply here
+TON_CURVE_MAX_GRAD = 10_000_000       # TON; the API caps graduation here
+TON_CURVE_SUPPLY_PRESETS = [("1M", 10**6), ("10M", 10**7), ("100M", 10**8), ("1B", 10**9)]
+
+
+def ton_grad_presets() -> list[str]:
+    """TON graduation quick-picks, never below the minimum (the smallest allowed target is always offered)."""
+    lo = ton_curve_min_grad()
+    out = [f"{lo:g}"] + [f"{v}" for v in (2000, 5000, 10000) if v > lo]
+    return out[:3]
+
+
 def _curve_live(chain: str) -> bool:
     if chain == "tron":
         return tron.curve_live()
+    if chain == "ton":
+        return ton_curve_live()
     if chain == "solana":
         return bool((os.environ.get("METEORA_CONFIG") or "").strip())
     key = FACTORY_KEY.get(chain)
@@ -135,7 +168,9 @@ def _steps(launch: dict) -> list[str]:
     if mode == "meteora":
         return ["type", "name", "symbol", "logo", "info", "devbuy"]
     s = ["type", "name", "symbol", "logo", "info", "supply"]
-    if mode == "bonding_curve":
+    if mode == "bonding_curve" and chain == "ton":
+        s += ["grad"]  # the TON curve contract has no dev buy, opening window or max buy
+    elif mode == "bonding_curve":
         s += ["grad", "devbuy", "window", "maxbuy"] if chain == "tron" else ["grad", "allocs", "devbuy", "window", "maxbuy"]
     elif chain in EVM_CHAINS:
         s += ["allocs"]
@@ -243,6 +278,136 @@ def _norm_wallet(w: str) -> str:
 
 def _short(w: str) -> str:
     return f"{w[:4]}…{w[-4:]}" if len(w) > 12 else w
+
+
+# ------------------------------------------------------------ holder tiers --
+PERKS_START_TEXT = "Fri Oct 9 2026, 7PM ET"      # FERZAN launch: perks switch on then (the mint stays hidden until announced)
+_SOL_ADDR = re.compile(r"[1-9A-HJ-NP-Za-km-z]{32,44}")
+
+
+def _perk_conn():
+    import sqlite3
+    conn = sqlite3.connect(db.DB_PATH, timeout=10)
+    conn.execute("CREATE TABLE IF NOT EXISTS perk_wallets (user_id INTEGER PRIMARY KEY, wallet TEXT NOT NULL, updated_at INTEGER)")
+    return conn
+
+
+def _get_perk_wallet(uid: int) -> str:
+    try:
+        conn = _perk_conn()
+        try:
+            row = conn.execute("SELECT wallet FROM perk_wallets WHERE user_id = ?", (int(uid),)).fetchone()
+        finally:
+            conn.close()
+        return row[0] if row else ""
+    except Exception:
+        return ""
+
+
+def _set_perk_wallet(uid: int, wallet: str) -> None:
+    conn = _perk_conn()
+    try:
+        if wallet:
+            conn.execute("INSERT INTO perk_wallets (user_id, wallet, updated_at) VALUES (?, ?, ?) "
+                         "ON CONFLICT(user_id) DO UPDATE SET wallet = excluded.wallet, updated_at = excluded.updated_at",
+                         (int(uid), wallet, int(time.time())))
+        else:
+            conn.execute("DELETE FROM perk_wallets WHERE user_id = ?", (int(uid),))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _pct(bps: int) -> str:
+    return "0%" if not bps else f"{bps / 100:.2f}%"
+
+
+def _tiers_text(own: dict | None = None, wallet: str = "") -> str:
+    """The public tier ladder (from ferzan_perks) plus, when given, this user's own tier. Never shows the mint."""
+    base = fp.base_bridge_bps()
+    lines = ["<b>🏅 FERZAN holder tiers</b>", "",
+             f"Hold FERZAN in a Solana wallet and get perks across Ferzan. They start at the FERZAN launch: "
+             f"<b>{PERKS_START_TEXT}</b>.", ""]
+    for t in fp.ladder():
+        off = int(t["launch_fee_off_pct"])
+        launch = "free" if off >= 100 else "half price" if off == 50 else f"{off}% off"
+        lines.append(f"{_esc(t['badge'])} — {_fmt_int(int(t['min']))}+ FERZAN\n"
+                     f"   Launch fee: {launch} · Bridge fee: {_pct(int(t['bridge_fee_bps']))} (else {_pct(base)}) · "
+                     f"Trade Bot fees: {int(t['trade_fee_discount_pct'])}% off (soon)")
+    lines += ["", "<i>Launch-fee perks apply to Solana launches, for the Solana wallet you launch from.</i>"]
+    if wallet:
+        lines.append("")
+        if own is None or not own.get("active"):
+            lines.append(f"Your wallet <code>{_esc(_short(wallet))}</code>: perks aren't live yet, so no tier is counted. "
+                         "It's checked automatically once FERZAN launches.")
+        elif own.get("error"):
+            lines.append(f"Your wallet <code>{_esc(_short(wallet))}</code>: couldn't read the balance right now, try again in a minute.")
+        elif own.get("tier") and own["tier"] != "none":
+            lines.append(f"Your wallet <code>{_esc(_short(wallet))}</code>: {_esc(own.get('badge'))} "
+                         f"({own.get('balance', 0):,.0f} FERZAN)")
+            if own.get("next_tier"):
+                lines.append(f"Next: {_esc(own['next_tier'])} at {_fmt_int(int(own['next_min']))} FERZAN.")
+        else:
+            lines.append(f"Your wallet <code>{_esc(_short(wallet))}</code>: no tier yet ({own.get('balance', 0):,.0f} FERZAN). "
+                         f"Holder starts at {_fmt_int(int(own.get('holder_min') or 0))}.")
+        lines.append("Change it with /tiers &lt;solana wallet&gt; · remove with /tiers clear")
+    else:
+        lines += ["", "See your own tier: <code>/tiers YourSolanaWalletAddress</code> (public address only, never a key)."]
+    return "\n".join(lines)
+
+
+async def _own_perks(wallet: str) -> dict | None:
+    if not wallet:
+        return None
+    try:
+        return await asyncio.to_thread(fp.perks, wallet)
+    except Exception:
+        return None
+
+
+async def _solana_fee_row(uid: int) -> tuple[str, str]:
+    """(fee text for the confirm screen, extra note). Discount = ferzan_perks on the saved Solana wallet."""
+    try:
+        base = int(os.environ.get("LAUNCH_FEE_LAMPORTS") or "50000000")
+    except ValueError:
+        base = 50_000_000
+    wallet = _get_perk_wallet(uid)
+    if wallet:
+        try:
+            fee, note = await asyncio.to_thread(fp.launch_fee_lamports, wallet, base)
+        except Exception:
+            fee, note = base, ""
+        if note:
+            return (f"{fee / 1e9:g} SOL (was {base / 1e9:g}) + network cost",
+                    f"{_esc(note)} for your saved wallet <code>{_esc(_short(wallet))}</code>. The discount applies to the "
+                    "wallet you connect, if it holds FERZAN.")
+    return (f"{base / 1e9:g} SOL + network cost",
+            "FERZAN holders get half off or a free Solana launch: see /tiers.")
+
+
+async def tiers_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    arg = " ".join(context.args or []).strip()
+    if arg.lower() in {"clear", "remove", "off"}:
+        await asyncio.to_thread(_set_perk_wallet, uid, "")
+        await update.effective_message.reply_text("Saved wallet removed.")
+        return
+    if arg:
+        if not _SOL_ADDR.fullmatch(arg):
+            await update.effective_message.reply_text("That doesn't look like a Solana address. Usage: /tiers YourSolanaWalletAddress")
+            return
+        await asyncio.to_thread(_set_perk_wallet, uid, arg)
+    wallet = arg or await asyncio.to_thread(_get_perk_wallet, uid)
+    own = await _own_perks(wallet)
+    await update.effective_message.reply_text(_tiers_text(own, wallet), parse_mode="HTML", disable_web_page_preview=True)
+
+
+async def go_tiers(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    wallet = await asyncio.to_thread(_get_perk_wallet, update.effective_user.id)
+    own = await _own_perks(wallet)
+    await q.message.reply_text(_tiers_text(own, wallet), parse_mode="HTML", disable_web_page_preview=True)
 
 
 async def _follow_start(update: Update, wallet: str) -> None:
@@ -485,7 +650,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 InlineKeyboardButton("⚡ Trade", url=f"https://t.me/{TRADE}"),
                 InlineKeyboardButton("💧 Liq", url=f"https://t.me/{LIQ}"),
             ],
-            [InlineKeyboardButton("🟢 Buy alerts", url=f"https://t.me/{BUY}")],
+            [InlineKeyboardButton("🟢 Buy alerts", url=f"https://t.me/{BUY}"),
+             InlineKeyboardButton("🏅 Holder tiers", callback_data="go:tiers")],
             [InlineKeyboardButton("💬 Community", url=CHAT)],
         ]
     )
@@ -745,12 +911,18 @@ async def _after_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     launch = context.user_data["launch"]
     if launch["mode"] == "meteora":
         return await _ask_devbuy(update, context)
-    rows = [[InlineKeyboardButton(lbl, callback_data=f"sup:{val}") for lbl, val in SUPPLY_PRESETS[i:i + 3]]
-            for i in (0, 3)]
+    if launch.get("chain") == "ton" and launch["mode"] == "bonding_curve":
+        rows = [[InlineKeyboardButton(lbl, callback_data=f"sup:{val}") for lbl, val in TON_CURVE_SUPPLY_PRESETS[i:i + 2]]
+                for i in (0, 2)]
+        limit = "\nTON curves allow up to 1B."
+    else:
+        rows = [[InlineKeyboardButton(lbl, callback_data=f"sup:{val}") for lbl, val in SUPPLY_PRESETS[i:i + 3]]
+                for i in (0, 3)]
+        limit = ""
     await _send(
         update,
         _hdr(launch, "supply", "Total supply") + "How many tokens should exist in total?\n"
-        "Most launches use <b>1B</b>. Tap one, or type a number like <code>420000000</code> or <code>69m</code>.",
+        "Most launches use <b>1B</b>. Tap one, or type a number like <code>420000000</code> or <code>69m</code>." + limit,
         rows,
     )
     return ENTERING_SUPPLY
@@ -844,6 +1016,10 @@ async def _set_supply(update: Update, context: ContextTypes.DEFAULT_TYPE, whole:
     launch = context.user_data["launch"]
     decimals = {"solana": 6, "ton": 9, "tron": 6}.get(launch["chain"], 18)
     raw = whole * (10 ** decimals)
+    if launch["chain"] == "ton" and launch["mode"] == "bonding_curve" and whole > TON_CURVE_MAX_SUPPLY:
+        await update.effective_message.reply_text(
+            f"TON curves allow at most {_fmt_int(TON_CURVE_MAX_SUPPLY)} tokens. Pick a smaller supply.")
+        return ENTERING_SUPPLY
     if launch["chain"] == "solana" and raw > SOL_U64_MAX:
         await update.effective_message.reply_text(
             f"Too big for Solana — max is {_fmt_int(SOL_U64_MAX // 10**6)}. Pick a smaller supply."
@@ -880,11 +1056,12 @@ async def supply_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def _ask_grad(update: Update, context: ContextTypes.DEFAULT_TYPE):
     launch = context.user_data["launch"]
     unit = NATIVE.get(launch["chain"], "native")
-    pre = GRAD_PRESETS.get(launch["chain"], GRAD_PRESETS["default"])
+    pre = ton_grad_presets() if launch["chain"] == "ton" else GRAD_PRESETS.get(launch["chain"], GRAD_PRESETS["default"])
+    floor = f"\nMinimum on TON: {ton_curve_min_grad():,.0f} TON." if launch["chain"] == "ton" else ""
     await _send(
         update,
         _hdr(launch, "grad", "Graduation") + f"How much {unit} should the curve collect before it moves to a full DEX pool?\n"
-        "Smaller = graduates faster. Tap one or type an amount.",
+        "Smaller = graduates faster. Tap one or type an amount." + floor,
         [[InlineKeyboardButton(f"{p} {unit}", callback_data=f"grad:{p}") for p in pre]],
     )
     return ENTERING_GRAD
@@ -896,6 +1073,17 @@ async def _set_grad(update: Update, context: ContextTypes.DEFAULT_TYPE, amount: 
         await update.effective_message.reply_text("Graduation amount must be above 0.")
         return ENTERING_GRAD
     extra = launch["extra_params"]
+    if launch["chain"] == "ton":
+        lo = ton_curve_min_grad()
+        if amount < lo or amount > TON_CURVE_MAX_GRAD:
+            await update.effective_message.reply_text(
+                f"TON curves graduate between {lo:,.0f} and {TON_CURVE_MAX_GRAD:,} TON (graduation opens a STON.fi pool). "
+                "Pick an amount in that range.")
+            return ENTERING_GRAD
+        extra["graduation_eth_threshold"] = str(int(round(amount * 10**9)))  # nanoTON, as api.py stores it
+        extra["graduation_display"] = f"{amount:g} TON"
+        extra["dev_buy"], extra["max_buy"], extra["start_minutes"] = "0", "0", "0"  # not in the TON curve contract
+        return await _show_confirm(update, context)
     if launch["chain"] == "tron" and amount < tron.curve_min_grad_trx():
         await update.effective_message.reply_text(
             f"Tron curves graduate at {tron.curve_min_grad_trx():,.0f} TRX or more (graduation opens a SunSwap pool, "
@@ -1180,22 +1368,41 @@ async def _show_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rows.append(("Graduates at", extra["graduation_display"]))
     if extra.get("allocs_display"):
         rows.append(("Team wallets", extra["allocs_display"]))
-    if mode in CURVE_MODES:
+    ton_curve = chain == "ton" and mode == "bonding_curve"
+    if ton_curve:
+        rows.append(("Dev buy", "none (TON curves have no dev buy yet)"))
+    elif mode in CURVE_MODES:
         dev = extra.get("dev_buy") or "0"
         rows.append(("Dev buy", f"{dev} {unit}" if dev != "0" else "none"))
     rows.append(("Logo", "✅ added" if launch.get("image_url") else "none"))
     links = [n for k, n in (("website", "Website"), ("x", "X"), ("telegram", "Telegram")) if extra.get(k)]
     if links or launch.get("description"):
         rows.append(("Info", ", ".join(links + (["description"] if launch.get("description") else []))))
-    if mode == "bonding_curve":
+    if ton_curve:
+        rows.append(("Trading opens", "about 2 minutes after launch"))
+    elif mode == "bonding_curve":
         rows.append(("Trading opens", extra.get("start_display") or "right away"))
         mb = extra.get("max_buy") or "0"
         rows.append(("Max buy", "no limit" if mb == "0" else f"{mb} {unit} per wallet"))
-    if mode == "plain" and chain == "ton":
+    tb_info = {}
+    if ton_curve:
+        fee_ton = tl.launch_fee_nano() / 1e9
+        contracts = (tcv.CURVE_TON + tl.DEPLOY_TON + tl.ADMIN_TON) / 1e9
+        rows.append(("Launch fee", f"{fee_ton:g} TON"))
+        rows.append(("Contracts + gas", f"{contracts:g} TON (the excess comes back as change; "
+                     f"{tcv.CURVE_TON / 1e9:g} TON stays in the curve as its gas buffer)"))
+        rows.append(("You send", f"about {_ton_need_nano('bonding_curve') / 1e9:g} TON, plus a small wallet network fee"))
+        tb_info = await tron.run("info", {"uid": update.effective_user.id, "need_nano": _ton_need_nano("bonding_curve")},
+                                 timeout=45, script="ton_launch_exec.py")
+    elif mode == "plain" and chain == "ton":
         fee_ton = int(os.environ.get("LAUNCH_FEE_NANOTON") or "300000000") / 1e9
         rows.append(("Launch fee", f"{fee_ton:g} TON + about 0.3 TON for the contract (most comes back)"))
     elif mode == "plain" and chain in PLAIN_FEE_TEXT:
         rows.append(("Launch fee", PLAIN_FEE_TEXT[chain] + " + network gas"))
+    perk_note = ""
+    if chain == "solana":
+        fee_row, perk_note = await _solana_fee_row(update.effective_user.id)
+        rows.append(("Launch fee", fee_row))
     tinfo = {}
     if chain == "tron":
         dev_sun = int(float(extra.get("dev_buy") or 0) * 1e6) if mode == "bonding_curve" else 0
@@ -1213,7 +1420,13 @@ async def _show_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         text += ("\n\nNext you'll connect your wallet and see the exact cost before signing. "
                  "Ferzan never holds your keys.")
-    if chain == "ton" and mode == "plain":
+    if perk_note:
+        text += "\n\n" + perk_note
+    if ton_curve:
+        text += ("\n\n<b>Two ways to pay:</b> connect Tonkeeper / Telegram Wallet, or launch straight from your "
+                 "Ferzan Trade Bot wallet.\n" + _ton_wallet_text(tb_info) +
+                 "\n\nNothing is sent until you tap one of the launch buttons.")
+    elif chain == "ton" and mode == "plain":
         text += ("\n\n<b>Two ways to pay:</b> connect Tonkeeper / Telegram Wallet, or launch straight from your "
                  f"Ferzan Trade Bot wallet (it needs about {(_ton_need_nano() + 100_000_000) / 1e9:g} TON; "
                  f"your TON address is in @{_esc(TRADE)} → /wallet → TON).")
@@ -1221,7 +1434,7 @@ async def _show_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if chain != "tron":  # Tron launches run from the chat, so there is no reminder flow for them
         first.append(InlineKeyboardButton("⏰ Launch later", callback_data="confirm:later"))
     kb = [first]
-    if chain == "ton" and mode == "plain":
+    if chain == "ton":
         first[0] = InlineKeyboardButton("🔗 Connect a wallet", callback_data="confirm:yes")
         kb.append([InlineKeyboardButton("💼 Launch from my Trade Bot wallet", callback_data="confirm:tb")])
     await update.effective_message.reply_text(
@@ -1235,8 +1448,10 @@ async def _show_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return CONFIRMING
 
 
-def _ton_need_nano() -> int:
-    return 300_000_000 + int(os.environ.get("LAUNCH_FEE_NANOTON") or "300000000")  # contract + mint + admin drop + fee
+def _ton_need_nano(mode: str = "plain") -> int:
+    """What the launch sends: plain = contract+mint + admin drop + fee; curve = the same plus the curve's gas buffer."""
+    base = 300_000_000 if mode != "bonding_curve" else tcv.CURVE_TON + tl.DEPLOY_TON + tl.ADMIN_TON
+    return base + tl.launch_fee_nano()
 
 
 def _ton_wallet_text(info: dict) -> str:
@@ -1327,7 +1542,7 @@ async def _ton_tb_go(update: Update, context: ContextTypes.DEFAULT_TYPE, launch:
     q = update.callback_query
     uid, chat_id = update.effective_user.id, update.effective_chat.id
     req = db.create_launch_request(
-        telegram_user_id=uid, chat_id=chat_id, chain="ton", mode="plain", name=launch["name"],
+        telegram_user_id=uid, chat_id=chat_id, chain="ton", mode=launch.get("mode") or "plain", name=launch["name"],
         symbol=launch["symbol"], total_supply=launch["total_supply_raw"], decimals=launch["decimals"],
         description=launch.get("description") or "", image_url=launch.get("image_url") or "",
         extra_params=dict(launch.get("extra_params") or {}, source="tradebot_wallet"),
@@ -1336,7 +1551,7 @@ async def _ton_tb_go(update: Update, context: ContextTypes.DEFAULT_TYPE, launch:
     await q.edit_message_text(
         f"⏳ Launching <b>{_esc(launch['name'])} (${_esc(launch['symbol'])})</b> on TON from your Trade Bot "
         "wallet. This takes 1-2 minutes. Please don't launch it again.", parse_mode="HTML")
-    context.application.create_task(_ton_tb_run(context.bot, req.id, uid, chat_id))
+    context.application.create_task(_ton_tb_run(context.bot, req.id, uid, chat_id, launch.get("mode") or "plain"))
     return ConversationHandler.END
 
 
@@ -1352,11 +1567,11 @@ def _build_tx(req_id: str, wallet: str) -> dict:
         return {"error": type(e).__name__}
 
 
-async def _ton_tb_run(bot, req_id: str, uid: int, chat_id: int):
+async def _ton_tb_run(bot, req_id: str, uid: int, chat_id: int, mode: str = "plain"):
     say = lambda t: bot.send_message(chat_id=chat_id, text=t, parse_mode="HTML", disable_web_page_preview=True)  # noqa: E731
     helper = "ton_launch_exec.py"
     try:
-        info = await tron.run("info", {"uid": uid, "need_nano": _ton_need_nano()}, timeout=60, script=helper)
+        info = await tron.run("info", {"uid": uid, "need_nano": _ton_need_nano(mode)}, timeout=60, script=helper)
         if not info.get("ok"):
             db.update_status(req_id, "failed", error_message=str(info.get("error"))[:200])
             await say("❌ Couldn't use your Trade Bot TON wallet. " + _ton_wallet_text(info) + "\nNothing was sent.")
@@ -1958,6 +2173,8 @@ def main():
     app.add_handler(conv)
     app.add_handler(CommandHandler("history", history))
     app.add_handler(CommandHandler("following", following_cmd))
+    app.add_handler(CommandHandler("tiers", tiers_cmd))
+    app.add_handler(CallbackQueryHandler(go_tiers, pattern="^go:tiers$"))
     app.add_handler(CommandHandler("alerts", alerts_cmd))
     app.add_handler(CallbackQueryHandler(watch_cb, pattern="^w[adl]:"))
     app.add_handler(CallbackQueryHandler(following_cb, pattern="^fol:"))
@@ -1988,6 +2205,7 @@ def main():
                 BotCommand("history", "Your launches"),
                 BotCommand("following", "Creators you follow"),
                 BotCommand("alerts", "Your coin alerts"),
+                BotCommand("tiers", "FERZAN holder tiers and perks"),
                 BotCommand("drafts", "Scheduled launches"),
                 BotCommand("claim", "Claim your trading fees"),
                 BotCommand("timezone", "Set your time zone"),
