@@ -22,19 +22,44 @@ CHAINS = {
     "pol": {"name": "Polygon", "id": 137, "unit": "POL", "kind": "evm", "dec": 18, "currency": NATIVE_EVM},
     "avax": {"name": "Avalanche", "id": 43114, "unit": "AVAX", "kind": "evm", "dec": 18, "currency": NATIVE_EVM},
     "op": {"name": "Optimism", "id": 10, "unit": "ETH", "kind": "evm", "dec": 18, "currency": NATIVE_EVM},
+    "hood": {"name": "Robinhood Chain", "id": 4663, "unit": "ETH", "kind": "evm", "dec": 18, "currency": NATIVE_EVM},
+    "arc": {"name": "Arc", "id": 0, "unit": "USDC", "kind": "evm", "dec": 18, "currency": NATIVE_EVM},
+    "trx": {"name": "Tron", "id": 0, "unit": "TRX", "kind": "tron", "dec": 6, "currency": NATIVE_EVM},
 }
+MAX_NATIVE = {"TRX": 20000.0, "USDC": 5000.0}  # per-bridge size cap in native units (default 25)
+
+
+def chain_id(key: str) -> int:
+    """EVM chain id. Arc's comes from the desk's chain table (set from its RPC)."""
+    if key == "arc":
+        from chains import CHAINS as DESK
+
+        return int((DESK.get("arc") or {}).get("chain_id") or 0)
+    return int(CHAINS[key]["id"])
 
 
 def _amount_raw(key: str, amt: str) -> str:
     meta = CHAINS[key]
     val = float(amt)
-    if val <= 0 or val > 25:
-        raise ValueError("Size must be between 0 and 25 native.")
+    cap = MAX_NATIVE.get(meta["unit"], 25.0)
+    if val <= 0 or val > cap:
+        raise ValueError(f"Size must be between 0 and {cap:g} {meta['unit']}.")
     return str(int(val * (10 ** meta["dec"])))
 
 
 DLN = "https://dln.debridge.finance/v1.0/dln/order/create-tx"
-DLN_CHAIN = {"sol": 7565164, "eth": 1, "base": 8453, "bsc": 56, "arb": 42161, "pol": 137, "avax": 43114, "op": 10}
+DLN_CHAIN = {"sol": 7565164, "eth": 1, "base": 8453, "bsc": 56, "arb": 42161, "pol": 137, "avax": 43114, "op": 10,
+             "hood": 4663, "arc": None, "trx": 100000026}
+
+
+def dln_chain(key: str):
+    """deBridge's id for a desk chain. DLN_ID_<KEY> in the env overrides (for ids that differ from the EVM one)."""
+    raw = (os.getenv(f"DLN_ID_{key.upper()}") or "").strip()
+    if raw.isdigit():
+        return int(raw)
+    if key == "arc":
+        return chain_id("arc") or None
+    return DLN_CHAIN.get(key)
 DLN_TOKEN = {
     "sol": SOL_NATIVE,
     "eth": NATIVE_EVM,
@@ -44,7 +69,30 @@ DLN_TOKEN = {
     "pol": NATIVE_EVM,
     "avax": NATIVE_EVM,
     "op": NATIVE_EVM,
+    "hood": NATIVE_EVM,
+    "arc": NATIVE_EVM,
+    "trx": NATIVE_EVM,
 }
+
+
+def dln_token(key: str) -> str:
+    return (os.getenv(f"DLN_NATIVE_{key.upper()}") or "").strip() or DLN_TOKEN[key]
+
+
+def wallet_addr(uid: int, key: str) -> str:
+    """The desk address for a chain: SOL wallet, EVM wallet, or the Tron address of the EVM key."""
+    import user_wallets
+
+    w = user_wallets.ensure(uid)
+    kind = CHAINS[key]["kind"]
+    if kind == "sol":
+        return w["sol_pub"]
+    if kind == "tron":
+        import tron_signer
+
+        _sol, evm = user_wallets.secrets(uid)
+        return tron_signer.evm_key_to_tron(evm.replace("0x", "").replace("0X", ""))[0]
+    return w["evm_pub"]
 
 
 def quote(uid: int, src: str, dst: str, amt: str) -> dict:
@@ -54,18 +102,41 @@ def quote(uid: int, src: str, dst: str, amt: str) -> dict:
         raise ValueError("Pick two listed chains.")
     if src == dst:
         raise ValueError("From and to must be different.")
-    w = user_wallets.ensure(uid)
-    user = w["sol_pub"] if CHAINS[src]["kind"] == "sol" else w["evm_pub"]
-    recv = w["sol_pub"] if CHAINS[dst]["kind"] == "sol" else w["evm_pub"]
-    if not user or not recv:
+    if CHAINS[src]["kind"] == "tron":
+        raise ValueError("Bridging out of Tron isn't enabled yet. Bridge INTO Tron, or send TRX manually.")
+    user_wallets_ok = user_wallets_ensure(uid)
+    user, recv = wallet_addr(uid, src), wallet_addr(uid, dst)
+    if not user_wallets_ok or not user or not recv:
         raise ValueError("Open /wallet first so Ferzan can create your desk addresses.")
-    if "sol" in {src, dst}:
+    if "sol" in {src, dst} or "trx" in {src, dst}:
         return _quote_dln(user, recv, src, dst, amt)
+    try:
+        return _quote_relay(user, recv, src, dst, amt)
+    except Exception as relay_err:
+        # Relay doesn't list every chain (Robinhood, Arc): deBridge is the fallback.
+        try:
+            return _quote_dln(user, recv, src, dst, amt)
+        except Exception as dln_err:
+            raise RuntimeError(f"No route: Relay said {str(relay_err)[:90]}; deBridge said {str(dln_err)[:90]}")
+
+
+def user_wallets_ensure(uid: int) -> bool:
+    import user_wallets
+
+    try:
+        return bool(user_wallets.ensure(uid))
+    except Exception:
+        return False
+
+
+def _quote_relay(user: str, recv: str, src: str, dst: str, amt: str) -> dict:
+    if not chain_id(src) or not chain_id(dst):
+        raise ValueError("chain id unknown")
     body = {
         "user": user,
         "recipient": recv,
-        "originChainId": CHAINS[src]["id"],
-        "destinationChainId": CHAINS[dst]["id"],
+        "originChainId": chain_id(src),
+        "destinationChainId": chain_id(dst),
         "originCurrency": CHAINS[src]["currency"],
         "destinationCurrency": CHAINS[dst]["currency"],
         "amount": _amount_raw(src, amt),
@@ -85,16 +156,17 @@ def quote(uid: int, src: str, dst: str, amt: str) -> dict:
 
 
 def _quote_dln(user: str, recv: str, src: str, dst: str, amt: str) -> dict:
-    if src not in DLN_CHAIN or dst not in DLN_CHAIN:
+    sid, did = dln_chain(src), dln_chain(dst)
+    if not sid or not did:
         raise ValueError("That pair is not on deBridge yet.")
     r = requests.get(
         DLN,
         params={
-            "srcChainId": DLN_CHAIN[src],
-            "srcChainTokenIn": DLN_TOKEN[src],
+            "srcChainId": sid,
+            "srcChainTokenIn": dln_token(src),
             "srcChainTokenInAmount": _amount_raw(src, amt),
-            "dstChainId": DLN_CHAIN[dst],
-            "dstChainTokenOut": DLN_TOKEN[dst],
+            "dstChainId": did,
+            "dstChainTokenOut": dln_token(dst),
             "dstChainTokenOutAmount": "auto",
             "dstChainTokenOutRecipient": recv,
             "srcChainOrderAuthorityAddress": user,
@@ -190,6 +262,8 @@ def widget_links(pack: dict) -> tuple[str, str]:
 def execute(uid: int, pack: dict) -> str:
     src = pack["src"]
     data = pack["raw"]
+    if CHAINS[src]["kind"] == "tron":
+        raise RuntimeError("Bridging out of Tron isn't enabled yet.")
     if pack.get("via") == "dln" and CHAINS[src]["kind"] == "sol":
         return _exec_dln_sol(uid, pack, data)
     if CHAINS[src]["kind"] == "evm":
@@ -313,7 +387,7 @@ def _exec_evm(uid: int, pack: dict, data: dict) -> str:
     if not items:
         raise RuntimeError("Relay sent no EVM tx to sign. Try another pair or size.")
     key = pack["src"]
-    desk_key = {"eth": "eth", "base": "base", "bsc": "bsc", "arb": "arb", "pol": "pol", "avax": "avax", "op": "op"}.get(key, "eth")
+    desk_key = key if key in DESK else "eth"
     meta = DESK.get(desk_key) or DESK["eth"]
     raw = evm_key.replace("0x", "").replace("0X", "")
     acct = Account.from_key("0x" + raw)
@@ -555,3 +629,19 @@ def _exec_sol(uid: int, pack: dict, data: dict) -> str:
         f"Steps: {kinds or 'none'}. {preview}\n"
         "Use Base → ETH until that payload is wired."
     )
+
+
+def est_out(pack: dict) -> float:
+    """What the route says the destination will receive, in destination native units (0.0 if unknown)."""
+    data = pack.get("raw") or {}
+    dec = CHAINS[pack["dst"]]["dec"]
+    try:
+        if pack.get("via") == "dln":
+            raw = ((data.get("estimation") or {}).get("dstChainTokenOut") or {}).get("amount")
+            return int(raw) / (10 ** dec) if raw is not None else 0.0
+        cout = (data.get("details") or {}).get("currencyOut") or {}
+        if cout.get("amountFormatted") is not None:
+            return float(cout["amountFormatted"])
+        return int(cout.get("amount") or 0) / (10 ** dec)
+    except (TypeError, ValueError):
+        return 0.0

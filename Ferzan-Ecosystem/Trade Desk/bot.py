@@ -60,6 +60,7 @@ import signer
 import sniper
 import trading
 import user_wallets
+import crossbuy
 import withdraw
 from chains import ACTIVE, CHAINS, chain_list, resolve_chain
 
@@ -167,6 +168,14 @@ async def _done(bot, chat_id: int, placeholder, text: str, **kwargs) -> None:
     """Replace the placeholder with the result; fall back to a new message if
     the edit fails (message too old, identical text, markup mismatch...)."""
     text = text or "Done."
+    if crossbuy.MARK in text:
+        # A cross-chain funding offer: attach the confirm buttons (nothing moves until Confirm).
+        text = text.replace(crossbuy.MARK, "")
+        if "reply_markup" not in kwargs:
+            kwargs["reply_markup"] = InlineKeyboardMarkup([[
+                InlineKeyboardButton("✅ Confirm: fund & buy", callback_data="xb:go"),
+                InlineKeyboardButton("✖️ Cancel", callback_data="xb:no"),
+            ]])
     if placeholder is not None:
         try:
             await placeholder.edit_text(text, **kwargs)
@@ -1333,6 +1342,10 @@ def _live_buy(
     except Exception as exc:
         return False, f"Live: open /wallet first.\n{exc}"
     liq_mark = True
+    if secrets_override is None and crossbuy.allowed():
+        offer = _xbuy_offer(uid, card, query, chain, mint, usd)
+        if offer:
+            return False, offer
     if chain in {"trx", "tron"} or (mint.startswith("T") and 30 <= len(mint) <= 36):
         import tron_signer
 
@@ -1372,14 +1385,20 @@ def _live_buy(
 
 def _live_buy_followup(
     uid: int, card, query: str, paper_ok: bool, force: bool, usd_override: float | None = None,
-    multi: bool = False,
+    multi: bool = False, xbuy: bool = False,
 ) -> str:
     # multi=True ONLY from a manual tap (/buy, Buy X, card buttons, app).
     # DCA, launch-feed auto-buys and paste-to-buy stay single-wallet so
     # turning multi-buy on can never quietly multiply automated spending.
-    if multi and db.multi_buy_slots(uid):
-        return _multi_buy(uid, card, query, force, usd_override)[1]
-    return _live_buy(uid, card, query, force, usd_override)[1]
+    # A cross-chain funding OFFER (never an automatic bridge) is allowed only on a
+    # manual tap (multi) or paste-to-buy (xbuy): DCA / feed auto-buys never offer one.
+    crossbuy.allow(bool(multi or xbuy))
+    try:
+        if multi and db.multi_buy_slots(uid):
+            return _multi_buy(uid, card, query, force, usd_override)[1]
+        return _live_buy(uid, card, query, force, usd_override)[1]
+    finally:
+        crossbuy.allow(False)
 
 
 def _multi_buy(
@@ -4533,7 +4552,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         except Exception:
             px = 0
         usd_o = amt * px if px > 0 else _default_buy_usd(uid)
-        live_msg = await _off(uid, _live_buy_followup, uid, card, pending, True, True, usd_override=usd_o, multi=True, _busy=BUSY_MSG)
+        live_msg = await _off(uid, _live_buy_followup, uid, card, pending, True, True, usd_override=usd_o, multi=True, xbuy=True, _busy=BUSY_MSG)
         await _done(context.bot, chat_id, status, f"{amt:g} native ≈ ${usd_o:.2f}\n{live_msg}")
         return
     if len(text) > 80:
@@ -4558,8 +4577,135 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     except Exception as exc:
         await _done(context.bot, chat_id, status, f"⚡️ Auto-buy skipped: {exc}")
         return
-    live_msg = await _off(uid, _live_buy_followup, uid, card, text, True, True, usd_override=usd, _busy=BUSY_MSG)
+    live_msg = await _off(uid, _live_buy_followup, uid, card, text, True, True, usd_override=usd, xbuy=True, _busy=BUSY_MSG)
     await _done(context.bot, chat_id, status, f"⚡️ Auto-buy ${usd:.0f}\n{live_msg}")
+
+
+# ---------------------------------------------------------------- cross-chain buy
+_XB_PX: dict = {"t": 0.0, "v": {}}
+
+
+def _xb_prices() -> dict:
+    import time as _t
+
+    if _XB_PX["v"] and _t.time() - _XB_PX["t"] < 60:
+        return _XB_PX["v"]
+    v = _native_prices()
+    if v:
+        _XB_PX.update(t=_t.time(), v=v)
+    return _XB_PX["v"]
+
+
+def _xb_dst(chain: str, mint: str) -> str:
+    c = (chain or "").lower()
+    if c in {"trx", "tron"} or (mint.startswith("T") and 30 <= len(mint) <= 36):
+        return "trx"
+    if c == "ton" or mint.startswith(("EQ", "UQ", "kQ")):
+        return "ton"
+    if mint.startswith("0x"):
+        r = resolve_chain(chain) or chain or "base"
+        return r if r in crossbuy.CHAINS else ""
+    return "sol"
+
+
+def _xbuy_offer(uid: int, card, query: str, chain: str, mint: str, usd: float) -> str:
+    """Blocking. If the gas coin on the token's chain is short but another chain can top it up,
+    returns the offer text (the caller shows it with Confirm/Cancel). Otherwise "" and the buy
+    proceeds (or fails) exactly as it always did."""
+    dst = _xb_dst(chain, mint)
+    if not dst:
+        return ""
+    try:
+        p, _prices, note = crossbuy.check(uid, dst, usd, _xb_prices, signer.max_usd())
+    except Exception:
+        logger.exception("crossbuy check failed")
+        return ""
+    if note == "busy":
+        return "🌉 A bridge is already running for you. Wait for it to land, then buy."
+    if not p:
+        return ""
+    import bridge as ferzan_bridge
+
+    try:
+        pack = ferzan_bridge.quote(uid, p["src"], p["dst"], f"{p['amt']:.8f}".rstrip("0").rstrip("."))
+        est = ferzan_bridge.est_out(pack)
+    except Exception as exc:
+        logger.info("crossbuy: no route %s->%s: %s", p["src"], p["dst"], str(exc)[:160])
+        return ""
+    if est and est < p["want_out"] * crossbuy.MIN_OUT_RATIO:
+        return ""
+    sym = (getattr(card.snapshot, "symbol", "") or "this token").upper()
+    crossbuy.put_pending(uid, {"plan": p, "card": card, "query": query, "usd": usd, "sym": sym})
+    return crossbuy.offer_text(p, usd, sym, est)
+
+
+async def _xbuy_execute(bot, chat_id: int, uid: int, msg) -> None:
+    item = crossbuy.take_pending(uid)
+    if not item:
+        await _done(bot, chat_id, msg, "No funding offer waiting (they expire after 5 min). Tap Buy again.")
+        return
+    p = item["plan"]
+    dst_name = crossbuy.CHAINS[p["dst"]]["name"]
+    crossbuy.INFLIGHT.add(uid)
+    try:
+        await _done(bot, chat_id, msg, "🌉 Bridging… signed on this desk. Don't tap Buy again until it lands.")
+        before = await asyncio.to_thread(crossbuy.native_balance, uid, p["dst"])
+        if before is None:
+            await _done(bot, chat_id, None, "Couldn't read your balance, so nothing was sent. Try again.")
+            return
+        res = await _off(uid, crossbuy.run, uid, p, _busy=BUSY_MSG)
+        if isinstance(res, str):
+            await _done(bot, chat_id, None, res)
+            return
+        ok, text, _info = res
+        if not ok:
+            await _done(bot, chat_id, None, f"🔴 {text}")
+            return
+        await _done(bot, chat_id, None, f"{text}\n\n⏳ Waiting for it to land on {dst_name} (up to 7 min)…")
+        landed = await asyncio.to_thread(crossbuy.wait_arrival, uid, p["dst"], before, p["want_out"])
+        if not landed:
+            await _done(
+                bot, chat_id, None,
+                f"The bridge was sent but hasn't landed on {dst_name} yet. Your funds are safe in transit "
+                "(check the order link above). Once your balance arrives, tap Buy again.",
+            )
+            return
+        buy_ok, buy_msg = await _off(uid, _live_buy, uid, item["card"], item["query"], True, item["usd"], gates_checked=True)
+        await _done(bot, chat_id, None, f"✅ {dst_name} funded.\n{buy_msg}")
+    except Exception as exc:
+        logger.exception("xbuy failed for %s", uid)
+        await _done(bot, chat_id, None, f"Cross-chain buy stopped: {str(exc)[:200]}. Check your balances before retrying.")
+    finally:
+        crossbuy.INFLIGHT.discard(uid)
+
+
+async def xbuy_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    from telegram.ext import ApplicationHandlerStop
+
+    q = update.callback_query
+    uid = q.from_user.id
+    if not await guard(update):
+        raise ApplicationHandlerStop
+    if q.data == "xb:no":
+        crossbuy.drop_pending(uid)
+        try:
+            await q.answer("Cancelled")
+            await q.edit_message_text("Cancelled. Nothing was sent.")
+        except Exception:
+            pass
+        raise ApplicationHandlerStop
+    try:
+        await q.answer("Working…")
+    except Exception:
+        pass
+    await _xbuy_execute(context.bot, q.message.chat_id, uid, q.message)
+    raise ApplicationHandlerStop
+
+
+async def xbuy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard(update):
+        return
+    await _xbuy_execute(context.bot, update.effective_chat.id, update.effective_user.id, None)
 
 
 BRIDGE = {
@@ -4571,6 +4717,9 @@ BRIDGE = {
     "pol": {"name": "Polygon", "id": 137, "slug": "polygon", "unit": "POL", "zero": "0x0000000000000000000000000000000000000000"},
     "avax": {"name": "Avalanche", "id": 43114, "slug": "avalanche", "unit": "AVAX", "zero": "0x0000000000000000000000000000000000000000"},
     "op": {"name": "Optimism", "id": 10, "slug": "optimism", "unit": "ETH", "zero": "0x0000000000000000000000000000000000000000"},
+    "hood": {"name": "Robinhood Chain", "id": 4663, "slug": "robinhood", "unit": "ETH", "zero": "0x0000000000000000000000000000000000000000"},
+    "arc": {"name": "Arc", "id": 0, "slug": "arc", "unit": "USDC", "zero": "0x0000000000000000000000000000000000000000"},
+    "trx": {"name": "Tron", "id": 0, "slug": "tron", "unit": "TRX", "zero": ""},
 }
 
 
@@ -4586,6 +4735,13 @@ def _bridge_addr(uid: int, key: str) -> str:
         w = {}
     if key == "sol":
         return w.get("sol_pub") or ""
+    if key == "trx":
+        try:
+            import bridge as _b
+
+            return _b.wallet_addr(uid, "trx")
+        except Exception:
+            return ""
     return w.get("evm_pub") or ""
 
 
@@ -4595,6 +4751,11 @@ def _bridge_bal(uid: int, key: str) -> str:
     if not addr:
         return f"Available · open /wallet"
     try:
+        if key in {"trx", "arc", "hood"}:
+            amt = crossbuy.native_balance(uid, key)
+            if amt is None:
+                raise RuntimeError("no balance")
+            return f"Available · <b>{float(amt):.6f}</b> {unit}"
         if key == "sol":
             import signer
 
@@ -7358,6 +7519,7 @@ def _native_prices() -> dict[str, float]:
             px = 0.0
         if px > 0:
             out[cid] = px
+    out.setdefault("arc", 1.0)  # Arc's gas coin is USDC
     return out
 
 
@@ -7556,6 +7718,8 @@ def main() -> None:
     app.add_handler(CommandHandler("panic", panic_cmd))
     app.add_handler(CommandHandler("sellall", sellall_cmd))
     app.add_handler(CallbackQueryHandler(panic_cb, pattern=r"^pnc:"), group=-1)
+    app.add_handler(CallbackQueryHandler(xbuy_cb, pattern=r"^xb:"), group=-1)
+    app.add_handler(CommandHandler("xbuy", xbuy_cmd))
     app.add_handler(CommandHandler("stake", stake_cmd))
     app.add_handler(CommandHandler("lpguard", lpguard_cmd))
     app.add_handler(CommandHandler("buylimit", buylimit_cmd))

@@ -226,6 +226,8 @@ def curve_meta(token: str) -> tuple[float, str, str, str]:
         px = 0.0
     if px <= 0:
         px = 600.0 if cid == "bsc" else 3000.0
+    if cid == "arc":  # Arc's gas coin is USDC: $1, not ETH
+        px = 1.0
     sym = name = ""
     try:
         for sel, attr in (("0x95d89b41", "sym"), ("0x06fdde03", "name")):
@@ -338,6 +340,8 @@ def buy_curve(
         px = 0.0
     if px <= 0:
         px = 600.0 if cid == "bsc" else 3000.0
+    if cid == "arc":  # Arc's gas coin is USDC: $1, not ETH
+        px = 1.0
     wei = max(10**12, int((usd / max(px, 1e-9)) * 10 ** _native_decimals(cid)))
     acct = Account.from_key("0x" + raw)
     quoted = _quote_curve_tokens(meta["rpc"], curve, wei)
@@ -423,6 +427,8 @@ def buy_evm(
         px = 0.0
     if px <= 0:
         px = 600.0 if cid == "bsc" else 20.0 if cid in {"avax", "pol", "hype", "sonic", "monad"} else 3000.0
+    if cid == "arc":  # Arc's gas coin is USDC: $1, not ETH
+        px = 1.0
     wei = max(10**12, int((usd / max(px, 1e-9)) * 10 ** _native_decimals(cid)))
     raw = (key_hex or _key_hex()).replace("0x", "").replace("0X", "")
     acct = Account.from_key("0x" + raw)

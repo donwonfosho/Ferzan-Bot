@@ -137,6 +137,34 @@ ALIASES = {
 }
 
 # Same order as Maestro's chain list in the screenshot.
+
+def _arc_setup() -> None:
+    """Arc needs an RPC and a chain id before any transaction can be signed.
+    ARC_RPC_URL / ARC_CHAIN_ID override; otherwise the id is asked from the RPC
+    once (4 s cap). If it can't be learned Arc stays unset (trades refuse
+    cleanly) rather than signing for a wrong chain."""
+    import os
+
+    meta = CHAINS.get("arc")
+    if not meta:
+        return
+    rpc = (os.getenv("ARC_RPC_URL") or "https://rpc.mainnet.arc.io").strip()
+    meta["rpc"] = rpc
+    raw = (os.getenv("ARC_CHAIN_ID") or "").strip()
+    try:
+        if raw:
+            meta["chain_id"] = int(raw, 0)
+        elif not meta.get("chain_id"):
+            import requests
+
+            r = requests.post(rpc, json={"jsonrpc": "2.0", "id": 1, "method": "eth_chainId", "params": []}, timeout=4)
+            meta["chain_id"] = int(str((r.json() or {}).get("result") or "0"), 16) or None
+    except Exception:
+        meta["chain_id"] = meta.get("chain_id")
+
+
+_arc_setup()
+
 ACTIVE = (
     "sol", "bsc", "base", "eth", "monad", "sonic", "avax",
     "arb", "hype", "hood", "pol", "pulse", "ink", "op", "linea",
