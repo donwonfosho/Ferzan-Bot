@@ -227,6 +227,22 @@ def verify_curve_launch(curve: str, minter: str, supply_raw: int, creator: str, 
     return {"ok": False, "error": last}
 
 
+def coin_wallet(minter: str, owner: str) -> str:
+    """The owner's wallet contract for this coin (asked from the coin's minter)."""
+    from pytoniq_core import begin_cell
+
+    sl = begin_cell().store_address(_addr(owner)).end_cell().begin_parse()
+    return _run_sync(minter, "get_wallet_address", [sl])[0].load_address().to_str(is_user_friendly=True)
+
+
+def coin_balance(wallet: str) -> int:
+    """Coins held by a coin-wallet contract; 0 when it isn't deployed yet."""
+    try:
+        return int(_run_sync(wallet, "get_wallet_data")[0])
+    except Exception:
+        return 0
+
+
 # --------------------------------------------------------------------------- trade messages
 def build_buy_message(curve: str, spend_nano: int, min_out: int = 0, referrer: str | None = None) -> dict:
     """TonConnect / signer message for a buy: TON to the curve with the buy instruction."""

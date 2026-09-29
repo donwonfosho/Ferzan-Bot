@@ -194,7 +194,8 @@ def get_media(name: str):
 @app.get("/api/curve-info/{curve}")
 def _curve_info(curve: str):
     """Public token info for the trade page: name, logo, links (no private data)."""
-    tron = bool(_re.fullmatch(r"T[1-9A-HJ-NP-Za-km-z]{33}", curve or ""))
+    ton = bool(_re.fullmatch(r"[A-Za-z0-9_-]{48}", curve or ""))
+    tron = ton or bool(_re.fullmatch(r"T[1-9A-HJ-NP-Za-km-z]{33}", curve or ""))  # case-sensitive address formats
     if not tron and not _re.fullmatch(r"0x[0-9a-fA-F]{40}", curve or ""):
         raise HTTPException(404, "not found")
     with db._get_conn() as conn:
@@ -1162,9 +1163,10 @@ def _native_usd(chain: str) -> float:
     if time.time() - _NATIVE_USD["t"] > 300:
         try:
             r = requests.get("https://api.coingecko.com/api/v3/simple/price",
-                             params={"ids": "binancecoin,ethereum,solana,tron", "vs_currencies": "usd"}, timeout=8).json()
+                             params={"ids": "binancecoin,ethereum,solana,tron,the-open-network", "vs_currencies": "usd"}, timeout=8).json()
             _NATIVE_USD.update(t=time.time(), bsc=float(r["binancecoin"]["usd"]), base=float(r["ethereum"]["usd"]),
-                               solana=float(r["solana"]["usd"]), tron=float((r.get("tron") or {}).get("usd") or 0))
+                               solana=float(r["solana"]["usd"]), tron=float((r.get("tron") or {}).get("usd") or 0),
+                               ton=float((r.get("the-open-network") or {}).get("usd") or 0))
         except Exception:
             _NATIVE_USD["t"] = time.time() - 240  # retry in a minute
     return float(_NATIVE_USD.get(chain) or 0.0)
@@ -1275,6 +1277,92 @@ def tron_curve_tx(curve: str, body: TronTradeBody):
     except ValueError as e:
         raise HTTPException(400, str(e)[:160])
     return {"transaction": tx}
+
+
+_TON_ADDR = r"[A-Za-z0-9_-]{48}"
+
+
+def _ton_curve_row(curve: str):
+    """(token,) when this is a confirmed Ferzan TON curve (the launch flow built its address), else None."""
+    c = _idx_db()
+    if c is None:
+        return None
+    try:
+        return c.execute("SELECT token FROM curves WHERE chain = 'ton' AND curve = ?", (curve,)).fetchone()
+    finally:
+        c.close()
+
+
+class TonTradeBody(BaseModel):
+    wallet: str
+    side: str            # buy | sell
+    amount: str          # nanoTON to spend for a buy; coin units for a sell
+    min_out: str = "0"
+    ref: str = ""
+
+
+@app.get("/api/ton-curve/{curve}")
+def ton_curve_state(curve: str, wallet: str = ""):
+    """State of one Ferzan TON curve straight from the chain (nanoTON / coin units), with the wallet's coin balance if given."""
+    if not _re.fullmatch(_TON_ADDR, curve or "") or (wallet and not _re.fullmatch(r"(0|-1):[0-9a-fA-F]{64}|" + _TON_ADDR, wallet)):
+        raise HTTPException(400, "bad address")
+    row = _ton_curve_row(curve)
+    if not row:
+        raise HTTPException(404, "not a Ferzan curve")
+    try:
+        st = _ton_curve.curve_state(curve)
+        mine = None
+        if wallet:
+            bal = _ton_curve.coin_balance(_ton_curve.coin_wallet(row["token"], wallet))
+            mine = {"balance": str(bal)}
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, "TON did not answer: " + str(e)[:80])
+    return {"curve": curve, "token": row["token"], "grad_target": str(st["grad"]), "real": str(st["real"]),
+            "sold": str(st["sold"]), "supply": str(st["supply"]), "start": st["start"], "complete": st["complete"],
+            "graduated": st["graduated"], "min_buy": "10000000", "overhead": str(_ton_curve.BUY_OVERHEAD), "mine": mine}
+
+
+@app.get("/api/ton-curve/{curve}/quote")
+def ton_curve_quote(curve: str, side: str, amount: int):
+    if not _re.fullmatch(_TON_ADDR, curve or "") or side not in ("buy", "sell") or not (0 < amount < 2**96):
+        raise HTTPException(400, "bad request")
+    if not _ton_curve_row(curve):
+        raise HTTPException(404, "not a Ferzan curve")
+    try:
+        if side == "buy":
+            q = _ton_curve.quote_buy(curve, amount)
+            return {"out": str(q["tokens_out"]), "refund": str(q["refund"]), "fee": str(q["fee"])}
+        q = _ton_curve.quote_sell(curve, amount)
+        return {"out": str(q["ton_out"]), "refund": "0", "fee": str(q["fee"])}
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(400, str(e)[:120])
+
+
+@app.post("/api/ton-curve/{curve}/tx")
+def ton_curve_tx(curve: str, body: TonTradeBody):
+    """Unsigned buy / sell message for the visitor's TON Connect wallet. Nothing is sent or signed here."""
+    wallet_re = r"(0|-1):[0-9a-fA-F]{64}|" + _TON_ADDR
+    if not _re.fullmatch(_TON_ADDR, curve or "") or not _re.fullmatch(wallet_re, body.wallet or ""):
+        raise HTTPException(400, "bad address")
+    if not (_re.fullmatch(r"\d{1,30}", body.amount or "") and _re.fullmatch(r"\d{1,30}", body.min_out or "0")):
+        raise HTTPException(400, "bad amount")
+    row = _ton_curve_row(curve)
+    if not row:
+        raise HTTPException(404, "not a Ferzan curve")
+    ref = body.ref if _re.fullmatch(wallet_re, body.ref or "") and body.ref != body.wallet else None
+    try:
+        if body.side == "buy":
+            msg = _ton_curve.build_buy_message(curve, int(body.amount), int(body.min_out or 0), ref)
+        elif body.side == "sell":
+            msg = _ton_curve.build_sell_message(curve, body.wallet, _ton_curve.coin_wallet(row["token"], body.wallet),
+                                                int(body.amount), int(body.min_out or 0), ref)
+        else:
+            raise ValueError("side must be buy or sell")
+    except ValueError as e:
+        raise HTTPException(400, str(e)[:160])
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, "TON did not answer: " + str(e)[:80])
+    return {"message": msg, "valid_until": int(time.time()) + 600, "network": "-3" if _ton_curve.testnet() else "-239"}
 
 
 @app.get("/api/chains")
@@ -1672,7 +1760,7 @@ def internal_referral_stats(user_id: int, request: Request):
 @app.get("/api/curve-chart/{curve}")
 def curve_chart(curve: str, tf: int = 300):
     curve = (curve or "").strip()
-    if not _re.fullmatch(r"T[1-9A-HJ-NP-Za-km-z]{33}", curve):  # Tron addresses are case-sensitive
+    if not _re.fullmatch(r"T[1-9A-HJ-NP-Za-km-z]{33}|[A-Za-z0-9_-]{48}", curve):  # Tron and TON addresses are case-sensitive
         curve = curve.lower()
         if not _re.fullmatch(r"0x[0-9a-f]{40}", curve):
             raise HTTPException(400, "bad curve address")
@@ -1723,7 +1811,7 @@ def curve_chart(curve: str, tf: int = 300):
 def curve_by_token(token: str, since: int = 0, kind: str = "buy"):
     """For the Buy Bot: a Ferzan curve token's recent curve trades (buys or sells) after `since`."""
     token = (token or "").strip()
-    if not _re.fullmatch(r"T[1-9A-HJ-NP-Za-km-z]{33}", token):  # Tron addresses are case-sensitive
+    if not _re.fullmatch(r"T[1-9A-HJ-NP-Za-km-z]{33}|[A-Za-z0-9_-]{48}", token):  # Tron and TON addresses are case-sensitive
         token = token.lower()
         if not _re.fullmatch(r"0x[0-9a-f]{40}", token):
             return {"found": False}
