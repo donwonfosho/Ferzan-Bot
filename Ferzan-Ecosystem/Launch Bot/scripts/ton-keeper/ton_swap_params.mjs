@@ -5,6 +5,7 @@ import { TonClient, Address } from "@ton/ton";
 import { StonApiClient } from "@ston-fi/api";
 import { dexFactory } from "@ston-fi/sdk";
 
+const TON = "EQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAM9c";  // the API rejects the word "ton"
 const out = (o) => { console.log(JSON.stringify(o)); process.exit(0); };
 try {
   const a = JSON.parse(process.argv[2] || "{}");
@@ -12,8 +13,8 @@ try {
   const client = new TonClient({ endpoint: process.env.TONCENTER_RPC || "https://toncenter.com/api/v2/jsonRPC", apiKey: process.env.TONCENTER_API_KEY || undefined });
   const api = new StonApiClient();
   const sim = await api.simulateSwap({
-    offerAddress: a.dir === "sell" ? a.jetton : "ton",
-    askAddress: a.dir === "sell" ? "ton" : a.jetton,
+    offerAddress: a.dir === "sell" ? a.jetton : TON,
+    askAddress: a.dir === "sell" ? TON : a.jetton,
     offerUnits: String(a.units),
     slippageTolerance: String(a.slip || "0.10"),
   });
