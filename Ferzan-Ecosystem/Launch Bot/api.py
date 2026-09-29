@@ -1169,8 +1169,8 @@ def _trade_url(chain: str, curve: str, token: str) -> str:
     """Where to trade an indexed launch: Solana tokens trade on Jupiter, EVM curves on our trade page."""
     if chain == "solana":
         return f"https://jup.ag/tokens/{token}"
-    if chain == "tron":  # Tron curves trade in the Ferzan Trade Bot
-        return f"https://t.me/{(os.environ.get('FERZAN_BOT_USERNAME') or 'Ferzan_Trade_Bot').lstrip('@')}?start=buy_{token}"
+    if chain == "tron":  # Tron curves trade on the website (TronLink) and in the Ferzan Trade Bot
+        return f"https://ferzan-factory.com/coin/tron/{curve}"
     return f"{MINI_APP_BASE}/curve.html?chain={chain}&curve={curve}"
 
 
