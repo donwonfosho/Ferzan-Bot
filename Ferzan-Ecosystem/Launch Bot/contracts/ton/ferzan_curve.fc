@@ -109,7 +109,7 @@ slice calc_wallet(slice owner, slice minter, cell wallet_code) inline_ref {
 }
 
 () log_trade(int is_buy, slice trader, int ton, int tokens, int fee, int real, int sold) impure inline_ref {
-    cell body = begin_cell().store_uint(OP_TRADE_LOG, 32).store_uint(is_buy, 1).store_slice(trader)
+    cell body = begin_cell().store_uint(OP_TRADE_LOG, 32).store_uint((is_buy != 0) ? 1 : 0, 1).store_slice(trader)
         .store_coins(ton).store_coins(tokens).store_coins(fee).store_coins(real).store_coins(sold).end_cell();
     ;; external out message: no addresses, body in a ref
     send_raw_message(begin_cell().store_uint(3, 2).store_uint(0, 2).store_uint(0, 2).store_uint(0, 96).store_uint(0, 1)
