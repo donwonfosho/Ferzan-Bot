@@ -1,0 +1,12 @@
+{
+  "name": "ferzan-ton-keeper",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@ton/core": "^0.60.0",
+    "@ton/crypto": "^3.3.0",
+    "@ton/ton": "^15.0.0",
+    "@ston-fi/api": "latest",
+    "@ston-fi/sdk": "latest"
+  }
+}

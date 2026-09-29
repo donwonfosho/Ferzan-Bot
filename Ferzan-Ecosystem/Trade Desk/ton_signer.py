@@ -382,7 +382,185 @@ async def _swap_jetton_to_ton(seed64: bytes, jetton: str, pct: int, slip: str) -
         await provider.close_all()
 
 
-def buy_ton(jetton: str, usd: float, secret: str | None = None) -> tuple[bool, str]:
+# ------------------------------------------------------------------ Ferzan TON curves --
+# A coin launched by the Ferzan TON curve trades on its curve until it graduates to STON.fi. Which coin has which
+# curve comes from the curve index (only confirmed launches built by our launch flow are in it, and a curve's address
+# commits to its pinned code, so a look-alike contract can't sit at that address).
+CURVE_SLIP_BPS = 500      # default 5% when the caller gives none
+_CURVES: dict = {"ts": 0.0, "rows": {}}
+
+
+def _index_db() -> str:
+    launch = os.environ.get("LAUNCH_DB_PATH") or "/opt/ferzan/app/launch/launch_bot.db"
+    return os.environ.get("CURVE_INDEX_DB") or os.path.join(os.path.dirname(launch) or ".", "curve_index.db")
+
+
+def _raw(addr: str) -> str:
+    from pytoniq_core import Address
+
+    return Address(addr).to_str(is_user_friendly=False).lower()
+
+
+def _in_thread(fn, *a):
+    """ton_curve's chain reads use asyncio.run(); run them on a fresh thread so a running bot loop can't break them."""
+    import concurrent.futures
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+        return ex.submit(fn, *a).result(timeout=60)
+
+
+def _tc():
+    import sys
+    from pathlib import Path
+
+    d = str(Path(__file__).resolve().parent.parent / "Launch Bot")
+    if d not in sys.path:
+        sys.path.append(d)
+    import ton_curve
+
+    return ton_curve
+
+
+def curve_info(jetton: str) -> dict:
+    """{} for normal coins; {'curve', 'graduated'} for a Ferzan TON curve coin (per the curve index)."""
+    import sqlite3
+    import time as _t
+
+    if os.environ.get("TON_CURVE_TRADE", "1") == "0":
+        return {}
+    if _t.time() - _CURVES["ts"] > 20:
+        rows = {}
+        try:
+            c = sqlite3.connect(f"file:{_index_db()}?mode=ro", uri=True, timeout=5)
+            for curve, token, grad in c.execute("SELECT curve, token, graduated FROM curves WHERE chain = 'ton'"):
+                try:
+                    rows[_raw(token)] = {"curve": curve, "graduated": bool(grad)}
+                except Exception:
+                    continue
+            c.close()
+        except Exception:
+            return _CURVES["rows"].get(_raw(jetton), {}) if _CURVES["rows"] else {}
+        _CURVES.update(ts=_t.time(), rows=rows)
+    try:
+        return dict(_CURVES["rows"].get(_raw(jetton), {}))
+    except Exception:
+        return {}
+
+
+async def _curve_tx(seed64: bytes, jetton: str, msg: dict, expect: str) -> dict:
+    """Signs one message from the user's wallet and watches their coin balance to see whether the curve filled it.
+    expect: 'up' (a buy adds coins) or 'down' (a sell removes them)."""
+    import asyncio
+    import base64
+
+    from pytoniq import LiteBalancer, WalletV4R2
+    from pytoniq_core import Address, Cell
+
+    provider = LiteBalancer.from_mainnet_config(trust_level=2)
+    await provider.start_up()
+    try:
+        wallet = await WalletV4R2.from_private_key(provider, seed64)
+        jw, before = await _jetton_wallet_and_balance(provider, jetton, wallet.address)
+        state = await provider.get_account_state(wallet.address)
+        have = int(getattr(state, "balance", 0) or 0)
+        need = int(msg["amount"]) + 60_000_000
+        if have < need:
+            return {"sent": False, "error": f"Not enough TON: need about {need / 1e9:.3f} (incl. gas), you have {have / 1e9:.3f}."}
+        body = Cell.one_from_boc(base64.b64decode(msg["payload"]))
+        h, seqno = await _send_one(provider, wallet, Address(msg["address"]), int(msg["amount"]), body)
+        landed = await _await_seqno(wallet, seqno)
+        after, filled = before, False
+        for _ in range(20):
+            await asyncio.sleep(3)
+            try:
+                _jw, after = await _jetton_wallet_and_balance(provider, jetton, wallet.address)
+            except Exception:
+                continue
+            if (expect == "up" and after > before) or (expect == "down" and after < before):
+                filled = True
+                break
+        return {"sent": True, "landed": landed, "filled": filled, "before": before, "after": after,
+                "addr": wallet.address.to_str(), "jw": jw.to_str() if hasattr(jw, "to_str") else str(jw), "hash": h}
+    finally:
+        await provider.close_all()
+
+
+async def _wallet_coin(seed64: bytes, jetton: str) -> tuple[str, str, int]:
+    """(owner address, owner's coin wallet, balance) for the wallet derived from seed64."""
+    from pytoniq import LiteBalancer, WalletV4R2
+
+    provider = LiteBalancer.from_mainnet_config(trust_level=2)
+    await provider.start_up()
+    try:
+        wallet = await WalletV4R2.from_private_key(provider, seed64)
+        jw, bal = await _jetton_wallet_and_balance(provider, jetton, wallet.address)
+        return wallet.address.to_str(), (jw.to_str() if hasattr(jw, "to_str") else str(jw)), int(bal)
+    finally:
+        await provider.close_all()
+
+
+def _curve_open(tc, curve: str) -> tuple[dict | None, str]:
+    import time as _t
+
+    st = _in_thread(tc.curve_state, curve)
+    if st["graduated"] or st["complete"]:
+        return None, "This Ferzan curve is full and is moving to STON.fi. Try again in a few minutes. Nothing sent."
+    if st["start"] > _t.time():
+        return None, f"Trading on this curve opens in about {int((st['start'] - _t.time()) / 60) + 1} min. Nothing sent."
+    return st, ""
+
+
+def _curve_buy(ci: dict, jetton: str, nano: int, usd: float, seed64: bytes, slip_bps: int) -> tuple[bool, str]:
+    tc = _tc()
+    st, why = _curve_open(tc, ci["curve"])
+    if st is None:
+        return False, why
+    q = _in_thread(tc.quote_buy, ci["curve"], nano)
+    if q["tokens_out"] <= 0:
+        return False, "The curve would not quote this buy. Nothing sent."
+    min_out = q["tokens_out"] * (10_000 - max(1, min(5000, slip_bps))) // 10_000
+    msg = tc.build_buy_message(ci["curve"], nano, min_out)
+    r = _run_async(_curve_tx(seed64, jetton, msg, "up"))
+    if not r.get("sent"):
+        return False, r.get("error", "not sent") + " Nothing sent."
+    link = f"https://tonviewer.com/{r['addr']}"
+    if r["filled"]:
+        got = (r["after"] - r["before"]) / 1e9
+        return True, (f"Live TON curve buy ~${usd:.2f} ({q['spent'] / 1e9:,.3f} TON, {got:,.0f} coins, 1% curve fee included). "
+                      f"Confirmed by your wallet balance.\nWallet: {link}")
+    if r["landed"]:
+        return False, ("Curve buy sent but no coins arrived yet. If the price moved past your slippage the curve sends your TON "
+                       f"back (minus a little gas). Check before retrying:\n{link}")
+    return False, f"Curve buy sent but not confirmed within a minute. Check before retrying:\n{link}"
+
+
+def _curve_sell(ci: dict, jetton: str, pct: int, seed64: bytes, slip_bps: int) -> tuple[bool, str]:
+    tc = _tc()
+    st, why = _curve_open(tc, ci["curve"])
+    if st is None:
+        return False, why.replace("Try again", "Sell again")
+    owner, jw, bal = _run_async(_wallet_coin(seed64, jetton))
+    if bal <= 0:
+        return False, "Nothing to sell: this wallet holds 0 of that coin."
+    amount = bal if pct >= 100 else bal * pct // 100
+    if amount <= 0:
+        return False, "Sell size rounds to 0."
+    q = _in_thread(tc.quote_sell, ci["curve"], amount)
+    if q["ton_out"] <= 0:
+        return False, "The curve would not quote this sell. Nothing sent."
+    min_out = q["ton_out"] * (10_000 - max(1, min(5000, slip_bps))) // 10_000
+    msg = tc.build_sell_message(ci["curve"], owner, jw, amount, min_out)
+    r = _run_async(_curve_tx(seed64, jetton, msg, "down"))
+    if not r.get("sent"):
+        return False, r.get("error", "not sent") + " Nothing sent."
+    link = f"https://tonviewer.com/{r['addr']}"
+    if r["filled"]:
+        return True, f"Sold {pct}% on the Ferzan curve · ~{q['ton_out'] / 1e9:,.4f} TON expected (after the 1% fee)\nWallet: {link}"
+    return False, ("Curve sell sent but your coins haven't left yet. If the price moved past your slippage the coins come back "
+                   f"to you. Check before retrying:\n{link}")
+
+
+def buy_ton(jetton: str, usd: float, secret: str | None = None, slip_bps: int = 0) -> tuple[bool, str]:
     if not live_enabled():
         return False, "Live buys OFF."
     jetton = (jetton or "").strip()
@@ -401,6 +579,17 @@ def buy_ton(jetton: str, usd: float, secret: str | None = None) -> tuple[bool, s
         # Never guess the TON price: a wrong guess over-spends the user.
         return False, "TON price feed is down — buy skipped, nothing sent."
     nano = max(10**7, int((usd / px) * 10**9))
+
+    ci = curve_info(jetton)
+    if ci and not ci.get("graduated"):  # a Ferzan curve coin still on its curve
+        try:
+            seed64 = _ton_keypair_bytes(secret)
+        except Exception as exc:
+            return False, f"TON key: {exc}"
+        try:
+            return _curve_buy(ci, jetton, nano, usd, seed64, slip_bps or CURVE_SLIP_BPS)
+        except Exception as exc:
+            return False, f"TON curve buy failed: {str(exc)[:160]}. Check your wallet before retrying."
 
     sim = simulate(jetton, str(nano))
     if sim.get("error"):
@@ -463,6 +652,12 @@ def sell_ton(jetton: str, secret: str | None = None, pct: int = 100, slip: str =
         seed64 = _ton_keypair_bytes(secret or "")
     except Exception as exc:
         return False, f"TON key: {exc}"
+    ci = curve_info(jetton)
+    if ci and not ci.get("graduated"):
+        try:
+            return _curve_sell(ci, jetton, pct, seed64, int(float(slip) * 10_000) or CURVE_SLIP_BPS)
+        except Exception as exc:
+            return False, f"TON curve sell failed: {str(exc)[:160]}. Check your wallet before retrying."
     try:
         return _run_async(_swap_jetton_to_ton(seed64, jetton, pct, slip))
     except Exception as exc:

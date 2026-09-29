@@ -1,0 +1,322 @@
+;; Ferzan bonding curve for TON (v1). No owner, no admin, no upgrade, no pause.
+;;
+;; Same pricing and fees as the EVM and Tron curves:
+;;   constant product on virtual reserves: x = grad/3 + real_ton, y = supply*16/15 - tokens_sold.
+;;   At the graduation target exactly 80% of the coins are sold; the rest, with all raised TON, are handed to
+;;   the graduation keeper (fixed at launch) who opens the DEX pool at the curve's final price and burns the LP.
+;;   1% fee on every trade: 50% creator, 50% platform, of which 10% of the fee goes to a referrer if one is given.
+;;
+;; The whole jetton supply is minted to this contract's own jetton wallet in the launch transaction.
+;;   buy:  send TON with op_buy         -> coins arrive from the curve's jetton wallet
+;;   sell: jetton transfer to this curve with forward payload op_sell -> TON comes back
+;;   graduate: anyone, once the curve is complete -> raised TON + remaining coins go to the keeper
+;;
+;; Storage: main cell (numbers, complete/graduated flags) -> cfg cell (treasury, creator, minter) -> cfg2 (keeper, wallet code)
+
+;; ---------------------------------------------------------------- minimal stdlib (self-contained; store_uint, load_uint, preload_uint are FunC built-ins) ----
+int now() asm "NOW";
+slice my_address() asm "MYADDR";
+cell get_data() asm "c4 PUSH";
+() set_data(cell c) impure asm "c4 POP";
+builder begin_cell() asm "NEWC";
+cell end_cell(builder b) asm "ENDC";
+slice begin_parse(cell c) asm "CTOS";
+builder store_ref(builder b, cell c) asm(c b) "STREF";
+builder store_slice(builder b, slice s) asm "STSLICER";
+builder store_coins(builder b, int x) asm "STVARUINT16";
+builder store_dict(builder b, cell c) asm(c b) "STDICT";
+(slice, int) load_coins(slice s) asm( -> 1 0) "LDVARUINT16";
+(slice, slice) load_msg_addr(slice s) asm( -> 1 0) "LDMSGADDR";
+(slice, cell) load_ref(slice s) asm( -> 1 0) "LDREF";
+int slice_bits(slice s) asm "SBITS";
+int equal_slices(slice a, slice b) asm "SDEQ";
+int cell_hash(cell c) asm "HASHCU";
+() send_raw_message(cell msg, int mode) impure asm "SENDRAWMSG";
+
+;; ---------------------------------------------------------------- constants ----
+const int FEE_BPS = 100;
+const int CREATOR_BPS = 5000;
+const int REFERRER_BPS = 1000;
+const int DUST_BPS = 1;                ;; complete when within 0.01% of the target
+
+const int OP_BUY = 0x62757931;         ;; [op:32][query_id:64][min_tokens_out:128][referrer: addr | none]
+const int OP_SELL = 0x73656c6c;        ;; jetton forward payload: [op:32][min_ton_out:128][referrer: addr | none]
+const int OP_GRADUATE = 0x67726164;
+const int OP_TRANSFER = 0x0f8a7ea5;
+const int OP_TRANSFER_NOTIFICATION = 0x7362d09c;
+const int OP_TRADE_LOG = 0x46545244;   ;; external log: "FTRD"
+
+const int BUY_OVERHEAD = 120000000;    ;; 0.12 TON on top of the amount to spend: 0.1 forwarded to the coin wallet (excess returns to the buyer), 0.02 for this contract's gas
+const int JETTON_VALUE = 100000000;    ;; 0.10 TON attached to the coin transfer
+const int GAS_KEEP = 20000000;         ;; 0.02 TON kept from each trade to pay this contract's own gas
+const int MIN_TRADE = 10000000;        ;; 0.01 TON minimum spend
+const int SELL_MIN = 100000000;        ;; a sell needs at least 0.10 TON of forward value
+const int GRAD_MIN = 150000000;        ;; graduate needs 0.15 TON
+const int MIN_PAY = 1000000;           ;; fee shares under 0.001 TON are folded into the platform share
+
+;; ---------------------------------------------------------------- helpers ----
+slice null_addr() inline {
+    return begin_cell().store_uint(0, 2).end_cell().begin_parse();
+}
+
+;; the jetton wallet this curve owns, computed from the standard jetton wallet state (balance, owner, minter, code)
+slice calc_wallet(slice owner, slice minter, cell wallet_code) inline_ref {
+    cell data = begin_cell().store_coins(0).store_slice(owner).store_slice(minter).store_ref(wallet_code).end_cell();
+    cell state_init = begin_cell().store_uint(0, 2).store_dict(wallet_code).store_dict(data).store_uint(0, 1).end_cell();
+    return begin_cell().store_uint(4, 3).store_uint(0, 8).store_uint(cell_hash(state_init), 256).end_cell().begin_parse();
+}
+
+(int, int, int, int, int, int, int, cell) load_main() inline {
+    slice ds = get_data().begin_parse();
+    int grad = ds~load_coins();
+    int supply = ds~load_coins();
+    int real = ds~load_coins();
+    int sold = ds~load_coins();
+    int start = ds~load_uint(32);
+    int complete = ds~load_uint(1);
+    int graduated = ds~load_uint(1);
+    cell cfg = ds~load_ref();
+    return (grad, supply, real, sold, start, complete, graduated, cfg);
+}
+
+() save_main(int grad, int supply, int real, int sold, int start, int complete, int graduated, cell cfg) impure inline {
+    set_data(begin_cell().store_coins(grad).store_coins(supply).store_coins(real).store_coins(sold)
+        .store_uint(start, 32).store_uint(complete, 1).store_uint(graduated, 1).store_ref(cfg).end_cell());
+}
+
+(slice, slice, slice, slice, cell) load_cfg(cell cfg) inline_ref {
+    slice c = cfg.begin_parse();
+    slice treasury = c~load_msg_addr();
+    slice creator = c~load_msg_addr();
+    slice minter = c~load_msg_addr();
+    slice c2 = c~load_ref().begin_parse();
+    slice keeper = c2~load_msg_addr();
+    cell wallet_code = c2~load_ref();
+    return (treasury, creator, minter, keeper, wallet_code);
+}
+
+() send_value(slice to, int value, int mode) impure inline_ref {
+    if (value <= 0) { return (); }
+    ;; internal message, not bounceable, no body
+    send_raw_message(begin_cell().store_uint(0x10, 6).store_slice(to).store_coins(value).store_uint(0, 107).end_cell(), mode);
+}
+
+() send_tokens(slice my_wallet, slice to, slice response, int amount, int value) impure inline_ref {
+    cell body = begin_cell().store_uint(OP_TRANSFER, 32).store_uint(0, 64).store_coins(amount)
+        .store_slice(to).store_slice(response).store_uint(0, 1).store_coins(0).store_uint(0, 1).end_cell();
+    send_raw_message(begin_cell().store_uint(0x18, 6).store_slice(my_wallet).store_coins(value)
+        .store_uint(0, 106).store_uint(1, 1).store_ref(body).end_cell(), 0);
+}
+
+() log_trade(int is_buy, slice trader, int ton, int tokens, int fee, int real, int sold) impure inline_ref {
+    cell body = begin_cell().store_uint(OP_TRADE_LOG, 32).store_uint((is_buy != 0) ? 1 : 0, 1).store_slice(trader)
+        .store_coins(ton).store_coins(tokens).store_coins(fee).store_coins(real).store_coins(sold).end_cell();
+    ;; external out message: no addresses, body in a ref
+    send_raw_message(begin_cell().store_uint(3, 2).store_uint(0, 2).store_uint(0, 2).store_uint(0, 96).store_uint(0, 1)
+        .store_uint(1, 1).store_ref(body).end_cell(), 0);
+}
+
+;; buy: (tokens out, gross spent, refund, fee) for `trade_in` nanoTON
+(int, int, int, int) quote_buy(int trade_in, int grad, int supply, int real, int sold) inline_ref {
+    int net = trade_in - (trade_in * FEE_BPS) / 10000;
+    int room = grad - real;
+    int gross = trade_in;
+    if (net >= room) {
+        net = room;
+        gross = (net * 10000 + (10000 - FEE_BPS) - 1) / (10000 - FEE_BPS);
+        if (gross > trade_in) { gross = trade_in; }
+    }
+    int fee = gross - net;
+    int x = grad / 3 + real;
+    int y = supply * 16 / 15 - sold;
+    int new_y = (x * y + (x + net) - 1) / (x + net);
+    return (y - new_y, gross, trade_in - gross, fee);
+}
+
+;; sell: (TON out after fee, fee) for `tokens_in`
+(int, int) quote_sell(int tokens_in, int grad, int supply, int real, int sold) inline_ref {
+    int x = grad / 3 + real;
+    int y = supply * 16 / 15 - sold;
+    int new_x = (x * y + (y + tokens_in) - 1) / (y + tokens_in);
+    int gross = x - new_x;
+    if (gross > real) { gross = real; }
+    int fee = gross * FEE_BPS / 10000;
+    return (gross - fee, fee);
+}
+
+() pay_fees(int fee, slice trader, slice creator, slice treasury, slice referrer) impure inline_ref {
+    if (fee <= 0) { return (); }
+    int to_creator = fee * CREATOR_BPS / 10000;
+    int to_ref = 0;
+    if (referrer.slice_bits() == 267) {
+        if (preload_uint(referrer, 3) == 4) {
+            int bad = equal_slices(referrer, creator) | equal_slices(referrer, treasury) | equal_slices(referrer, trader) | equal_slices(referrer, my_address());
+            if (bad == 0) { to_ref = fee * REFERRER_BPS / 10000; }
+        }
+    }
+    int to_platform = fee - to_creator - to_ref;
+    if (to_creator < MIN_PAY) { to_platform += to_creator; to_creator = 0; }
+    if ((to_ref > 0) & (to_ref < MIN_PAY)) { to_platform += to_ref; to_ref = 0; }
+    send_value(creator, to_creator, 2);
+    send_value(referrer, to_ref, 2);
+    send_value(treasury, to_platform, 2);
+}
+
+;; user-supplied trade fields, read defensively: never throws on short or odd input
+;; layout: [min_out:128][referrer: addr_std (267 bits) | addr_none (2 bits)]
+(int, slice, int) parse_trade(slice s) inline_ref {
+    if (s.slice_bits() < 128 + 2) { return (0, null_addr(), 0); }
+    int min_out = s~load_uint(128);
+    slice referrer = null_addr();
+    if (s.slice_bits() == 267) {
+        if (preload_uint(s, 3) == 4) { referrer = s~load_msg_addr(); }
+    }
+    return (min_out, referrer, -1);
+}
+
+;; ---------------------------------------------------------------- messages ----
+() recv_internal(int my_balance, int msg_value, cell in_msg_full, slice in_msg_body) impure {
+    slice cs = in_msg_full.begin_parse();
+    int flags = cs~load_uint(4);
+    if (flags & 1) { return (); }              ;; bounced message: ignore
+    slice sender = cs~load_msg_addr();
+    if (in_msg_body.slice_bits() < 32) { return (); }   ;; plain TON / deploy message
+    int op = in_msg_body~load_uint(32);
+    if (op == 0) { return (); }
+
+    (int grad, int supply, int real, int sold, int start, int complete, int graduated, cell cfg) = load_main();
+    (slice treasury, slice creator, slice minter, slice keeper, cell wallet_code) = load_cfg(cfg);
+    slice my_wallet = calc_wallet(my_address(), minter, wallet_code);
+
+    if (op == OP_BUY) {
+        throw_if(101, complete);
+        throw_if(102, graduated);
+        throw_if(103, now() < start);
+        throw_unless(104, msg_value >= BUY_OVERHEAD + MIN_TRADE);
+        in_msg_body~load_uint(64);
+        (int min_out, slice referrer, int ok) = parse_trade(in_msg_body);
+        int trade_in = msg_value - BUY_OVERHEAD;
+        (int out, int gross, int refund, int fee) = quote_buy(trade_in, grad, supply, real, sold);
+        throw_unless(105, (out > 0) & (out >= min_out));
+        real += gross - fee;
+        sold += out;
+        if (real + (grad * DUST_BPS) / 10000 >= grad) { complete = -1; }
+        send_tokens(my_wallet, sender, sender, out, JETTON_VALUE);
+        pay_fees(fee, sender, creator, treasury, referrer);
+        send_value(sender, refund, 2);
+        log_trade(-1, sender, gross, out, fee, real, sold);
+        save_main(grad, supply, real, sold, start, (complete != 0) ? 1 : 0, graduated, cfg);
+        return ();
+    }
+
+    if (op == OP_TRANSFER_NOTIFICATION) {
+        throw_unless(110, equal_slices(sender, my_wallet));   ;; only our own coin wallet can report coins received
+        in_msg_body~load_uint(64);
+        int amount = in_msg_body~load_coins();
+        slice seller = in_msg_body~load_msg_addr();
+        int ok = (complete == 0) & (graduated == 0) & (now() >= start) & (amount > 0) & (amount <= sold) & (msg_value >= SELL_MIN);
+        int min_out = 0;
+        slice referrer = null_addr();
+        int out = 0;
+        int fee = 0;
+        if (ok) {
+            slice payload = in_msg_body;
+            if (in_msg_body.slice_bits() >= 1) {
+                int either = in_msg_body~load_uint(1);
+                payload = in_msg_body;
+                if (either == 1) { payload = in_msg_body~load_ref().begin_parse(); }
+            }
+            if (payload.slice_bits() >= 32) {
+                int op2 = payload~load_uint(32);
+                if (op2 == OP_SELL) {
+                    (int m, slice r, int parsed) = parse_trade(payload);
+                    if (parsed) { min_out = m; referrer = r; } else { ok = 0; }
+                } else { ok = 0; }
+            } else { ok = 0; }
+        }
+        if (ok) {
+            (out, fee) = quote_sell(amount, grad, supply, real, sold);
+            ok = (out > 0) & (out >= min_out);
+        }
+        if (ok == 0) {
+            ;; anything unexpected: send the coins straight back to whoever sent them
+            if (msg_value >= 60000000) {
+                send_tokens(my_wallet, seller, seller, amount, msg_value - GAS_KEEP);
+            }
+            return ();
+        }
+        real -= out + fee;
+        sold -= amount;
+        pay_fees(fee, seller, creator, treasury, referrer);
+        send_value(seller, out + msg_value - GAS_KEEP, 0);
+        log_trade(0, seller, out + fee, amount, fee, real, sold);
+        save_main(grad, supply, real, sold, start, complete, graduated, cfg);
+        return ();
+    }
+
+    if (op == OP_GRADUATE) {
+        throw_unless(120, complete);
+        throw_if(121, graduated);
+        throw_unless(122, msg_value >= GRAD_MIN);
+        int tokens_left = supply - sold;
+        send_value(keeper, real, 0);
+        send_tokens(my_wallet, keeper, sender, tokens_left, msg_value - GAS_KEEP);
+        save_main(grad, supply, 0, sold, start, complete, 1, cfg);
+        return ();
+    }
+
+    throw(0xffff);
+}
+
+;; ---------------------------------------------------------------- get methods ----
+;; (grad_target, curve_supply, real_ton, tokens_sold, start_time, complete, graduated)
+(int, int, int, int, int, int, int) get_curve() method_id {
+    (int grad, int supply, int real, int sold, int start, int complete, int graduated, cell cfg) = load_main();
+    return (grad, supply, real, sold, start, complete, graduated);
+}
+
+slice get_minter() method_id {
+    (int grad, int supply, int real, int sold, int start, int complete, int graduated, cell cfg) = load_main();
+    (slice treasury, slice creator, slice minter, slice keeper, cell wallet_code) = load_cfg(cfg);
+    return minter;
+}
+
+slice get_creator() method_id {
+    (int grad, int supply, int real, int sold, int start, int complete, int graduated, cell cfg) = load_main();
+    (slice treasury, slice creator, slice minter, slice keeper, cell wallet_code) = load_cfg(cfg);
+    return creator;
+}
+
+slice get_keeper() method_id {
+    (int grad, int supply, int real, int sold, int start, int complete, int graduated, cell cfg) = load_main();
+    (slice treasury, slice creator, slice minter, slice keeper, cell wallet_code) = load_cfg(cfg);
+    return keeper;
+}
+
+slice get_treasury() method_id {
+    (int grad, int supply, int real, int sold, int start, int complete, int graduated, cell cfg) = load_main();
+    (slice treasury, slice creator, slice minter, slice keeper, cell wallet_code) = load_cfg(cfg);
+    return treasury;
+}
+
+;; the curve's own coin wallet (where the supply sits)
+slice get_wallet() method_id {
+    (int grad, int supply, int real, int sold, int start, int complete, int graduated, cell cfg) = load_main();
+    (slice treasury, slice creator, slice minter, slice keeper, cell wallet_code) = load_cfg(cfg);
+    return calc_wallet(my_address(), minter, wallet_code);
+}
+
+;; spend `trade_in` nanoTON (the amount to spend, NOT counting the 0.12 TON overhead) -> (coins out, spent, refund, fee)
+(int, int, int, int) get_quote_buy(int trade_in) method_id {
+    (int grad, int supply, int real, int sold, int start, int complete, int graduated, cell cfg) = load_main();
+    return quote_buy(trade_in, grad, supply, real, sold);
+}
+
+(int, int) get_quote_sell(int tokens_in) method_id {
+    (int grad, int supply, int real, int sold, int start, int complete, int graduated, cell cfg) = load_main();
+    return quote_sell(tokens_in, grad, supply, real, sold);
+}
+
+int get_overhead() method_id {
+    return BUY_OVERHEAD;
+}
