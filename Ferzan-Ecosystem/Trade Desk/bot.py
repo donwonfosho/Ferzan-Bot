@@ -481,6 +481,38 @@ def _card_wallet(uid: int | None, ca: str, chain: str) -> str:
     )
 
 
+def _token_amount(uid: int, ca: str, chain: str) -> float:
+    """How much of this token the user's wallet holds on its own chain (0.0 if unknown). Blocking."""
+    cid = resolve_chain(chain) or ("sol" if ca and not str(ca).startswith("0x") else "eth")
+    sol_secret, evm_secret = user_wallets.secrets(uid)
+    try:
+        if cid == "sol":
+            for row in signer.holdings(sol_secret):
+                if row.get("mint") == ca:
+                    return float(row.get("amount") or 0)
+            return 0.0
+        if cid == "ton":
+            import ton_signer
+
+            return float(ton_signer.jetton_holding(sol_secret, ca)[0] or 0)
+        if cid == "trx":
+            import tron_signer
+
+            addr_t, _ = tron_signer.evm_key_to_tron(evm_secret.replace("0x", ""))
+            th = tron_signer._to_hex(ca)
+            w = tron_signer._const(th, tron_signer._to_hex(addr_t), "balanceOf(address)",
+                                   tron_signer._w(tron_signer._to_hex(addr_t)))
+            dec = (tron_signer._const(th, th, "decimals()", "") or [6])[0]
+            return (w[0] if w else 0) / 10 ** dec
+        from eth_account import Account
+
+        addr = Account.from_key(evm_secret).address
+        rpc = (CHAINS.get(cid) or {}).get("rpc") or ""
+        return float(_erc20_amt(rpc, ca, addr)) if rpc else 0.0
+    except Exception:
+        return 0.0
+
+
 def render_card(card: SignalCard, uid: int | None = None) -> str:
     return _fit_html(_render_card(card, uid))
 
@@ -614,7 +646,7 @@ def card_keyboard(
             InlineKeyboardButton("🔔 Alert", callback_data=f"talt:{q}"),
         ],
         [
-            InlineKeyboardButton("↔️ Sell", callback_data=f"slc:{q}"),
+            InlineKeyboardButton("💰 Go to sell", callback_data=f"slc:{q}"),
             InlineKeyboardButton("📍 Track", callback_data=f"watch:{q}"),
             InlineKeyboardButton("🔄 Refresh", callback_data=f"sig:{q}"),
         ],
@@ -5719,13 +5751,28 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     if data.startswith("slc:"):
         mint = data[4:].strip()
-        sol_secret, evm_secret = user_wallets.secrets(uid)
-        if mint.startswith("0x"):
-            await context.bot.send_message(
-                uid,
-                "Sell pad for EVM: /livesellevm <chain> " + mint,
-            )
+        try:
+            card = await asyncio.to_thread(analyze, mint)
+            text = render_card(card, uid)
+            chain = card.snapshot.chain or ""
+            ca = card.snapshot.token_address or mint
+        except Exception:
+            card, ca, chain = None, mint, ""
+            text = ""
+        if chain:
+            non_sol = (resolve_chain(chain) or "sol") != "sol"
+        else:
+            non_sol = mint.startswith("0x") or (mint.startswith("T") and len(mint) == 34 and mint[1:].isalnum() and "0" not in mint and "O" not in mint) or (mint.startswith(("EQ", "UQ", "kQ")) and len(mint) == 48)
+        if non_sol:
+            # EVM, Tron and TON: same sell pad as Solana, with the real token balance on that chain.
+            amount = await asyncio.to_thread(_token_amount, uid, ca, chain)
+            if card is None:
+                await context.bot.send_message(uid, "Could not load this token right now. Try again in a moment.")
+                return
+            kb = sell_keyboard(ca, ca, chain, uid, amount)
+            await context.bot.send_message(uid, text, reply_markup=kb, parse_mode="HTML")
             return
+        sol_secret, evm_secret = user_wallets.secrets(uid)
         amount = 0.0
         addr = ""
         try:
@@ -5737,11 +5784,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     break
         except Exception:
             pass
-        try:
-            card = await asyncio.to_thread(analyze, mint)
-            text = render_card(card, uid)
-            chain = card.snapshot.chain or ""
-        except Exception:
+        if card is None:
             text = (await asyncio.to_thread(_bag_panel, mint, amount, addr, uid))[0]
             chain = "sol"
         kb = sell_keyboard(mint, mint, chain, uid, amount)
@@ -5925,7 +5968,7 @@ async def token_alert_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         q = mint[:48]
         buys = [InlineKeyboardButton(f"🟢 {v:g} {unit}", callback_data=f"bnv:{v:g}:{q}") for v in db.buy_presets(r["user_id"], cid)[:3]]
         kb = [buys, [
-            InlineKeyboardButton("↔️ Sell", callback_data=f"slc:{q}"),
+            InlineKeyboardButton("💰 Go to sell", callback_data=f"slc:{q}"),
             InlineKeyboardButton("📡 Card", callback_data=f"sig:{q}"),
         ]]
         if m.get("url"):
