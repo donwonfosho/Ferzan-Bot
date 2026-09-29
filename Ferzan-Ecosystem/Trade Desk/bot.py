@@ -1342,7 +1342,7 @@ def _live_buy(
         import ton_signer
 
         label, liq_mark = "TON", False
-        ok, msg = ton_signer.buy_ton(mint, usd, secret=sol_secret)
+        ok, msg = ton_signer.buy_ton(mint, usd, secret=sol_secret, slip_bps=_slip_bps(uid, "buy", "ton"))
     elif mint.startswith("0x"):
         if not (os.getenv("ZEROX_API_KEY") or "").strip() and str(getattr(snap, "dex", "") or "").lower() != "ferzan-curve":
             return False, "Live: EVM needs ZEROX_API_KEY on the droplet."
