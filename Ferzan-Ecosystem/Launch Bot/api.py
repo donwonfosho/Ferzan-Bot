@@ -1439,8 +1439,8 @@ def launches_feed(sort: str = "new", limit: int = 30, chain: str = "", q: str = 
             rows = c.execute(f"SELECT * FROM curves WHERE {where} ORDER BY launched_ts DESC LIMIT ?", args + [limit]).fetchall()
         vol = {}
         if rows:
-            q = ",".join("?" for _ in rows)
-            for v in c.execute(f"SELECT curve, SUM(native) FROM trades WHERE ts > ? AND curve IN ({q}) GROUP BY curve",
+            marks = ",".join("?" for _ in rows)
+            for v in c.execute(f"SELECT curve, SUM(native) FROM trades WHERE ts > ? AND curve IN ({marks}) GROUP BY curve",
                                [int(time.time()) - 86400] + [r["curve"] for r in rows]):
                 vol[v[0]] = v[1] or 0.0
         stats = _creator_stats(c, [r["creator"] for r in rows])
