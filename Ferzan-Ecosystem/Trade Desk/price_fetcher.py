@@ -47,6 +47,7 @@ _WRAPPED = {
     "tron": "TNUC9Qb1rRpS5CbWLmNMxXBjyFoydXjWFR",
     "the-open-network": "0x582d872A1B094FC48F5DE31D3B73F2D9bE47def1",
     "avalanche-2": "0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7",
+    "matic-network": "0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270",  # WPOL on Polygon
 }
 _LAST: dict[str, tuple[float, float]] = {}  # coin id -> (time, last good price)
 _LAST_MAX_AGE = 1800.0
@@ -555,6 +556,52 @@ def _evm_token_probe(ca: str) -> list[tuple[str, str, str]]:
         return [x for x in ex.map(one, list(CHAINS.items())) if x]
 
 
+def _zerox_price_snap(ca: str) -> MarketSnapshot | None:
+    """A token no DEX index lists yet, priced by the same 0x router the desk trades through: a $5 buy quote on
+    every chain where the token contract exists. Any chain in the 0x list works, not just Ferzan's launch chains."""
+    import os
+
+    ca = (ca or "").strip()
+    key = (os.getenv("ZEROX_API_KEY") or "").strip()
+    if not (ca.lower().startswith("0x") and len(ca) == 42 and key):
+        return None
+    try:
+        from chains import CHAINS, ZEROX_LIVE
+        from evm_signer import NATIVE, NATIVE_CG, ZEROX
+
+        found = _evm_token_probe(ca)
+    except Exception:
+        return None
+    for cid, label, sym in found:
+        if cid not in ZEROX_LIVE or cid not in NATIVE_CG:
+            continue
+        c = CHAINS[cid]
+        try:
+            native_usd = float(get_price_usd(NATIVE_CG[cid]) or 0)
+            if native_usd <= 0:
+                continue
+            dec_r = requests.post(c["rpc"], json={"jsonrpc": "2.0", "id": 1, "method": "eth_call",
+                                  "params": [{"to": ca, "data": "0x313ce567"}, "latest"]}, timeout=4).json()
+            dec = int((dec_r or {}).get("result") or "0x12", 16)
+            wei = int(5.0 / native_usd * 10 ** 18)
+            r = requests.get(ZEROX, headers={"0x-api-key": key, "0x-version": "v2", "Accept": "application/json"},
+                             params={"chainId": str(c["chain_id"]), "sellToken": NATIVE, "buyToken": ca,
+                                     "sellAmount": str(wei)}, timeout=12)
+            out = int((r.json() or {}).get("buyAmount") or 0) if r.status_code < 400 else 0
+        except Exception:
+            continue
+        if out <= 0:
+            continue
+        px = 5.0 / (out / 10 ** dec)
+        return MarketSnapshot(
+            query=ca, symbol=sym or "?", name=sym or "Token", chain=cid, dex="0x", pair_address="",
+            token_address=ca, price_usd=px, liquidity_usd=0.0, volume_24h=0.0, change_5m=0.0, change_1h=0.0,
+            change_6h=0.0, change_24h=0.0, fdv=0.0, buys_h1=0, sells_h1=0, pair_created_ms=None,
+            url=f"{c.get('explorer', '')}/token/{ca}", source="0x", extras={"zerox_priced": True},
+        )
+    return None
+
+
 def load_market(query: str) -> MarketSnapshot:
     snap = search_dex(query)
     if snap and snap.price_usd > 0:
@@ -586,6 +633,9 @@ def load_market(query: str) -> MarketSnapshot:
             chosen.extras["pasted"] = query.strip()
             return chosen
 
+    zs = _zerox_price_snap(query)  # any 0x chain, even when DexScreener has not indexed the pool
+    if zs:
+        return zs
     coins = search_coin(query)
     if not coins:
         q = (query or "").strip()

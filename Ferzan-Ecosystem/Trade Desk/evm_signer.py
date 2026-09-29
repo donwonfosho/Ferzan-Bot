@@ -425,10 +425,10 @@ def buy_evm(
         px = float(get_price_usd(NATIVE_CG.get(cid, "ethereum")) or 0)
     except Exception:
         px = 0.0
-    if px <= 0:
-        px = 600.0 if cid == "bsc" else 20.0 if cid in {"avax", "pol", "hype", "sonic", "monad"} else 3000.0
     if cid == "arc":  # Arc's gas coin is USDC: $1, not ETH
         px = 1.0
+    if px <= 0:
+        return False, f"{cid.upper()} price feed is down, buy skipped. Nothing sent."  # never guess a dollar amount
     wei = max(10**12, int((usd / max(px, 1e-9)) * 10 ** _native_decimals(cid)))
     raw = (key_hex or _key_hex()).replace("0x", "").replace("0X", "")
     acct = Account.from_key("0x" + raw)

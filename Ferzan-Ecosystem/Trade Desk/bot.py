@@ -614,11 +614,7 @@ def card_keyboard(
 ) -> InlineKeyboardMarkup:
     q = (ca or query)[:48]  # TON addresses are 48 chars; longest prefix keeps this < 64 bytes
     cid = resolve_chain(chain) or ("sol" if q and not str(q).startswith("0x") else "eth")
-    unit = {
-        "sol": "SOL", "bsc": "BNB", "eth": "ETH", "base": "ETH",
-        "arb": "ETH", "avax": "AVAX", "pol": "POL", "hood": "ETH",
-        "ton": "TON", "trx": "TRX", "arc": "USDC",
-    }.get(cid, "ETH")
+    unit = _NATIVE_UNIT.get(cid, "ETH")
     presets = db.buy_presets(uid, cid)
     multi_n = len(db.multi_buy_slots(uid)) if uid else 0
     times = f" ×{multi_n}" if multi_n else ""
@@ -702,11 +698,7 @@ def sell_keyboard(
 ) -> InlineKeyboardMarkup:
     q = (ca or query)[:48]  # TON addresses are 48 chars; longest prefix keeps this < 64 bytes
     cid = resolve_chain(chain) or ("sol" if q and not str(q).startswith("0x") else "eth")
-    unit = {
-        "sol": "SOL", "bsc": "BNB", "eth": "ETH", "base": "ETH",
-        "arb": "ETH", "avax": "AVAX", "pol": "POL", "hood": "ETH",
-        "ton": "TON", "trx": "TRX", "arc": "USDC",
-    }.get(cid, "ETH")
+    unit = _NATIVE_UNIT.get(cid, "ETH")
     rows = [
         [
             InlineKeyboardButton("📍 Track", callback_data=f"watch:{q}"),
@@ -5814,10 +5806,13 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 _NATIVE_GECKO = {
     "sol": "solana", "bsc": "binancecoin", "eth": "ethereum", "base": "ethereum", "arb": "ethereum",
     "hood": "ethereum", "avax": "avalanche-2", "ton": "the-open-network", "trx": "tron",
-}
+    **{k: v for k, v in evm_signer.NATIVE_CG.items() if k not in ("eth", "base", "arb", "hood", "bsc", "avax")},
+}  # every EVM chain the desk can trade: Polygon is priced as POL, not as ETH
 _NATIVE_UNIT = {
     "sol": "SOL", "bsc": "BNB", "eth": "ETH", "base": "ETH", "arb": "ETH", "hood": "ETH",
     "avax": "AVAX", "ton": "TON", "trx": "TRX", "arc": "USDC",
+    "pol": "POL", "op": "ETH", "linea": "ETH", "ink": "ETH", "sonic": "S", "hype": "HYPE", "monad": "MON",
+    "pulse": "PLS",
 }
 
 
