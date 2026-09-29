@@ -208,3 +208,124 @@ def verify_curve_launch(txid: str, creator: str, wait_s: int = 60) -> dict:
                 and to_b58(t[3]) == creator):
             return {"ok": True, "curve": to_b58(t[1]), "token": to_b58(t[2])}
     return {"ok": False, "error": "no Ferzan curve launch for this creator"}
+
+
+# ---------------------------------------------------------------- Tron curves on the website ----
+# The website builds nothing itself: these helpers read a Ferzan Tron curve and prepare unsigned calls that
+# the visitor's own TronLink signs. Only curves made by our factory are ever touched.
+_OURS: dict = {}
+_STATE: dict = {}
+
+
+def _const(contract: str, sig: str, param: str = "") -> str:
+    h = to_hex41(contract)
+    r = _post("/wallet/triggerconstantcontract", {"owner_address": h, "contract_address": h,
+                                                  "function_selector": sig, "parameter": param})
+    if any(x.get("ret") == "FAILED" for x in ((r.get("transaction") or {}).get("ret") or [])):
+        raise ValueError(f"{sig} reverted")
+    res = (r.get("constant_result") or [""])[0]
+    if not res:
+        raise ValueError(f"{sig}: no answer")
+    return res
+
+
+def _words(res: str) -> list:
+    return [int(res[i:i + 64], 16) for i in range(0, len(res) - 63, 64)]
+
+
+def _abi(types: list, vals: list) -> str:
+    from eth_abi import encode
+
+    return encode(types, vals).hex()
+
+
+def _a20(b58: str) -> str:
+    return "0x" + to_hex41(b58)[2:]
+
+
+def is_our_curve(curve: str) -> bool:
+    """True only for a curve whose factory() is the configured Ferzan Tron curve factory."""
+    fac = curve_factory()
+    if not fac or not curve.startswith("T") or len(curve) != 34:
+        return False
+    if _OURS.get(curve):
+        return True
+    try:
+        ok = _const(curve, "factory()")[-40:] == to_hex41(fac)[2:] and _words(_const(curve, "token()"))[0] != 0
+    except (ValueError, IndexError):
+        return False
+    if ok:
+        _OURS[curve] = True
+    return ok
+
+
+def curve_state(curve: str, wallet: str = "") -> dict:
+    """Public curve numbers (cached 5 s) plus the wallet's own balances when a wallet is given. Sun and coin units."""
+    now = time.time()
+    hit = _STATE.get(curve)
+    if hit and now - hit[0] < 5:
+        st = dict(hit[1])
+    else:
+        w = lambda sig: _words(_const(curve, sig))[0]  # noqa: E731
+        token = to_b58(hex(w("token()"))[2:].zfill(40))
+        st = {"token": token, "grad_target": w("gradTarget()"), "real": w("realEth()"), "sold": w("tokensSold()"),
+              "supply": w("curveSupply()"), "start": w("startTime()"), "max_buy": w("maxBuyPerWallet()"),
+              "complete": bool(w("complete()")), "graduated": bool(w("graduated()"))}
+        _STATE[curve] = (now, st)
+        st = dict(st)
+    if wallet:
+        tok, owner = st["token"], to_hex41(wallet)[2:].zfill(64)
+        bal = _words(_const(tok, "balanceOf(address)", owner))[0]
+        alw = _words(_const(tok, "allowance(address,address)", owner + to_hex41(curve)[2:].zfill(64)))[0]
+        bought = _words(_const(curve, "boughtNative(address)", owner))[0]
+        acct = _post("/wallet/getaccount", {"address": to_hex41(wallet)})
+        st["mine"] = {"balance": bal, "allowance": alw, "bought": bought, "trx": int(acct.get("balance") or 0)}
+    return st
+
+
+def curve_quote(curve: str, side: str, amount: int) -> dict:
+    if side == "buy":
+        out, used, refund, fee = _words(_const(curve, "quoteBuy(uint256)", _abi(["uint256"], [amount])))[:4]
+        return {"out": out, "used": used, "refund": refund, "fee": fee}
+    out, fee = _words(_const(curve, "quoteSell(uint256)", _abi(["uint256"], [amount])))[:2]
+    return {"out": out, "fee": fee}
+
+
+def _build(owner: str, contract: str, sig: str, params: str, value: int, fee_limit: int) -> dict:
+    built = _post("/wallet/triggersmartcontract", {
+        "owner_address": to_hex41(owner), "contract_address": to_hex41(contract), "function_selector": sig,
+        "parameter": params, "call_value": int(value), "fee_limit": int(fee_limit), "visible": False})
+    tx = built.get("transaction") or {}
+    if not tx.get("txID") or not (built.get("result") or {}).get("result"):
+        raise ValueError("Tron could not prepare that: " + str(built.get("result") or built)[:120])
+    return tx
+
+
+def build_curve_trade(owner: str, curve: str, side: str, amount: int, min_out: int, referrer: str = "") -> dict:
+    """Unsigned buy / sell / approve for a Ferzan Tron curve. `amount` is sun for a buy, coin units otherwise."""
+    if not is_our_curve(curve):
+        raise ValueError("That is not a Ferzan curve")
+    if not (0 < amount < 2**96) or not (0 <= min_out < 2**96):
+        raise ValueError("Amount looks wrong")
+    ref = _a20(referrer) if referrer and referrer != owner and referrer.startswith("T") and len(referrer) == 34 else "0x" + "0" * 40
+    if side == "buy":
+        return _build(owner, curve, "buy(uint256,address)", _abi(["uint256", "address"], [min_out, ref]), amount, 150_000_000)
+    if side == "sell":
+        return _build(owner, curve, "sell(uint256,uint256,address)", _abi(["uint256", "uint256", "address"], [amount, min_out, ref]), 0, 150_000_000)
+    if side == "approve":
+        token = curve_state(curve)["token"]
+        return _build(owner, token, "approve(address,uint256)", _abi(["address", "uint256"], [_a20(curve), amount]), 0, 50_000_000)
+    raise ValueError("Unknown action")
+
+
+def build_site_curve_launch(owner: str, name: str, symbol: str, supply_raw: int, grad_sun: int, start: int,
+                            max_buy_sun: int, dev_sun: int) -> dict:
+    """Unsigned launch() on the Ferzan Tron curve factory, for the visitor's TronLink."""
+    fac = curve_factory()
+    if not curve_live() or not fac:
+        raise ValueError("Tron curve launches are not open yet")
+    fee = _words(_const(fac, "launchFeeSun()"))[0]
+    params = _abi(["string", "string", "uint256", "uint256", "uint256", "uint256"],
+                  [name, symbol, int(supply_raw), int(grad_sun), int(start), int(max_buy_sun)])
+    tx = _build(owner, fac, "launch(string,string,uint256,uint256,uint256,uint256)", params, fee + dev_sun, 150_000_000)
+    return {"transaction": tx, "fee_sun": fee}

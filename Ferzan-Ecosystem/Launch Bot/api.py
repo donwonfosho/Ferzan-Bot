@@ -188,12 +188,13 @@ def get_media(name: str):
 @app.get("/api/curve-info/{curve}")
 def _curve_info(curve: str):
     """Public token info for the trade page: name, logo, links (no private data)."""
-    if not _re.fullmatch(r"0x[0-9a-fA-F]{40}", curve or ""):
+    tron = bool(_re.fullmatch(r"T[1-9A-HJ-NP-Za-km-z]{33}", curve or ""))
+    if not tron and not _re.fullmatch(r"0x[0-9a-fA-F]{40}", curve or ""):
         raise HTTPException(404, "not found")
     with db._get_conn() as conn:
         rows = conn.execute(
             "SELECT id FROM launch_requests WHERE extra_params LIKE ? ORDER BY created_at DESC LIMIT 20",
-            (f"%{curve[2:]}%",),
+            (f"%{curve if tron else curve[2:]}%",),
         ).fetchall()
     for row in rows:
         req = db.get_launch_request(row[0])
@@ -290,11 +291,21 @@ def build_tx(request_id: str, body: BuildTxRequest):
             if (req.extra_params or {}).get("source") != "site":
                 raise HTTPException(400, "Tron coins launch from your Ferzan Trade Bot wallet, right in the Launch Bot chat.")
             try:
-                tx = _tron.build_site_launch(body.wallet_address, req.name, req.symbol, total_supply)
+                if req.mode == "bonding_curve":
+                    ex = req.extra_params or {}
+                    mins = int(float(str(ex.get("start_minutes") or "0") or 0))
+                    tx = _tron.build_site_curve_launch(
+                        body.wallet_address, req.name, req.symbol, total_supply,
+                        int(ex.get("graduation_eth_threshold") or 0), int(time.time()) + mins * 60 if mins > 0 else 0,
+                        int(Decimal(str(ex.get("max_buy") or "0")) * 10**6), int(Decimal(str(ex.get("dev_buy") or "0")) * 10**6))
+                else:
+                    tx = _tron.build_site_launch(body.wallet_address, req.name, req.symbol, total_supply)
             except ValueError as e:
                 raise HTTPException(400, str(e))
             response = {"chain": "tron", "transaction": tx["transaction"], "fee_sun": tx["fee_sun"],
-                        "factory": _tron.factory(), "note": "Sign in TronLink. About 16 TRX of energy + the launch fee."}
+                        "factory": _tron.curve_factory() if req.mode == "bonding_curve" else _tron.factory(),
+                        "note": "Sign in TronLink. About 50 TRX of energy + the launch fee." if req.mode == "bonding_curve"
+                        else "Sign in TronLink. About 16 TRX of energy + the launch fee."}
 
         elif req.chain == "ton":
             if (os.environ.get("TON_LAUNCH_LIVE") or "").strip() != "1":
@@ -508,6 +519,7 @@ class SiteLaunchBody(BaseModel):
     website: str = ""
     x: str = ""
     telegram: str = ""
+    mode: str = ""             # Tron only: "plain" forces a standard coin; anything else uses the curve when it is open
     validate_only: bool = False
 
 
@@ -595,7 +607,20 @@ def site_launch(body: SiteLaunchBody, request: Request):
         link = _site_link(getattr(body, k), k)
         if link:
             extra[k] = link
-    if chain in ("tron", "ton"):  # SITE_TRON_TON: standard fixed-supply coins, signed by TronLink / TON Connect
+    if chain == "tron" and body.mode != "plain" and _tron.curve_live():  # Tron bonding curve, signed by TronLink
+        decimals, mode = 6, "bonding_curve"
+        whole = int(_site_num(body.supply_whole, "Supply", Decimal(1), Decimal(10**12)))
+        total_supply = str(whole * 10**6)
+        grad = _site_num(body.grad_native, "Graduation", Decimal(str(_tron.curve_min_grad_trx())), Decimal(100_000_000_000))
+        extra["graduation_eth_threshold"] = str(int(grad * 10**6))  # sun
+        extra["graduation_display"] = f"{grad.normalize():f}"
+        mb = _site_num(body.max_buy, "Max buy", Decimal("0.000001"), Decimal(100_000_000_000), allow_zero=True)
+        extra["max_buy"] = f"{mb:f}" if mb > 0 else "0"
+        mins = int(_site_num(body.start_minutes, "Start delay", Decimal(0), Decimal(10080), allow_zero=True))
+        if mins and dev > 0:
+            raise HTTPException(400, "A dev buy needs trading to open right away")
+        extra["start_minutes"] = str(mins)
+    elif chain in ("tron", "ton"):  # SITE_TRON_TON: standard fixed-supply coins, signed by TronLink / TON Connect
         decimals = 6 if chain == "tron" else 9
         whole = int(_site_num(body.supply_whole, "Supply", Decimal(1), Decimal(10**12)))
         mode, total_supply = "plain", str(whole * 10**decimals)
@@ -1163,6 +1188,57 @@ def _curve_item(r, usd: float, extra: dict, vol24: float, stats: dict) -> dict:
     }
 
 
+class TronTradeBody(BaseModel):
+    wallet: str
+    side: str            # buy | sell | approve
+    amount: str          # sun for a buy; coin units for a sell / approve
+    min_out: str = "0"
+    ref: str = ""
+
+
+_TRON_ADDR = r"T[1-9A-HJ-NP-Za-km-z]{33}"
+
+
+@app.get("/api/tron-curve/{curve}")
+def tron_curve(curve: str, wallet: str = ""):
+    """State of one Ferzan Tron curve straight from the chain (sun / coin units), with the wallet's balances if given."""
+    if not _re.fullmatch(_TRON_ADDR, curve or "") or (wallet and not _re.fullmatch(_TRON_ADDR, wallet)):
+        raise HTTPException(400, "bad address")
+    if not _tron.is_our_curve(curve):
+        raise HTTPException(404, "not a Ferzan curve")
+    try:
+        st = _tron.curve_state(curve, wallet)
+    except ValueError as e:
+        raise HTTPException(502, "Tron did not answer: " + str(e)[:80])
+    return {"curve": curve, **st}
+
+
+@app.get("/api/tron-curve/{curve}/quote")
+def tron_curve_quote(curve: str, side: str, amount: int):
+    if not _re.fullmatch(_TRON_ADDR, curve or "") or side not in ("buy", "sell") or not (0 < amount < 2**96):
+        raise HTTPException(400, "bad request")
+    if not _tron.is_our_curve(curve):
+        raise HTTPException(404, "not a Ferzan curve")
+    try:
+        return _tron.curve_quote(curve, side, amount)
+    except ValueError as e:
+        raise HTTPException(400, str(e)[:120])
+
+
+@app.post("/api/tron-curve/{curve}/tx")
+def tron_curve_tx(curve: str, body: TronTradeBody):
+    """Unsigned buy / sell / approve for the visitor's TronLink. Read-only for us: nothing is sent or signed here."""
+    if not _re.fullmatch(_TRON_ADDR, curve or "") or not _re.fullmatch(_TRON_ADDR, body.wallet or ""):
+        raise HTTPException(400, "bad address")
+    if not (_re.fullmatch(r"\d{1,30}", body.amount or "") and _re.fullmatch(r"\d{1,30}", body.min_out or "0")):
+        raise HTTPException(400, "bad amount")
+    try:
+        tx = _tron.build_curve_trade(body.wallet, curve, body.side, int(body.amount), int(body.min_out or 0), body.ref)
+    except ValueError as e:
+        raise HTTPException(400, str(e)[:160])
+    return {"transaction": tx}
+
+
 @app.get("/api/chains")
 def chain_status():
     """Which launch modes are open on each chain right now, so the website only claims what works.
@@ -1557,9 +1633,11 @@ def internal_referral_stats(user_id: int, request: Request):
 
 @app.get("/api/curve-chart/{curve}")
 def curve_chart(curve: str, tf: int = 300):
-    curve = (curve or "").lower()
-    if not _re.fullmatch(r"0x[0-9a-f]{40}", curve):
-        raise HTTPException(400, "bad curve address")
+    curve = (curve or "").strip()
+    if not _re.fullmatch(r"T[1-9A-HJ-NP-Za-km-z]{33}", curve):  # Tron addresses are case-sensitive
+        curve = curve.lower()
+        if not _re.fullmatch(r"0x[0-9a-f]{40}", curve):
+            raise HTTPException(400, "bad curve address")
     tf = tf if tf in (60, 300, 900, 3600, 14400) else 300
     c = _idx_db()
     if c is None:
