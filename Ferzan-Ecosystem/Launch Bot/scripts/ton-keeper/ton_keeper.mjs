@@ -125,11 +125,12 @@ async function main() {
 
   // ---- 3. burn every LP token we received
   const routerAddr = readDone(curve).router;
-  const sim2 = await api.simulateLiquidityProvision({ tokenA: TON_ADDRESS, tokenB: minter, provisionType: "Initial", slippageTolerance: "0.05",
-    walletAddress: kaddr, tokenAUnits: "1000000000", tokenBUnits: "1000000000" }).catch(() => null);
-  const contracts2 = dexFactory((sim2 && sim2.router) || { address: routerAddr });
-  const router2 = client.open(contracts2.Router.create(routerAddr));
-  const pton2 = contracts2.pTON.create((sim2 && sim2.router.ptonMasterAddress) || "");
+  // The pool is already open, so a fresh "Initial" simulation no longer works. Ask STON.fi for the router itself
+  // (it carries the dex version and the pTON master the SDK needs).
+  const routerInfo = await api.getRouter(routerAddr);
+  const contracts2 = dexFactory(routerInfo);
+  const router2 = client.open(contracts2.Router.create(routerInfo.address));
+  const pton2 = contracts2.pTON.create(routerInfo.ptonMasterAddress);
   const poolAddr = await router2.getPoolAddress({ token0: pton2.address.toString(), token1: minter });
   const pool = client.open(contracts2.Pool.create(poolAddr));
   const lpWallet = await waitFor(async () => {

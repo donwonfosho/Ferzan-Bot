@@ -6,7 +6,7 @@
     "@ton/core": "^0.62.0",
     "@ton/crypto": "^3.3.0",
     "@ton/ton": "^15.0.0",
-    "@ston-fi/api": "latest",
-    "@ston-fi/sdk": "latest"
+    "@ston-fi/api": "0.32.0",
+    "@ston-fi/sdk": "2.7.0"
   }
 }
