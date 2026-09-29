@@ -444,6 +444,21 @@ def _card_wallet(uid: int | None, ca: str, chain: str) -> str:
                     if row.get("mint") == ca:
                         tok = float(row.get("amount") or 0)
                         break
+        elif cid in ("ton", "trx"):
+            # TON and Tron have their own wallets, not the EVM address: read the real native balance.
+            import crossbuy
+
+            bal = crossbuy.native_balance(uid, cid)
+            if bal is None:
+                raise RuntimeError("balance unavailable")
+            native, native_sym = float(bal), ("TON" if cid == "ton" else "TRX")
+            if cid == "ton" and ca and str(ca).startswith(("EQ", "UQ", "kQ")):
+                import ton_signer
+
+                try:
+                    tok = float(ton_signer.jetton_holding(sol_secret, ca)[0] or 0)
+                except Exception:
+                    tok = 0.0  # the TON balance above is still shown
         else:
             from eth_account import Account
             addr = Account.from_key(evm_secret).address

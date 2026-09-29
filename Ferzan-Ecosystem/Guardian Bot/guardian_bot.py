@@ -429,6 +429,7 @@ def _db() -> sqlite3.Connection:
         "ALTER TABLE settings ADD COLUMN slowmode_seconds INTEGER DEFAULT 0",
         "ALTER TABLE settings ADD COLUMN welcome_btn_label TEXT",
         "ALTER TABLE settings ADD COLUMN welcome_btn_url TEXT",
+        "ALTER TABLE settings ADD COLUMN welcome_delete_seconds INTEGER DEFAULT 0",
         "ALTER TABLE warns ADD COLUMN last_ts INTEGER DEFAULT 0",
         "ALTER TABLE filters ADD COLUMN is_regex INTEGER DEFAULT 0",
         "ALTER TABLE settings ADD COLUMN lock_voice INTEGER DEFAULT 0",
@@ -2006,6 +2007,7 @@ MENU_SECTIONS: dict[str, tuple[str, str]] = {
         "Welcome the new, see off the ones who leave.\n\n"
         "• <code>/setwelcome text</code> — supports <code>{first}</code> / <code>{chatname}</code>\n"
         "• <code>/welcome on|off</code>\n"
+        "• <code>/welcomedelete 60</code> — delete the welcome message after 60 seconds (also 5m, 1h; <code>off</code> keeps it)\n"
         "• <code>/setwelcomebtn Label | https://link</code> — add a tappable button to the welcome message\n"
         "• <code>/delwelcomebtn</code> — remove it\n"
         "• <code>/setgoodbye text</code> — supports <code>{first}</code> / <code>{chatname}</code>\n"
@@ -4754,6 +4756,64 @@ async def delwelcome_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await update.effective_message.reply_text("Removed.")
 
 
+def _welcome_delete_seconds(chat_id: int) -> int:
+    con = _db()
+    row = con.execute("SELECT welcome_delete_seconds FROM settings WHERE chat_id=?", (chat_id,)).fetchone()
+    con.close()
+    try:
+        return max(0, int(row[0] or 0)) if row else 0
+    except (TypeError, ValueError):
+        return 0
+
+
+def _parse_welcome_delete(raw: str) -> int | None:
+    """'90' / '90s' / '5m' / '1h' -> seconds; 'off' -> 0; anything else -> None."""
+    t = (raw or "").strip().lower()
+    if t in ("off", "0", "no", "never"):
+        return 0
+    mult = 1
+    if t and t[-1] in "smh":
+        mult = {"s": 1, "m": 60, "h": 3600}[t[-1]]
+        t = t[:-1]
+    if not t.isdigit():
+        return None
+    return int(t) * mult
+
+
+async def welcomedelete_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/welcomedelete 60  -> Guardian deletes its own welcome message 60 seconds after posting it."""
+    if not await _is_admin(update, context):
+        return
+    chat_id = update.effective_chat.id
+    if not context.args:
+        cur = _welcome_delete_seconds(chat_id)
+        await update.effective_message.reply_text(
+            "Welcome messages are deleted "
+            + (f"{cur} seconds after they are posted." if cur else "never (they stay).")
+            + "\nUsage: /welcomedelete 60  (seconds; also 5m, 1h)  or  /welcomedelete off"
+        )
+        return
+    secs = _parse_welcome_delete(context.args[0])
+    if secs is None or secs > 24 * 3600 or (0 < secs < 5):
+        await update.effective_message.reply_text(
+            "Use a time between 5 seconds and 24 hours, like /welcomedelete 60, /welcomedelete 5m, or /welcomedelete off."
+        )
+        return
+    con = _db()
+    con.execute(
+        "INSERT INTO settings(chat_id, welcome_delete_seconds) VALUES(?,?) "
+        "ON CONFLICT(chat_id) DO UPDATE SET welcome_delete_seconds=excluded.welcome_delete_seconds",
+        (chat_id, secs),
+    )
+    con.commit()
+    con.close()
+    await update.effective_message.reply_text(
+        f"Welcome messages will be deleted {secs} seconds after they are posted."
+        if secs
+        else "Welcome messages will stay in the chat (auto-delete off)."
+    )
+
+
 async def welcome_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _is_admin(update, context):
         return
@@ -5690,13 +5750,18 @@ async def on_member(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         try:
             if welcome_media_id and welcome_media_type == "photo":
-                await context.bot.send_photo(chat_id, welcome_media_id, caption=greeting, reply_markup=kb)
+                sent_welcome = await context.bot.send_photo(chat_id, welcome_media_id, caption=greeting, reply_markup=kb)
             elif welcome_media_id and welcome_media_type == "animation":
-                await context.bot.send_animation(chat_id, welcome_media_id, caption=greeting, reply_markup=kb)
+                sent_welcome = await context.bot.send_animation(chat_id, welcome_media_id, caption=greeting, reply_markup=kb)
             elif welcome_media_id and welcome_media_type == "video":
-                await context.bot.send_video(chat_id, welcome_media_id, caption=greeting, reply_markup=kb)
+                sent_welcome = await context.bot.send_video(chat_id, welcome_media_id, caption=greeting, reply_markup=kb)
             else:
-                await context.bot.send_message(chat_id, greeting, reply_markup=kb)
+                sent_welcome = await context.bot.send_message(chat_id, greeting, reply_markup=kb)
+            del_after = _welcome_delete_seconds(chat_id)
+            if del_after and context.job_queue and sent_welcome is not None:
+                context.job_queue.run_once(
+                    _delete_later, del_after, data={"chat_id": chat_id, "message_id": sent_welcome.message_id}
+                )
         except Exception as exc:
             log.warning("welcome %s", exc)
 
@@ -6387,6 +6452,7 @@ def main() -> None:
     app.add_handler(CommandHandler("welcomevariants", welcomevariants_cmd))
     app.add_handler(CommandHandler("delwelcome", delwelcome_cmd))
     app.add_handler(CommandHandler("welcome", welcome_toggle))
+    app.add_handler(CommandHandler("welcomedelete", welcomedelete_cmd))
     app.add_handler(CommandHandler("setwelcomebtn", setwelcomebtn))
     app.add_handler(CommandHandler("delwelcomebtn", delwelcomebtn))
     app.add_handler(CommandHandler("setgoodbye", setgoodbye))
@@ -6547,6 +6613,7 @@ def main() -> None:
             BotCommand("welcomevariants", "List welcome-message variants"),
             BotCommand("delwelcome", "Delete a welcome-message variant"),
             BotCommand("welcome", "Toggle welcome messages"),
+            BotCommand("welcomedelete", "Auto-delete welcome messages after a time"),
             BotCommand("setwelcomebtn", "Set a button on the welcome message"),
             BotCommand("delwelcomebtn", "Remove the welcome button"),
             BotCommand("setgoodbye", "Set the goodbye message"),
