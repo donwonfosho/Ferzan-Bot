@@ -6931,6 +6931,8 @@ def main() -> None:
     app.add_handler(CommandHandler("gbroadcast", gbroadcast))
     app.add_handler(CommandHandler("gsettings", gsettings_cmd))
     app.add_handler(CommandHandler("gsetup", gsetup_cmd))
+    app.add_handler(CommandHandler("setup", gsetup_cmd))
+    app.add_handler(CommandHandler("addons", gaddons_cmd))
     app.add_handler(CommandHandler("gaddons", gaddons_cmd))
     app.add_handler(CommandHandler("linkwhitelist", linkwhitelist_cmd))
     app.add_handler(CommandHandler("exportconfig", exportconfig_cmd))
