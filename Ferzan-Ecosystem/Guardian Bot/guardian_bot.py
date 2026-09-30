@@ -67,6 +67,20 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s guardian %(message)s")
 log = logging.getLogger("guardian")
 
+
+class _HideToken(logging.Filter):
+    def filter(self, record):
+        try:
+            record.msg = re.sub(r"/bot\d+:[A-Za-z0-9_-]+", "/bot<hidden>", record.getMessage())
+            record.args = ()
+        except Exception:
+            pass
+        return True
+
+
+for _h in logging.getLogger().handlers:
+    _h.addFilter(_HideToken())
+
 DB = Path(os.getenv("GUARDIAN_DB", "/opt/ferzan/app/guardian.db"))
 BANNER = Path(os.getenv("GUARDIAN_BANNER", str(Path(__file__).resolve().parent / "banner.png")))
 TRADE = (os.getenv("FERZAN_BOT_USERNAME") or "Ferzan_Trade_Bot").lstrip("@")
@@ -3526,6 +3540,10 @@ async def _debug_log_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     """Warn admins when Telegram sends a message format this bot can't read (e.g. rich numbered lists)."""
     import logging as _lg
     m = update.message
+    if m and m.text and m.text.startswith("/"):
+        _lg.getLogger("guardian").info("cmd seen chat=%s type=%s from=%s text=%s", update.effective_chat.id,
+                                       update.effective_chat.type, update.effective_user.id if update.effective_user else "?",
+                                       m.text[:40])
     if not m or m.text or m.caption or m.effective_attachment is not None or not m.api_kwargs:
         return
     _lg.getLogger("guardian").warning(
