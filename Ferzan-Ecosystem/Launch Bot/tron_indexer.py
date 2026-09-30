@@ -162,7 +162,13 @@ def run(idx_conn, launch_db: str, force: bool = False) -> int:
             continue
         k, st = known.get(curve), state.get(curve)
         if k and k[1]:
-            continue  # graduated: it trades on SunSwap now (DEX sites and the Trade Bot take over)
+            try:  # it trades on SunSwap now: keep its chart and trade list alive from the pool's swaps
+                import tron_pool_trades
+
+                tron_pool_trades.sync(idx_conn, curve, token)
+            except Exception as e:
+                log.warning("tron pool sync %s: %s", curve, str(e)[:120])
+            continue  # graduated
         idle = k is not None and (k[2] or 0) < now - 6 * 3600
         if st and idle and now - (st[5] or 0) < IDLE_POLL:
             continue

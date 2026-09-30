@@ -70,6 +70,79 @@ def pool_authority() -> str:
         return ""
 
 
+# ---------------------------------------------------- after graduation --
+# Meteora migrates a filled curve into a DAMM v2 pool: the curve goes quiet and every later trade (this bot, Jupiter,
+# anyone) is a swap in that pool. Its vaults are owned by the DAMM v2 pool authority, so the same balance-delta parse
+# works; this finds each graduated coin's pool and follows it.
+DAMM_AUTH = (os.environ.get("DAMM_POOL_AUTHORITY") or "HLnpSz9h2S4hiLQ43rnSD9XkcUThA7B8hQMKmDaiTLcC").strip()
+GRAD_POLL = 12.0
+BACKFILL = 100  # signatures read the first time a graduated pool is seen, so past trades appear too
+_grad_last = 0.0
+
+
+def graduated_map() -> dict:
+    """mint -> curve (the DBC pool key the site uses) for graduated Ferzan Solana coins."""
+    try:
+        with idx() as c:
+            return {r["token"]: r["curve"] for r in c.execute("SELECT token, curve FROM curves WHERE chain = 'solana' AND graduated = 1")}
+    except sqlite3.Error:
+        return {}
+
+
+def damm_pool_for(mint: str, dbc_pool: str) -> str:
+    """The coin's live post-graduation pool, from DexScreener: the most liquid Solana pair that is not the old curve."""
+    try:
+        pairs = requests.get(f"https://api.dexscreener.com/latest/dex/tokens/{mint}", timeout=15).json().get("pairs") or []
+    except Exception:
+        return ""
+    best, best_liq = "", -1.0
+    for p in pairs:
+        if p.get("chainId") != "solana" or p.get("pairAddress") == dbc_pool:
+            continue
+        if (p.get("baseToken") or {}).get("address") != mint:
+            continue
+        liq = float((p.get("liquidity") or {}).get("usd") or 0)
+        if liq > best_liq:
+            best, best_liq = p.get("pairAddress") or "", liq
+    return best
+
+
+def poll_graduated(st: dict) -> list:
+    """New swaps in the pools of graduated coins, parsed like curve trades and flagged post_grad."""
+    global _grad_last
+    if time.time() - _grad_last < GRAD_POLL:
+        return []
+    _grad_last = time.time()
+    found = []
+    damm = st.setdefault("damm", {})
+    last = st.setdefault("damm_last", {})
+    for mint, dbc_pool in graduated_map().items():
+        pool = damm.get(mint)
+        if not pool:
+            if time.time() - float(st.setdefault("damm_try", {}).get(mint, 0)) < 300:
+                continue
+            st["damm_try"][mint] = time.time()
+            pool = damm_pool_for(mint, dbc_pool)
+            if not pool:
+                continue
+            damm[mint] = pool
+        until = last.get(pool, "")
+        if until:
+            sigs = new_signatures(pool, until)
+        else:
+            page = rpc("getSignaturesForAddress", [pool, {"limit": BACKFILL, "commitment": "confirmed"}]) or []
+            sigs = list(reversed(page))
+        if not sigs:
+            continue
+        ok = [x["signature"] for x in sigs if not x.get("err")]
+        for sig, tx in zip(ok, fetch_txs(ok)):
+            t = parse(tx, {mint: dbc_pool}, DAMM_AUTH) if tx else None
+            if t and not t["created"]:
+                found.append(dict(t, sig=sig, post_grad=True))
+        last[pool] = sigs[-1]["signature"]
+    return found
+
+
 # ------------------------------------------------------------------- rpc --
 _S = requests.Session()
 
@@ -238,9 +311,19 @@ def store(trades: list, ps: PoolState) -> None:
         return
     with idx() as c:
         for t in trades:
-            c.execute("INSERT OR IGNORE INTO trades (chain, curve, block, ts, tx, log_index, trader, is_buy, native, tokens, price) "
-                      "VALUES ('solana', ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)",
-                      (t["pool"], t["slot"], t["ts"], t["sig"], t["trader"], 1 if t["is_buy"] else 0, t["native"], t["tokens"], t["price"]))
+            cur = c.execute("INSERT OR IGNORE INTO trades (chain, curve, block, ts, tx, log_index, trader, is_buy, native, tokens, price) "
+                            "VALUES ('solana', ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)",
+                            (t["pool"], t["slot"], t["ts"], t["sig"], t["trader"], 1 if t["is_buy"] else 0, t["native"], t["tokens"], t["price"]))
+            if t.get("post_grad") and cur.rowcount and t["price"] > 0:
+                # the curve is finished, sol_indexer no longer counts it: keep price, volume and counts moving from the pool
+                c.execute("UPDATE curves SET price = ?, mcap = ?, volume = volume + ?, trades = trades + 1, buys = buys + ?, "
+                          "sells = sells + ?, last_trade_ts = MAX(COALESCE(last_trade_ts, 0), ?) WHERE chain = 'solana' AND curve = ?",
+                          (t["price"], t["price"] * SUPPLY, t["native"], 1 if t["is_buy"] else 0, 0 if t["is_buy"] else 1, t["ts"], t["pool"]))
+                try:
+                    c.execute("INSERT INTO sol_px (ts, pool, price) VALUES (?,?,?)", (t["ts"], t["pool"], t["price"]))
+                except sqlite3.Error:
+                    pass
+    trades = [t for t in trades if not t.get("post_grad")]
     states = ps.read(sorted({t["pool"] for t in trades}))
     now = int(time.time())
     last = {}
@@ -337,6 +420,10 @@ def run() -> int:
             for sig, (seen, _tx) in list(pending.items()):
                 if time.time() - seen > 180 or len(pending) > 500:
                     pending.pop(sig, None)
+            try:
+                found += poll_graduated(st)
+            except Exception as e:
+                log.warning("graduated pools: %s", str(e)[:160])
             if found:
                 store(found, ps)
                 log.info("%d trade(s): %s", len(found), ", ".join(f"{'buy' if t['is_buy'] else 'sell'} {t['native']:.3f} SOL"
