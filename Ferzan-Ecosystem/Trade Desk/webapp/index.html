@@ -221,6 +221,7 @@
   <div id="wallets" class="list"></div>
 </div>
 
+<div class="list" style="margin-top:10px"><button class="w" id="degenBtn" style="border-top:0"><span id="degenTxt">😈 Degen mode</span><span class="hint" id="degenHint"></span></button></div>
 <p class="foot" id="foot">Trades run through the bot — same safety checks as a button tap.</p>
 <p class="foot"><a href="#" id="toClassic">💬 Switch to classic chat mode</a></p>
 <div class="sheet-bg" id="sheetBg" hidden></div>
@@ -347,6 +348,22 @@
     if (!r.ok) throw new Error(j.detail || "Request failed");
     return j;
   }
+  let degenOn = false;
+  function paintDegen() {
+    $("degenTxt").textContent = degenOn ? "😈 Degen mode: ON" : "😈 Degen mode: OFF";
+    $("degenHint").textContent = degenOn ? "Tap to turn off" : "Tap to turn on";
+  }
+  async function loadDegen() { try { degenOn = (await api("/api/degen", {})).on; paintDegen(); } catch (e) { $("degenBtn").hidden = true; } }
+  $("degenBtn").addEventListener("click", async () => {
+    const want = !degenOn;
+    const q = want
+      ? "Turn on Degen mode?\n\nPaste a CA and it buys straight away (min $50). Slippage 25%, liquidity and score blocks off, TP +300% / SL -25% / 20% trail on every buy. Rug Guard stays on, honeypots stay blocked. Turning it off restores your old settings."
+      : "Turn off Degen mode and restore your earlier settings?";
+    if (!(await confirmBox(q))) return;
+    try { degenOn = (await api("/api/degen", { on: want })).on; paintDegen(); toast(degenOn ? "😈 Degen mode ON" : "Degen mode OFF", 2500); }
+    catch (e) { toast(e.message, 3000); }
+  });
+  loadDegen();
   let busy = false;
   async function order(o, question) {
     if (busy) { toast("A trade is already running…", 2500); return; }

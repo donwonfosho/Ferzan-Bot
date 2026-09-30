@@ -430,6 +430,23 @@ async def api_wallet(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True})
 
 
+@app.post("/api/degen")
+async def api_degen(request: Request) -> JSONResponse:
+    """Degen mode state / switch: the same preset and the same restore as the bot's /degen."""
+    body = await _json(request)
+    uid = _auth(body, max_age=ORDER_MAX_AGE_S if "on" in body else None)
+    if "on" in body:
+        if not _rate_ok(uid, "degen", 6):
+            raise HTTPException(status_code=429, detail="Slow down a moment.")
+        if bool(body.get("on")) and not db.degen_on(uid):
+            await asyncio.to_thread(db.degen_enable, uid)
+        elif not bool(body.get("on")) and db.degen_on(uid):
+            await asyncio.to_thread(db.degen_disable, uid)
+        with _cache_lock:
+            _cache.pop(uid, None)
+    return JSONResponse({"on": bool(db.degen_on(uid))})
+
+
 @app.post("/api/card")
 async def api_card(request: Request) -> JSONResponse:
     body = await _json(request)
