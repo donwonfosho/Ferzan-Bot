@@ -2569,8 +2569,26 @@ _ADDONS_TEXT = (
 )
 
 
+async def _admin_or_say(update: Update, context: ContextTypes.DEFAULT_TYPE, cmd: str) -> bool:
+    """Admin check for /setup and /addons that never fails silently: says why it will not run."""
+    msg = update.effective_message
+    try:
+        if await _is_admin(update, context):
+            return True
+        if msg:
+            await msg.reply_text(f"Only group admins can use /{cmd}. If you are an admin posting anonymously, "
+                                 "post as yourself or as the group and try again.")
+    except Exception as exc:
+        log.warning("%s admin check failed in %s: %s", cmd, update.effective_chat.id, exc)
+        if msg:
+            await msg.reply_text(f"I could not check your admin status here ({str(exc)[:80]}). "
+                                 "Make sure Guardian is a member with admin rights, then try /" + cmd + " again.")
+    return False
+
+
 async def gsetup_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await _is_admin(update, context):
+    log.info("/setup in %s by %s", update.effective_chat.id, update.effective_user.id if update.effective_user else "?")
+    if not await _admin_or_say(update, context, "setup"):
         return
     if update.effective_chat.type == "private":
         await update.effective_message.reply_text("Run /gsetup inside your group.")
@@ -2580,7 +2598,7 @@ async def gsetup_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 async def gaddons_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await _is_admin(update, context):
+    if not await _admin_or_say(update, context, "addons"):
         return
     if update.effective_chat.type == "private":
         await update.effective_message.reply_text("Run /gaddons inside your group.")
