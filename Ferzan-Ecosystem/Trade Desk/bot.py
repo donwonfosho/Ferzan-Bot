@@ -413,7 +413,7 @@ def _erc20_amt(rpc: str, token: str, owner: str) -> float:
         return 0.0
 
 
-def _card_wallet(uid: int | None, ca: str, chain: str) -> str:
+def _card_wallet(uid: int | None, ca: str, chain: str, price: float = 0.0) -> str:
     if not uid:
         return "<blockquote>💰 <b>Balance</b>\nFund /wallet</blockquote>"
     cid = resolve_chain(chain)
@@ -473,10 +473,21 @@ def _card_wallet(uid: int | None, ca: str, chain: str) -> str:
             "</blockquote>"
         )
     bag = ticker or "token"
+    hold = f"🪙 {html.escape(bag)} {_fmt_amt(tok)}"
+    try:
+        worth = float(tok or 0) * float(price or 0)
+        if worth > 0:
+            hold += f" · ${worth:,.2f}"
+            cost = db.live_cost(uid, ca) if ca else 0
+            if cost > 0:
+                pnl = worth - cost
+                hold += f"\n{'🟢' if pnl >= 0 else '🔴'} PnL <b>{pnl:+,.2f} USD</b> ({pnl / cost * 100:+.1f}%) · in ${cost:,.2f}"
+    except Exception:
+        pass
     return (
         "<blockquote>"
         f"💰 <b>{html.escape(label)}</b>  {native:.4f} {html.escape(native_sym)}\n"
-        f"🪙 {html.escape(bag)} {_fmt_amt(tok)}"
+        f"{hold}"
         "</blockquote>"
     )
 
@@ -624,7 +635,7 @@ def _render_card(card: SignalCard, uid: int | None = None) -> str:
         f"🛒 <b>1h flow</b>  {flow}"
         "</blockquote>",
         _esc(safety) if safety else "",
-        _card_wallet(uid, ca, s.chain or ""),
+        _card_wallet(uid, ca, s.chain or "", float(s.price_usd or 0)),
         f"{score_emoji} <b>Ferzan score</b> {card.score}/100  {_bar(card.score / 100)}  <b>{_esc(card.bias)}</b>",
         " · ".join(links),
     ]
@@ -1708,8 +1719,8 @@ def _log_trade_safe(uid: int, side: str, mint: str, chain: str, usd: float, sour
 
 
 def _trade_result(side: str, ok: bool, chain_label: str, msg: str, *, usd: float | None = None, pct: int | None = None) -> str:
-    """Same confirmation layout for every chain and every entry point."""
-    icon = "🟢" if ok else "🔴"
+    """Same confirmation layout for every chain and every entry point (plain text; Telegram links the URL)."""
+    icon = "✅" if ok else "❌"
     if side == "buy":
         verb = "Bought" if ok else "Buy failed"
         size = f" ${usd:,.2f}" if usd else ""
@@ -1718,7 +1729,17 @@ def _trade_result(side: str, ok: bool, chain_label: str, msg: str, *, usd: float
         size = f" {pct}%" if pct else ""
     head = f"{icon} {verb}{size} · {chain_label}"
     body = (msg or "").strip()
-    return f"{head}\n{body}" if body else head
+    if not body:
+        return head
+    import re as _re
+
+    urls = _re.findall(r"https?://\S+", body)
+    if ok and urls:
+        rest = "\n".join(ln for ln in body.split("\n") if not _re.fullmatch(r"\s*https?://\S+\s*", ln))
+        rest = rest.replace(urls[0], "").strip()
+        out = head + ("\n" + rest if rest else "")
+        return out + f"\n🔗 Transaction: {urls[0]}"
+    return f"{head}\n{body}"
 
 
 def _live_sell_position(uid: int, pos_id: int, pct: int = 100, only_if_live: bool = False) -> str:
