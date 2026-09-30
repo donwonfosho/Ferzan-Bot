@@ -1116,6 +1116,7 @@ async def _tour_step1(bot, uid: int) -> None:
     kb = InlineKeyboardMarkup(
         [
             [InlineKeyboardButton("✅ I sent funds — check", callback_data="tour:bal")],
+            [InlineKeyboardButton("🔐 Add a withdrawal PIN (optional)", callback_data="pin:start")],
             [InlineKeyboardButton("⏭ Skip — show me how to trade", callback_data="tour:trade")],
         ]
     )
@@ -4949,6 +4950,8 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = (update.message.text or "").strip()
     if not text or text.startswith("/"):
         return
+    if update.effective_chat and update.effective_chat.type == "private" and await _pin_text(update, context, text):
+        return
     if update.effective_chat and update.effective_chat.type == "private" and await _withdraw_text(update, context, text):
         return
     talert = (context.user_data or {}).get("talert")
@@ -5564,6 +5567,10 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             if update.effective_chat and update.effective_chat.type != "private":
                 await context.bot.send_message(uid, "Export only works in a private chat with the bot.")
                 return
+            if db.has_pin(uid):
+                context.user_data["pinexport"] = time.time()
+                await context.bot.send_message(uid, "🔐 Enter your PIN to show your private keys (I'll delete your message).")
+                return
             try:
                 await context.bot.send_message(
                     uid,
@@ -5956,6 +5963,20 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await context.bot.send_message(uid, quotes.format_quote(q))
         except Exception as exc:
             await context.bot.send_message(uid, str(exc))
+        return
+    if data.startswith("pin:"):
+        if update.effective_chat and update.effective_chat.type != "private":
+            return
+        if db.has_pin(uid):
+            await context.bot.send_message(uid, "🔐 You already have a PIN. Change it with /pin change <old> <new>.")
+            return
+        context.user_data["pinsetup"] = time.time()
+        await context.bot.send_message(
+            uid,
+            "🔐 <b>Withdrawal PIN</b>\nSend 4 to 8 digits as your next message. I'll delete it right away.\n"
+            "I'll ask for it before every withdrawal and before showing your private keys, so a stolen Telegram "
+            "can't empty your wallet.\n\nChanged your mind? Just ignore this or send /start.",
+            parse_mode="HTML")
         return
     if data.startswith("tour:"):
         if data == "tour:bal":
@@ -6743,6 +6764,45 @@ async def _withdraw_save_prompt(update: Update, context: ContextTypes.DEFAULT_TY
         return
     st["await"] = "label"
     await context.bot.send_message(update.effective_user.id, "Name this address (e.g. Coinbase, Ledger):")
+
+
+async def _pin_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> bool:
+    """PIN typed after 'Add a PIN' (setup) or before showing the private keys (export). True if consumed."""
+    ud = context.user_data
+    if not (ud.get("pinsetup") or ud.get("pinexport")):
+        return False
+    stamp = float(ud.get("pinsetup") or ud.get("pinexport") or 0)
+    if time.time() - stamp > 120 or not text.strip().isdigit():
+        ud.pop("pinsetup", None)  # a stale or non-PIN message: forget the request and let it work as normal text
+        ud.pop("pinexport", None)
+        return False
+    uid = update.effective_user.id
+    msg = update.effective_message
+    try:
+        await msg.delete()  # never leave a PIN in the chat
+    except Exception:
+        pass
+    t = text.strip()
+    if ud.get("pinsetup"):
+        if not (t.isdigit() and 4 <= len(t) <= 8):
+            await context.bot.send_message(uid, "A PIN is 4 to 8 digits only. Send it again, or /start to skip.")
+            return True
+        ud.pop("pinsetup", None)
+        db.set_pin(uid, t)
+        await context.bot.send_message(uid, "🔐 PIN set. I deleted your message. Never share it. /pin off <pin> removes it.")
+        return True
+    ok, why = db.check_pin(uid, t)
+    if not ok:
+        await context.bot.send_message(uid, "🔐 " + why)
+        if "Locked" in why or "Too many" in why:
+            ud.pop("pinexport", None)
+        return True
+    ud.pop("pinexport", None)
+    try:
+        await context.bot.send_message(uid, user_wallets.export_text(uid), parse_mode="Markdown")
+    except Exception as exc:
+        await context.bot.send_message(uid, str(exc))
+    return True
 
 
 async def _withdraw_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> bool:
