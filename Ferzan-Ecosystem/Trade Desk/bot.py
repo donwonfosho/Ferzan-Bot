@@ -112,6 +112,8 @@ _FAIL_LOG: list = []       # (time, chain label) of recent buys that failed for 
 _HEALTH_STATE: dict = {}   # check name -> consecutive failures
 _HEALTH_DOWN: set = set()  # names already reported down
 _FAIL_ALERT_AT = 0.0
+# blocked from the droplet by design, or not needed to trade: never page the operator for these
+_NOT_CRITICAL = {"GeckoTerminal", "CoinGecko", "Etherscan"}
 _INFRA_WORDS = ("rpc", "timeout", "timed out", "429", "403", "connection", "price feed", "broadcast", "not confirmed", "failed on-chain")
 
 
@@ -135,7 +137,7 @@ async def ops_watch_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     _HEALTH_LAST["t"], _HEALTH_LAST["checks"] = time.time(), checks
     for c in checks:
-        if c.ok is None:
+        if c.ok is None or c.name in _NOT_CRITICAL:
             continue
         if c.ok:
             _HEALTH_STATE[c.name] = 0
@@ -964,7 +966,7 @@ def home_keyboard(private: bool = True, hot: list | None = None) -> InlineKeyboa
         [
             InlineKeyboardButton("👛 Wallets", callback_data="go:wallets"),
             InlineKeyboardButton("🌉 Bridge", callback_data="go:bridge"),
-            InlineKeyboardButton("📤 Withdraw", callback_data="go:withdraw"),
+            InlineKeyboardButton("📤 Send", callback_data="go:withdraw"),
         ],
         [
             InlineKeyboardButton("📡 Signals", callback_data="go:feeds"),
@@ -977,10 +979,12 @@ def home_keyboard(private: bool = True, hot: list | None = None) -> InlineKeyboa
             InlineKeyboardButton("🎓 Migrate", callback_data="go:mig"),
         ],
         [
-            InlineKeyboardButton("🚀 Launch", callback_data="go:launches"),
-            InlineKeyboardButton("🤝 Refer", callback_data="go:ref"),
-            InlineKeyboardButton("💬 Chat", url=chat),
-            InlineKeyboardButton("𝕏", url=xurl),
+            InlineKeyboardButton("🚀 Launch a coin", callback_data="go:launches"),
+            InlineKeyboardButton("🤝 Refer & earn", callback_data="go:ref"),
+        ],
+        [
+            InlineKeyboardButton("💬 Community", url=chat),
+            InlineKeyboardButton("𝕏 Follow", url=xurl),
         ],
     ]
     app_url = _webapp_url()
@@ -1096,14 +1100,14 @@ async def _home_parts(uid: int, first_time: bool) -> tuple[str, list]:
         )
         return text, hot
     pf = await limited(_portfolio_line, uid, secs=5.0, default="")
-    text = (
-        "⚡ <b>FERZAN DESK</b>  ·  👀 See it. 🦍 Ape it. 🚀 Send it.\n"
-        + (f"\n{pf}" if pf else "")
-        + (f"\n{strip}" if strip else "")
-        + ("\n\n🔥 <b>Hot on Ferzan</b> — tap to score it" if hot else "")
-        + "\n\n⚡ Paste a token CA to trade. Chain follows the CA.\n"
-        + foot
-    )
+    blocks = ["⚡ <b>FERZAN DESK</b>"]
+    blocks.append(pf if pf else "No open positions yet. Paste a token CA below to make your first trade.")
+    if strip:
+        blocks.append(strip)
+    if hot:
+        blocks.append("🔥 <b>Hot on Ferzan</b>  ·  tap a coin to score it")
+    blocks.append("⚡ Paste a token CA to trade. The chain follows the CA.\n" + foot)
+    text = "\n\n".join(blocks)
     return text, hot
 
 
@@ -8490,7 +8494,7 @@ def main() -> None:
         jq.run_repeating(drawdown_job, interval=DRAWDOWN_POLL_SECONDS, first=55)
         jq.run_repeating(snipe_job, interval=SNIPE_POLL_SECONDS, first=18)
         jq.run_repeating(live_exit_job, interval=45, first=50)
-        jq.run_repeating(ops_watch_job, interval=300, first=120)
+        jq.run_repeating(ops_watch_job, interval=300, first=20)
         jq.run_daily(digest_job, time=dt.time(hour=13, minute=0, tzinfo=dt.timezone.utc))
         jq.run_repeating(auto_exit_job, interval=20, first=30)
         jq.run_repeating(lp_watch_job, interval=40, first=70)
