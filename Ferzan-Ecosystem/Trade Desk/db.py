@@ -223,6 +223,10 @@ def init_db() -> None:
             """
         )
         cols = {row[1] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
+        if "auto_tp" not in cols:
+            conn.execute("ALTER TABLE users ADD COLUMN auto_tp REAL DEFAULT 100")
+        if "auto_sl" not in cols:
+            conn.execute("ALTER TABLE users ADD COLUMN auto_sl REAL DEFAULT 30")
         if "peak_equity" not in cols:
             conn.execute("ALTER TABLE users ADD COLUMN peak_equity REAL")
         if "drawdown_alert_pct" not in cols:
@@ -2685,4 +2689,24 @@ def prune_auto_exit_seen(user_id: int, held: list[str]) -> None:
         for r in rows:
             if str(r["mint"]) not in keep:
                 conn.execute("DELETE FROM auto_exit_seen WHERE user_id = ? AND mint = ?", (int(user_id), str(r["mint"])))
+        conn.commit()
+
+
+def get_auto_protect(user_id: int) -> tuple[bool, float, float]:
+    """(on, take-profit %, stop-loss %) applied to every new live buy. Off by default."""
+    with get_conn() as conn:
+        row = conn.execute("SELECT auto_tp, auto_sl FROM users WHERE user_id = ?", (user_id,)).fetchone()
+    tp = float(row["auto_tp"]) if row and row["auto_tp"] is not None else 100.0
+    sl = float(row["auto_sl"]) if row and row["auto_sl"] is not None else 30.0
+    return flag_on(user_id, "autoprotect", 0), tp, sl
+
+
+def set_auto_protect(user_id: int, on: bool | None = None, tp: float | None = None, sl: float | None = None) -> None:
+    if on is not None:
+        set_flag(user_id, "autoprotect", on)
+    with get_conn() as conn:
+        if tp is not None:
+            conn.execute("UPDATE users SET auto_tp = ? WHERE user_id = ?", (float(tp), user_id))
+        if sl is not None:
+            conn.execute("UPDATE users SET auto_sl = ? WHERE user_id = ?", (float(sl), user_id))
         conn.commit()

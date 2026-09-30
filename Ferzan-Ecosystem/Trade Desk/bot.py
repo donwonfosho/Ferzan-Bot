@@ -413,6 +413,32 @@ def _erc20_amt(rpc: str, token: str, owner: str) -> float:
         return 0.0
 
 
+def _verdict_line(safety: str, liq: float) -> str:
+    """One-glance call for the top of the safety block: Safe / Caution / Danger, with the reason."""
+    t = safety or ""
+    why = []
+    level = 0
+    if "🚨" in t:
+        level = 2
+        why.append("honeypot or rug flag")
+    elif "⚠️" in t:
+        level = max(level, 1)
+        why.append("contract flags")
+    if liq and liq < 1000:
+        level = 2
+        why.append(f"liquidity only ${liq:,.0f}")
+    elif liq and liq < 10000:
+        level = max(level, 1)
+        why.append(f"thin liquidity ${liq:,.0f}")
+    if level == 2:
+        return "🔴 <b>DANGER</b> · " + _esc(", ".join(why)) + " · think twice"
+    if level == 1:
+        return "🟡 <b>CAUTION</b> · " + _esc(", ".join(why))
+    if not t:
+        return "⚪ <b>Unchecked</b> · no security data for this chain"
+    return "🟢 <b>Looks OK</b> · no red flags found"
+
+
 def _card_wallet(uid: int | None, ca: str, chain: str, price: float = 0.0) -> str:
     if not uid:
         return "<blockquote>💰 <b>Balance</b>\nFund /wallet</blockquote>"
@@ -619,6 +645,7 @@ def _render_card(card: SignalCard, uid: int | None = None) -> str:
     score_emoji = "🔥" if card.score >= 75 else ("👀" if card.score >= 50 else "⚠️")
     head = [x for x in [venue, (f"⏱ {html.escape(age)}" if age else ""), curve] if x]
     safety = _safety_line(s.chain or "", ca)
+    verdict = _verdict_line(safety, liq)
     lines = [
         f"⚡ <b>{_esc(_clip_plain(s.name, 40))}</b>  <b>${_esc(_clip_plain(str(s.symbol).lstrip('$'), 24))}</b>  ·  🔗 {_esc(chain)}",
         f"<code>{_esc(ca)}</code>" if ca else "",
@@ -634,6 +661,7 @@ def _render_card(card: SignalCard, uid: int | None = None) -> str:
         f"{_chg('6h', s.change_6h)}  ·  {_chg('24h', s.change_24h)}\n"
         f"🛒 <b>1h flow</b>  {flow}"
         "</blockquote>",
+        verdict,
         _esc(safety) if safety else "",
         _card_wallet(uid, ca, s.chain or "", float(s.price_usd or 0)),
         f"{score_emoji} <b>Ferzan score</b> {card.score}/100  {_bar(card.score / 100)}  <b>{_esc(card.bias)}</b>",
@@ -1471,6 +1499,15 @@ def _live_buy(
         extra = db.credit_desk_share(uid, usd)
         if extra:
             msg = f"{msg}\n{extra}"
+        if record_basis:
+            try:
+                ap_on, ap_tp, ap_sl = db.get_auto_protect(uid)
+                cur = db.get_live_exit(uid, mint) or {}
+                if ap_on and not (cur.get("tp_pct") or cur.get("sl_pct")):
+                    db.set_live_exit(uid, mint, tp_pct=ap_tp, sl_pct=ap_sl)
+                    msg = f"{msg}\n🛡 Auto-protect armed: TP +{ap_tp:g}% · SL -{ap_sl:g}%"
+            except Exception:
+                logger.exception("auto-protect failed for %s", uid)
     if ok:
         _BUY_OK[uid] = mint  # lets the chat handler follow the confirmation with the position card
     return bool(ok), _trade_result("buy", bool(ok), label, msg, usd=usd)
@@ -4601,6 +4638,118 @@ async def treasury_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         f"Cut  {fees.current_bps() / 100:.2f}%"
     )
     await fees_cmd(update, context)
+
+
+async def digest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/digest on|off: one morning message (9am ET) with your open positions and PnL."""
+    if not await guard(update):
+        return
+    uid = update.effective_user.id
+    a = (context.args[0].lower() if context.args else "")
+    if a in ("on", "off"):
+        db.set_flag(uid, "digest", a == "on")
+    on = db.flag_on(uid, "digest", 0)
+    await update.effective_message.reply_text(
+        f"🌅 Daily digest is {'ON' if on else 'OFF'}.\n"
+        "Every morning at 9am ET: your open positions, what they're worth and your PnL.\n"
+        "Change: /digest on · /digest off")
+
+
+def _digest_text(uid: int) -> str:
+    rows, tot_w, tot_c = [], 0.0, 0.0
+    for mint in db.live_mints(uid)[:15]:
+        try:
+            amt, _owner, venue = _bag_position_amount(uid, mint)
+            if not amt or float(amt) <= 0:
+                continue
+            meta = _token_meta(mint)
+            worth = float(amt) * float(meta.get("px") or 0)
+            cost = db.live_cost(uid, mint)
+            sym = (meta.get("symbol") or mint[:6]).upper()
+            if worth <= 0:
+                continue
+            tot_w += worth
+            tot_c += cost
+            pct = f" ({(worth - cost) / cost * 100:+.0f}%)" if cost > 0 else ""
+            rows.append((worth, f"{'🟢' if worth >= cost else '🔴'} ${html.escape(sym)} · {html.escape(str(venue))} · ${worth:,.2f}{pct}"))
+        except Exception:
+            continue
+    if not rows:
+        return ""
+    rows.sort(key=lambda r: -r[0])
+    head = f"🌅 <b>Your Ferzan morning</b>\nPositions ${tot_w:,.2f}"
+    if tot_c > 0:
+        head += f" · {'🟢' if tot_w >= tot_c else '🔴'} {tot_w - tot_c:+,.2f} USD ({(tot_w - tot_c) / tot_c * 100:+.1f}%) vs in"
+    return head + "\n\n" + "\n".join(r[1] for r in rows) + "\n\nPaste any CA to trade. /digest off to stop."
+
+
+async def digest_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    for u in db.list_users():
+        uid = int(u.get("user_id") or 0)
+        if not uid or not db.flag_on(uid, "digest", 0):
+            continue
+        try:
+            text = await asyncio.to_thread(_digest_text, uid)
+            if text:
+                await context.bot.send_message(uid, text, parse_mode="HTML", disable_web_page_preview=True)
+        except Exception:
+            logger.exception("digest failed for %s", uid)
+        await asyncio.sleep(0.5)
+
+
+async def protect_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/protect [on|off] [tp N] [sl N]: arm take-profit and stop-loss automatically on every live buy."""
+    if not await guard(update):
+        return
+    uid = update.effective_user.id
+    args = [a.lower() for a in (context.args or [])]
+    on = tp = sl = None
+    try:
+        i = 0
+        while i < len(args):
+            a = args[i]
+            if a in ("on", "off"):
+                on = a == "on"
+            elif a in ("tp", "sl") and i + 1 < len(args):
+                v = float(args[i + 1].rstrip("%"))
+                if not (1 <= v <= 1000 if a == "tp" else 1 <= v <= 95):
+                    raise ValueError
+                tp, sl = (v, sl) if a == "tp" else (tp, v)
+                i += 1
+            else:
+                raise ValueError
+            i += 1
+    except ValueError:
+        await update.effective_message.reply_text(
+            "Usage: /protect on | /protect off | /protect tp 100 sl 30\n(tp 1-1000%, sl 1-95%)")
+        return
+    if on is not None or tp is not None or sl is not None:
+        db.set_auto_protect(uid, on, tp, sl)
+    cur_on, cur_tp, cur_sl = db.get_auto_protect(uid)
+    await update.effective_message.reply_text(
+        f"🛡 Auto-protect is {'ON' if cur_on else 'OFF'}\n"
+        f"Every new live buy arms 🎯 TP +{cur_tp:g}% and 🛑 SL -{cur_sl:g}%.\n"
+        "Change: /protect on · /protect off · /protect tp 100 sl 30\n"
+        "Rules you set by hand on a token are never overwritten.")
+
+
+async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/status: are prices, swaps and the chains up right now. Anyone can run it."""
+    if not await guard(update):
+        return
+    import health
+
+    status = await _progress(context.bot, update.effective_chat.id, "🩺 Checking services…")
+    checks = await asyncio.to_thread(health.run_checks)
+    down = [c.name for c in checks if c.ok is False]
+    lines = ["🩺 <b>Ferzan status</b> — " + ("all systems go 🟢" if not down else f"{len(down)} service(s) degraded 🟡")]
+    for c in checks:
+        if c.ok is None:
+            continue
+        lines.append(f"{'🟢' if c.ok else '🔴'} {html.escape(c.name)}")
+    if down:
+        lines.append("\nTrades on the affected chains may fail or be slow. Nothing is sent if a price feed is down.")
+    await _done(context.bot, update.effective_chat.id, status, "\n".join(lines), parse_mode="HTML")
 
 
 async def health_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -7899,6 +8048,9 @@ def main() -> None:
     app.add_handler(CommandHandler("treasury", treasury_cmd))
     app.add_handler(CommandHandler("health", health_cmd))
     app.add_handler(CommandHandler("status", status_cmd))
+    app.add_handler(CommandHandler("protect", protect_cmd))
+    app.add_handler(CommandHandler("digest", digest_cmd))
+    app.add_handler(CommandHandler("status", status_cmd))
     app.add_handler(CommandHandler("ref", ref_cmd))
     app.add_handler(CommandHandler("referral", ref_cmd))
     app.add_handler(CommandHandler("claim", claim_cmd))
@@ -7931,6 +8083,7 @@ def main() -> None:
         jq.run_repeating(drawdown_job, interval=DRAWDOWN_POLL_SECONDS, first=55)
         jq.run_repeating(snipe_job, interval=SNIPE_POLL_SECONDS, first=18)
         jq.run_repeating(live_exit_job, interval=45, first=50)
+        jq.run_daily(digest_job, time=dt.time(hour=13, minute=0, tzinfo=dt.timezone.utc))
         jq.run_repeating(auto_exit_job, interval=20, first=30)
         jq.run_repeating(lp_watch_job, interval=40, first=70)
         jq.run_repeating(buy_limit_job, interval=35, first=80)
