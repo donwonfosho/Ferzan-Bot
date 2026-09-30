@@ -305,6 +305,14 @@ def _security_line(chain: str, ca: str) -> str:
         "⚠️ Contract flags" if flags else "✅ No honeypot flag"
     )
     out = f"{head}  ·  buy {buy_t}%  ·  sell {sell_t}%"
+    try:
+        hs = [h for h in (blob.get("holders") or []) if str(h.get("is_contract", "0")) != "1"][:10]
+        top10 = sum(float(h.get("percent") or 0) for h in hs) * 100
+        n_hold = int(float(blob.get("holder_count") or 0))
+        if hs:
+            out += f"\n👥 Top 10 hold {top10:.0f}%" + (f" · {n_hold:,} holders" if n_hold else "")
+    except Exception:
+        pass
     if flags:
         out += "\n" + " · ".join(flags[:6])
     return out
@@ -424,6 +432,12 @@ def _verdict_line(safety: str, liq: float) -> str:
     elif "⚠️" in t:
         level = max(level, 1)
         why.append("contract flags")
+    import re as _re
+
+    m = _re.search(r"Top 10 hold (\d+)%", t)
+    if m and int(m.group(1)) >= 50:
+        level = max(level, 1)
+        why.append(f"top 10 hold {m.group(1)}%")
     if liq and liq < 1000:
         level = 2
         why.append(f"liquidity only ${liq:,.0f}")
@@ -644,6 +658,14 @@ def _render_card(card: SignalCard, uid: int | None = None) -> str:
     flow = f"🟩 {b1}  🟥 {s1}  {_bar(b1 / tot1, 10, '🟩', '🟥')}" if tot1 else "no trades in the last hour"
     score_emoji = "🔥" if card.score >= 75 else ("👀" if card.score >= 50 else "⚠️")
     head = [x for x in [venue, (f"⏱ {html.escape(age)}" if age else ""), curve] if x]
+    impact = ""
+    try:
+        if liq > 0 and uid:
+            buy_usd = float(_default_buy_usd(uid))
+            imp = buy_usd / (liq / 2.0) * 100.0  # constant-product estimate: a buy of x moves the price ~ x / (half the pool)
+            impact = f"\n💥 <b>Impact</b> ~{imp:.2f}% on a ${buy_usd:g} buy" + (" ⚠️ big" if imp >= 3 else "")
+    except Exception:
+        impact = ""
     safety = _safety_line(s.chain or "", ca)
     verdict = _verdict_line(safety, liq)
     lines = [
@@ -655,6 +677,7 @@ def _render_card(card: SignalCard, uid: int | None = None) -> str:
         "<blockquote>"
         f"🧢 <b>MC</b> {_esc(f'${mc:,.0f}' if mc else '—')}   💵 <b>Price</b> {_esc(_fmt_px(s.price_usd))}\n"
         f"💧 <b>Liq</b> {_esc(f'${liq:,.0f}' if liq else '—')}{_esc(liq_pct)}   📊 <b>Vol 24h</b> {_esc(f'${vol:,.0f}' if vol else '—')}"
+        f"{impact}"
         "</blockquote>",
         "<blockquote>"
         f"{_chg('5m', s.change_5m)}  ·  {_chg('1h', s.change_1h)}\n"
@@ -1432,6 +1455,7 @@ def _live_buy(
     return their original text (other code matches on those prefixes);
     actual sends come back in the shared _trade_result layout."""
     _BUY_OK.pop(uid, None)
+    _t0 = time.time()
     if not signer.live_enabled():
         return False, "Live buys are off. LIVE_BUYS=0 on the server."
     if db.flag_on(uid, "score_gate", 0) and not force and not gates_checked:
@@ -1499,6 +1523,7 @@ def _live_buy(
         extra = db.credit_desk_share(uid, usd)
         if extra:
             msg = f"{msg}\n{extra}"
+        msg = f"{msg}\n⚡ Filled in {time.time() - _t0:.1f}s"
         if record_basis:
             try:
                 ap_on, ap_tp, ap_sl = db.get_auto_protect(uid)
@@ -2017,6 +2042,9 @@ def _bag_panel(
     ]
     if bits:
         rows.append([InlineKeyboardButton("🧹 Clear exit rules", callback_data=f"exc:{short}")])
+    else:
+        _ap_on, _ap_tp, _ap_sl = db.get_auto_protect(uid)
+        rows.append([InlineKeyboardButton(f"🛡 Protect me · TP +{_ap_tp:g}% / SL -{_ap_sl:g}%", callback_data=f"prt:{short}")])
     rows += [
         [
             InlineKeyboardButton("📡 Score", callback_data=f"sig:{short}"),
@@ -5708,6 +5736,14 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     if data.startswith("mig:"):
         await _mig_callback(update, context, data)
+        return
+    if data.startswith("prt:"):
+        mint = data[4:]
+        _on, ap_tp, ap_sl = db.get_auto_protect(uid)
+        db.set_live_exit(uid, mint, tp_pct=ap_tp, sl_pct=ap_sl)
+        await context.bot.send_message(uid, f"🛡 Protected: 🎯 TP +{ap_tp:g}% · 🛑 SL -{ap_sl:g}% armed. Change the numbers with /protect.")
+        if _is_bag_panel(query.message):
+            await _refresh_bag_panel(query, uid, mint, quiet=True)
         return
     if data.startswith("tpx:") or data.startswith("slx:"):
         kind, pct_s, mint = data.split(":", 2)
