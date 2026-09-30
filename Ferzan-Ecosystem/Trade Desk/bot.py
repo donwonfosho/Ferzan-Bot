@@ -591,21 +591,44 @@ def _render_card(card: SignalCard, uid: int | None = None) -> str:
         links.append(f'<a href="{html.escape(dt, quote=True)}">DexTools</a>')
     if scan:
         links.append(f'<a href="{html.escape(scan, quote=True)}">Scan</a>')
+    def _chg(label: str, v) -> str:
+        try:
+            v = float(v)
+        except Exception:
+            return f"{label} —"
+        return f"{'🟢' if v > 0 else ('🔴' if v < 0 else '⚪')} {label} {v:+.1f}%"
+
+    def _bar(frac: float, n: int = 10, on: str = "▰", off: str = "▱") -> str:
+        k = max(0, min(n, int(round(frac * n))))
+        return on * k + off * (n - k)
+
+    b1, s1 = int(s.buys_h1 or 0), int(s.sells_h1 or 0)
+    tot1 = b1 + s1
+    flow = f"🟩 {b1}  🟥 {s1}  {_bar(b1 / tot1, 10, '🟩', '🟥')}" if tot1 else "no trades in the last hour"
+    score_emoji = "🔥" if card.score >= 75 else ("👀" if card.score >= 50 else "⚠️")
+    head = [x for x in [venue, (f"⏱ {html.escape(age)}" if age else ""), curve] if x]
+    safety = _safety_line(s.chain or "", ca)
     lines = [
-        f"⚡ <b>{_esc(_clip_plain(s.name, 40))}</b>  ${_esc(_clip_plain(str(s.symbol).lstrip('$'), 24))}  ·  {_esc(chain)}",
+        f"⚡ <b>{_esc(_clip_plain(s.name, 40))}</b>  <b>${_esc(_clip_plain(str(s.symbol).lstrip('$'), 24))}</b>  ·  🔗 {_esc(chain)}",
         f"<code>{_esc(ca)}</code>" if ca else "",
-        " · ".join([x for x in [venue, (f"age {html.escape(age)}" if age else ""), curve] if x]),
+        " · ".join(head),
         " · ".join(social) if social else "",
-        (
-            f"🧢 {_esc(f'${mc:,.0f}' if mc else '—')}"
-            f"  💵 {_esc(_fmt_px(s.price_usd))}"
-            f"  💧 {_esc(f'${liq:,.0f}' if liq else '—')}{_esc(liq_pct)}"
-        ),
-        _esc(_safety_line(s.chain or "", ca)),
+        "",
+        "<blockquote>"
+        f"🧢 <b>MC</b> {_esc(f'${mc:,.0f}' if mc else '—')}   💵 <b>Price</b> {_esc(_fmt_px(s.price_usd))}\n"
+        f"💧 <b>Liq</b> {_esc(f'${liq:,.0f}' if liq else '—')}{_esc(liq_pct)}   📊 <b>Vol 24h</b> {_esc(f'${vol:,.0f}' if vol else '—')}"
+        "</blockquote>",
+        "<blockquote>"
+        f"{_chg('5m', s.change_5m)}  ·  {_chg('1h', s.change_1h)}\n"
+        f"{_chg('6h', s.change_6h)}  ·  {_chg('24h', s.change_24h)}\n"
+        f"🛒 <b>1h flow</b>  {flow}"
+        "</blockquote>",
+        _esc(safety) if safety else "",
         _card_wallet(uid, ca, s.chain or ""),
-        f"📊 1h {s.buys_h1}/{s.sells_h1}  ·  24h {_esc(f'${vol:,.0f}' if vol else '—')}  ·  {card.score}/100 {_esc(card.bias)}",
+        f"{score_emoji} <b>Ferzan score</b> {card.score}/100  {_bar(card.score / 100)}  <b>{_esc(card.bias)}</b>",
         " · ".join(links),
     ]
+    lines = [x for i, x in enumerate(lines) if x or (i == 4)]
     return "\n".join(lines)
 
 
