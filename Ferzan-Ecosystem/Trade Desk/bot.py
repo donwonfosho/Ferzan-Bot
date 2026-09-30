@@ -133,6 +133,7 @@ async def ops_watch_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     except Exception:
         logger.exception("ops watch: health run failed")
         return
+    _HEALTH_LAST["t"], _HEALTH_LAST["checks"] = time.time(), checks
     for c in checks:
         if c.ok is None:
             continue
@@ -945,47 +946,165 @@ async def resolve_symbol_or_reply(update: Update, symbol: str):
     return candidates[0]
 
 
-def home_keyboard(private: bool = True) -> InlineKeyboardMarkup:
+def home_keyboard(private: bool = True, hot: list | None = None) -> InlineKeyboardMarkup:
     chat = (os.getenv("FERZAN_CHAT_URL") or "https://t.me/Ferzan_Chat").strip()
     xurl = (os.getenv("FERZAN_X_URL") or "https://x.com/ferzaneco").strip()
-    # Telegram sizes a photo card's buttons to the photo, so a row of three
-    # only fits short labels. Long labels (Settings, Migrations, Withdraw)
-    # get rows of two so nothing is cut off with "…".
-    rows = [
+    # Telegram sizes a photo card's buttons to the photo, so rows stay at three short labels.
+    # Grouped by purpose: Trade, Money, Tools, Grow.
+    rows = []
+    if hot:
+        rows.append([InlineKeyboardButton(lbl, callback_data=cb) for lbl, cb in hot[:3]])
+    rows += [
+        [InlineKeyboardButton("⚡ PASTE CA TO TRADE", callback_data="go:buyhelp")],
         [
-            InlineKeyboardButton("⚙️ Settings", callback_data="go:settings"),
-            InlineKeyboardButton("👛 Wallets", callback_data="go:wallets"),
-        ],
-        [
-            InlineKeyboardButton("⛓ Chains", callback_data="go:chains"),
             InlineKeyboardButton("📊 Bag", callback_data="go:bag"),
-            InlineKeyboardButton("📡 Signals", callback_data="go:feeds"),
-        ],
-        [
             InlineKeyboardButton("🎯 Snipe", callback_data="go:snipehelp"),
             InlineKeyboardButton("⏱ Limits", callback_data="go:snipes"),
-            InlineKeyboardButton("👯 Copy", callback_data="go:copy"),
         ],
         [
-            InlineKeyboardButton("🎓 Migrations", callback_data="go:mig"),
+            InlineKeyboardButton("👛 Wallets", callback_data="go:wallets"),
+            InlineKeyboardButton("🌉 Bridge", callback_data="go:bridge"),
             InlineKeyboardButton("📤 Withdraw", callback_data="go:withdraw"),
         ],
         [
+            InlineKeyboardButton("📡 Signals", callback_data="go:feeds"),
+            InlineKeyboardButton("👯 Copy", callback_data="go:copy"),
             InlineKeyboardButton("🔔 Alerts", callback_data="go:alerts"),
-            InlineKeyboardButton("🌉 Bridge", callback_data="go:bridge"),
-            InlineKeyboardButton("🚀 Launch", callback_data="go:launches"),
         ],
         [
+            InlineKeyboardButton("⚙️ Settings", callback_data="go:settings"),
+            InlineKeyboardButton("⛓ Chains", callback_data="go:chains"),
+            InlineKeyboardButton("🎓 Migrate", callback_data="go:mig"),
+        ],
+        [
+            InlineKeyboardButton("🚀 Launch", callback_data="go:launches"),
             InlineKeyboardButton("🤝 Refer", callback_data="go:ref"),
             InlineKeyboardButton("💬 Chat", url=chat),
-            InlineKeyboardButton("𝕏 X", url=xurl),
+            InlineKeyboardButton("𝕏", url=xurl),
         ],
-        [InlineKeyboardButton("⚡ PASTE CA", callback_data="go:buyhelp")],
     ]
     app_url = _webapp_url()
     if app_url and private:  # Telegram rejects web_app buttons outside private chats
         rows.insert(0, [InlineKeyboardButton("📱 Open Ferzan app", web_app=WebAppInfo(url=app_url))])
     return InlineKeyboardMarkup(rows)
+
+
+# ---- home screen helpers: live header, chain lights, "Hot on Ferzan" -----------------------------------
+_HEALTH_LAST: dict = {"t": 0.0, "checks": []}
+_HOME_CACHE: dict = {}
+_LIGHTS = (("SOL", "Solana RPC"), ("ETH", "ETH RPC"), ("BASE", "BASE RPC"), ("BNB", "BSC RPC"),
+           ("TON", "STON.fi (TON swaps)"), ("TRX", "TronGrid"))
+
+
+def _status_strip() -> str:
+    """'🟢 SOL 🟢 ETH …' from the last background health check (no extra network work); '' until one has run."""
+    if not _HEALTH_LAST["checks"] or time.time() - _HEALTH_LAST["t"] > 1200:
+        return ""
+    by = {c.name: c.ok for c in _HEALTH_LAST["checks"]}
+    bits = [f"{'🟢' if by[name] else '🔴'} {label}" for label, name in _LIGHTS if by.get(name) is not None]
+    return "  ".join(bits)
+
+
+def _portfolio_line(uid: int) -> str:
+    """'👛 Positions $1,240 · 🟢 +$38 (+3.1%) · 3 open' or ''. Blocking, cached 60s."""
+    hit = _HOME_CACHE.get(("pf", uid))
+    if hit and time.time() - hit[0] < 60:
+        return hit[1]
+    from concurrent.futures import ThreadPoolExecutor
+
+    mints = db.live_mints(uid)[:8]
+
+    def one(mint):
+        amt, _o, _v = _bag_position_amount(uid, mint)
+        if not amt or float(amt) <= 0:
+            return None
+        px = float(_token_meta(mint).get("px") or 0)
+        return (float(amt) * px, db.live_cost(uid, mint)) if px > 0 else None
+
+    tot_w = tot_c = 0.0
+    n = 0
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        for r in ex.map(lambda m: _safe_call(one, m), mints):
+            if r:
+                tot_w += r[0]
+                tot_c += r[1]
+                n += 1
+    line = ""
+    if n:
+        line = f"👛 Positions <b>${tot_w:,.2f}</b>"
+        if tot_c > 0:
+            d = tot_w - tot_c
+            line += f" · {'🟢' if d >= 0 else '🔴'} {d:+,.2f} ({d / tot_c * 100:+.1f}%)"
+        line += f" · {n} open"
+    _HOME_CACHE[("pf", uid)] = (time.time(), line)
+    return line
+
+
+def _safe_call(fn, *a):
+    try:
+        return fn(*a)
+    except Exception:
+        return None
+
+
+def _hot_rows() -> list:
+    """Top 3 coins by the last hour's trading on the Ferzan launchpad: [(button label, callback)]. Blocking, cached 60s."""
+    hit = _HOME_CACHE.get("hot")
+    if hit and time.time() - hit[0] < 60:
+        return hit[1]
+    base = (os.getenv("LAUNCH_API_URL") or "http://127.0.0.1:8000").rstrip("/")
+    out = []
+    for sort in ("trending", "new"):
+        try:
+            items = (requests.get(f"{base}/api/launches", params={"sort": sort, "limit": 3}, timeout=3).json() or {}).get("items") or []
+        except Exception:
+            items = []
+        for it in items:
+            tok, sym = str(it.get("token") or ""), str(it.get("symbol") or "").lstrip("$")
+            if tok and sym and len(f"sig:{tok}") <= 64:
+                out.append((f"🔥 ${sym[:8].upper()}", f"sig:{tok}"))
+        if out:
+            break
+    out = out[:3]
+    _HOME_CACHE["hot"] = (time.time(), out)
+    return out
+
+
+async def _home_parts(uid: int, first_time: bool) -> tuple[str, list]:
+    """(text, hot buttons). Each live piece has a hard time limit, so /start is never slow."""
+    async def limited(fn, *a, secs=4.0, default=""):
+        try:
+            return await asyncio.wait_for(asyncio.to_thread(fn, *a), secs)
+        except Exception:
+            return default
+
+    hub = html.escape(os.getenv("FERZAN_HUB_URL") or "https://t.me/Ferzan_Trade_Ecosystem", quote=True)
+    chat = html.escape(os.getenv("FERZAN_CHAT_URL") or "https://t.me/Ferzan_Chat", quote=True)
+    xurl = html.escape(os.getenv("FERZAN_X_URL") or "https://x.com/ferzaneco", quote=True)
+    foot = f'<a href="{hub}">Hub</a> · <a href="{chat}">Chat</a> · <a href="{xurl}">X</a>'
+    hot = await limited(_hot_rows, default=[])
+    strip = _status_strip()
+    if first_time:
+        text = (
+            "⚡ <b>Welcome to Ferzan</b>\n"
+            "👀 See it.  🦍 Ape it.  🚀 Send it.\n\n"
+            "The one-stop desk for 19 chains: trade, snipe, bridge and launch from one place. "
+            "Your wallet is ready in a moment.\n\n"
+            "⚡ <b>Paste any token address</b> and the card appears.\n"
+            + (f"\n{strip}\n" if strip else "")
+            + f"\n{foot}"
+        )
+        return text, hot
+    pf = await limited(_portfolio_line, uid, secs=5.0, default="")
+    text = (
+        "⚡ <b>FERZAN DESK</b>  ·  👀 See it. 🦍 Ape it. 🚀 Send it.\n"
+        + (f"\n{pf}" if pf else "")
+        + (f"\n{strip}" if strip else "")
+        + ("\n\n🔥 <b>Hot on Ferzan</b> — tap to score it" if hot else "")
+        + "\n\n⚡ Paste a token CA to trade. Chain follows the CA.\n"
+        + foot
+    )
+    return text, hot
 
 
 def _webapp_url() -> str:
@@ -1045,42 +1164,37 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         ready, _fee_note = fees.live_ready()
         buy_usd = float(user.get("buy_usd") or 25)
         bslip = float(user.get("buy_slip_pct") or 10)
-        text = (
-            "⚡ Welcome to Ferzan — the one-stop desk.\n"
-            "👀 See it.  🦍 Ape it.  🚀 Send it.\n\n"
-            "⛓ Chains: enable the venues you trade.\n"
-            "👛 Wallets: your Ferzan desk addresses.\n"
-            "⚙️ Settings: slip, size, gas, anti-MEV.\n"
-            "📊 Bag: open bags and sell %.\n"
-            "📡 Signals: chain rooms.\n"
-            "🎯 Snipe: arm a first-block buy.\n"
-            "⏱ Limits: buy / sell limits.\n"
-            "👯 Copy: watch a wallet.\n"
-            "🌉 Bridge: SOL · ETH · BASE · BSC inside Ferzan.\n\n"
-            "⚡ Paste a token CA to trade now.\n"
-            "Chain follows the CA. Session and wallet stay put.\n\n"
-            f'<a href="{html.escape(os.getenv("FERZAN_HUB_URL") or "https://t.me/Ferzan_Trade_Ecosystem", quote=True)}">Hub</a> · '
-            f'<a href="{html.escape(os.getenv("FERZAN_CHAT_URL") or "https://t.me/Ferzan_Chat", quote=True)}">Chat</a> · '
-            f'<a href="{html.escape(os.getenv("FERZAN_X_URL") or "https://x.com/ferzaneco", quote=True)}">X</a>'
-        )
+        text, hot = await _home_parts(update.effective_user.id, first_time)
         target = update.effective_message
         if not target:
             return
         banner = BANNER_PATH if BANNER_PATH.exists() else LOGO_PATH
-        if banner.exists():
+        if first_time and PROMO_PATH.exists() and len(text) <= TG_CAPTION_MAX:  # the animation is the first-hello only
+            try:
+                with PROMO_PATH.open("rb") as clip:
+                    await target.reply_animation(
+                        animation=clip, caption=text, parse_mode="HTML",
+                        reply_markup=home_keyboard(private=bool(update.effective_chat and update.effective_chat.type == "private"), hot=hot),
+                    )
+                banner = None
+            except Exception:
+                logger.info("start animation failed, using the banner")
+        if banner is None:
+            pass
+        elif banner.exists():
             with banner.open("rb") as photo:
                 await target.reply_photo(
                     photo=photo,
                     caption=text,
                     parse_mode="HTML",
-                    reply_markup=home_keyboard(private=bool(update.effective_chat and update.effective_chat.type == "private")),
+                    reply_markup=home_keyboard(private=bool(update.effective_chat and update.effective_chat.type == "private"), hot=hot),
                 )
         else:
             await target.reply_text(
                 text,
                 parse_mode="HTML",
                 disable_web_page_preview=True,
-                reply_markup=home_keyboard(private=bool(update.effective_chat and update.effective_chat.type == "private")),
+                reply_markup=home_keyboard(private=bool(update.effective_chat and update.effective_chat.type == "private"), hot=hot),
             )
         try:
             user_wallets.ensure(update.effective_user.id)
