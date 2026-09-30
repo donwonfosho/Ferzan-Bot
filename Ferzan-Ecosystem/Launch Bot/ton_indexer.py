@@ -174,7 +174,13 @@ def run(idx_conn, launch_db: str, force: bool = False) -> int:
             continue
         k, st = known.get(curve), state.get(curve)
         if k and k[1] and not (st and st[7] != "done" and now - int(st[6] or 0) >= GRAD_RETRY):
-            continue  # graduated and the keeper finished: it trades on STON.fi now
+            try:  # it trades on STON.fi now: keep its chart and trade list alive from the pool's swaps
+                import ton_pool_trades
+
+                ton_pool_trades.sync(idx_conn, curve, token)
+            except Exception as e:
+                log.warning("ton pool sync %s: %s", curve, str(e)[:120])
+            continue  # graduated and the keeper finished
         idle = k is not None and (k[2] or 0) < now - 6 * 3600
         if st and idle and now - (st[5] or 0) < IDLE_POLL:
             continue
