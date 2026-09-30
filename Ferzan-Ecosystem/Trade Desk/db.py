@@ -227,6 +227,8 @@ def init_db() -> None:
                          ("pin_locked_until", "INTEGER DEFAULT 0")):
             if col not in cols:
                 conn.execute(f"ALTER TABLE users ADD COLUMN {col} {ddl}")
+        if "degen_prev" not in cols:
+            conn.execute("ALTER TABLE users ADD COLUMN degen_prev TEXT")
         if "auto_tp" not in cols:
             conn.execute("ALTER TABLE users ADD COLUMN auto_tp REAL DEFAULT 100")
         if "auto_sl" not in cols:
@@ -2789,3 +2791,52 @@ def trade_stats(user_id: int) -> tuple[int, int]:
             else:
                 break
     return int(n), streak
+
+
+# ---- Degen mode: one switch that sets a bold preset and remembers what it replaced, so OFF puts everything back ----
+DEGEN_FLAGS = ("auto_buy", "rug_buy", "score_gate", "lp_watch", "autoprotect")
+DEGEN_COLS = ("buy_usd", "buy_slip_pct", "sell_slip_pct", "auto_buy_usd", "auto_tp", "auto_sl")
+
+
+def degen_on(user_id: int) -> bool:
+    return flag_on(user_id, "degen", 0)
+
+
+def degen_enable(user_id: int) -> dict:
+    """Turn Degen mode on. Returns the preset that was applied."""
+    import json
+
+    if degen_on(user_id):
+        return {}
+    u = get_user(user_id) or {}
+    prev = {"cols": {k: u.get(k) for k in DEGEN_COLS},
+            "flags": {f: flag_on(user_id, f, 1 if f == "rug_buy" else 0) for f in DEGEN_FLAGS}}
+    buy = max(50.0, float(u.get("buy_usd") or 25))
+    preset = {"buy_usd": buy, "buy_slip_pct": 25.0, "sell_slip_pct": 25.0,
+              "auto_buy_usd": buy, "auto_tp": 300.0, "auto_sl": 25.0}
+    update_user(user_id, degen_prev=json.dumps(prev), **preset)
+    set_flag(user_id, "auto_buy", True)      # paste a CA and it buys
+    set_flag(user_id, "rug_buy", False)      # thin-liquidity block becomes the card's warning
+    set_flag(user_id, "score_gate", False)   # the score floor no longer blocks
+    set_flag(user_id, "lp_watch", True)      # but Rug Guard auto-sell is ON: bold, not naked
+    set_flag(user_id, "autoprotect", True)   # TP +300% / SL -25% / 20% trail on every buy
+    set_flag(user_id, "degen", True)
+    return preset
+
+
+def degen_disable(user_id: int) -> None:
+    import json
+
+    u = get_user(user_id) or {}
+    try:
+        prev = json.loads(u.get("degen_prev") or "{}")
+    except ValueError:
+        prev = {}
+    cols = {k: v for k, v in (prev.get("cols") or {}).items() if k in DEGEN_COLS}
+    if cols:
+        update_user(user_id, **cols)
+    for f, on in (prev.get("flags") or {}).items():
+        if f in DEGEN_FLAGS:
+            set_flag(user_id, f, bool(on))
+    update_user(user_id, degen_prev=None)
+    set_flag(user_id, "degen", False)

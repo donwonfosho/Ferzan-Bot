@@ -1123,7 +1123,7 @@ async def _home_parts(uid: int, first_time: bool) -> tuple[str, list]:
         )
         return text, hot
     pf = await limited(_portfolio_line, uid, secs=5.0, default="")
-    blocks = ["⚡ <b>FERZAN DESK</b>"]
+    blocks = ["⚡ <b>FERZAN DESK</b>" + ("  ·  😈 <b>DEGEN MODE</b>" if _safe_call(db.degen_on, uid) else "")]
     blocks.append(pf if pf else "No open positions yet. Paste a token CA below to make your first trade.")
     lv = _safe_call(_level_line, uid)
     if lv:
@@ -1816,8 +1816,9 @@ def _live_buy(
                 ap_on, ap_tp, ap_sl = db.get_auto_protect(uid)
                 cur = db.get_live_exit(uid, mint) or {}
                 if ap_on and not (cur.get("tp_pct") or cur.get("sl_pct")):
-                    db.set_live_exit(uid, mint, tp_pct=ap_tp, sl_pct=ap_sl)
-                    msg = f"{msg}\n🛡 Auto-protect armed: TP +{ap_tp:g}% · SL -{ap_sl:g}%"
+                    trail = 20.0 if db.degen_on(uid) else None
+                    db.set_live_exit(uid, mint, tp_pct=ap_tp, sl_pct=ap_sl, trail_pct=trail)
+                    msg = f"{msg}\n🛡 Auto-protect armed: TP +{ap_tp:g}% · SL -{ap_sl:g}%" + (" · 📉 Trail 20%" if trail else "")
             except Exception:
                 logger.exception("auto-protect failed for %s", uid)
     if ok:
@@ -3385,6 +3386,66 @@ async def journal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await update.effective_message.reply_text("\n".join(lines)[:3500])
 
 
+DEGEN_INFO = (
+    "😈 <b>Degen mode</b>\n"
+    "For fast, bold trading. Turning it on sets:\n"
+    "• ⚡ Paste a CA and it buys straight away (min $50 per buy)\n"
+    "• 📉 Slippage 25% on buys and sells\n"
+    "• 🚫 Thin-liquidity and score-floor blocks are off (the card still warns you)\n"
+    "• 🎯 TP +300% · 🛑 SL -25% · 📉 20% trailing stop on every buy\n"
+    "• 🛡 Rug Guard auto-sell ON (LP pulled, dev dumps, top holders dump)\n\n"
+    "Still protected: known honeypots stay blocked, a live price is required, withdrawals and cross-chain "
+    "bridging always ask you first.\n\n"
+    "Turn it off any time and every setting goes back exactly as it was."
+)
+
+
+def _degen_btn(uid: int) -> str:
+    return "😈 Degen mode: ON · tap to turn off" if db.degen_on(uid) else "😈 Degen mode: OFF"
+
+
+async def degen_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard(update):
+        return
+    uid = update.effective_user.id
+    on = db.degen_on(uid)
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton(
+        "✅ Turn OFF, restore my settings" if on else "😈 Turn ON", callback_data="dgn:off" if on else "dgn:ask")]])
+    await update.effective_message.reply_text(
+        f"{'🟢 Degen mode is ON.' if on else '🔴 Degen mode is OFF.'}\n\n{DEGEN_INFO}",
+        parse_mode="HTML", reply_markup=kb)
+
+
+async def _degen_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, data: str) -> None:
+    uid = update.effective_user.id
+    q = update.callback_query
+    if update.effective_chat and update.effective_chat.type != "private":
+        return
+    if data == "dgn:t":
+        data = "dgn:off" if db.degen_on(uid) else "dgn:ask"
+    if data == "dgn:ask":
+        await context.bot.send_message(
+            uid, DEGEN_INFO + "\n\n⚠️ Bold trading loses money fast. Only use what you can afford to lose.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("😈 Yes, go degen", callback_data="dgn:on"),
+                InlineKeyboardButton("✖️ Cancel", callback_data="dgn:no"),
+            ]]))
+        return
+    if data == "dgn:on":
+        db.degen_enable(uid)
+        await _safe_answer(q, "Degen mode ON")
+        await context.bot.send_message(uid, "😈 Degen mode is ON. Paste a CA and it buys. /degen to turn it off.")
+        return
+    if data == "dgn:off":
+        db.degen_disable(uid)
+        await _safe_answer(q, "Degen mode OFF")
+        await context.bot.send_message(uid, "✅ Degen mode is OFF. Your earlier settings are back.")
+        return
+    if data == "dgn:no":
+        await _safe_answer(q, "Cancelled")
+
+
 async def settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update):
         return
@@ -3519,6 +3580,7 @@ async def settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     InlineKeyboardButton("🎓 Migration sniper", callback_data="mig:x:panel"),
                 ],
                 [InlineKeyboardButton("📡 Per-chain feeds", callback_data="go:feeds")],
+                [InlineKeyboardButton(_degen_btn(uid), callback_data="dgn:t")],
             ]
         ),
     )
@@ -3913,6 +3975,8 @@ def chain_board_keyboard(user_id: int | None = None) -> InlineKeyboardMarkup:
     if row:
         rows.append(row)
     rows.append([InlineKeyboardButton("🍎 Buy gas", callback_data="go:buy")])
+    if user_id:
+        rows.append([InlineKeyboardButton(_degen_btn(user_id), callback_data="dgn:t")])
     if has:
         rows.append([InlineKeyboardButton("👛 My wallets · switch / new", callback_data="wsl:list")])
     rows.append(
@@ -6199,6 +6263,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await context.bot.send_message(uid, quotes.format_quote(q))
         except Exception as exc:
             await context.bot.send_message(uid, str(exc))
+        return
+    if data.startswith("dgn:"):
+        await _degen_callback(update, context, data)
         return
     if data.startswith("pin:"):
         if update.effective_chat and update.effective_chat.type != "private":
@@ -8572,6 +8639,7 @@ def main() -> None:
     app.add_handler(CommandHandler("status", status_cmd))
     app.add_handler(CommandHandler("protect", protect_cmd))
     app.add_handler(CommandHandler("pin", pin_cmd))
+    app.add_handler(CommandHandler("degen", degen_cmd))
     app.add_handler(CommandHandler("digest", digest_cmd))
     app.add_handler(CommandHandler("status", status_cmd))
     app.add_handler(CommandHandler("ref", ref_cmd))
