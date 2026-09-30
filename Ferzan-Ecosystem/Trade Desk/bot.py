@@ -1074,6 +1074,29 @@ def _hot_rows() -> list:
     return out
 
 
+LEVELS = ((250, "Legend", "👑"), (100, "Sniper", "🎯"), (50, "Whale Hunter", "🐋"), (20, "Degen", "😈"),
+          (5, "Ape", "🦍"), (1, "Scout", "🔭"), (0, "Newcomer", "🌱"))
+WHATS_NEW_ID = "2026-09-29"
+WHATS_NEW = ("🆕 <b>What's new</b>\n"
+             "• Safe / Caution / Danger call on every card\n"
+             "• /protect: auto take-profit and stop-loss on every buy\n"
+             "• /pin: optional PIN for withdrawals and key export\n"
+             "• Live cards, Hot on Ferzan, /digest morning summary")
+
+
+def _level_line(uid: int) -> str:
+    n, streak = db.trade_stats(uid)
+    if n <= 0:
+        return ""
+    need, name, emo = next(l for l in LEVELS if n >= l[0])
+    higher = [l for l in LEVELS if l[0] > n]
+    nxt = f" · {higher[-1][0] - n} to {higher[-1][1]}" if higher else ""
+    line = f"{emo} <b>{name}</b> · {n} trade{'s' if n != 1 else ''}{nxt}"
+    if streak >= 2:
+        line += f" · 🔥 {streak}-day streak"
+    return line
+
+
 async def _home_parts(uid: int, first_time: bool) -> tuple[str, list]:
     """(text, hot buttons). Each live piece has a hard time limit, so /start is never slow."""
     async def limited(fn, *a, secs=4.0, default=""):
@@ -1102,10 +1125,19 @@ async def _home_parts(uid: int, first_time: bool) -> tuple[str, list]:
     pf = await limited(_portfolio_line, uid, secs=5.0, default="")
     blocks = ["⚡ <b>FERZAN DESK</b>"]
     blocks.append(pf if pf else "No open positions yet. Paste a token CA below to make your first trade.")
+    lv = _safe_call(_level_line, uid)
+    if lv:
+        blocks.append(lv)
     if strip:
         blocks.append(strip)
     if hot:
         blocks.append("🔥 <b>Hot on Ferzan</b>  ·  tap a coin to score it")
+    try:
+        if not db.flag_on(uid, f"seen_{WHATS_NEW_ID}", 0):
+            blocks.append(WHATS_NEW)
+            db.set_flag(uid, f"seen_{WHATS_NEW_ID}", True)  # shown once per release
+    except Exception:
+        pass
     blocks.append("⚡ Paste a token CA to trade. The chain follows the CA.\n" + foot)
     text = "\n\n".join(blocks)
     return text, hot
@@ -1552,17 +1584,15 @@ async def _send_signal(update: Update, query: str, edit: bool = False) -> None:
         except Exception:
             placeholder = None
 
-    async def _out(text: str, **kwargs) -> None:
+    async def _out(text: str, **kwargs):
         if edit and update.callback_query:
-            await update.callback_query.edit_message_text(text, **kwargs)
-            return
+            return await update.callback_query.edit_message_text(text, **kwargs)
         if placeholder is not None:
             try:
-                await placeholder.edit_text(text, **kwargs)
-                return
+                return await placeholder.edit_text(text, **kwargs)
             except Exception:
                 pass
-        await update.effective_message.reply_text(text, **kwargs)
+        return await update.effective_message.reply_text(text, **kwargs)
 
     try:
         card = await asyncio.to_thread(analyze, query)
@@ -1578,7 +1608,53 @@ async def _send_signal(update: Update, query: str, edit: bool = False) -> None:
         chain=card.snapshot.chain or "",
         uid=uid,
     )
-    await _out(text, parse_mode="HTML", disable_web_page_preview=True, reply_markup=markup)
+    sent = await _out(text, parse_mode="HTML", disable_web_page_preview=True, reply_markup=markup)
+    try:
+        if (uid and hasattr(sent, "message_id") and update.effective_chat and update.effective_chat.type == "private"
+                and (card.snapshot.token_address or "") != TOUR_DEMO_MINT and os.getenv("LIVE_CARD", "1") == "1"):
+            _start_live_card(sent, query, uid, text, markup)
+    except Exception:
+        logger.exception("live card start failed")
+
+
+_LIVE_CARDS: dict = {}   # (chat_id, message_id) -> asyncio task
+_LIVE_BY_USER: dict = {}  # uid -> (chat_id, message_id): one live card per person
+LIVE_CARD_STEPS = int(os.getenv("LIVE_CARD_STEPS", "4"))      # refreshes ...
+LIVE_CARD_EVERY = int(os.getenv("LIVE_CARD_EVERY", "20"))     # ... this many seconds apart
+LIVE_CARD_MAX = int(os.getenv("LIVE_CARD_MAX", "40"))         # cards being kept live at once, whole desk
+
+
+def _start_live_card(msg, query: str, uid: int, first_text: str, markup) -> None:
+    """Keep the card's numbers fresh for about a minute after it opens, editing in place. Stops on any error."""
+    old = _LIVE_BY_USER.get(uid)
+    if old and old in _LIVE_CARDS:
+        _LIVE_CARDS[old].cancel()
+    if len(_LIVE_CARDS) >= LIVE_CARD_MAX:
+        return
+    key = (msg.chat_id, msg.message_id)
+
+    async def run():
+        last = first_text
+        try:
+            for _ in range(LIVE_CARD_STEPS):
+                await asyncio.sleep(LIVE_CARD_EVERY)
+                card = await asyncio.to_thread(analyze, query)
+                text = await asyncio.to_thread(render_card, card, uid)
+                if text == last:
+                    continue
+                await msg.edit_text(text, parse_mode="HTML", disable_web_page_preview=True, reply_markup=markup)
+                last = text
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # message gone, edited elsewhere, or the feed hiccuped: just stop
+            logger.debug("live card stopped: %s", exc)
+        finally:
+            _LIVE_CARDS.pop(key, None)
+            if _LIVE_BY_USER.get(uid) == key:
+                _LIVE_BY_USER.pop(uid, None)
+
+    _LIVE_CARDS[key] = asyncio.get_running_loop().create_task(run())
+    _LIVE_BY_USER[uid] = key
 
 
 async def signal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -7658,6 +7734,42 @@ async def _rug_guard_sell(context: ContextTypes.DEFAULT_TYPE, uid: int, mint: st
         logger.exception("rug guard notify")
 
 
+_RUG_WARNED: dict = {}   # (uid, mint) -> time of the last warning, so one problem is not repeated every cycle
+
+
+async def _rug_warn_only(context: ContextTypes.DEFAULT_TYPE, uid: int) -> None:
+    """For people who did not switch on Rug Guard auto-sell: the same dev-sold / top-holders-dumped check, but it
+    only sends a warning with one-tap sell buttons. Nothing is sold without a tap."""
+    for mint in db.live_mints(uid)[:10]:
+        try:
+            why = await asyncio.to_thread(_rug_signal, uid, mint)
+        except Exception:
+            continue
+        if not why or time.time() - _RUG_WARNED.get((uid, mint), 0) < 3600:
+            continue
+        _RUG_WARNED[(uid, mint)] = time.time()
+        sym = ""
+        try:
+            sym = (_token_meta(mint).get("symbol") or "").upper()
+        except Exception:
+            pass
+        short = mint[:48]
+        try:
+            await context.bot.send_message(
+                uid,
+                f"🚨 <b>Heads up{(' on $' + html.escape(sym)) if sym else ''}</b>: {html.escape(why)}.\n"
+                "Rug Guard auto-sell is off, so nothing was sold. Want out?",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("Sell 50%", callback_data=f"slp:50:{short}"),
+                    InlineKeyboardButton("☢️ Sell 100%", callback_data=f"slp:100:{short}"),
+                    InlineKeyboardButton("Ignore", callback_data="go:home"),
+                ]]),
+            )
+        except Exception:
+            logger.exception("rug warn notify")
+
+
 async def lp_watch_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         with db.get_conn() as conn:
@@ -7666,6 +7778,7 @@ async def lp_watch_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     for uid in users:
         if not db.flag_on(uid, "lp_watch", 0):
+            await _rug_warn_only(context, uid)  # auto-sell is off: still tell them, with sell buttons
             continue
         try:
             sol_secret, evm_secret = user_wallets.secrets(uid)

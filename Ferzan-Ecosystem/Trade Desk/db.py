@@ -2768,3 +2768,24 @@ def check_pin(user_id: int, pin: str) -> tuple[bool, str]:
                      (0 if lock else fails, lock, user_id))
         conn.commit()
         return False, ("Wrong PIN. Locked for 15 minutes." if lock else f"Wrong PIN ({5 - fails} tries left).")
+
+
+def trade_stats(user_id: int) -> tuple[int, int]:
+    """(number of buys and sells, current daily streak). A streak counts consecutive UTC days with a trade,
+    ending today or yesterday, so it does not reset until a full day is missed."""
+    with get_conn() as conn:
+        n = conn.execute("SELECT COUNT(*) FROM live_trades WHERE user_id = ? AND side IN ('buy', 'sell')", (user_id,)).fetchone()[0]
+        days = [r[0] for r in conn.execute(
+            "SELECT DISTINCT ts / 86400 FROM live_trades WHERE user_id = ? AND side IN ('buy', 'sell') "
+            "ORDER BY 1 DESC LIMIT 60", (user_id,)).fetchall()]
+    today = int(time.time()) // 86400
+    streak = 0
+    if days and days[0] >= today - 1:
+        want = days[0]
+        for d in days:
+            if d == want:
+                streak += 1
+                want -= 1
+            else:
+                break
+    return int(n), streak
