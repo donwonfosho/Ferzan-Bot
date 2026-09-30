@@ -1801,7 +1801,21 @@ def _trade_result(side: str, ok: bool, chain_label: str, msg: str, *, usd: float
         rest = rest.replace(urls[0], "").strip()
         out = head + ("\n" + rest if rest else "")
         return out + f"\n🔗 Transaction: {urls[0]}"
-    return f"{head}\n{body}"
+    tip = ""
+    if not ok:
+        low = body.lower()
+        for keys, hint in (
+            (("insufficient", "not enough", "balance too low"), "Add funds with /wallet, or try a smaller amount."),
+            (("slippage", "price impact", "too little received", "min return"), "Price moved. Raise slippage on the card (🎚 Slip) or retry."),
+            (("price feed", "feed is down"), "Prices are down for a moment. Nothing was sent. Check /status, then retry."),
+            (("rpc", "timeout", "timed out", "429", "403", "connection"), "The network was busy. Nothing moved unless a link is shown. Retry in a minute (/status shows what's up)."),
+            (("honeypot", "cannot sell"), "This token blocks selling. Skip it."),
+            (("nonce", "replacement", "underpriced"), "Another transaction was pending. Wait a moment and retry."),
+        ):
+            if any(k in low for k in keys):
+                tip = "\n👉 " + hint
+                break
+    return f"{head}\n{body}{tip}"
 
 
 def _live_sell_position(uid: int, pos_id: int, pct: int = 100, only_if_live: bool = False) -> str:
