@@ -108,6 +108,56 @@ async def _notify_admins(bot, text: str) -> None:
             logger.exception("admin notify failed for %s", admin_id)
 
 
+_FAIL_LOG: list = []       # (time, chain label) of recent buys that failed for infrastructure reasons
+_HEALTH_STATE: dict = {}   # check name -> consecutive failures
+_HEALTH_DOWN: set = set()  # names already reported down
+_FAIL_ALERT_AT = 0.0
+_INFRA_WORDS = ("rpc", "timeout", "timed out", "429", "403", "connection", "price feed", "broadcast", "not confirmed", "failed on-chain")
+
+
+def _note_trade_failure(label: str, msg: str) -> None:
+    low = (msg or "").lower()
+    if any(w in low for w in _INFRA_WORDS):
+        now = time.time()
+        _FAIL_LOG.append((now, str(label)))
+        del _FAIL_LOG[:-200]
+
+
+async def ops_watch_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Every 5 minutes: tell the operators when a service goes down or comes back, and when buys keep failing."""
+    global _FAIL_ALERT_AT
+    import health
+
+    try:
+        checks = await asyncio.to_thread(health.run_checks)
+    except Exception:
+        logger.exception("ops watch: health run failed")
+        return
+    for c in checks:
+        if c.ok is None:
+            continue
+        if c.ok:
+            _HEALTH_STATE[c.name] = 0
+            if c.name in _HEALTH_DOWN:
+                _HEALTH_DOWN.discard(c.name)
+                await _notify_admins(context.bot, f"🟢 Back up: {c.name}")
+            continue
+        n = _HEALTH_STATE.get(c.name, 0) + 1
+        _HEALTH_STATE[c.name] = n
+        if n >= 2 and c.name not in _HEALTH_DOWN:  # two bad checks in a row = a real outage, not a blip
+            _HEALTH_DOWN.add(c.name)
+            await _notify_admins(context.bot, f"🔴 Down: {c.name}\n{c.detail[:160]}\nUsers on this service may see failed trades. /health has the rest.")
+    now = time.time()
+    recent = [f for f in _FAIL_LOG if now - f[0] < 600]
+    if len(recent) >= 5 and now - _FAIL_ALERT_AT > 1800:
+        _FAIL_ALERT_AT = now
+        by = {}
+        for _t, lab in recent:
+            by[lab] = by.get(lab, 0) + 1
+        top = ", ".join(f"{k} ×{v}" for k, v in sorted(by.items(), key=lambda kv: -kv[1])[:4])
+        await _notify_admins(context.bot, f"⚠️ {len(recent)} buys failed in the last 10 min for network reasons: {top}\nCheck /health and the RPCs.")
+
+
 def _auto_trading_killed() -> bool:
     """Global kill switch for TP-ladder rung sells, auto-buy-on-feed, and DCA
     scheduled buys. Defaults OFF (auto trading enabled) until an admin flips
@@ -1535,6 +1585,8 @@ def _live_buy(
                 logger.exception("auto-protect failed for %s", uid)
     if ok:
         _BUY_OK[uid] = mint  # lets the chat handler follow the confirmation with the position card
+    if not ok:
+        _note_trade_failure(label, msg)
     return bool(ok), _trade_result("buy", bool(ok), label, msg, usd=usd)
 
 
@@ -8133,6 +8185,7 @@ def main() -> None:
         jq.run_repeating(drawdown_job, interval=DRAWDOWN_POLL_SECONDS, first=55)
         jq.run_repeating(snipe_job, interval=SNIPE_POLL_SECONDS, first=18)
         jq.run_repeating(live_exit_job, interval=45, first=50)
+        jq.run_repeating(ops_watch_job, interval=300, first=120)
         jq.run_daily(digest_job, time=dt.time(hour=13, minute=0, tzinfo=dt.timezone.utc))
         jq.run_repeating(auto_exit_job, interval=20, first=30)
         jq.run_repeating(lp_watch_job, interval=40, first=70)
