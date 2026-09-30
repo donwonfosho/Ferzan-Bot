@@ -3226,26 +3226,59 @@ def _pay_box() -> str:
     )
 
 
+
+_DEX_WRAPPED = {
+    # BNB not needed here
+    "bsc": "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c",     # WBNB
+    "base": "0x4200000000000000000000000000000000000006",    # WETH
+    "solana": "So11111111111111111111111111111111111111112",
+    "tron": "TNUC9Qb1rRpS5CbWLmNMxXBjyFoydXjWFR",            # WTRX
+    "ton": "0x582d872A1B094FC48F5DE31D3B73F2D9bE47def1",     # TON (wrapped)
+}
+
+
+def _dex_usd(addr: str) -> float:
+    """USD price of a wrapped native from its deepest DexScreener pool. 0.0 if unavailable or too thin."""
+    try:
+        pairs = requests.get(f"https://api.dexscreener.com/latest/dex/tokens/{addr}", timeout=8).json().get("pairs") or []
+    except Exception:
+        return 0.0
+    best_liq, best_px = 0.0, 0.0
+    for p in pairs:
+        try:
+            liq = float((p.get("liquidity") or {}).get("usd") or 0)
+            px = float(p.get("priceUsd") or 0)
+            if str((p.get("baseToken") or {}).get("address", "")).lower() != addr.lower():
+                if str((p.get("quoteToken") or {}).get("address", "")).lower() != addr.lower():
+                    continue
+                pn = float(p.get("priceNative") or 0)
+                px = px / pn if pn > 0 else 0.0
+        except (TypeError, ValueError):
+            continue
+        if px > 0 and liq > best_liq:
+            best_liq, best_px = liq, px
+    return best_px if best_liq >= 50_000 else 0.0
+
+
 _PRICE_CACHE = {"ts": 0.0, "sol": 0.0, "eth": 0.0}
 
 
 def _get_usd_prices() -> tuple[float, float]:
-    """Live SOL/ETH USD prices, cached 5 min. Returns (sol_usd, eth_usd) — 0.0 if the feed is down."""
+    """Live SOL/ETH USD prices, cached 5 min. CoinGecko first, DexScreener if it refuses us. 0.0 only if both are down."""
     now = time.time()
     if now - _PRICE_CACHE["ts"] < 300 and (_PRICE_CACHE["sol"] or _PRICE_CACHE["eth"]):
         return _PRICE_CACHE["sol"], _PRICE_CACHE["eth"]
+    sol = eth = 0.0
     try:
-        r = requests.get(
-            "https://api.coingecko.com/api/v3/simple/price?ids=ethereum,solana&vs_currencies=usd",
-            timeout=10,
-        )
-        d = r.json()
+        d = requests.get("https://api.coingecko.com/api/v3/simple/price?ids=ethereum,solana&vs_currencies=usd", timeout=10).json()
         sol = float((d.get("solana") or {}).get("usd") or 0)
         eth = float((d.get("ethereum") or {}).get("usd") or 0)
-        if sol or eth:
-            _PRICE_CACHE.update(ts=now, sol=sol or _PRICE_CACHE["sol"], eth=eth or _PRICE_CACHE["eth"])
     except Exception as exc:
         log.warning("price feed %s", exc)
+    sol = sol or _dex_usd(_DEX_WRAPPED["solana"])
+    eth = eth or _dex_usd(_DEX_WRAPPED["base"])
+    if sol or eth:
+        _PRICE_CACHE.update(ts=now, sol=sol or _PRICE_CACHE["sol"], eth=eth or _PRICE_CACHE["eth"])
     return _PRICE_CACHE["sol"], _PRICE_CACHE["eth"]
 
 

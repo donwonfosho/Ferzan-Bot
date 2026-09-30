@@ -1156,19 +1156,60 @@ def _idx_db():
     return c
 
 
+
+_DEX_WRAPPED = {
+    "bsc": "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c",     # WBNB
+    "base": "0x4200000000000000000000000000000000000006",    # WETH
+    "solana": "So11111111111111111111111111111111111111112",
+    "tron": "TNUC9Qb1rRpS5CbWLmNMxXBjyFoydXjWFR",            # WTRX
+    "ton": "0x582d872A1B094FC48F5DE31D3B73F2D9bE47def1",     # TON (wrapped)
+}
+
+
+def _dex_usd(addr: str) -> float:
+    """USD price of a wrapped native from its deepest DexScreener pool. 0.0 if unavailable or too thin."""
+    try:
+        pairs = requests.get(f"https://api.dexscreener.com/latest/dex/tokens/{addr}", timeout=8).json().get("pairs") or []
+    except Exception:
+        return 0.0
+    best_liq, best_px = 0.0, 0.0
+    for p in pairs:
+        try:
+            liq = float((p.get("liquidity") or {}).get("usd") or 0)
+            px = float(p.get("priceUsd") or 0)
+            if str((p.get("baseToken") or {}).get("address", "")).lower() != addr.lower():
+                if str((p.get("quoteToken") or {}).get("address", "")).lower() != addr.lower():
+                    continue
+                pn = float(p.get("priceNative") or 0)
+                px = px / pn if pn > 0 else 0.0
+        except (TypeError, ValueError):
+            continue
+        if px > 0 and liq > best_liq:
+            best_liq, best_px = liq, px
+    return best_px if best_liq >= 50_000 else 0.0
+
+
 def _native_usd(chain: str) -> float:
     if chain == "arc":
         return 1.0  # Arc's gas token is USDC
     chain = "base" if chain in ("ethereum", "robinhood") else chain  # all ETH-gas chains share the ETH price
     if time.time() - _NATIVE_USD["t"] > 300:
-        try:
+        got = {}
+        try:  # CoinGecko first; it often refuses datacenter IPs, so DexScreener backs it up per coin
             r = requests.get("https://api.coingecko.com/api/v3/simple/price",
                              params={"ids": "binancecoin,ethereum,solana,tron,the-open-network", "vs_currencies": "usd"}, timeout=8).json()
-            _NATIVE_USD.update(t=time.time(), bsc=float(r["binancecoin"]["usd"]), base=float(r["ethereum"]["usd"]),
-                               solana=float(r["solana"]["usd"]), tron=float((r.get("tron") or {}).get("usd") or 0),
-                               ton=float((r.get("the-open-network") or {}).get("usd") or 0))
+            got = {"bsc": float((r.get("binancecoin") or {}).get("usd") or 0), "base": float((r.get("ethereum") or {}).get("usd") or 0),
+                   "solana": float((r.get("solana") or {}).get("usd") or 0), "tron": float((r.get("tron") or {}).get("usd") or 0),
+                   "ton": float((r.get("the-open-network") or {}).get("usd") or 0)}
         except Exception:
-            _NATIVE_USD["t"] = time.time() - 240  # retry in a minute
+            pass
+        for ch, addr in _DEX_WRAPPED.items():
+            if not got.get(ch):
+                got[ch] = _dex_usd(addr)
+        for ch, v in got.items():
+            if v > 0:
+                _NATIVE_USD[ch] = v  # a failed lookup keeps the last good price instead of zeroing it
+        _NATIVE_USD["t"] = time.time() if any(got.values()) else time.time() - 240  # all down: retry in a minute
     return float(_NATIVE_USD.get(chain) or 0.0)
 
 
