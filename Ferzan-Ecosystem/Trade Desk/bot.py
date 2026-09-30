@@ -1105,12 +1105,31 @@ TOUR_DEMO_MINT = os.getenv("FERZAN_TOUR_DEMO_MINT", "DezXAZ8z7PnrnRJjz3wXBoRgixC
 
 async def _tour_step1(bot, uid: int) -> None:
     row = await asyncio.to_thread(user_wallets.ensure, uid)
+    trx_addr = ton_addr = ""
+    try:
+        import tron_signer
+
+        _sol_s, _evm_s = await asyncio.to_thread(user_wallets.secrets, uid)
+        trx_addr = (await asyncio.to_thread(tron_signer.evm_key_to_tron, _evm_s.replace("0x", "")))[0]
+    except Exception:
+        logger.info("tour: tron address unavailable for %s", uid)
+    try:
+        import ton_signer
+
+        ton_addr = (await asyncio.wait_for(asyncio.to_thread(ton_signer.address_and_balance, _sol_s), 12))[0]
+    except Exception:
+        logger.info("tour: ton address unavailable for %s", uid)  # never show another chain's address in its place
+    extra = ""
+    extra += (f"🔴 <b>Tron</b> (send TRX)\n<code>{html.escape(trx_addr)}</code>\n\n" if trx_addr else "")
+    extra += (f"💠 <b>TON</b> (send TON)\n<code>{html.escape(ton_addr)}</code>\n\n" if ton_addr
+              else "💠 <b>TON</b>: tap /wallet → TON to see your address.\n\n")
     text = (
         "👋 <b>Quick tour · 1/3 — your wallet is ready</b>\n\n"
         "Ferzan made you a trading wallet. Keys stay encrypted on the desk; export any time in /wallet.\n\n"
         f"🟣 <b>Solana</b> (send SOL)\n<code>{html.escape(row.get('sol_pub', ''))}</code>\n\n"
         f"🔵 <b>EVM</b> — ETH · Base · BNB · Arb… (send that chain's gas coin)\n"
         f"<code>{html.escape(row.get('evm_pub', ''))}</code>\n\n"
+        + extra +
         "Tap an address to copy it, send a little from your exchange or wallet, then tap below."
     )
     kb = InlineKeyboardMarkup(
