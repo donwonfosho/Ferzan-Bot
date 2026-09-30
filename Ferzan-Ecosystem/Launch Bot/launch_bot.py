@@ -1644,6 +1644,16 @@ async def _tron_run(bot, req_id: str, uid: int, chat_id: int, launch: dict):
             for attempt in range(6):  # the API re-checks the launch on-chain, then posts the launch card
                 ok, why = await asyncio.to_thread(_tron_complete, req_id, txid)
                 if ok:
+                    if launch.get("mode") != "bonding_curve":
+                        try:  # a plain coin has no pool until its creator adds one: offer it right away
+                            await bot.send_message(
+                                chat_id=chat_id, parse_mode="HTML",
+                                text=("💧 <b>One more step: open trading.</b>\nYour coin is live but has no pool yet, so nobody "
+                                      "can buy or sell it. Add a SunSwap pool from your Trade Bot wallet (you pick how much "
+                                      "TRX goes in; you can lock the liquidity forever)."),
+                                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💧 Open the pool now", callback_data=f"lp:go:{req_id}")]]))
+                        except Exception:  # noqa: BLE001
+                            logger.exception("pool prompt failed for %s", req_id)
                     return
                 await asyncio.sleep(30)
             logger.warning("tron launch %s not recorded: %s", req_id, why)

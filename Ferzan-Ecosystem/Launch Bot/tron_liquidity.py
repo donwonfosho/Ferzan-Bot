@@ -82,6 +82,16 @@ async def _ask_trx(q, st: dict):
 async def lp_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     parts = q.data.split(":")
+    if parts[1] == "go":  # straight from the "coin is live" message: skip the coin picker
+        with db._get_conn() as c:
+            row = c.execute("SELECT id, name, symbol, result_token_address, total_supply, decimals FROM launch_requests "
+                            "WHERE id = ? AND telegram_user_id = ? AND chain = 'tron' AND status = 'confirmed' "
+                            "AND result_token_address LIKE 'T%'", (":".join(parts[2:]), update.effective_user.id)).fetchone()
+        if not row:
+            await q.answer("Couldn't find that coin. Send /liquidity.", show_alert=True)
+            return
+        context.user_data["lp"] = {"coins": [dict(row)]}
+        parts = ["lp", "t", "0"]
     st = context.user_data.get("lp") or {}
     if parts[1] == "no":
         await q.answer()
