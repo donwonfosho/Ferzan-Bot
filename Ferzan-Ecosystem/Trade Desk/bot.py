@@ -4791,6 +4791,67 @@ async def digest_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         await asyncio.sleep(0.5)
 
 
+async def pin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/pin set 1234 | /pin change 1234 5678 | /pin off 1234: an optional PIN asked before every withdrawal."""
+    if not await guard(update):
+        return
+    msg = update.effective_message
+    uid = update.effective_user.id
+    if update.effective_chat.type != "private":
+        await msg.reply_text("Set your PIN in a private chat with me.")
+        return
+    a = [x for x in (context.args or [])]
+    sub = a[0].lower() if a else ""
+
+    async def _wipe():
+        try:
+            await msg.delete()  # never leave a PIN in the chat
+        except Exception:
+            pass
+
+    ok_fmt = lambda p: p.isdigit() and 4 <= len(p) <= 8  # noqa: E731
+    if sub == "set" and len(a) == 2:
+        await _wipe()
+        if db.has_pin(uid):
+            await context.bot.send_message(uid, "You already have a PIN. Use /pin change <old> <new>.")
+        elif not ok_fmt(a[1]):
+            await context.bot.send_message(uid, "PIN must be 4 to 8 digits. Example: /pin set 4821")
+        else:
+            db.set_pin(uid, a[1])
+            await context.bot.send_message(uid, "🔐 PIN set. I'll ask for it before every withdrawal. I deleted your message; never share the PIN. If you forget it, contact support.")
+        return
+    if sub == "change" and len(a) == 3:
+        await _wipe()
+        ok, why = db.check_pin(uid, a[1])
+        if not db.has_pin(uid):
+            await context.bot.send_message(uid, "You have no PIN yet. /pin set 4821")
+        elif not ok:
+            await context.bot.send_message(uid, "🔐 " + why)
+        elif not ok_fmt(a[2]):
+            await context.bot.send_message(uid, "New PIN must be 4 to 8 digits.")
+        else:
+            db.set_pin(uid, a[2])
+            await context.bot.send_message(uid, "🔐 PIN changed.")
+        return
+    if sub == "off" and len(a) == 2:
+        await _wipe()
+        ok, why = db.check_pin(uid, a[1])
+        if not db.has_pin(uid):
+            await context.bot.send_message(uid, "You have no PIN set.")
+        elif not ok:
+            await context.bot.send_message(uid, "🔐 " + why)
+        else:
+            db.clear_pin(uid)
+            await context.bot.send_message(uid, "PIN removed. Withdrawals no longer ask for one.")
+        return
+    on = db.has_pin(uid)
+    await msg.reply_text(
+        f"🔐 Withdrawal PIN is {'ON' if on else 'OFF'}.\n"
+        "A PIN stops anyone who gets into your Telegram from sending your funds out.\n\n"
+        "/pin set 4821 · /pin change 4821 9137 · /pin off 4821\n"
+        "Wrong PIN 5 times locks it for 15 minutes.")
+
+
 async def protect_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/protect [on|off] [tp N] [sl N]: arm take-profit and stop-loss automatically on every live buy."""
     if not await guard(update):
@@ -6470,7 +6531,8 @@ async def _wd_confirm(bot, uid: int, st: dict) -> None:
         f"Network: {html.escape(st['net'])}\n"
         f"From: {html.escape(label)}\n"
         f"To: {html.escape(saved['label'] + ' · ') if saved else ''}<code>{html.escape(to)}</code>\n\n"
-        "⚠️ Crypto sends can't be reversed. Check the address matches, character for character.",
+        + ("" if saved else "🆕 <b>New address</b>: not in your address book yet.\n")
+        + "⚠️ Crypto sends can't be reversed. Check the address matches, character for character.",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup([[
             InlineKeyboardButton("✅ Send it", callback_data=f"wd:go:{st['nonce']}"),
@@ -6649,22 +6711,30 @@ async def _withdraw_callback(update: Update, context: ContextTypes.DEFAULT_TYPE,
         if not st.get("dest") or data[6:] != st.get("nonce") or st.get("confirmed") != _wd_snapshot(st):
             await bot.send_message(uid, "That confirmation is stale. Start again with /withdraw.")
             return
-        context.user_data["wd"] = {"last_dest": st["dest"], "last_family": st["family"]}  # one tap = one send
-        status = await _progress(bot, uid, "⏳ Sending…")
-        try:
-            ok, msg = await _off(uid, _wd_execute, uid, st, _busy=(False, BUSY_MSG))
-        except Exception as exc:
-            logger.exception("withdraw failed for %s", uid)
-            ok, msg = None, (
-                f"Something went wrong mid-send ({str(exc)[:120]}). It may or may not have gone out — "
-                "check your wallet on the explorer before trying again."
-            )
-        icon = "🟢" if ok else ("🟡" if ok is None else "🔴")
-        kb = None
-        if ok is not False and not any(b["address"] == st["dest"] for b in db.list_addresses(uid, st["family"])):
-            kb = InlineKeyboardMarkup([[InlineKeyboardButton("💾 Save this address", callback_data="wd:save")]])
-        await _done(bot, uid, status, f"{icon} {msg}", reply_markup=kb, disable_web_page_preview=True)
+        if db.has_pin(uid):
+            st["await"] = "pin"
+            await bot.send_message(uid, "🔐 Enter your PIN to send this withdrawal (I'll delete your message). /withdraw to cancel.")
+            return
+        await _wd_send(bot, uid, st, context)
         return
+
+
+async def _wd_send(bot, uid: int, st: dict, context) -> None:
+    context.user_data["wd"] = {"last_dest": st["dest"], "last_family": st["family"]}  # one tap = one send
+    status = await _progress(bot, uid, "⏳ Sending…")
+    try:
+        ok, msg = await _off(uid, _wd_execute, uid, st, _busy=(False, BUSY_MSG))
+    except Exception as exc:
+        logger.exception("withdraw failed for %s", uid)
+        ok, msg = None, (
+            f"Something went wrong mid-send ({str(exc)[:120]}). It may or may not have gone out — "
+            "check your wallet on the explorer before trying again."
+        )
+    icon = "🟢" if ok else ("🟡" if ok is None else "🔴")
+    kb = None
+    if ok is not False and not any(b["address"] == st["dest"] for b in db.list_addresses(uid, st["family"])):
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("💾 Save this address", callback_data="wd:save")]])
+    await _done(bot, uid, status, f"{icon} {msg}", reply_markup=kb, disable_web_page_preview=True)
 
 
 async def _withdraw_save_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -6731,6 +6801,24 @@ async def _withdraw_text(update: Update, context: ContextTypes.DEFAULT_TYPE, tex
             return True
         st["dest"] = addr
         await _wd_confirm(context.bot, uid, st)
+        return True
+    if step == "pin":
+        try:
+            await msg.delete()
+        except Exception:
+            pass
+        if not st.get("dest") or st.get("confirmed") != _wd_snapshot(st):
+            context.user_data["wd"] = {}
+            await context.bot.send_message(uid, "That confirmation is stale. Start again with /withdraw.")
+            return True
+        ok, why = db.check_pin(uid, text.strip())
+        if not ok:
+            await context.bot.send_message(uid, "🔐 " + why + (" Send the PIN again, or /withdraw to cancel." if "Locked" not in why and "Too many" not in why else ""))
+            if "Locked" in why or "Too many" in why:
+                context.user_data["wd"] = {}
+            return True
+        st["await"] = ""
+        await _wd_send(context.bot, uid, st, context)
         return True
     if step == "label":
         db.save_address(uid, st["last_family"], text.strip()[:24] or "Saved", st["last_dest"])
@@ -8151,6 +8239,7 @@ def main() -> None:
     app.add_handler(CommandHandler("health", health_cmd))
     app.add_handler(CommandHandler("status", status_cmd))
     app.add_handler(CommandHandler("protect", protect_cmd))
+    app.add_handler(CommandHandler("pin", pin_cmd))
     app.add_handler(CommandHandler("digest", digest_cmd))
     app.add_handler(CommandHandler("status", status_cmd))
     app.add_handler(CommandHandler("ref", ref_cmd))

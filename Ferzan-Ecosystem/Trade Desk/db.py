@@ -223,6 +223,10 @@ def init_db() -> None:
             """
         )
         cols = {row[1] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
+        for col, ddl in (("pin_hash", "TEXT"), ("pin_salt", "TEXT"), ("pin_fails", "INTEGER DEFAULT 0"),
+                         ("pin_locked_until", "INTEGER DEFAULT 0")):
+            if col not in cols:
+                conn.execute(f"ALTER TABLE users ADD COLUMN {col} {ddl}")
         if "auto_tp" not in cols:
             conn.execute("ALTER TABLE users ADD COLUMN auto_tp REAL DEFAULT 100")
         if "auto_sl" not in cols:
@@ -2710,3 +2714,57 @@ def set_auto_protect(user_id: int, on: bool | None = None, tp: float | None = No
         if sl is not None:
             conn.execute("UPDATE users SET auto_sl = ? WHERE user_id = ?", (float(sl), user_id))
         conn.commit()
+
+
+# ---- optional withdrawal PIN (salted PBKDF2; never stored in clear; 5 wrong tries lock it for 15 minutes) ----
+def _pin_hash(pin: str, salt: str) -> str:
+    import hashlib
+
+    return hashlib.pbkdf2_hmac("sha256", pin.encode(), bytes.fromhex(salt), 120_000).hex()
+
+
+def has_pin(user_id: int) -> bool:
+    with get_conn() as conn:
+        row = conn.execute("SELECT pin_hash FROM users WHERE user_id = ?", (user_id,)).fetchone()
+    return bool(row and row["pin_hash"])
+
+
+def set_pin(user_id: int, pin: str) -> None:
+    import secrets
+
+    salt = secrets.token_hex(16)
+    with get_conn() as conn:
+        conn.execute("UPDATE users SET pin_hash = ?, pin_salt = ?, pin_fails = 0, pin_locked_until = 0 WHERE user_id = ?",
+                     (_pin_hash(pin, salt), salt, user_id))
+        conn.commit()
+
+
+def clear_pin(user_id: int) -> None:
+    with get_conn() as conn:
+        conn.execute("UPDATE users SET pin_hash = NULL, pin_salt = NULL, pin_fails = 0, pin_locked_until = 0 WHERE user_id = ?",
+                     (user_id,))
+        conn.commit()
+
+
+def check_pin(user_id: int, pin: str) -> tuple[bool, str]:
+    """(ok, reason). Wrong tries are counted; the 5th wrong one locks PIN checks for 15 minutes."""
+    import hmac
+
+    with get_conn() as conn:
+        row = conn.execute("SELECT pin_hash, pin_salt, pin_fails, pin_locked_until FROM users WHERE user_id = ?",
+                           (user_id,)).fetchone()
+        if not row or not row["pin_hash"]:
+            return True, ""
+        now = int(time.time())
+        if int(row["pin_locked_until"] or 0) > now:
+            return False, f"Too many wrong tries. Try again in {(int(row['pin_locked_until']) - now) // 60 + 1} min."
+        if hmac.compare_digest(_pin_hash(pin, row["pin_salt"]), row["pin_hash"]):
+            conn.execute("UPDATE users SET pin_fails = 0 WHERE user_id = ?", (user_id,))
+            conn.commit()
+            return True, ""
+        fails = int(row["pin_fails"] or 0) + 1
+        lock = now + 900 if fails >= 5 else 0
+        conn.execute("UPDATE users SET pin_fails = ?, pin_locked_until = ? WHERE user_id = ?",
+                     (0 if lock else fails, lock, user_id))
+        conn.commit()
+        return False, ("Wrong PIN. Locked for 15 minutes." if lock else f"Wrong PIN ({5 - fails} tries left).")
