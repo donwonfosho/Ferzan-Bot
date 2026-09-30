@@ -1142,26 +1142,45 @@ async def _tour_step1(bot, uid: int) -> None:
     await bot.send_message(uid, text, parse_mode="HTML", reply_markup=kb)
 
 
-def _tour_balances(uid: int) -> tuple[float, float]:
+def _tour_balances(uid: int) -> list[tuple[str, float, str]]:
+    """Funded chains as (label, amount, coin). Checks every chain in parallel; a slow or broken RPC just drops out."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     row = db.get_user_wallet(uid) or {}
-    sol = eth = 0.0
+    evm = row.get("evm_pub", "")
+    jobs = {"Solana": lambda: (signer.sol_balance_lamports(row.get("sol_pub", "")) / 1e9, "SOL")}
+    for cid in ACTIVE:
+        if cid in ("sol", "ton", "trx") or not evm:
+            continue
+        label = (CHAINS.get(cid) or {}).get("label") or cid.upper()
+        jobs[label] = lambda cid=cid: evm_signer.native_balance(cid, evm)
+    jobs["TON"] = lambda: (crossbuy.native_balance(uid, "ton") or 0.0, "TON")
+    jobs["Tron"] = lambda: (crossbuy.native_balance(uid, "trx") or 0.0, "TRX")
+    out: list[tuple[str, float, str]] = []
+    ex = ThreadPoolExecutor(max_workers=12)
     try:
-        sol = signer.sol_balance_lamports(row.get("sol_pub", "")) / 1e9
-    except Exception:
-        pass
-    try:
-        eth, _sym = evm_signer.native_balance("base", row.get("evm_pub", ""))
-    except Exception:
-        pass
-    return sol, float(eth or 0)
+        futs = {ex.submit(fn): name for name, fn in jobs.items()}
+        try:
+            for f in as_completed(futs, timeout=15):
+                try:
+                    amt, sym = f.result()
+                    if amt and float(amt) > 0:
+                        out.append((futs[f], float(amt), str(sym)))
+                except Exception:
+                    pass
+        except Exception:
+            pass  # timed out: show what answered
+    finally:
+        ex.shutdown(wait=False)
+    return sorted(out, key=lambda r: r[0])
 
 
 async def _tour_step2(query, uid: int) -> None:
-    sol, eth = await asyncio.to_thread(_tour_balances, uid)
-    if sol <= 0 and eth <= 0:
+    funded = await asyncio.to_thread(_tour_balances, uid)
+    if not funded:
         text = (
             "👋 <b>Quick tour · 2/3 — waiting for your deposit</b>\n\n"
-            "Nothing has landed yet. Transfers usually arrive in under a minute "
+            "Nothing has landed yet on any chain. Transfers usually arrive in under a minute "
             "(exchange withdrawals can take longer).\n"
             "Tap again once it's sent."
         )
@@ -1172,9 +1191,10 @@ async def _tour_step2(query, uid: int) -> None:
             ]
         )
     else:
+        lines = "\n".join(f"• {html.escape(n)}: <b>{a:.5g} {html.escape(sym)}</b>" for n, a, sym in funded)
         text = (
             "👋 <b>Quick tour · 2/3 — funded ✅</b>\n\n"
-            f"🟣 {sol:.4f} SOL   🔵 {eth:.5f} ETH (Base)\n\n"
+            f"{lines}\n\n"
             "You're ready to trade."
         )
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("➡️ Show me how to trade", callback_data="tour:trade")]])
@@ -1197,7 +1217,10 @@ async def _tour_step3(query, uid: int) -> None:
         + ("• Anti-MEV: paused for maintenance — buys use the fast normal route for now\n"
            if signer.anti_mev_paused() else
            "• Anti-MEV: Solana buys go private via Jito (no sandwiches, no fee if it fails)\n")
-        + "• A trade only says ✅ once it's confirmed on-chain\n\n"
+        + "• A trade only says ✅ once it's confirmed on-chain\n"
+        "• Every card shows a 🟢/🟡/🔴 safety call before you buy\n\n"
+        "💡 <b>Funds on a different chain?</b> Ferzan offers to bridge and buy in one tap.\n"
+        "🛡 /protect arms take-profit and stop-loss on every buy · 🔐 /pin adds a withdrawal PIN.\n\n"
         f"💵 Default buy size: <b>${size:.0f}</b> — change it in ⚙️ Settings.\n\n"
         "Try it now 👇"
     )
