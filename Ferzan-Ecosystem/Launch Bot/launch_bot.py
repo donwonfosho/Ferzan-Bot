@@ -1417,6 +1417,8 @@ async def _show_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if chain == "tron":
         launch_btn = "✅ Launch from my Trade Bot wallet"
         text += "\n\n" + _tron_wallet_text(tinfo)
+        text += ("\n\n<b>Two ways to launch:</b> straight from your Trade Bot wallet (button above), or use your own "
+                 "TronLink wallet on the website (button below; you'll re-enter the coin details there).")
     else:
         text += ("\n\nNext you'll connect your wallet and see the exact cost before signing. "
                  "Ferzan never holds your keys.")
@@ -1434,6 +1436,10 @@ async def _show_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if chain != "tron":  # Tron launches run from the chat, so there is no reminder flow for them
         first.append(InlineKeyboardButton("⏰ Launch later", callback_data="confirm:later"))
     kb = [first]
+    if chain == "tron":  # second way to pay: sign in TronLink on the website (the site already supports it)
+        site = (os.environ.get("FERZAN_SITE_URL") or "https://ferzan-factory.com").rstrip("/")
+        kind = "curve" if mode == "bonding_curve" else "pool"
+        kb.append([InlineKeyboardButton("🔗 Launch with TronLink (website)", url=f"{site}/launch?chain=tron&kind={kind}")])
     if chain == "ton":
         first[0] = InlineKeyboardButton("🔗 Connect a wallet", callback_data="confirm:yes")
         kb.append([InlineKeyboardButton("💼 Launch from my Trade Bot wallet", callback_data="confirm:tb")])
