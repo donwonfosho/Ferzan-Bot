@@ -7763,7 +7763,6 @@ async def _rug_warn_only(context: ContextTypes.DEFAULT_TYPE, uid: int) -> None:
                 reply_markup=InlineKeyboardMarkup([[
                     InlineKeyboardButton("Sell 50%", callback_data=f"slp:50:{short}"),
                     InlineKeyboardButton("☢️ Sell 100%", callback_data=f"slp:100:{short}"),
-                    InlineKeyboardButton("Ignore", callback_data="go:home"),
                 ]]),
             )
         except Exception:
