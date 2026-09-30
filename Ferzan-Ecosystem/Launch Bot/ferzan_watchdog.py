@@ -26,7 +26,7 @@ for f in ("/opt/ferzan/.env", str(HERE / ".env")):
 import requests  # noqa: E402
 
 STATE = Path("/opt/ferzan/app/watchdog-state.json")
-FERZAN_LAUNCH_AT = calendar.timegm((2026, 10, 9, 23, 0, 0))
+FERZAN_LAUNCH_AT = calendar.timegm((2026, 10, 15, 20, 0, 0))
 REPEAT_S = 6 * 3600
 SOL_RPC = os.environ.get("SOLANA_RPC_URL") or "https://api.mainnet-beta.solana.com"
 TRONGRID = (os.environ.get("TRONGRID_URL") or "https://api.trongrid.io").rstrip("/")
@@ -38,7 +38,7 @@ SERVICES = ["ferzan-trade", "ferzan-trade-api", "ferzan-webapp", "ferzan-launch"
             "ferzan-buy", "ferzan-guardian", "ferzan-curve-indexer", "ferzan-liq", "ferzan-sol-trades"]
 DEFAULT_WALLETS = [
     ("sol", "J8yrufechFRtMfCz3MRdv4w1TTkv1eHqjiub3t3v6317", 0.01, "Flywheel wallet (daily claim, buy + burn)"),  # it keeps a 0.02 reserve itself
-    ("sol", "95Mu227mZ7cFjaRULv966B3erithUZHVEhSFUZ7YR8Yo", 0.08, "FERZAN launcher (creates the pool on Oct 9)"),
+    ("sol", "95Mu227mZ7cFjaRULv966B3erithUZHVEhSFUZ7YR8Yo", 0.08, "FERZAN launcher (creates the pool on Oct 15)"),
     ("tron", "TNtgqHLXQdLHevwNt14mzoTPuFqbPkaKRz", 260.0, "Tron graduation keeper"),
 ]
 

@@ -2176,7 +2176,7 @@ def creator_record(wallet: str):
 _PULSE: dict = {"t": 0.0, "v": None}
 _FLAGSHIP_STATE = "/opt/ferzan/dbc-keys/ferzan-flagship-state.json"
 _FLYWHEEL_STATE = "/opt/ferzan/dbc-keys/flywheel-state.json"
-_FERZAN_LAUNCH_AT = 1791586800  # Fri Oct 9 2026 23:00 UTC (7:00 PM Eastern)
+_FERZAN_LAUNCH_AT = 1792094400  # Thu Oct 15 2026 20:00 UTC (4:00 PM Eastern)
 
 
 def _feed_hidden() -> set:
@@ -3366,7 +3366,7 @@ def pnl_all(wallet: str):
 
 # ---------------------------------------------------------------- weekly competition and callers
 _WEEK = 7 * 86400
-_COMPETE_START = int(os.environ.get("COMPETE_START") or 1791586800)  # FERZAN launch: Fri Oct 9 2026, 23:00 UTC
+_COMPETE_START = int(os.environ.get("COMPETE_START") or 1792094400)  # FERZAN launch: Thu Oct 15 2026, 20:00 UTC
 _ZERO = ("", "0x0000000000000000000000000000000000000000", "T9yD14Nj9j7xAB4dbGeiX9h8unkKHxuWwb")
 _COMPETE_CACHE: dict = {}
 

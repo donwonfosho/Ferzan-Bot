@@ -17,7 +17,7 @@ for f in ("/opt/ferzan/.env", str(HERE / ".env")):
 os.chdir(HERE); sys.path.insert(0, str(HERE))
 import requests  # noqa: E402
 
-LAUNCH_AT = calendar.timegm((2026, 10, 9, 23, 0, 0))  # Friday Oct 9 2026, 7:00 PM Eastern
+LAUNCH_AT = calendar.timegm((2026, 10, 15, 20, 0, 0))  # Thursday Oct 15 2026, 4:00 PM Eastern (20:00 UTC)
 NAME, SYMBOL = "Ferzan", "FERZAN"
 VAULT = "2vWqwX72ijo24vgvPQW6yBQh2qXE4jrEd18YDdEbWKLG"
 LOGO_URL = "https://ferzan-factory.com/brand/ferzan-token.jpg"
@@ -83,7 +83,7 @@ def prepare(tell: bool) -> int:
     s = ensure_metadata(load())
     r = node("plan", s["uri"])
     when = time.strftime("%a %b %d %Y %H:%M UTC", time.gmtime(LAUNCH_AT))
-    lines = [f"FERZAN rehearsal: {'READY' if r.get('ok') else 'PROBLEM'}", f"Launch: {when} (7:00 PM Eastern)",
+    lines = [f"FERZAN rehearsal: {'READY' if r.get('ok') else 'PROBLEM'}", f"Launch: {when} (4:00 PM Eastern)",
              f"Token address (keep private until launch): {r.get('mint')}", f"Pool: {r.get('pool')}",
              f"Launcher: {r.get('launcher')} ({float(r.get('launcher_sol') or 0):.4f} SOL)", f"Vault: {r.get('vault')} - {r.get('vault_check')}",
              f"Pool creation test: {r.get('create_sim') or ('pool already exists' if r.get('pool_exists') else '-')}",

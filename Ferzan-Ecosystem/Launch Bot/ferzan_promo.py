@@ -1,10 +1,11 @@
 """Ferzan auto-posting, run every 10 minutes by a timer. Decides what is due and posts each thing once:
-  - FERZAN countdown: 7 days, 3 days, 1 day, 6 hours, 1 hour and 10 minutes before launch
+  - FERZAN countdown: 14 and 10 days, 7, 5, 3 and 2 days, 24, 12, 6 and 3 hours, 1 hour, 30, 10 and 5 minutes before launch,
+    each with its own graphic and a different fact about FERZAN
   - daily recap (23:30 UTC): new launches and the top coins by 24h volume
-  - 14 rotating feature promos, every 8 hours (X copies carry hashtags and the $FERZAN cashtag where relevant)
+  - 23 rotating feature promos, every PROMO_EVERY_HOURS hours (default 4; X copies carry hashtags and the $FERZAN cashtag where relevant)
 Where: the @Ferzan_Launches channel and X get everything; the groups in PROMO_GROUPS
 (default @Ferzan_Trade_Ecosystem and @Ferzan_Chat) get everything too (PROMO_GROUP_PROMOS=0 keeps promos out of them). Preview mode (default) sends everything to the admins only;
-set PROMO_LIVE=1 to post publicly, PROMO_OFF=1 to stop. X posts are capped by PROMO_X_PER_DAY (default 4)."""
+set PROMO_LIVE=1 to post publicly, PROMO_OFF=1 to stop. X posts are capped by PROMO_X_PER_DAY (default 6)."""
 import calendar, json, os, sys, time
 from pathlib import Path
 
@@ -20,13 +21,36 @@ os.chdir(HERE); sys.path.insert(0, str(HERE))
 import requests  # noqa: E402
 import ferzan_media as fm  # noqa: E402
 
-LAUNCH_AT = calendar.timegm((2026, 10, 9, 23, 0, 0))
+LAUNCH_AT = calendar.timegm((2026, 10, 15, 20, 0, 0))
 STATE = Path("/opt/ferzan/promo-state.json")
 LIVE = os.environ.get("PROMO_LIVE") == "1"
 SITE = "https://ferzan-factory.com"
 API = "http://127.0.0.1:8000/api"
-COUNTDOWN = [(7 * 86400, "7 days"), (3 * 86400, "3 days"), (86400, "24 hours"), (6 * 3600, "6 hours"), (3600, "1 hour"), (600, "10 minutes")]
-COUNTDOWN_IMG = {7 * 86400: "countdown_7d.jpg", 3 * 86400: "countdown_3d.jpg", 86400: "countdown_24h.jpg", 6 * 3600: "countdown_6h.jpg", 3600: "countdown_1h.jpg", 600: "countdown_10m.jpg"}
+D, H, M = 86400, 3600, 60
+COUNTDOWN = [(14 * D, "14 days"), (10 * D, "10 days"), (7 * D, "7 days"), (5 * D, "5 days"), (3 * D, "3 days"), (2 * D, "2 days"),
+             (D, "24 hours"), (12 * H, "12 hours"), (6 * H, "6 hours"), (3 * H, "3 hours"), (H, "1 hour"), (30 * M, "30 minutes"),
+             (10 * M, "10 minutes"), (5 * M, "5 minutes")]
+COUNTDOWN_IMG = {14 * D: "countdown_14d.jpg", 10 * D: "countdown_10d.jpg", 7 * D: "countdown_7d.jpg", 5 * D: "countdown_5d.jpg",
+                 3 * D: "countdown_3d.jpg", 2 * D: "countdown_2d.jpg", D: "countdown_24h.jpg", 12 * H: "countdown_12h.jpg",
+                 6 * H: "countdown_6h.jpg", 3 * H: "countdown_3h.jpg", H: "countdown_1h.jpg", 30 * M: "countdown_30m.jpg",
+                 10 * M: "countdown_10m.jpg", 5 * M: "countdown_5m.jpg"}
+# one real fact per countdown post, so each one teaches something (all of it is on the FERZAN page)
+COUNTDOWN_FACTS = {
+    14 * D: "Supply is fixed at 1,000,000,000 and the mint authority is removed at launch. Nobody can make more.",
+    10 * D: "No presale and no dev buy: 28% of the supply is bought on the curve, by anyone, at the same price.",
+    7 * D: "Liquidity is locked forever. At graduation the pool's liquidity is locked so it can never be pulled.",
+    5 * D: "The team's 3% sits behind a 12-month cliff, then pays out monthly. The lock link will be posted for anyone to check.",
+    3 * D: "60% of the supply is locked for 24 months and only starts releasing after graduation, 25M a month, to a 2-of-3 multisig.",
+    2 * D: "Every day part of Ferzan's Solana fees buys FERZAN on the open market and burns it, with receipts posted.",
+    D: "The fee at open is 99% and falls to the normal 1% over 30 minutes. Patient buyers win.",
+    12 * H: "The contract address is posted only here, on X from @ferzaneco and on ferzan-factory.com. Any other address is fake.",
+    6 * H: "Launch is automatic, created on-chain by Ferzan's own launcher and handed to the multisig.",
+    3 * H: "Get your wallet ready on Solana. Sign in at ferzan-factory.com or use @Ferzan_Trade_Bot.",
+    H: "One hour. Fee at open: 99%. Minute 1: 85%. Minute 5: 46%. Minute 30: 1%.",
+    30 * M: "30 minutes. Remember: the contract address only comes from @ferzaneco, this channel and ferzan-factory.com/ferzan.",
+    10 * M: "10 minutes. The fee starts at 99%. Don't rush the first minutes.",
+    5 * M: "5 minutes. Stay in this channel: the contract address drops the moment FERZAN is live.",
+}
 # (Telegram text, X text, X hashtags). X gets its own shorter copy; hashtags only go on X.
 PROMOS = [
     (f"🚀 Launch a coin in a minute on Ferzan Factory: Solana, Base, BNB, Ethereum and Robinhood Chain. Sign in with email, Google or X; your wallet is built in.\n{SITE}/launch",
@@ -68,6 +92,33 @@ PROMOS = [
     (f"🎯 FERZAN is built against snipers: the fee starts at 99% and falls to 1% over the first 30 minutes, and 650M of the supply is locked in a multisig by Meteora.\n{SITE}/ferzan",
      f"🎯 $FERZAN is built against snipers: a 99% fee at open that falls to 1% over 30 minutes, and 650M supply locked by Meteora.\n{SITE}/ferzan",
      "#Solana #FairLaunch"),
+    (f"📊 FERZAN supply, 1,000,000,000 fixed: 28% public curve, 7% graduation liquidity (locked forever), 5% unlocks at graduation (20M rewards, 30M team lock), 60% locked for 24 months at 25M a month. Mint authority removed.\n{SITE}/ferzan",
+     f"📊 $FERZAN supply, 1B fixed: 28% public curve, 7% locked liquidity, 5% at graduation, 60% locked 24 months. Mint authority removed.\n{SITE}/ferzan",
+     "#tokenomics #Solana"),
+    (f"🔒 The team's FERZAN: 3% (30M), split equally across three public wallets. Nothing moves for 12 months, then monthly releases. After graduation the multisig locks it on-chain and posts the link so anyone can check.\n{SITE}/ferzan",
+     f"🔒 Team allocation is 3%, equal across three public wallets, 12-month cliff, then monthly. Locked on-chain after graduation, link posted.\n{SITE}/ferzan",
+     "#transparency #Solana"),
+    (f"🎯 Anti-sniper fee on FERZAN: 99% at open, 85% after 1 minute, 46% at 5, 21% at 10, 5% at 20, and the normal 1% at 30 minutes. Sniping the open costs almost everything.\n{SITE}/ferzan",
+     f"🎯 $FERZAN fee: 99% at open, 46% at 5 min, 5% at 20 min, 1% at 30 min. Sniping the open costs almost everything.\n{SITE}/ferzan",
+     "#FairLaunch #Solana"),
+    (f"🔥 Watch the burn: every day 30% of Ferzan's Solana fees buys FERZAN on the open market and burns it. Every buy and burn is posted with its transaction link.\n{SITE}/transparency",
+     f"🔥 Watch the $FERZAN burn: 30% of Ferzan's Solana fees buy and burn daily. Every transaction is public.\n{SITE}/transparency",
+     "#burn #Solana"),
+    ("😈 New in @Ferzan_Trade_Bot: Degen mode. Paste a CA and it buys, with bigger default sizes, looser slippage, TP +300%, SL -25% and a 20% trailing stop on every buy. Rug Guard stays on, honeypots stay blocked, and one tap restores your old settings.\nhttps://t.me/Ferzan_Trade_Bot",
+     "😈 Degen mode in @Ferzan_Trade_Bot: paste a CA and it buys, TP/SL/trail set automatically. Rug Guard on, honeypots blocked, off in one tap.\nhttps://t.me/Ferzan_Trade_Bot",
+     "#TradingBot #memecoins"),
+    ("🌐 @Ferzan_Trade_Bot trades across 19 chains from one desk: one wallet screen, one token card, one tap to buy.\nhttps://t.me/Ferzan_Trade_Bot",
+     "🌐 19 chains, one trading desk in Telegram. @Ferzan_Trade_Bot\nhttps://t.me/Ferzan_Trade_Bot",
+     "#multichain #crypto"),
+    ("👀 Paste any contract address into @Ferzan_Trade_Bot and see the token card before you buy: safety verdict, liquidity, holder concentration, price impact and what you already hold. One tap to Protect with TP and SL.\nhttps://t.me/Ferzan_Trade_Bot",
+     "👀 See it before you buy: paste a CA in @Ferzan_Trade_Bot for safety, liquidity, holders and price impact. One tap Protect.\nhttps://t.me/Ferzan_Trade_Bot",
+     "#DYOR #TradingBot"),
+    (f"🏆 Top traders and top callers on every Ferzan coin, every chain, ranked weekly. See where you stand.\n{SITE}/compete",
+     f"🏆 Weekly leaderboard: top traders and callers on every Ferzan coin, every chain.\n{SITE}/compete",
+     "#leaderboard #crypto"),
+    (f"🌉 Bridge and buy: move value across chains and buy in one flow, inside @Ferzan_Trade_Bot or on the website.\n{SITE}/bridge",
+     f"🌉 Bridge and buy in one flow, in Telegram or on the web.\n{SITE}/bridge",
+     "#bridge #DeFi"),
     ("💬 Questions, ideas, alpha? The Ferzan community is here.\nhttps://t.me/Ferzan_Chat",
      "💬 Questions, ideas, alpha? Join the Ferzan community on Telegram.\nhttps://t.me/Ferzan_Chat",
      "#cryptocommunity #Web3"),
@@ -137,7 +188,7 @@ def post(s: dict, key: str, text: str, x_text: str | None = None, groups: bool =
         for g in GROUPS:
             if not fm.tg_photo(g, text, pic):
                 admins(f"Could not post in {g}: add @Ferzan_Launch_Bot to it (admin in a channel, member in a group).")
-    cap = int(os.environ.get("PROMO_X_PER_DAY") or 4)
+    cap = int(os.environ.get("PROMO_X_PER_DAY") or 6)
     if x_text is not None and len(s["x_log"]) < cap:
         try:
             ok, info = fm.x_post(x_text[:280], pic)
@@ -154,11 +205,12 @@ def countdown(s: dict, now: float) -> None:
     for secs, label in COUNTDOWN:
         due = LAUNCH_AT - secs
         if due <= now < due + 1800:  # within 30 minutes of the moment; never a stale post
-            et = "Friday Oct 9, 7:00 PM Eastern"
-            text = (f"⏳ FERZAN launches in {label} — {et}.\n\nThe launch is automatic. The fee starts at 99% and falls to 1% over 30 minutes, "
+            et = "Thursday Oct 15, 4:00 PM Eastern"
+            fact = COUNTDOWN_FACTS.get(secs, "")
+            text = (f"⏳ FERZAN launches in {label} — {et}.\n\n{fact}\n\nThe launch is automatic. The fee starts at 99% and falls to 1% over 30 minutes, "
                     f"so sniping the open costs almost everything. 650M of the supply is locked in a multisig by Meteora.\n\n"
                     f"The contract address is posted here and at {SITE}/ferzan the moment it goes live. Anything posted before that is not FERZAN.")
-            post(s, f"countdown:{secs}", text, with_tags(f"⏳ $FERZAN launches in {label}: {et}. Anti-sniper fee at open, 650M locked. Contract address only from @ferzaneco and {SITE}/ferzan at launch.", "#Solana #Meteora"), groups=True, image=COUNTDOWN_IMG.get(secs, ""))
+            post(s, f"countdown:{secs}", text, with_tags(f"⏳ $FERZAN launches in {label}: {et}. {fact} Contract address only from @ferzaneco and {SITE}/ferzan.", "#Solana #Meteora"), groups=True, image=COUNTDOWN_IMG.get(secs, ""))
 
 
 def recap(s: dict, now: float) -> None:
@@ -181,14 +233,15 @@ def recap(s: dict, now: float) -> None:
 
 
 def promo(s: dict, now: float) -> None:
-    if now - float(s.get("last_promo") or 0) < 8 * 3600:
+    every = float(os.environ.get("PROMO_EVERY_HOURS") or 4) * 3600
+    if now - float(s.get("last_promo") or 0) < every - 300:  # 5 minutes of slack so the 10-minute timer never skips a slot
         return
     if LAUNCH_AT - 3 * 3600 < now < LAUNCH_AT + 3 * 3600:
         return  # keep launch hours clear
     i = int(s.get("promo_i") or 0) % len(PROMOS)
     tg_text, x_body, tags = PROMOS[i]
     n = int(s.get("promo_n") or 0)  # rotating extra tag keeps repeat cycles from being identical (X rejects duplicates)
-    post(s, f"promo:{int(now // (8 * 3600))}", tg_text, with_tags(x_body, tags, GENERAL_TAGS[n % len(GENERAL_TAGS)]),
+    post(s, f"promo:{int(now // every)}", tg_text, with_tags(x_body, tags, GENERAL_TAGS[n % len(GENERAL_TAGS)]),
          groups=os.environ.get("PROMO_GROUP_PROMOS") != "0", image=f"promo_{i + 1:02d}.jpg")
     s["promo_n"] = n + 1
     s["promo_i"] = i + 1; s["last_promo"] = now

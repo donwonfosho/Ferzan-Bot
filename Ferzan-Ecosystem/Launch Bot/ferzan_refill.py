@@ -3,7 +3,7 @@
 The tank is a wallet on the droplet (keys in /opt/ferzan/dbc-keys/gas-tank.json) that you fill by hand with a
 limited amount. The treasury is never touched. Every 30 minutes (ferzan-refill.timer):
   * Flywheel wallet    below 0.01 SOL  -> topped up to 0.03 SOL
-  * FERZAN launcher    below 0.10 SOL  -> topped up to 0.12 SOL (until the Oct 9 launch only)
+  * FERZAN launcher    below 0.10 SOL  -> topped up to 0.12 SOL (until the Oct 15 launch only)
   * Tron keeper        below 260 TRX while a Tron curve is 80%+ full -> topped up to 300 TRX
 Destinations are fixed in this file; nothing else can receive from the tank. Daily caps: 0.2 SOL and 400 TRX.
 The admins get a DM for every top-up, and when the tank itself runs low.
@@ -30,7 +30,7 @@ TANK = Path("/opt/ferzan/dbc-keys/gas-tank.json")
 STATE = Path("/opt/ferzan/ops/refill_state.json")
 SOL_RPC = os.environ.get("SOLANA_RPC_URL") or "https://api.mainnet-beta.solana.com"
 INDEX_DB = os.environ.get("CURVE_INDEX_DB") or "/opt/ferzan/app/launch/curve_index.db"
-FERZAN_LAUNCH_AT = calendar.timegm((2026, 10, 9, 23, 0, 0))
+FERZAN_LAUNCH_AT = calendar.timegm((2026, 10, 15, 20, 0, 0))
 DAY_CAP = {"sol": 0.2, "tron": 400.0}
 TANK_LOW = {"sol": 0.1, "tron": 300.0}
 # (chain, address, refill below, refill up to, label)

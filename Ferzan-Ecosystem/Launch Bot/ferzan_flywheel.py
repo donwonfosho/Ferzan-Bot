@@ -16,7 +16,7 @@ for f in ("/opt/ferzan/.env", str(HERE / ".env")):
 os.chdir(HERE); sys.path.insert(0, str(HERE))
 import requests  # noqa: E402
 
-LAUNCH_AT = calendar.timegm((2026, 10, 9, 23, 0, 0))
+LAUNCH_AT = calendar.timegm((2026, 10, 15, 20, 0, 0))
 STATE = Path("/opt/ferzan/dbc-keys/flywheel-state.json")
 RPC = os.environ.get("SOLANA_RPC_URL") or "https://api.mainnet-beta.solana.com"
 LIVE = os.environ.get("FLYWHEEL_LIVE") == "1"

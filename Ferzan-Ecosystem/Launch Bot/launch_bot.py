@@ -281,7 +281,7 @@ def _short(w: str) -> str:
 
 
 # ------------------------------------------------------------ holder tiers --
-PERKS_START_TEXT = "Fri Oct 9 2026, 7PM ET"      # FERZAN launch: perks switch on then (the mint stays hidden until announced)
+PERKS_START_TEXT = "Thu Oct 15 2026, 4PM ET"      # FERZAN launch: perks switch on then (the mint stays hidden until announced)
 _SOL_ADDR = re.compile(r"[1-9A-HJ-NP-Za-km-z]{32,44}")
 
 
