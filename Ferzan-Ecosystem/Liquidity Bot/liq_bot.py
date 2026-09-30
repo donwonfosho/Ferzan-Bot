@@ -1,6 +1,7 @@
 """Ferzan Liq — pool analytics + real LP desk hook. Token: LIQBOT_TOKEN"""
 from __future__ import annotations
 
+import asyncio
 import html
 import logging
 import os
@@ -860,14 +861,10 @@ async def paid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.effective_message.reply_text("That transaction doesn't pay the Ferzan treasury address.")
         return
     value_wei = int(txinfo.get("value") or "0x0", 16)
-    px = 3000.0
-    try:
-        pr = requests.get(
-            "https://api.coingecko.com/api/v3/simple/price", params={"ids": "ethereum", "vs_currencies": "usd"}, timeout=10
-        )
-        px = float((pr.json() or {}).get("ethereum", {}).get("usd") or px)
-    except Exception:
-        pass
+    px = await asyncio.to_thread(_eth_usd)
+    if px <= 0:
+        await update.effective_message.reply_text("Couldn't get a live ETH price right now, so nothing was redeemed. Try again in a minute.")
+        return
     paid_usd = (value_wei / 1e18) * px
     if paid_usd < MM_PRICE_USD * 0.9:
         await update.effective_message.reply_text(f"That payment (~${paid_usd:.2f}) is short of the ${MM_PRICE_USD:.0f} price.")
@@ -876,6 +873,34 @@ async def paid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         conn.execute("INSERT INTO redeemed_tx (tx_hash, user_id) VALUES (?,?)", (txh, uid))
     expiry = subscription.grant_premium(uid, MM_PLAN_DAYS)
     await update.effective_message.reply_text(f"✅ MM unlocked until {expiry.strftime('%Y-%m-%d')}. Run /mm to start.")
+
+
+def _eth_usd() -> float:
+    """Live ETH/USD: CoinGecko, then the deepest WETH pool on DexScreener. 0.0 when neither answers (never a guess)."""
+    try:
+        r = requests.get("https://api.coingecko.com/api/v3/simple/price", params={"ids": "ethereum", "vs_currencies": "usd"}, timeout=10)
+        px = float((r.json() or {}).get("ethereum", {}).get("usd") or 0)
+        if px > 0:
+            return px
+    except Exception:
+        pass
+    addr = "0x4200000000000000000000000000000000000006"  # WETH on Base
+    try:
+        pairs = requests.get(f"https://api.dexscreener.com/latest/dex/tokens/{addr}", timeout=8).json().get("pairs") or []
+    except Exception:
+        return 0.0
+    best_liq, best_px = 0.0, 0.0
+    for p in pairs:
+        try:
+            liq = float((p.get("liquidity") or {}).get("usd") or 0)
+            px = float(p.get("priceUsd") or 0)
+            if str((p.get("baseToken") or {}).get("address", "")).lower() != addr.lower():
+                continue
+        except (TypeError, ValueError):
+            continue
+        if px > 0 and liq > best_liq:
+            best_liq, best_px = liq, px
+    return best_px if best_liq >= 50_000 else 0.0
 
 
 def main() -> None:

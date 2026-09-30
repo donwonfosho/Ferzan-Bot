@@ -32,9 +32,11 @@ def buy_hood(token: str, usd: float, key_hex: str | None = None) -> tuple[bool, 
         return False, "No EVM key for Hood buy."
     acct = Account.from_key("0x" + raw)
     try:
-        px = float(get_price_usd("ethereum") or 3000)
+        px = float(get_price_usd("ethereum") or 0)
     except Exception:
-        px = 3000.0
+        px = 0.0
+    if px <= 0:
+        return False, "No live ETH price right now, so no buy was sent. Try again in a minute."
     wei = max(10**12, int((usd / max(px, 1e-9)) * 10**18))
     deadline = int(time.time()) + 600
     # offset path dynamic array after 4 * 32

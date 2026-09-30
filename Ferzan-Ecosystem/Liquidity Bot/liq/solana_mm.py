@@ -213,7 +213,6 @@ def _native_usd() -> float:
             "https://api.coingecko.com/api/v3/simple/price",
             params={"ids": "solana", "vs_currencies": "usd"},
             timeout=10,
-        }
         )
         return float((r.json() or {}).get("solana", {}).get("usd") or 0)
     except Exception:

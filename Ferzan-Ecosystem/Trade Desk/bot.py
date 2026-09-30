@@ -439,9 +439,11 @@ def _pump_meta(ca: str) -> dict:
         # curve vault ≈ SOL in the curve; USD ~ SOL * 2 * px is what desks quote as liq
         px = 0.0
         if out["mc"] and sol:
-            # implied SOL USD from cap / tokens is noisy; use reserve * 200 fallback
-            px = 180.0
-        out["liq"] = sol * px * 2 if sol else 0.0
+            try:
+                px = float(get_price_usd("solana") or 0)  # live price; 0 (shown as unknown) rather than a guess
+            except Exception:
+                px = 0.0
+        out["liq"] = sol * px * 2 if sol and px else 0.0
         if data.get("complete"):
             out["curve"] = "📈 Bonding curve 100% · graduated"
         elif sol:
@@ -1198,8 +1200,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         user = db.ensure_user(update.effective_user.id, update.effective_user.username)
         ready, _fee_note = fees.live_ready()
-        buy_usd = float(user.get("buy_usd") or 25)
-        bslip = float(user.get("buy_slip_pct") or 10)
         text, hot = await _home_parts(update.effective_user.id, first_time)
         target = update.effective_message
         if not target:
@@ -4938,7 +4938,8 @@ async def launches_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await send_launch(context.bot, update.effective_chat.id, text, markup)
 
 
-async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def opstatus_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/opstatus: the original settings snapshot (RPC, live mode, priority fee). /status is the public health check."""
     if not await guard(update):
         return
     rpc = (os.getenv("SOLANA_RPC_URL") or os.getenv("HELIUS_API_KEY") or "").strip()
@@ -8636,7 +8637,7 @@ def main() -> None:
     app.add_handler(CommandHandler("livesellevm", livesellevm_cmd))
     app.add_handler(CommandHandler("treasury", treasury_cmd))
     app.add_handler(CommandHandler("health", health_cmd))
-    app.add_handler(CommandHandler("status", status_cmd))
+    app.add_handler(CommandHandler("opstatus", opstatus_cmd))
     app.add_handler(CommandHandler("protect", protect_cmd))
     app.add_handler(CommandHandler("pin", pin_cmd))
     app.add_handler(CommandHandler("degen", degen_cmd))
