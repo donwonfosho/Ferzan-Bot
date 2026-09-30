@@ -38,6 +38,8 @@ INDEX_DB = os.environ.get("CURVE_INDEX_DB") or os.path.join(os.path.dirname(LAUN
 
 T_LAUNCHED = "0x188ae4cd8aa7c0376e9501e76fb7a19dd1454add5c88bffbf75f391807a14475"
 T_TRADE = "0xf13ff38259ab955eb95db2db3b0c9e4e41db64e91a47c1d463a86970563e4b08"
+# Uniswap-V2-style pool Swap(sender, amount0In, amount1In, amount0Out, amount1Out, to): what trades AFTER graduation emit
+T_SWAP = "0xd78ad95fa46c994b6551d0da85fc275fe613ce37657fb8d5e3d130840159d822"
 T_GRAD = "0x71aa8c3702dbbc54247a4e6446450e64a46250dd72707a247ddb01d72eaef445"
 
 CHAINS = {
@@ -372,6 +374,58 @@ class ChainIndexer:
              self.chain, curve),
         )
 
+    def pool_curves(self) -> dict:
+        """{pool address: curve} for graduated curves whose pool we know. After graduation the curve is silent and
+        every trade is a swap in this pool, so this is what keeps the chart and trade list alive."""
+        out = {}
+        for curve, cv in self.known.items():
+            pool = (cv.get("pool") or "").lower()
+            if cv.get("graduated") and len(pool) == 42 and int(pool, 16) != 0:
+                out[pool] = curve
+        return out
+
+    def _token_is_token0(self, pool: str, token: str) -> bool:
+        if not hasattr(self, "_t0"):
+            self._t0 = {}
+        if pool not in self._t0:
+            t0 = "0x" + format(_call_uint(self.rpc, pool, "0x0dfe1681"), "040x")  # token0()
+            self._t0[pool] = t0 == token.lower()
+        return self._t0[pool]
+
+    def on_swap(self, lg: dict, pools: dict, c: sqlite3.Connection) -> None:
+        pool = lg["address"].lower()
+        curve = pools.get(pool)
+        cv = self.known.get(curve) if curve else None
+        if not cv or not cv.get("graduated"):
+            return
+        d = lg["data"]
+        a0i, a1i, a0o, a1o = (_word(d, i) for i in range(4))
+        tok0 = self._token_is_token0(pool, cv["token"])
+        tok_in, tok_out = (a0i, a0o) if tok0 else (a1i, a1o)
+        nat_in, nat_out = (a1i, a1o) if tok0 else (a0i, a0o)
+        is_buy = tok_out > 0  # the pool paid tokens out: someone bought
+        native = nat_in if is_buy else nat_out
+        tokens = tok_out if is_buy else tok_in
+        if native <= 0 or tokens <= 0:
+            return
+        price = native / tokens
+        blk = int(lg["blockNumber"], 16)
+        ts = self.block_ts(blk)
+        cur = c.execute(
+            "INSERT OR IGNORE INTO trades (chain, curve, block, ts, tx, log_index, trader, is_buy, native, tokens, price, real_eth, "
+            "fee, referrer) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (self.chain, curve, blk, ts, lg["transactionHash"], int(lg["logIndex"], 16), _addr_topic(lg["topics"][2]),
+             1 if is_buy else 0, native / 1e18, tokens / 1e18, price, "0", 0.0, ""),
+        )
+        if cur.rowcount == 0:
+            return
+        c.execute(
+            "UPDATE curves SET price = ?, mcap = ?, volume = volume + ?, trades = trades + 1, buys = buys + ?, "
+            "sells = sells + ?, last_trade_ts = ? WHERE chain = ? AND curve = ?",
+            (price, price * int(cv["total_supply"]) / 1e18, native / 1e18, 1 if is_buy else 0, 0 if is_buy else 1, ts,
+             self.chain, curve),
+        )
+
     def on_grad(self, lg: dict, c: sqlite3.Connection) -> None:
         curve = lg["address"].lower()
         if curve not in self.known:
@@ -381,6 +435,9 @@ class ChainIndexer:
             "UPDATE curves SET graduated = 1, grad_ts = ?, grad_native = ?, pool = ? WHERE chain = ? AND curve = ? AND graduated = 0",
             (ts, _word(lg["data"], 0) / 1e18, _addr_topic(lg["topics"][1]), self.chain, curve),
         )
+        self.known[curve]["graduated"] = 1
+        if not int(self.known[curve].get("pool") or "0x0", 16):
+            self.known[curve]["pool"] = _addr_topic(lg["topics"][1])
         log.info("%s: %s graduated", self.chain, curve)
 
     def run_once(self, max_ranges: int = 40) -> int:
@@ -401,6 +458,10 @@ class ChainIndexer:
                 addrs = list(self.known)
                 for i in range(0, len(addrs), 50):  # public nodes want explicit addresses
                     events += self.get_logs(frm, to, address=addrs[i:i + 50], topics=[[T_TRADE, T_GRAD]])
+                pools = self.pool_curves()
+                pl = list(pools)
+                for i in range(0, len(pl), 50):
+                    events += self.get_logs(frm, to, address=pl[i:i + 50], topics=[T_SWAP])
             except RuntimeError as e:
                 msg = str(e).lower()
                 if "archive" in msg or "missing trie" in msg or "pruned" in msg:
@@ -428,6 +489,8 @@ class ChainIndexer:
                         self.on_trade(lg, c)
                     elif lg["topics"][0] == T_GRAD:
                         self.on_grad(lg, c)
+                    elif lg["topics"][0] == T_SWAP:
+                        self.on_swap(lg, pools, c)
                 c.execute(
                     "INSERT INTO cursor (chain, block, rpc) VALUES (?, ?, ?) ON CONFLICT(chain) DO UPDATE SET block = excluded.block, rpc = excluded.rpc",
                     (self.chain, to, self.rpc.url.split("//")[-1].split("/")[0]),
