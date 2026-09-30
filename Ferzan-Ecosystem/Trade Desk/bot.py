@@ -4723,6 +4723,24 @@ def _xbuy_offer(uid: int, card, query: str, chain: str, mint: str, usd: float) -
     return crossbuy.offer_text(p, usd, sym, est)
 
 
+async def _send_position_panel(bot, chat_id: int, uid: int, card, query: str) -> None:
+    """The token's position card (amount, value, TP/SL, sell buttons) right after a buy. Never raises."""
+    try:
+        mint = ((card.snapshot.token_address or "").strip()) or (query or "").strip()
+        if not mint:
+            return
+        amount = owner = venue = None
+        for attempt in range(3):  # the balance can trail the swap by a block
+            amount, owner, venue = await asyncio.to_thread(_bag_position_amount, uid, mint)
+            if amount and float(amount) > 0:
+                break
+            await asyncio.sleep(3)
+        text, kb = await asyncio.to_thread(_bag_panel, mint, amount, owner, uid, None, venue)
+        await bot.send_message(chat_id, text, reply_markup=kb, parse_mode="HTML", disable_web_page_preview=True)
+    except Exception:
+        logger.exception("position panel after buy failed for %s", uid)
+
+
 async def _xbuy_execute(bot, chat_id: int, uid: int, msg) -> None:
     item = crossbuy.take_pending(uid)
     if not item:
@@ -4759,7 +4777,12 @@ async def _xbuy_execute(bot, chat_id: int, uid: int, msg) -> None:
             )
             return
         buy_ok, buy_msg = await _off(uid, _live_buy, uid, item["card"], item["query"], True, item["usd"], gates_checked=True)
-        await _done(bot, chat_id, None, f"✅ {dst_name} funded.\n{buy_msg}")
+        # Same result a normal buy gives: the bridge is one message, the buy confirmation its own, then the token's
+        # position card with the sell buttons.
+        await _done(bot, chat_id, None, f"✅ Bridge complete: {dst_name} funded.")
+        await _done(bot, chat_id, None, buy_msg)
+        if buy_ok:
+            await _send_position_panel(bot, chat_id, uid, item["card"], item["query"])
     except Exception as exc:
         logger.exception("xbuy failed for %s", uid)
         await _done(bot, chat_id, None, f"Cross-chain buy stopped: {str(exc)[:200]}. Check your balances before retrying.")
