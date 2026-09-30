@@ -1358,6 +1358,9 @@ def _default_buy_usd(uid: int) -> float:
     return min(signer.max_usd(), max(1.0, usd))
 
 
+_BUY_OK: dict = {}  # uid -> mint of the last live buy that went through, until its card is sent
+
+
 def _live_buy(
     uid: int, card, query: str, force: bool, usd_override: float | None = None,
     secrets_override: tuple[str, str] | None = None, record_basis: bool = True,
@@ -1366,6 +1369,7 @@ def _live_buy(
     """Blocking — call via _off(). Returns (ok, message). Guard refusals
     return their original text (other code matches on those prefixes);
     actual sends come back in the shared _trade_result layout."""
+    _BUY_OK.pop(uid, None)
     if not signer.live_enabled():
         return False, "Live buys are off. LIVE_BUYS=0 on the server."
     if db.flag_on(uid, "score_gate", 0) and not force and not gates_checked:
@@ -1433,6 +1437,8 @@ def _live_buy(
         extra = db.credit_desk_share(uid, usd)
         if extra:
             msg = f"{msg}\n{extra}"
+    if ok:
+        _BUY_OK[uid] = mint  # lets the chat handler follow the confirmation with the position card
     return bool(ok), _trade_result("buy", bool(ok), label, msg, usd=usd)
 
 
@@ -1730,6 +1736,7 @@ async def buy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     live_msg = await _off(uid, _live_buy_followup, uid, card, query, True, False, multi=True, _busy=BUSY_MSG)
     await _done(context.bot, chat_id, status, live_msg or "Buy sent.")
+    await _after_buy(context.bot, chat_id, uid, card, query)
 
 
 async def positions_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -4626,6 +4633,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         usd_o = amt * px
         live_msg = await _off(uid, _live_buy_followup, uid, card, pending, True, True, usd_override=usd_o, multi=True, xbuy=True, _busy=BUSY_MSG)
         await _done(context.bot, chat_id, status, f"{amt:g} native ≈ ${usd_o:.2f}\n{live_msg}")
+        await _after_buy(context.bot, chat_id, uid, card, pending)
         return
     if len(text) > 80:
         return
@@ -4651,6 +4659,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     live_msg = await _off(uid, _live_buy_followup, uid, card, text, True, True, usd_override=usd, xbuy=True, _busy=BUSY_MSG)
     await _done(context.bot, chat_id, status, f"⚡️ Auto-buy ${usd:.0f}\n{live_msg}")
+    await _after_buy(context.bot, chat_id, uid, card, text)
 
 
 # ---------------------------------------------------------------- cross-chain buy
@@ -4741,6 +4750,14 @@ async def _send_position_panel(bot, chat_id: int, uid: int, card, query: str) ->
         logger.exception("position panel after buy failed for %s", uid)
 
 
+async def _after_buy(bot, chat_id: int, uid: int, card, query: str) -> None:
+    """After a manual buy went through: bring the token's position card back up (amount, value, PnL, sell and
+    buy-more buttons). Does nothing if the buy failed."""
+    mint = _BUY_OK.pop(uid, None)
+    if mint:
+        await _send_position_panel(bot, chat_id, uid, card, query)
+
+
 async def _xbuy_execute(bot, chat_id: int, uid: int, msg) -> None:
     item = crossbuy.take_pending(uid)
     if not item:
@@ -4782,6 +4799,7 @@ async def _xbuy_execute(bot, chat_id: int, uid: int, msg) -> None:
         await _done(bot, chat_id, None, f"✅ Bridge complete: {dst_name} funded.")
         await _done(bot, chat_id, None, buy_msg)
         if buy_ok:
+            _BUY_OK.pop(uid, None)
             await _send_position_panel(bot, chat_id, uid, item["card"], item["query"])
     except Exception as exc:
         logger.exception("xbuy failed for %s", uid)
@@ -5746,6 +5764,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         usd_o = min(signer.max_usd(), max(1.0, usd_o))
         live_msg = await _off(uid, _live_buy_followup, uid, card, name, True, True, usd_override=usd_o, multi=True, _busy=BUSY_MSG)
         await _done(context.bot, uid, status, f"{amt:g} native ≈ ${usd_o:.2f}\n{live_msg or ''}")
+        await _after_buy(context.bot, uid, uid, card, name)
         return
     if data.startswith("buyz:"):
         _tag, usd_s, name = data.split(":", 2)
@@ -5761,6 +5780,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             return
         live_msg = await _off(uid, _live_buy_followup, uid, card, name, True, True, usd_override=usd_o, multi=True, _busy=BUSY_MSG)
         await _done(context.bot, uid, status, live_msg or "Buy sent.")
+        await _after_buy(context.bot, uid, uid, card, name)
         return
     if data.startswith("buy:") or data.startswith("force:"):
         force = data.startswith("force:")
@@ -5773,6 +5793,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             return
         live_msg = await _off(uid, _live_buy_followup, uid, card, name, True, force, multi=True, _busy=BUSY_MSG)
         await _done(context.bot, uid, status, live_msg or "Buy sent.")
+        await _after_buy(context.bot, uid, uid, card, name)
         return
     if data.startswith("close:"):
         try:
