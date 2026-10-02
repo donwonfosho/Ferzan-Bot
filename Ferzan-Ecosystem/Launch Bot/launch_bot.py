@@ -1027,8 +1027,10 @@ async def _after_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _send(
         update,
         _hdr(launch, "supply", "Total supply") + "How many tokens should exist in total?\n"
-        "Most launches use <b>1B</b>. Tap one, or type a number like <code>420000000</code> or <code>69m</code>." + limit,
-        rows,
+        "Most launches use <b>1B</b>. Tap one, or type a number like <code>420000000</code> or <code>69m</code>.\n\n"
+        "⚡ <b>Quick launch</b> uses 1B supply and the recommended settings for everything else "
+        "(no team wallets, no dev buy, trading opens right away, no buy limit). You review it before anything is sent." + limit,
+        rows + [[InlineKeyboardButton("⚡ Quick launch - recommended settings", callback_data="sup:quick")]],
     )
     return ENTERING_SUPPLY
 
@@ -1154,7 +1156,11 @@ async def supply_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _tap(update)
     if not context.user_data.get("launch"):
         return ConversationHandler.END
-    return await _set_supply(update, context, int(update.callback_query.data.split(":", 1)[1]))
+    val = update.callback_query.data.split(":", 1)[1]
+    if val == "quick":
+        context.user_data["launch"]["quick"] = True
+        val = str(10**9)
+    return await _set_supply(update, context, int(val))
 
 
 # ------------------------------------------------------ curve: graduation --
@@ -1163,6 +1169,8 @@ async def _ask_grad(update: Update, context: ContextTypes.DEFAULT_TYPE):
     unit = NATIVE.get(launch["chain"], "native")
     pre = ton_grad_presets() if launch["chain"] == "ton" else GRAD_PRESETS.get(launch["chain"], GRAD_PRESETS["default"])
     floor = f"\nMinimum on TON: {ton_curve_min_grad():,.0f} TON." if launch["chain"] == "ton" else ""
+    if launch.get("quick"):  # middle preset: the recommended graduation size
+        return await _set_grad(update, context, float(pre[1] if len(pre) > 1 else pre[0]))
     await _send(
         update,
         _hdr(launch, "grad", "Graduation") + f"How much {unit} should the curve collect before it moves to a full DEX pool?\n"
@@ -1225,6 +1233,9 @@ async def grad_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ------------------------------------------------------------ team allocs --
 async def _ask_allocs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     launch = context.user_data["launch"]
+    if launch.get("quick"):
+        launch["extra_params"]["allocs"] = ""
+        return await _after_allocs(update, context)
     await _send(
         update,
         _hdr(launch, "allocs", "Team wallets") + "Send part of the supply straight to team wallets at launch?\n"
@@ -1299,6 +1310,8 @@ async def allocs_skip_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ---------------------------------------------------------------- dev buy --
 async def _ask_devbuy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     launch = context.user_data["launch"]
+    if launch.get("quick"):
+        return await _set_devbuy(update, context, 0.0)
     unit = NATIVE.get(launch["chain"], "native")
     pre = DEVBUY_PRESETS.get(launch["chain"], DEVBUY_PRESETS["default"])
     note = ""
@@ -1343,6 +1356,8 @@ async def devbuy_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ------------------------------------------------- curve: trading window --
 async def _ask_window(update: Update, context: ContextTypes.DEFAULT_TYPE):
     launch = context.user_data["launch"]
+    if launch.get("quick"):
+        return await _set_window(update, context, 0)
     await _send(
         update,
         _hdr(launch, "window", "Trading opens") + "When should trading open?\n"
@@ -1371,6 +1386,8 @@ async def _set_window(update: Update, context: ContextTypes.DEFAULT_TYPE, mins: 
         extra["start_display"] = _dur(mins * 60) + " after launch"
     else:
         extra["start_display"] = "right away"
+    if launch.get("quick"):
+        return await _set_maxbuy(update, context, 0.0)
     unit = NATIVE.get(launch["chain"], "native")
     pre = MAXBUY_PRESETS.get(launch["chain"], MAXBUY_PRESETS["default"])
     await _send(
