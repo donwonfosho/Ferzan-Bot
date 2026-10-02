@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import time
 
 import requests
 
@@ -116,8 +117,16 @@ def address_and_balance(secret: str) -> tuple[str, float]:
     """(TON address, TON balance) for the wallet derived from `secret` —
     same ed25519 key as the user's Solana wallet, different derived address."""
     seed64 = _ton_keypair_bytes(secret)
-    addr, nano = _run_async(_address_and_balance(seed64))
-    return addr, nano / 1e9
+    last: Exception | None = None
+    for attempt in range(3):  # read-only lookup: public liteservers are often busy, so retry before giving up
+        try:
+            addr, nano = _run_async(_address_and_balance(seed64))
+            return addr, nano / 1e9
+        except Exception as exc:
+            last = exc
+            if attempt < 2:
+                time.sleep(1.5 * (attempt + 1))
+    raise last if last else RuntimeError("TON lookup failed")
 
 
 # Signed messages expire after this; we poll for longer, so "not confirmed"
