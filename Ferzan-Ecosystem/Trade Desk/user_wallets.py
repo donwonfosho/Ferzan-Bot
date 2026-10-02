@@ -146,8 +146,25 @@ def export_text(user_id: int) -> str:
         f"EVM private key\n`{evm}`\n\n"
         "Phantom → import Solana private key.\n"
         "MetaMask / Trust → import EVM private key.\n"
+        f"{_tron_note(evm)}\n"
+        "TON: TON wallets (Tonkeeper etc.) want 24 words, not a raw key, so this wallet can't be imported there. "
+        "To move TON out, use /send to your own TON address.\n"
         "Bot-generated wallets have no 12-word phrase — only these keys."
     )
+
+
+def _tron_note(evm_key: str) -> str:
+    """Tron signs with the same secp256k1 key as the EVM wallet; show the T-address it controls."""
+    try:
+        import tron_signer
+
+        addr, _k = tron_signer.evm_key_to_tron(evm_key)
+        return (
+            f"Tron: your EVM private key above also controls this Tron address: `{addr}`. "
+            "TronLink / Trust → import it as a Tron private key."
+        )
+    except Exception:
+        return "Tron: your EVM private key above also controls your Tron address (import it as a Tron private key)."
 
 
 def card_text(user_id: int) -> str:
