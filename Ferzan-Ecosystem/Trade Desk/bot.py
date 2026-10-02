@@ -3103,6 +3103,17 @@ async def join_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                                             InlineKeyboardButton("👛 My wallets", callback_data="go:wallets")]]))
 
 
+async def launchday_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard(update):
+        return
+    if not _is_admin(update.effective_user.id):
+        return  # admin only, and silent for everyone else
+    import launchday
+
+    text = await asyncio.to_thread(launchday.report)
+    await update.effective_message.reply_text(text, parse_mode="HTML")
+
+
 async def stake_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update):
         return
@@ -9506,7 +9517,7 @@ def main() -> None:
     app.add_handler(CommandHandler("xbuy", xbuy_cmd))
     _xb_prices()  # warm the price cache in the background so the first buy after a restart can check
     app.add_handler(CommandHandler("stake", stake_cmd))
-    for _n, _f in (("security", security_cmd), ("stats", stats_cmd), ("rank", rank_cmd), ("wrapped", wrapped_cmd), ("join", join_cmd)):
+    for _n, _f in (("security", security_cmd), ("stats", stats_cmd), ("rank", rank_cmd), ("wrapped", wrapped_cmd), ("join", join_cmd), ("launchday", launchday_cmd)):
         app.add_handler(CommandHandler(_n, _f))
     app.add_handler(CommandHandler("lpguard", lpguard_cmd))
     app.add_handler(CommandHandler("buylimit", buylimit_cmd))
