@@ -106,6 +106,16 @@
   .sheet img.card { width: 100%; aspect-ratio: 1200/630; border-radius: 14px; background: var(--sunk); display: block; margin-bottom: 12px; object-fit: cover; }
   .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 8px; }
   .tip { background: var(--sunk); border-radius: 12px; padding: 10px 12px; font-size: 13px; color: var(--muted); margin: 8px 0; }
+  .seg { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; padding: 4px; border-radius: 14px; background: var(--card); border: 1px solid var(--line); margin-bottom: 12px; }
+  .seg button { border: 0; background: none; color: var(--muted); font-weight: 800; font-size: 13px; padding: 10px 0; border-radius: 10px; }
+  .seg button.on { background: linear-gradient(180deg, #2fe3d8, #12b3ae); color: var(--btn-ink); }
+  .timer { position: absolute; bottom: 12px; right: 14px; font-size: 11px; font-weight: 800; color: var(--link); }
+  .ready { margin-bottom: 12px; }
+  .ready .hd { display: flex; justify-content: space-between; align-items: baseline; font-weight: 800; }
+  .ready ul { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 5px; font-size: 13px; color: var(--muted); }
+  .ready li.ok { color: var(--ink); } .ready li b { display: inline-block; width: 20px; }
+  .earn { background: radial-gradient(90% 140% at 100% 0%, rgba(52,211,153,.18), transparent 60%), var(--card); }
+  .earn .big { font-size: 32px; font-weight: 800; color: var(--gain); }
   @keyframes rise { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
   .view:not([hidden]) { animation: rise .35s cubic-bezier(.2,.8,.2,1) both; }
   @media (prefers-reduced-motion: reduce) { .view:not([hidden]) { animation: none; } .skel { animation: none; } }
@@ -126,8 +136,9 @@
 </header>
 
 <section class="view" id="v-launch">
+  <div class="seg" id="qf"><button type="button" data-q="1">⚡ Quick</button><button type="button" data-q="0">🎛️ Full control</button></div>
   <div class="prev" id="prev">
-    <span class="tag" id="pTag">NEW</span>
+    <span class="tag" id="pTag">NEW</span><span class="timer num" id="timer"></span>
     <div class="row"><div class="av" id="pAv">?</div><div style="min-width:0"><div class="nm" id="pNm">Your coin</div><div class="sy" id="pSy">$TICKER</div></div></div>
     <div class="bar"><i style="width:0%"></i></div>
     <div class="meta"><span id="pChain">Pick a chain</span><span id="pGrad">0% to graduation</span></div>
@@ -142,29 +153,31 @@
     <label class="f fld">Logo</label>
     <div class="logo fld"><div class="pick" id="pick">🖼️</div><div><button class="btn ghost sm" id="pickBtn" type="button">Choose image</button><p>Square works best. Under 300 KB after resize.</p></div></div>
     <input type="file" id="file" accept="image/png,image/jpeg,image/webp" hidden>
-    <div id="supBox" class="fld"><label class="f" for="supply">Supply</label>
+    <div id="supBox" class="fld adv"><label class="f" for="supply">Supply</label>
       <div class="chips pre" id="supChips"></div><input class="in num" id="supply" inputmode="numeric" value="1000000000" style="margin-top:8px"></div>
-    <div id="gradBox" class="fld"><label class="f" for="grad">Graduation target <span id="gUnit"></span></label>
+    <div id="gradBox" class="fld adv"><label class="f" for="grad">Graduation target <span id="gUnit"></span></label>
       <div class="chips pre" id="gradChips"></div><input class="in num" id="grad" inputmode="decimal" placeholder="default" style="margin-top:8px"></div>
-    <div id="devBox" class="fld"><label class="f" for="dev">Your first buy (dev buy) <span id="dUnit"></span></label>
+    <div id="devBox" class="fld adv"><label class="f" for="dev">Your first buy (dev buy) <span id="dUnit"></span></label>
       <div class="chips pre" id="devChips"></div><input class="in num" id="dev" inputmode="decimal" placeholder="0" style="margin-top:8px"></div>
-    <div id="winBox" class="fld"><label class="f">Trading opens</label><div class="chips pre" id="winChips"></div></div>
+    <div id="winBox" class="fld adv"><label class="f">Trading opens</label><div class="chips pre" id="winChips"></div></div>
     <div class="toggle fld" id="shieldRow"><div><b>🛡️ Fair Launch Shield</b><small id="shieldTxt">Caps any single buy at 2% of the graduation target so snipers can't grab the curve.</small></div><input type="checkbox" class="sw" id="shield" checked></div>
-    <div id="maxBox" class="fld"><label class="f" for="maxb">Custom max buy <span id="mUnit"></span> (optional, overrides the Shield cap)</label><input class="in num" id="maxb" inputmode="decimal" placeholder="none"></div>
-    <div id="teamBox" class="fld"><label class="f" for="allocs">Team wallets (optional)</label>
+    <div id="maxBox" class="fld adv"><label class="f" for="maxb">Custom max buy <span id="mUnit"></span> (optional, overrides the Shield cap)</label><input class="in num" id="maxb" inputmode="decimal" placeholder="none"></div>
+    <div id="teamBox" class="fld adv"><label class="f" for="allocs">Team wallets (optional)</label>
       <textarea class="in" id="allocs" placeholder="0xAddress:5&#10;0xAddress:2.5" style="height:76px"></textarea><p class="hi" style="margin:4px 0 0">One per line, percent of supply. Each 0.01% to 20%.</p></div>
-    <details class="fld">
+    <details class="fld adv">
       <summary>Description &amp; links</summary>
       <label class="f" for="desc">Description</label><textarea class="in" id="desc" maxlength="500" placeholder="What is this coin about?"></textarea>
       <label class="f" for="web">Links</label><input class="in" id="web" placeholder="Website (optional)" style="margin-bottom:8px"><input class="in" id="xh" placeholder="X link (optional)" style="margin-bottom:8px"><input class="in" id="tgl" placeholder="Telegram link (optional)">
     </details>
   </div>
+  <div class="sec ready" id="ready"><div class="hd"><span>Launch readiness</span><span class="num" id="rScore">0%</span></div><div class="bar"><i id="rBar" style="width:0%"></i></div><ul id="rList"></ul></div>
   <button class="btn" id="go" type="button">Review &amp; sign in your wallet</button>
   <p class="hi" style="text-align:center;margin-top:10px">You sign in your own wallet. Ferzan never holds keys.</p>
 </section>
 
 <section class="view" id="v-mine" hidden>
   <div class="lvl" id="lvl"></div>
+  <div class="sec earn" id="earn" hidden></div>
   <div class="tiles" id="tiles"></div>
   <button class="btn ghost" id="claim" type="button" style="margin-bottom:6px">💰 Claim creator fees</button>
   <h2>My launches</h2><div class="list" id="mineList"><div class="skel"></div></div>
@@ -293,8 +306,33 @@
     fillChips("#winChips", WINDOWS, (it) => { state.win = it[1]; chainUi(); }, (it) => state.win === it[1]);
     $("#pTag").textContent = chat ? "IN CHAT" : plain ? "STANDARD" : "CURVE";
     $("#pGrad").hidden = plain || chat;
-    preview();
+    if (state.quick) document.querySelectorAll(".adv").forEach((e) => (e.hidden = true));
+    document.querySelectorAll("#qf button").forEach((b) => b.classList.toggle("on", (b.dataset.q === "1") === state.quick));
+    $("#ready").hidden = chat;
+    preview(); readiness();
   }
+  /* ---- quick vs full, readiness, build timer ---- */
+  try { state.quick = localStorage.getItem("ferzan_launch_quick") !== "0"; } catch (e) { state.quick = true; }
+  $("#qf").addEventListener("click", (e) => { const b = e.target.closest("button"); if (!b) return; buzz();
+    state.quick = b.dataset.q === "1"; try { localStorage.setItem("ferzan_launch_quick", state.quick ? "1" : "0"); } catch (x) {} chainUi(); });
+  function readiness() {
+    const nm = $("#name").value.trim(), sy = $("#sym").value.trim(), plain = state.mode === "plain", sol = state.chain === "solana";
+    const items = [
+      [!!nm, 20, "Name", "Pick a memorable name"], [!!sy, 15, "Ticker", "Short and punchy, 3 to 5 letters"],
+      [!!state.image, 25, "Logo", "Coins with a logo get far more clicks"],
+      [$("#desc").value.trim().length >= 20, 15, "Description", "Say what it's about (Full control)"],
+      [!!($("#web").value.trim() || $("#xh").value.trim() || $("#tgl").value.trim()), 15, "Community link", "Add your X or Telegram (Full control)"],
+    ];
+    if (!plain && !sol) items.push([$("#shield").checked || +$("#maxb").value > 0, 10, "Anti-sniper shield", "Cap the max buy"]);
+    const tot = items.reduce((a, i) => a + i[1], 0), got = items.reduce((a, i) => a + (i[0] ? i[1] : 0), 0), pct = Math.round(got * 100 / tot);
+    $("#rScore").textContent = pct + "%"; $("#rBar").style.width = pct + "%";
+    $("#rList").innerHTML = items.map((i) => `<li class="${i[0] ? "ok" : ""}"><b>${i[0] ? "✅" : "⬜"}</b>${i[0] ? i[2] : i[2] + " · " + i[3]}</li>`).join("");
+  }
+  ["name", "sym", "desc", "web", "xh", "tgl", "maxb"].forEach((id) => $("#" + id).addEventListener("input", readiness));
+  $("#shield").addEventListener("change", readiness);
+  state.t0 = 0;
+  const startTimer = () => { if (state.t0) return; state.t0 = Date.now(); state.tick = setInterval(() => { const s = Math.floor((Date.now() - state.t0) / 1000); $("#timer").textContent = "⏱ " + Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0"); }, 1000); };
+  ["name", "sym"].forEach((id) => $("#" + id).addEventListener("input", startTimer));
   ["supply", "grad", "dev"].forEach((id) => $("#" + id).addEventListener("input", () => chainUi()));
   $("#modeChips").addEventListener("click", (e) => { const b = e.target.closest(".chip"); if (!b) return; buzz(); state.mode = b.dataset.m; renderChains(); });
   $("#chainChips").addEventListener("click", (e) => { const b = e.target.closest(".chip"); if (!b || b.disabled) return; buzz(); state.chain = b.dataset.c; renderChains(); });
@@ -311,7 +349,7 @@
         supply_whole: $("#supply").value || "1000000000", grad_native: $("#grad").value, dev_buy: $("#dev").value || "0",
         allocs: $("#allocs").value, max_buy: $("#maxb").value, start_minutes: String(state.win || 0),
         shield: $("#shield").checked, website: $("#web").value, x: $("#xh").value, telegram: $("#tgl").value });
-      buzz("medium"); location.href = j.sign_url;
+      buzz("medium"); const sec = state.t0 ? Math.round((Date.now() - state.t0) / 1000) : 0; if (sec) toast("Built in " + sec + "s. Now sign in your wallet."); setTimeout(() => (location.href = j.sign_url), sec ? 700 : 0);
     } catch (e) { toast(e.message); b.disabled = false; b.textContent = "Review & sign in your wallet"; }
   };
 
@@ -327,6 +365,9 @@
       const me = state.me = await post("/api/app/me");
       const s = me.stats;
       $("#lvl").innerHTML = lvl(s.launched, s.graduated);
+      const em = (n) => (n >= 100 ? "$" + n.toFixed(0) : "$" + n.toFixed(2));
+      $("#earn").hidden = !s.launched;
+      $("#earn").innerHTML = `<div class="hi">Your trading-fee share</div><div class="big num">${em(s.earned_usd || 0)}</div><div class="hi">${em(s.earned_24h_usd || 0)} in the last 24h · you earn half of every curve trading fee</div>`;
       $("#tiles").innerHTML = `<div class="tile"><div class="k">Launched</div><div class="v num">${s.launched}</div></div><div class="tile"><div class="k">Graduated</div><div class="v num">${s.graduated}</div></div><div class="tile"><div class="k">Best cap</div><div class="v num">${usd(s.best_mcap_usd)}</div></div>`;
       $("#mineList").innerHTML = me.launches.length ? me.launches.map((l) => {
         const p = l.progress == null ? null : Math.round(l.progress);
@@ -334,7 +375,7 @@
           <div style="min-width:0"><div class="t">${esc(l.name)} <span class="pill">$${esc(l.symbol)}</span>${statusPill(l.status)}</div>
           <div class="s">${NAMES[l.chain] || esc(l.chain)}${l.graduated ? " · 🎓 graduated" : ""}${p != null && !l.graduated ? " · " + p + "% to graduation" : ""}</div>
           ${p != null ? `<div class="bar" style="margin-top:6px"><i style="width:${p}%"></i></div>` : ""}</div>
-          <div class="r">${l.mcap_usd ? usd(l.mcap_usd) : ""}</div></div>`;
+          <div class="r">${l.mcap_usd ? usd(l.mcap_usd) : ""}${l.earned_usd > 0.005 ? `<div class="up" style="color:var(--gain);font-size:11px">+${em(l.earned_usd)}</div>` : ""}</div></div>`;
       }).join("") : '<div class="empty">No launches yet.<br>Tap 🚀 Launch to create your first coin.</div>';
       renderChains();
     } catch (e) { $("#mineList").innerHTML = '<div class="empty">Open this from the Ferzan Launch bot in Telegram.</div>'; }

@@ -124,12 +124,14 @@ def app_me(body: AppBody):
     uid = int(user["id"])
     rows = A.db.get_user_launch_history(uid, 40)
     c = A._idx_db()
-    out, graduated, best = [], 0, 0.0
+    out, graduated, best, earned, earned24 = [], 0, 0.0, 0.0, 0.0
     try:
+        has_fee = c is not None and "fee" in {x[1] for x in c.execute("PRAGMA table_info(trades)")}
+        since = int(time.time()) - 86400
         for r in rows:
             item = {"id": r.id, "chain": r.chain, "mode": r.mode, "name": r.name, "symbol": r.symbol, "status": r.status,
                     "image": r.image_url or "", "token": r.result_token_address or "", "created_at": r.created_at,
-                    "progress": None, "graduated": False, "mcap_usd": 0.0, "trades": 0, "url": "", "share": ""}
+                    "progress": None, "graduated": False, "mcap_usd": 0.0, "trades": 0, "url": "", "share": "", "earned_usd": 0.0, "earned_24h_usd": 0.0}
             if r.status == "confirmed" and r.result_token_address:
                 item["share"] = f"{A._PUBLIC_ORIGIN}/api/share/{r.chain}/{r.result_token_address}"
             if r.status == "confirmed" and r.result_token_address and c is not None:
@@ -142,6 +144,14 @@ def app_me(body: AppBody):
                     item["mcap_usd"] = float((cur["mcap"] or 0) * A._native_usd(r.chain))
                     item["trades"] = int(cur["trades"] or 0)
                     item["url"] = A._trade_url(r.chain, cur["curve"], r.result_token_address)
+                    if has_fee and r.chain != "solana":  # creators get half of every curve trading fee
+                        usd = A._native_usd(r.chain)
+                        tot, d24 = c.execute("SELECT SUM(fee), SUM(CASE WHEN ts > ? THEN fee ELSE 0 END) FROM trades "
+                                             "WHERE chain = ? AND curve = ? AND fee IS NOT NULL", (since, r.chain, cur["curve"])).fetchone()
+                        item["earned_usd"] = float(tot or 0) * 0.5 * usd
+                        item["earned_24h_usd"] = float(d24 or 0) * 0.5 * usd
+                        earned += item["earned_usd"]
+                        earned24 += item["earned_24h_usd"]
                     graduated += 1 if cur["graduated"] else 0
                     best = max(best, item["mcap_usd"])
             out.append(item)
@@ -150,7 +160,8 @@ def app_me(body: AppBody):
             c.close()
     chains = A.chain_status()["chains"]
     return {"user": {"id": uid, "name": user.get("first_name") or ""}, "launches": out,
-            "stats": {"launched": sum(1 for x in out if x["status"] == "confirmed"), "graduated": graduated, "best_mcap_usd": best},
+            "stats": {"launched": sum(1 for x in out if x["status"] == "confirmed"), "graduated": graduated, "best_mcap_usd": best,
+                      "earned_usd": earned, "earned_24h_usd": earned24},
             "chains": chains, "native": A._NATIVE_SYM, "grad_default": GRAD_DEFAULT, "grad_presets": GRAD_PRESETS, "dev_presets": DEVBUY_PRESETS, "base": A.MINI_APP_BASE, "origin": A._PUBLIC_ORIGIN,
             "bots": {"buy": (os.environ.get("FERZAN_BUY_BOT") or "Ferzan_Buy_Bot").lstrip("@"),
                      "guardian": (os.environ.get("FERZAN_GUARDIAN_BOT") or "Ferzan_Guardian_Bot").lstrip("@"),
