@@ -27,9 +27,10 @@ _rate: dict = {}
 _rate_lock = threading.Lock()
 
 # Same defaults the chat flow offers (launch_bot.py GRAD_PRESETS / MAXBUY_PRESETS).
-GRAD_DEFAULT = {"bsc": "10", "default": "2.5"}
+GRAD_DEFAULT = {"bsc": "10", "arc": "10000", "default": "2.5"}
 MAXBUY_PCT = Decimal("0.02")  # Fair Launch Shield: no single buy above 2% of the graduation target
-CURVE_CHAINS = ("base", "bsc", "ethereum", "robinhood")
+EVM_CHAINS = ("base", "bsc", "ethereum", "robinhood", "arc")
+SOL_U64_MAX = 2**64 - 1
 
 
 def _token() -> str:
@@ -89,6 +90,7 @@ class AppLaunchBody(AppBody):
     supply_whole: str = "1000000000"
     grad_native: str = ""   # EVM curves; blank = chat-flow default
     dev_buy: str = "0"
+    mode: str = "curve"     # "curve" or "plain" (standard fixed-supply coin)
     shield: bool = True     # Fair Launch Shield: cap any single buy
     website: str = ""
     x: str = ""
@@ -166,25 +168,38 @@ def app_launch(body: AppLaunchBody):
             extra[k] = link
     dev = _num(body.dev_buy, "Dev buy", Decimal("0.000001"), Decimal("100000"), allow_zero=True)
     extra["dev_buy"] = f"{dev:f}" if dev > 0 else "0"
+    plain = (body.mode or "curve").strip().lower() == "plain"
     if chain == "solana":
-        if not (os.environ.get("METEORA_CONFIG") or "").strip():
-            raise HTTPException(501, "Solana curves are not configured")
-        mode, decimals, total_supply = "meteora", 6, str(10**9 * 10**6)
-    elif chain in CURVE_CHAINS:
-        if not live.get("curve"):
-            raise HTTPException(501, f"Bonding curves on {chain} are not open yet")
-        mode, decimals = "bonding_curve", 18
+        if plain:
+            whole = int(_num(body.supply_whole, "Supply", Decimal(1), Decimal(10**12)))
+            if whole * 10**6 > SOL_U64_MAX:
+                raise HTTPException(400, f"Too big for Solana. Max supply is {SOL_U64_MAX // 10**6:,}")
+            mode, decimals, total_supply = "plain", 6, str(whole * 10**6)
+            extra["dev_buy"] = "0"
+        else:
+            if not (os.environ.get("METEORA_CONFIG") or "").strip():
+                raise HTTPException(501, "Solana curves are not configured")
+            mode, decimals, total_supply = "meteora", 6, str(10**9 * 10**6)
+    elif chain in EVM_CHAINS:
+        if not live.get("plain" if plain else "curve"):
+            raise HTTPException(501, f"{'Standard tokens' if plain else 'Bonding curves'} on {chain} are not open yet")
+        decimals = 18
         whole = int(_num(body.supply_whole, "Supply", Decimal(1), Decimal(10**15)))
         total_supply = str(whole * 10**18)
-        grad = _num(body.grad_native or GRAD_DEFAULT.get(chain, GRAD_DEFAULT["default"]), "Graduation",
-                    Decimal("0.001"), Decimal(1_000_000))
-        extra.update(graduation_eth_threshold=str(int(grad * 10**18)), graduation_display=f"{grad.normalize():f} {A._NATIVE_SYM.get(chain, '')}",
-                     virtual_eth_reserve=str(10**18), virtual_token_reserve=str(int(total_supply) * 80 // 100),
-                     start_minutes="0")
-        cap = (grad * MAXBUY_PCT).quantize(Decimal("0.0001")) if body.shield else Decimal(0)
-        extra["max_buy"] = f"{max(cap, Decimal('0.0001')).normalize():f}" if body.shield else "0"
+        if plain:
+            mode = "plain"
+            extra.pop("dev_buy", None)
+        else:
+            mode = "bonding_curve"
+            grad = _num(body.grad_native or GRAD_DEFAULT.get(chain, GRAD_DEFAULT["default"]), "Graduation",
+                        Decimal("0.001"), Decimal(1_000_000))
+            extra.update(graduation_eth_threshold=str(int(grad * 10**18)), graduation_display=f"{grad.normalize():f} {A._NATIVE_SYM.get(chain, '')}",
+                         virtual_eth_reserve=str(10**18), virtual_token_reserve=str(int(total_supply) * 80 // 100),
+                         start_minutes="0")
+            cap = (grad * MAXBUY_PCT).quantize(Decimal("0.0001")) if body.shield else Decimal(0)
+            extra["max_buy"] = f"{max(cap, Decimal('0.0001')).normalize():f}" if body.shield else "0"
     else:
-        raise HTTPException(400, "Pick Solana, Base, BNB Chain, Ethereum or Robinhood Chain")
+        raise HTTPException(400, "Tron and TON launches run through your Trade Bot wallet. Continue in the chat.")
     image_url = A._site_image(body.image)
     req = A.db.create_launch_request(
         telegram_user_id=uid, chat_id=uid, chain=chain, mode=mode, name=name, symbol=symbol, total_supply=total_supply,

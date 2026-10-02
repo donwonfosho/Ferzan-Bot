@@ -86,7 +86,7 @@
   .toast.show { display: block; }
   .skel { height: 58px; border-radius: 12px; background: linear-gradient(90deg, var(--sunk), #17245a, var(--sunk)); background-size: 200% 100%; animation: sk 1.2s linear infinite; margin-bottom: 8px; }
   @keyframes sk { to { background-position: -200% 0; } }
-  .view[hidden] { display: none; }
+  [hidden] { display: none !important; }
   @keyframes rise { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
   .view:not([hidden]) { animation: rise .35s cubic-bezier(.2,.8,.2,1) both; }
   @media (prefers-reduced-motion: reduce) { .view:not([hidden]) { animation: none; } .skel { animation: none; } }
@@ -103,23 +103,25 @@
     <span class="tag" id="pTag">NEW</span>
     <div class="row"><div class="av" id="pAv">?</div><div style="min-width:0"><div class="nm" id="pNm">Your coin</div><div class="sy" id="pSy">$TICKER</div></div></div>
     <div class="bar"><i style="width:0%"></i></div>
-    <div class="meta"><span id="pChain">Pick a chain</span><span>0% to graduation</span></div>
+    <div class="meta"><span id="pChain">Pick a chain</span><span id="pGrad">0% to graduation</span></div>
   </div>
 
   <div class="sec">
     <div class="chips" id="chainChips"></div>
-    <label class="f" for="name">Name &amp; ticker</label>
-    <div class="two"><input class="in" id="name" maxlength="32" placeholder="Moon Cat" autocomplete="off"><input class="in" id="sym" maxlength="10" placeholder="MCAT" autocapitalize="characters" autocomplete="off"></div>
-    <label class="f">Logo</label>
-    <div class="logo"><div class="pick" id="pick">🖼️</div><div><button class="btn ghost sm" id="pickBtn" type="button">Choose image</button><p>Square works best. Under 300 KB after resize.</p></div></div>
+    <div class="chips" id="modeChips" style="margin-top:10px"></div>
+    <p class="hi" id="chatNote" hidden style="margin:12px 0 0">Tron and TON launches are signed with your Trade Bot wallet, so they continue in the chat. Tap below, then choose 🚀 Launch a token.</p>
+    <label class="f fld" for="name">Name &amp; ticker</label>
+    <div class="two fld"><input class="in" id="name" maxlength="32" placeholder="Moon Cat" autocomplete="off"><input class="in" id="sym" maxlength="10" placeholder="MCAT" autocapitalize="characters" autocomplete="off"></div>
+    <label class="f fld">Logo</label>
+    <div class="logo fld"><div class="pick" id="pick">🖼️</div><div><button class="btn ghost sm" id="pickBtn" type="button">Choose image</button><p>Square works best. Under 300 KB after resize.</p></div></div>
     <input type="file" id="file" accept="image/png,image/jpeg,image/webp" hidden>
     <div class="toggle" id="shieldRow"><div><b>🛡️ Fair Launch Shield</b><small id="shieldTxt">Caps any single buy so snipers can't grab the curve.</small></div><input type="checkbox" class="sw" id="shield" checked></div>
-    <details>
+    <details class="fld">
       <summary>More options</summary>
       <label class="f" for="desc">Description</label><textarea class="in" id="desc" maxlength="500" placeholder="What is this coin about?"></textarea>
-      <div id="evmOpts"><label class="f" for="grad">Graduation target <span id="gUnit"></span></label><input class="in num" id="grad" inputmode="decimal" placeholder="default">
+      <div id="evmOpts"><div id="gradBox"><label class="f" for="grad">Graduation target <span id="gUnit"></span></label><input class="in num" id="grad" inputmode="decimal" placeholder="default"></div>
       <label class="f" for="supply">Supply</label><input class="in num" id="supply" inputmode="numeric" value="1000000000"></div>
-      <label class="f" for="dev">Your first buy (dev buy) <span id="dUnit"></span></label><input class="in num" id="dev" inputmode="decimal" placeholder="0">
+      <div id="devBox"><label class="f" for="dev">Your first buy (dev buy) <span id="dUnit"></span></label><input class="in num" id="dev" inputmode="decimal" placeholder="0"></div>
       <label class="f" for="web">Links</label><input class="in" id="web" placeholder="Website (optional)" style="margin-bottom:8px"><input class="in" id="xh" placeholder="X link (optional)" style="margin-bottom:8px"><input class="in" id="tgl" placeholder="Telegram link (optional)">
     </details>
   </div>
@@ -158,9 +160,10 @@
   const API = location.origin;
   const $ = (s) => document.querySelector(s);
   const esc = (s) => String(s == null ? "" : s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
-  const NAMES = { solana: "Solana", base: "Base", bsc: "BNB Chain", ethereum: "Ethereum", robinhood: "Robinhood Chain" };
-  const LAUNCH = ["solana", "base", "bsc", "ethereum", "robinhood"];
-  const state = { chain: "", me: null, image: "", sort: "new", per: "all" };
+  const NAMES = { solana: "Solana", base: "Base", bsc: "BNB Chain", ethereum: "Ethereum", robinhood: "Robinhood Chain", arc: "Arc", tron: "Tron", ton: "TON" };
+  const LAUNCH = ["solana", "base", "bsc", "ethereum", "robinhood", "arc", "tron", "ton"];
+  const CHAT = ["tron", "ton"]; /* these run through your Trade Bot wallet in the chat */
+  const state = { chain: "", me: null, image: "", sort: "new", per: "all", mode: "curve" };
   if (tg) { try { tg.ready(); tg.expand(); tg.setHeaderColor("#050a1e"); tg.setBackgroundColor("#050a1e"); } catch (e) {} }
   const buzz = (k) => { try { tg && tg.HapticFeedback && tg.HapticFeedback.impactOccurred(k || "light"); } catch (e) {} };
   const toast = (m) => { const t = $("#toast"); t.textContent = m; t.classList.add("show"); clearTimeout(toast.h); toast.h = setTimeout(() => t.classList.remove("show"), 3500); };
@@ -212,31 +215,46 @@
   };
 
   /* ---- chains ---- */
+  function openModes(c) {
+    const ch = (state.me && state.me.chains) || {}, o = ch[c] || {};
+    if (c === "solana") return ["curve", "plain"];
+    return [o.curve ? "curve" : null, o.plain ? "plain" : null].filter(Boolean);
+  }
   function renderChains() {
-    const open = {}, ch = (state.me && state.me.chains) || {};
-    LAUNCH.forEach((c) => { open[c] = c === "solana" ? !!(ch.solana && ch.solana.curve) : !!(ch[c] && ch[c].curve); });
+    const open = {};
+    LAUNCH.forEach((c) => { open[c] = openModes(c).length > 0; });
     if (!state.chain || !open[state.chain]) state.chain = LAUNCH.find((c) => open[c]) || "";
     $("#chainChips").innerHTML = LAUNCH.map((c) => `<button class="chip ${c === state.chain ? "on" : ""}" data-c="${c}" ${open[c] ? "" : "disabled"}>${NAMES[c]}</button>`).join("");
+    const ms = state.chain ? openModes(state.chain) : [];
+    if (!ms.includes(state.mode)) state.mode = ms[0] || "curve";
+    const lbl = { curve: state.chain === "solana" ? "📈 Meteora curve" : "📈 Bonding curve", plain: "🪙 Standard coin" };
+    $("#modeChips").innerHTML = ms.length > 1 && !CHAT.includes(state.chain) ? ms.map((m) => `<button class="chip ${m === state.mode ? "on" : ""}" data-m="${m}">${lbl[m]}</button>`).join("") : "";
     chainUi();
   }
   function chainUi() {
-    const sol = state.chain === "solana", nat = (state.me && state.me.native && state.me.native[state.chain]) || "";
-    $("#evmOpts").hidden = sol; $("#shieldRow").hidden = sol;
+    const sol = state.chain === "solana", chat = CHAT.includes(state.chain), plain = state.mode === "plain", nat = (state.me && state.me.native && state.me.native[state.chain]) || "";
+    $("#evmOpts").hidden = chat || (sol && !plain); /* supply box shows for standard coins */ $("#gradBox").hidden = plain || sol;
+    $("#shieldRow").hidden = sol || plain || chat; $("#devBox").hidden = plain || chat; $("#chatNote").hidden = !chat; document.querySelectorAll(".fld").forEach((e) => (e.hidden = chat)); $("#pGrad").hidden = plain || chat;
+    $("#go").textContent = chat ? "Continue in chat" : "Review & sign in your wallet";
     $("#gUnit").textContent = nat ? "(" + nat + ")" : ""; $("#dUnit").textContent = nat ? "(" + nat + ")" : "";
     const gd = (state.me && state.me.grad_default) || {};
     $("#grad").placeholder = "default " + (gd[state.chain] || gd.default || "2.5");
+    const note = { curve: "Bonding curve", plain: "Standard coin" }[state.mode];
+    $("#pTag").textContent = chat ? "IN CHAT" : plain ? "STANDARD" : "CURVE";
     preview();
   }
+  $("#modeChips").addEventListener("click", (e) => { const b = e.target.closest(".chip"); if (!b) return; buzz(); state.mode = b.dataset.m; renderChains(); });
   $("#chainChips").addEventListener("click", (e) => { const b = e.target.closest(".chip"); if (!b || b.disabled) return; buzz(); state.chain = b.dataset.c; renderChains(); });
 
   /* ---- launch ---- */
   $("#go").onclick = async () => {
+    if (CHAT.includes(state.chain)) { toast("Open the chat and tap 🚀 Launch a token → " + NAMES[state.chain]); setTimeout(() => { try { tg.close(); } catch (e) {} }, 900); return; }
     const name = $("#name").value.trim(), symbol = $("#sym").value.trim();
     if (!state.chain) return toast("No chain is open for launches right now");
     if (!name || !symbol) return toast("Add a name and ticker first");
     const b = $("#go"); b.disabled = true; b.textContent = "Preparing…";
     try {
-      const j = await post("/api/app/launch", { chain: state.chain, name, symbol, description: $("#desc").value, image: state.image,
+      const j = await post("/api/app/launch", { chain: state.chain, mode: state.mode, name, symbol, description: $("#desc").value, image: state.image,
         supply_whole: $("#supply").value || "1000000000", grad_native: $("#grad").value, dev_buy: $("#dev").value || "0",
         shield: $("#shield").checked, website: $("#web").value, x: $("#xh").value, telegram: $("#tgl").value });
       buzz("medium"); location.href = j.sign_url;
