@@ -2057,6 +2057,21 @@ class _SellEstimate:
         return 0.0 if self._t.is_alive() else float(self._v)
 
 
+def _skim_sell(uid: int, mint: str, cid: str, usd: float, sol_secret: str, evm_secret: str) -> str:
+    """Fee on a live sell, from the native coin the sale paid. Returns the confirmation line ("" if none).
+    Every sell path calls this so the fee does not depend on which button was tapped."""
+    if not (feecollect.sells_enabled() and usd > 0 and cid not in {"trx", "ton"}):
+        return ""
+    try:
+        _taken, line = feecollect.skim_buy(
+            uid, usd, "sol" if cid == "sol" else "evm", sol_secret=sol_secret or "", evm_secret=evm_secret or "",
+            evm_chain=cid, kind="manual", note=mint[:12], side="sell")
+        return line
+    except Exception:
+        logger.exception("sell fee failed for %s", uid)
+        return ""
+
+
 def _sell_any(uid: int, mint: str, pct: int = 100) -> tuple[bool, str, str]:
     """One sell path for every chain. Blocking — call via _off().
     Returns (ok, message, chain_label)."""
@@ -2082,16 +2097,9 @@ def _sell_any(uid: int, mint: str, pct: int = 100) -> tuple[bool, str, str]:
     if ok:
         _sold_usd = _est.value()
         _log_trade_safe(uid, "sell", mint, cid, _sold_usd)
-        if feecollect.sells_enabled() and _sold_usd > 0 and cid not in {"trx", "ton"}:
-            try:
-                _fam = "sol" if cid == "sol" else "evm"
-                _taken, _fline = feecollect.skim_buy(
-                    uid, _sold_usd, _fam, sol_secret=sol_secret or "", evm_secret=evm_secret or "",
-                    evm_chain=cid, kind="manual", note=mint[:12], side="sell")
-                if _fline:
-                    msg = f"{msg}\n{_fline}"
-            except Exception:
-                logger.exception("sell fee failed for %s", uid)
+        _fline = _skim_sell(uid, mint, cid, _sold_usd, sol_secret, evm_secret)
+        if _fline:
+            msg = f"{msg}\n{_fline}"
         try:
             if pct >= 100:
                 db.clear_live_cost(uid, mint)
@@ -3333,6 +3341,7 @@ async def livesell_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     chat_id = update.effective_chat.id
     status = await _progress(context.bot, chat_id, "⏳ Selling…")
     sol_secret, _evm = user_wallets.secrets(uid)
+    _est = _SellEstimate(uid, context.args[0].strip(), 100)
     ok, msg = await _off(
         uid,
         signer.sell_sol,
@@ -3344,6 +3353,9 @@ async def livesell_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     )
     if ok:
         db.clear_live_cost(uid, context.args[0].strip())
+        _fl = await asyncio.to_thread(_skim_sell, uid, context.args[0].strip(), "sol", _est.value(), sol_secret, "")
+        if _fl:
+            msg = f"{msg}\n{_fl}"
     await _done(context.bot, chat_id, status, _trade_result("sell", ok, "SOL", msg, pct=100))
 
 
@@ -3361,9 +3373,13 @@ async def livesellevm_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     chat_id = update.effective_chat.id
     status = await _progress(context.bot, chat_id, "⏳ Selling…")
     _sol, evm_secret = user_wallets.secrets(uid)
+    _est = _SellEstimate(uid, token, 100)
     ok, msg = await _off(uid, evm_signer.sell_evm, chain, token, key_hex=evm_secret, _busy=(False, BUSY_MSG))
     if ok:
         db.clear_live_cost(uid, token)
+        _fl = await asyncio.to_thread(_skim_sell, uid, token, resolve_chain(chain) or chain, _est.value(), "", evm_secret)
+        if _fl:
+            msg = f"{msg}\n{_fl}"
     await _done(
         context.bot, chat_id, status,
         _trade_result("sell", ok, (resolve_chain(chain) or chain).upper(), msg, pct=100),
@@ -8062,6 +8078,10 @@ def _exit_sell_all(uid: int, mint: str, holdings: list, pct: int) -> tuple[bool,
     oks, msgs = [], []
     total = sum(h[3] for h in holdings) or 0.0
     sold_amt = 0.0
+    try:
+        _px = float(_token_mark_usd(mint) or 0) if feecollect.sells_enabled() else 0.0
+    except Exception:
+        _px = 0.0
     for sol, evm, cid, amt in holdings:
         try:
             if mint.startswith("0x"):
@@ -8073,6 +8093,10 @@ def _exit_sell_all(uid: int, mint: str, holdings: list, pct: int) -> tuple[bool,
         except Exception as exc:
             ok, msg = False, str(exc)
         oks.append(bool(ok))
+        if ok and _px > 0:
+            _fl = _skim_sell(uid, mint, cid, amt * _px * max(0, min(100, int(pct))) / 100.0, sol, evm)
+            if _fl:
+                msg = f"{msg}\n{_fl}"
         msgs.append(msg)
         if ok:
             sold_amt += amt

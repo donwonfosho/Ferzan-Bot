@@ -139,8 +139,7 @@ def _status(sig: str, history: bool = False) -> tuple[str, str]:
     "none" means the RPC answered and has NO record of the tx; "unknown"
     means we couldn't get an answer (network error, 429, malformed)."""
     try:
-        st = requests.post(
-            _rpc(),
+        st = _rpc_post(
             json={
                 "jsonrpc": "2.0",
                 "id": 1,
@@ -166,8 +165,7 @@ def _status(sig: str, history: bool = False) -> tuple[str, str]:
 
 def _block_height() -> int | None:
     try:
-        h = requests.post(
-            _rpc(),
+        h = _rpc_post(
             json={"jsonrpc": "2.0", "id": 1, "method": "getBlockHeight", "params": [{"commitment": "confirmed"}]},
             timeout=10,
         ).json()
@@ -488,8 +486,7 @@ def _rpc_broadcast(wire: str) -> tuple[bool, str]:
     """Send an already-signed tx through the normal RPC. Preflight stays on:
     a swap that would fail is refused here instead of burning a fee."""
     try:
-        r = requests.post(
-            _rpc(),
+        r = _rpc_post(
             json={"jsonrpc": "2.0", "id": 1, "method": "sendTransaction",
                   "params": [wire, {"encoding": "base64", "skipPreflight": False, "maxRetries": 5}]},
             timeout=15,
@@ -522,8 +519,7 @@ def _swap_send_rpc(quote: dict, kp, base_fee: int) -> tuple[bool, str]:
         except Exception as exc:
             return False, f"Signing failed: {exc}"
         try:
-            send = requests.post(
-                _rpc(),
+            send = _rpc_post(
                 json={
                     "jsonrpc": "2.0",
                     "id": 1,
@@ -601,6 +597,29 @@ def max_usd() -> float:
         return max(1.0, min(5000.0, float(os.getenv("SIGNER_MAX_USD", "500"))))
     except ValueError:
         return 500.0
+
+
+def _rpc_fallback() -> str:
+    """Optional second Solana RPC (SOLANA_RPC_FALLBACK_URL). Used only when the main one fails or is rate-limited."""
+    return (os.getenv("SOLANA_RPC_FALLBACK_URL") or "").strip()
+
+
+def _rpc_post(**kwargs):
+    """requests.post to the Solana RPC; if the main RPC errors, is rate-limited (429) or returns non-JSON, retry the
+    SAME request once on the fallback RPC when one is configured. Without a fallback this is a plain post."""
+    fb = _rpc_fallback()
+    try:
+        r = requests.post(_rpc(), **kwargs)
+        if fb and (r.status_code == 429 or r.status_code >= 500):
+            raise RuntimeError(f"rpc http {r.status_code}")
+        if fb:
+            r.json()  # a 200 with a non-JSON body counts as a failure too
+        return r
+    except Exception as exc:
+        if not fb or fb == _rpc():
+            raise
+        log.warning("main Solana RPC failed (%s); retrying on the fallback", str(exc)[:80])
+        return requests.post(fb, **kwargs)
 
 
 def _rpc() -> str:
@@ -781,8 +800,7 @@ def _tip_note(opts: dict) -> str:
 
 def _token_raw_balance(mint: str, kp=None) -> int:
     kp = kp or _keypair()
-    r = requests.post(
-        _rpc(),
+    r = _rpc_post(
         json={
             "jsonrpc": "2.0",
             "id": 1,
@@ -828,8 +846,7 @@ def holdings_pub(owner: str, strict: bool = False) -> list[dict]:
     out = []
     seen = set()
     for program in _TOKEN_PROGRAMS:
-        r = requests.post(
-            _rpc(),
+        r = _rpc_post(
             json={
                 "jsonrpc": "2.0",
                 "id": 1,
@@ -863,8 +880,7 @@ def holdings_pub(owner: str, strict: bool = False) -> list[dict]:
 
 
 def sol_balance_lamports(addr: str) -> int:
-    r = requests.post(
-        _rpc(),
+    r = _rpc_post(
         json={"jsonrpc": "2.0", "id": 1, "method": "getBalance", "params": [addr]},
         timeout=15,
     )
@@ -917,8 +933,7 @@ def send_sol(dest: str, secret: str | None = None, lamports: int | None = None) 
         send_amt = int(lamports)
     if send_amt <= 0 or send_amt + 5000 > bag:
         return False, "Not enough SOL to send (need rent + fee)."
-    bh = requests.post(
-        _rpc(),
+    bh = _rpc_post(
         json={"jsonrpc": "2.0", "id": 1, "method": "getLatestBlockhash", "params": [{"commitment": "finalized"}]},
         timeout=15,
     ).json()
@@ -930,8 +945,7 @@ def send_sol(dest: str, secret: str | None = None, lamports: int | None = None) 
     tx = Transaction.new_unsigned(msg)
     tx.sign([kp], Hash.from_string(blockhash))
     raw = bytes(tx).hex()
-    body = requests.post(
-        _rpc(),
+    body = _rpc_post(
         json={"jsonrpc": "2.0", "id": 1, "method": "sendTransaction", "params": [raw, {"encoding": "hex"}]},
         timeout=20,
     ).json()

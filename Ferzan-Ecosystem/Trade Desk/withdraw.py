@@ -83,9 +83,7 @@ def short(addr: str) -> str:
 
 # ------------------------------------------------------------------ SOL ----
 def _sol_rpc(method: str, params: list, timeout: float = 15) -> dict:
-    r = requests.post(
-        signer._rpc(), json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params}, timeout=timeout
-    )
+    r = signer._rpc_post(json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params}, timeout=timeout)
     body = r.json() if r.content else {}
     if body.get("error"):
         raise RuntimeError(str(body["error"].get("message") if isinstance(body["error"], dict) else body["error"]))
