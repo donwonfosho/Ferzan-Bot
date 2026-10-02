@@ -1,7 +1,7 @@
 # Ferzan Trade Desk
 
-Non-custodial trading bot for Telegram — buy, sell, snipe, and manage
-positions across Solana and EVM chains, signed with your own wallet.
+Custodial hot-wallet trading bot for Telegram — buy, sell, snipe, and manage
+positions across Solana, EVM, Tron and TON from a per-user trading wallet.
 
 ## Features
 
@@ -17,9 +17,11 @@ positions across Solana and EVM chains, signed with your own wallet.
 ## Fees
 
 Per-trade cut, disclosed. Discounted by 30-day trading volume and by
-staking (`/stake`) toward the Ferzan token, once live.
+FERZAN holder fee discounts, once the token is live.
 
-## Non-custodial
+## Custody
 
-Every trade is built as an unsigned transaction and signed with the
-user's own key. This bot does not hold user funds.
+This is a custodial hot wallet. Each Telegram account gets a trading wallet whose
+key is encrypted on the server so the bot can sign trades. Users can export keys or
+withdraw at any time; keep only trading funds in it. (The Launch Bot is the
+non-custodial one: it never holds keys.)

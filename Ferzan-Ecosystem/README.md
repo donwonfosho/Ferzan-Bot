@@ -2,8 +2,8 @@
 
 Five Telegram bots covering token trading, token launching, liquidity
 management, safety scanning, and buy alerts — built around Solana and
-EVM chains, non-custodial throughout: every bot signs with the user's
-own wallet, never holds user private keys or funds itself.
+EVM chains. The Launch Bot is non-custodial (the user's own wallet signs). The Trade Bot is a
+custodial hot wallet with encrypted keys that users can export or withdraw at any time.
 
 ## Bots
 
@@ -39,9 +39,8 @@ directly — they can be deployed, updated, and restarted independently.
 
 ## Security
 
-- Non-custodial: every trade or launch transaction is built unsigned
-  by the backend and signed by the user's own wallet. No bot in this
-  repo holds a user's private key.
+- Launch Bot is non-custodial: launch transactions are built unsigned and signed by the
+  user's own wallet. The Trade Bot is custodial: it holds encrypted per-user trading keys.
 - `launch-bot/contracts/` holds the on-chain Solidity contracts. These
   have not yet had a professional third-party audit — treat that as
   required before opening bonding-curve launches to users beyond

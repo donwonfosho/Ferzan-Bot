@@ -421,6 +421,26 @@ def send_erc20(key_hex: str, chain: str, token: str, dest: str, raw: int | None)
 
 
 # ------------------------------------------------------------------ TON ----
+def send_trx(key_hex: str, dest: str, sun: int) -> tuple[bool | None, str]:
+    """Plain TRX transfer (1 TRX = 1,000,000 sun) from a trading wallet. Used for the fee skim."""
+    import tron_signer as ts
+
+    try:
+        owner, _k = ts.evm_key_to_tron(key_hex)
+        if ts._to_hex(dest) == ts._to_hex(owner):
+            return False, "That's this wallet's own address."
+        if int(sun) <= 0:
+            return False, "Nothing to send."
+        tx = ts._post("/wallet/createtransaction", {"owner_address": ts._to_hex(owner), "to_address": ts._to_hex(dest),
+                                                     "amount": int(sun)})
+        if not tx.get("raw_data_hex"):
+            return False, str(tx.get("Error") or tx.get("message") or "TronGrid built no transfer")[:200]
+        ok, res = ts._broadcast(tx, key_hex)
+        return bool(ok), res
+    except Exception as exc:  # never let a fee skim break the trade that already landed
+        return False, str(exc)[:200]
+
+
 def send_ton(secret: str, dest: str, nano: int | None) -> tuple[bool | None, str]:
     import ton_signer
 

@@ -250,6 +250,11 @@
   .held { background: var(--sunk); border-radius: 10px; padding: 8px 10px; margin-bottom: 10px; }
   .held .arow { display: flex; gap: 6px; margin-top: 6px; }
   .impact-hi { color: #ff5c6c; font-weight: 700; }
+  .imeter { height: 6px; border-radius: 99px; background: rgba(255,255,255,.08); overflow: hidden; margin: 6px 0 0; }
+  .imeter > i { display: block; height: 100%; width: 0; border-radius: inherit; background: #19c9c0; transition: width .35s ease, background .35s ease; }
+  .imeter.mid > i { background: #f5b942; }
+  .imeter.hi > i { background: #ff5c6c; animation: imPulse 1s ease-in-out infinite; }
+  @keyframes imPulse { 50% { opacity: .55; } }
   .upd { color: var(--muted); font-size: 11px; margin-right: 6px; }
   .star { background: none; border: 0; font-size: 20px; color: var(--link); padding: 0 6px; }
   .livestats { display: flex; gap: 14px; flex-wrap: wrap; justify-content: center; color: var(--muted); font-size: 12px; margin: -4px 0 12px; }
@@ -767,7 +772,8 @@
     const el = $("customEst");
     if (!(n > 0 && px)) { el.textContent = ""; return; }
     const v = n * px, fee = token.fee_bps ? v * token.fee_bps / 10000 : 0, im = impactPct(v);
-    el.innerHTML = `≈ $${v.toFixed(2)}${fee ? ` + $${fee.toFixed(2)} fee` : ""}${im != null ? ` · <span class="${im >= 5 ? "impact-hi" : ""}">price impact ~${im < 0.1 ? "<0.1" : im.toFixed(1)}%</span>` : ""}`;
+    el.innerHTML = `≈ $${v.toFixed(2)}${fee ? ` + $${fee.toFixed(2)} fee` : ""}${im != null ? ` · <span class="${im >= 5 ? "impact-hi" : ""}">price impact ~${im < 0.1 ? "<0.1" : im.toFixed(1)}%</span>` : ""}`
+      + (im != null ? `<div class="imeter ${im >= 10 ? "hi" : im >= 3 ? "mid" : ""}" aria-hidden="true"><i style="width:${Math.max(3, Math.min(100, im * 5))}%"></i></div>` : "");
   });
   $("tok").addEventListener("submit", (e) => {
     if (e.target.id !== "customBuy" || !token) return;
@@ -1261,7 +1267,7 @@
           <div class="dsub" style="margin-top:8px;line-height:1.6">
             Standard 0.50% · snipes and auto orders 1.00%<br>
             $5k traded in 30 days → 0.40% · $25k → 0.35% · $100k → 0.25%<br>
-            Staking 100 / 1,000 / 10,000 units → a further 0.05 / 0.10 / 0.15% off<br>
+            Hold FERZAN (once live) → 10 / 15 / 25 / 40% off your fee, by tier<br>
             Invite friends: earn a share of their fees, up to 3 levels deep
           </div></details>
         ${r.link ? `<button class="btn share" id="shareRef" data-link="${esc(r.link)}">🔗 Share my invite link</button>` : ""}

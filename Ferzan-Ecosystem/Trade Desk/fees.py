@@ -48,14 +48,17 @@ def current_bps(user_id: int | None = None) -> int:
             bps = min(bps, 35)
         elif vol >= 5_000:
             bps = min(bps, 40)
-        user = db.get_user(int(user_id)) or {}
-        stake = float(user.get("stake_units") or 0)
-        if stake >= 10_000:
-            bps = max(10, bps - 15)
-        elif stake >= 1_000:
-            bps = max(15, bps - 10)
-        elif stake >= 100:
-            bps = max(20, bps - 5)
+        # /stake is a self-declared number, so it earns NO discount unless a verified ledger feeds it.
+        # Set FEE_STAKE_LEDGER=1 only once stake_units is written from real, checked balances.
+        if (os.getenv("FEE_STAKE_LEDGER", "0").strip().lower()) in {"1", "true", "on", "yes"}:
+            user = db.get_user(int(user_id)) or {}
+            stake = float(user.get("stake_units") or 0)
+            if stake >= 10_000:
+                bps = max(10, bps - 15)
+            elif stake >= 1_000:
+                bps = max(15, bps - 10)
+            elif stake >= 100:
+                bps = max(20, bps - 5)
         import trust  # FERZAN holder tiers: percent off the fee, from the last known balance (0 until FERZAN is live)
 
         disc = trust.holder_discount_pct(int(user_id))
@@ -88,6 +91,8 @@ def fee_wallets() -> dict[str, str]:
     return {
         "sol": os.getenv("FEE_WALLET_SOL", "").strip(),
         "evm": os.getenv("FEE_WALLET_EVM", "").strip(),
+        "ton": os.getenv("FEE_WALLET_TON", "").strip(),
+        "trx": os.getenv("FEE_WALLET_TRON", "").strip(),
         "jupiter_fee_account": os.getenv("JUPITER_FEE_ACCOUNT", "").strip(),
     }
 

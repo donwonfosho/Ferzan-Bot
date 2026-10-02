@@ -2076,6 +2076,14 @@ def _sell_any(uid: int, mint: str, pct: int = 100) -> tuple[bool, str, str]:
         _fline = _skim_sell(uid, mint, cid, _sold_usd, sol_secret, evm_secret)
         if _fline:
             msg = f"{msg}\n{_fline}"
+        try:  # first profitable sell: one-time celebration (cost basis is read before it is cleared below)
+            _cost = db.live_cost(uid, mint) * pct / 100.0
+            if _cost > 0 and _sold_usd > _cost and not db.flag_on(uid, "first_profit", 0):
+                db.set_flag(uid, "first_profit", True)
+                msg = (f"{msg}\n\n🎉🟢 First green exit! +${_sold_usd - _cost:,.2f} "
+                       f"({(_sold_usd / _cost - 1) * 100:+.0f}%). You just earned the 🟢 In the green badge — see /rank.")
+        except Exception:
+            logger.exception("first-profit check failed")
         try:
             if pct >= 100:
                 db.clear_live_cost(uid, mint)
@@ -3106,9 +3114,8 @@ async def stake_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.effective_message.reply_text(
             f"Stake ledger: {held:,.2f} units\n"
             f"Token mint: `{mint or 'not set — FERZAN_TOKEN_MINT'}`\n\n"
-            "This is a rebate ledger until the Ferzan token is live.\n"
-            "/stake 1000  records units for a fee cut.\n"
-            "100 → −5 bps · 1,000 → −10 · 10,000 → −15 (floor 0.10%).",
+            "This is a self-declared note, not a verified balance, so it does not change your fee.\n"
+            "Real fee discounts come from holding FERZAN once it is live: see /rank for the tiers.",
             parse_mode="Markdown",
         )
         return
@@ -3119,7 +3126,8 @@ async def stake_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     db.set_stake_units(uid, units)
     await update.effective_message.reply_text(
-        f"Stake set to {units:,.2f}. Your next quotes use the rebate tier."
+        f"Stake note saved: {units:,.2f}. It is self-declared, so it does not change your fee. "
+        "Holder discounts are based on your real FERZAN balance (see /rank)."
     )
 
 

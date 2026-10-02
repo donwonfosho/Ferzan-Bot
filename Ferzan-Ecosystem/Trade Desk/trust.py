@@ -89,7 +89,8 @@ def security_facts() -> dict:
         "solana_mev": ("Paused for maintenance: buys use the normal fast route." if signer.anti_mev_paused()
                        else "Solana buys go private through Jito: no sandwiches, and no fee if the bundle fails."),
         "evm_mev": ("Private routing for " + ", ".join(names.get(c, f"chain {c}") for c in private) +
-                    ". Other EVM chains use the public mempool." if evm_on else "Off. EVM swaps use the public mempool."),
+                    ". Base has no public mempool (a single sequencer orders trades), so sandwiching works differently there. "
+                    "Other EVM chains use the public mempool." if evm_on else "Off. EVM swaps use the public mempool."),
         "safety": "Every buy card shows a safety line (honeypot, taxes, mint and freeze authority). Honeypots are blocked.",
         "fees": "The fee is shown before you confirm, and again in your history. No hidden spread.",
         "audit": (os.getenv("FERZAN_AUDIT_NOTE") or "No independent audit is published yet. Treat this as early software."),
