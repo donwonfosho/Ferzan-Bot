@@ -849,6 +849,43 @@ async def api_stats(request: Request) -> JSONResponse:
     return JSONResponse(st)
 
 
+def history_rows(uid: int, limit: int = 30) -> list[dict]:
+    """Recent live trades with a ticker where the market still knows the token. Buys carry no P/L; sells do."""
+    rows = db.recent_trades(uid, max(1, min(int(limit), 60)))
+    syms: dict[str, str] = {}
+    try:
+        marks = portfolio._ds_prices(sorted({r["mint"] for r in rows if r.get("mint")}))
+        syms = {k.lower(): str(v.get("symbol") or "") for k, v in marks.items()}
+    except Exception:
+        syms = {}
+    out = []
+    for r in rows:
+        cost, pnl = r.get("cost_usd"), r.get("pnl_usd")
+        pct = (float(pnl) / float(cost) * 100) if (pnl is not None and cost and float(cost) > 0) else None
+        out.append({
+            "ts": int(r["ts"]), "side": r["side"], "mint": r["mint"],
+            "symbol": syms.get(str(r["mint"]).lower(), ""), "chain": r.get("chain") or "",
+            "usd": round(float(r.get("usd") or 0), 2),
+            "pnl": None if pnl is None else round(float(pnl), 2),
+            "pnl_pct": None if pct is None else round(pct, 1),
+            "source": r.get("source") or "",
+        })
+    return out
+
+
+@app.post("/api/history")
+async def api_history(request: Request) -> JSONResponse:
+    body = await _json(request)
+    uid = _auth(body)
+    if not _rate_ok(uid, "history", 12):
+        raise HTTPException(status_code=429, detail="Too many refreshes — give it a minute.")
+    try:
+        n = int(body.get("limit") or 30)
+    except (TypeError, ValueError):
+        n = 30
+    return JSONResponse({"items": await asyncio.to_thread(history_rows, uid, n)})
+
+
 @app.post("/api/me")
 async def api_me(request: Request) -> JSONResponse:
     body = await _json(request)
