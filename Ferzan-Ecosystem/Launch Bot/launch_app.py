@@ -28,6 +28,9 @@ _rate_lock = threading.Lock()
 
 # Same defaults the chat flow offers (launch_bot.py GRAD_PRESETS / MAXBUY_PRESETS).
 GRAD_DEFAULT = {"bsc": "10", "arc": "10000", "default": "2.5"}
+GRAD_PRESETS = {"bsc": ["5", "10", "20"], "arc": ["5000", "10000", "25000"], "default": ["1", "2.5", "5"]}
+DEVBUY_PRESETS = {"solana": ["0.1", "0.5", "1", "2"], "bsc": ["0.01", "0.05", "0.1", "0.5"], "arc": ["10", "50", "100", "500"],
+                  "default": ["0.001", "0.005", "0.01", "0.05"]}
 MAXBUY_PCT = Decimal("0.02")  # Fair Launch Shield: no single buy above 2% of the graduation target
 EVM_CHAINS = ("base", "bsc", "ethereum", "robinhood", "arc")
 SOL_U64_MAX = 2**64 - 1
@@ -91,6 +94,9 @@ class AppLaunchBody(AppBody):
     grad_native: str = ""   # EVM curves; blank = chat-flow default
     dev_buy: str = "0"
     mode: str = "curve"     # "curve" or "plain" (standard fixed-supply coin)
+    allocs: str = ""        # team wallets, EVM only: "0xAddress:5" per line (percent of supply, 0.01 to 20 each)
+    max_buy: str = ""       # custom per-buy cap (overrides the Shield default)
+    start_minutes: str = "0"  # trading opens this many minutes after launch
     shield: bool = True     # Fair Launch Shield: cap any single buy
     website: str = ""
     x: str = ""
@@ -142,7 +148,7 @@ def app_me(body: AppBody):
     chains = A.chain_status()["chains"]
     return {"user": {"id": uid, "name": user.get("first_name") or ""}, "launches": out,
             "stats": {"launched": sum(1 for x in out if x["status"] == "confirmed"), "graduated": graduated, "best_mcap_usd": best},
-            "chains": chains, "native": A._NATIVE_SYM, "grad_default": GRAD_DEFAULT, "base": A.MINI_APP_BASE}
+            "chains": chains, "native": A._NATIVE_SYM, "grad_default": GRAD_DEFAULT, "grad_presets": GRAD_PRESETS, "dev_presets": DEVBUY_PRESETS, "base": A.MINI_APP_BASE}
 
 
 @router.post("/api/app/launch")
@@ -186,6 +192,23 @@ def app_launch(body: AppLaunchBody):
         decimals = 18
         whole = int(_num(body.supply_whole, "Supply", Decimal(1), Decimal(10**15)))
         total_supply = str(whole * 10**18)
+        if (body.allocs or "").strip():
+            out, total = [], 0
+            for part in re.split(r"[,;\n]+", body.allocs):
+                part = part.strip()
+                if not part:
+                    continue
+                m = re.fullmatch(r"(0x[0-9a-fA-F]{40})\s*[: ]\s*(\d+(?:\.\d+)?)\s*%?", part)
+                if not m:
+                    raise HTTPException(400, f"Couldn't read team wallet '{part[:44]}'. Use 0xAddress:5")
+                bps = int(round(float(m.group(2)) * 100))
+                if bps <= 0 or bps > 2000:
+                    raise HTTPException(400, "Each team wallet can get between 0.01% and 20%")
+                total += bps
+                out.append(f"{m.group(1)}:{bps}")
+            if total >= 10_000:
+                raise HTTPException(400, "Team wallets can't take 100% of the supply")
+            extra["allocs"] = ",".join(out)
         if plain:
             mode = "plain"
             extra.pop("dev_buy", None)
@@ -195,11 +218,19 @@ def app_launch(body: AppLaunchBody):
                         Decimal("0.001"), Decimal(1_000_000))
             extra.update(graduation_eth_threshold=str(int(grad * 10**18)), graduation_display=f"{grad.normalize():f} {A._NATIVE_SYM.get(chain, '')}",
                          virtual_eth_reserve=str(10**18), virtual_token_reserve=str(int(total_supply) * 80 // 100),
-                         start_minutes="0")
-            cap = (grad * MAXBUY_PCT).quantize(Decimal("0.0001")) if body.shield else Decimal(0)
-            extra["max_buy"] = f"{max(cap, Decimal('0.0001')).normalize():f}" if body.shield else "0"
+                         )
+            custom = _num(body.max_buy, "Max buy", Decimal("0.000001"), Decimal(1_000_000), allow_zero=True)
+            cap = custom if custom > 0 else ((grad * MAXBUY_PCT).quantize(Decimal("0.0001")) if body.shield else Decimal(0))
+            extra["max_buy"] = f"{max(cap, Decimal('0.000001')).normalize():f}" if cap > 0 else "0"
+            mins = int(_num(body.start_minutes, "Trading opens", Decimal(0), Decimal(10080 - 10), allow_zero=True))
+            if mins and dev > 0:
+                raise HTTPException(400, "A dev buy needs trading to open right away")
+            extra["start_minutes"] = str(mins)
     else:
         raise HTTPException(400, "Tron and TON launches run through your Trade Bot wallet. Continue in the chat.")
+    ref = A.db.get_referrer(uid) if hasattr(A.db, "get_referrer") else None
+    if ref:
+        extra["referrer_id"] = str(ref)
     image_url = A._site_image(body.image)
     req = A.db.create_launch_request(
         telegram_user_id=uid, chat_id=uid, chain=chain, mode=mode, name=name, symbol=symbol, total_supply=total_supply,
