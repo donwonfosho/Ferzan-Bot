@@ -66,7 +66,7 @@ def _price(v: float) -> str:
         return f"${v:,.4f}"
     if v >= 0.0001:
         return f"${v:.6f}"
-    return f"${v:.10f}".rstrip("0")
+    return f"${v:.10f}".rstrip("0") if v >= 1e-10 else "<$0.0000000001"
 
 
 def _pill(d: ImageDraw.ImageDraw, xy: tuple[int, int], text: str, fill, ink, size: int = 26) -> int:

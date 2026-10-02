@@ -2918,13 +2918,13 @@ def signal_track_add(chat_id: int, msg_id: int, token: str, chain: str, symbol: 
 
 
 def feed_min_liq_get(chat_id: int) -> float:
-    """Smallest liquidity (USD) a signal needs for this channel; falls back to FERZAN_FEED_MIN_LIQ, default 0 (no filter)."""
+    """Smallest liquidity (USD) a signal needs for this channel; falls back to FERZAN_FEED_MIN_LIQ, default $1,000 (0 turns the floor off)."""
     with get_conn() as conn:
         r = conn.execute("SELECT min_liq FROM feed_filters WHERE chat_id = ?", (int(chat_id),)).fetchone()
     if r is not None:
         return float(r[0])
     try:
-        return max(0.0, float(os.getenv("FERZAN_FEED_MIN_LIQ", "0") or 0))
+        return max(0.0, float(os.getenv("FERZAN_FEED_MIN_LIQ", "1000") or 0))
     except ValueError:
         return 0.0
 

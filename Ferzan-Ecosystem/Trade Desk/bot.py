@@ -5024,6 +5024,14 @@ def _junk_signal(ln) -> bool:
     return (ln.symbol or "").strip().upper() in _JUNK_SYMBOLS
 
 
+def _dead_or_stable(ln) -> bool:
+    """Stablecoin-like (price ~$1 with a real market cap) or already collapsed (-70% in the last hour)."""
+    px = float(getattr(ln, "price_usd", 0) or 0)
+    mc = float(getattr(ln, "fdv_usd", 0) or 0)
+    chg = float(getattr(ln, "chg_1h", 0) or 0)
+    return (0.95 <= px <= 1.05 and mc >= 1e7) or chg <= -70 or mc >= 5e9
+
+
 def _enrich_launch(ln):
     """Fill missing market data (and the real ticker for boosted profiles) from DexScreener's best pool for the
     token. Returns a copy; the original is untouched. On any failure the signal is returned unchanged."""
@@ -9024,6 +9032,8 @@ async def _launch_feed_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 ln = await asyncio.to_thread(_enrich_launch, ln)
                 if _junk_signal(ln) or float(ln.liquidity_usd or 0) <= 0 or (min_liq > 0 and float(ln.liquidity_usd or 0) < min_liq):
                     continue  # no pool data (or under this channel's floor): a card full of dashes helps nobody
+                if _dead_or_stable(ln):
+                    continue
                 sf = await asyncio.to_thread(_signal_safety, ln.chain or "", (ln.token or "").strip())
                 if sf and sf[1] == "bad" and SIGNAL_SKIP_HONEYPOT:
                     continue  # never advertise a confirmed honeypot in a signals channel
