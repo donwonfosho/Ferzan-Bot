@@ -1190,8 +1190,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if extra and extra.startswith("buy_"):
         await _send_signal(update, extra[4:], edit=False)
         if update.effective_message:
+            app_kb = None
+            app_url = _webapp_url()
+            ca = extra[4:]
+            if app_url and re.fullmatch(r"[A-Za-z0-9_-]{20,70}", ca) and update.effective_chat and update.effective_chat.type == "private":
+                sep = "&" if "?" in app_url else "?"
+                app_kb = InlineKeyboardMarkup([[InlineKeyboardButton("📱 Open in the Ferzan app", web_app=WebAppInfo(url=f"{app_url}{sep}ca={ca}"))]])
             await update.effective_message.reply_text(
-                "Buy desk. Tap 0.01 / 0.05 / $ on the card. Spends YOUR Ferzan wallet."
+                "Buy desk. Tap 0.01 / 0.05 / $ on the card. Spends YOUR Ferzan wallet.",
+                reply_markup=app_kb,
             )
         return
     first_time = not db.flag_on(update.effective_user.id, "onboarded", 0) and not db.get_user_wallet(

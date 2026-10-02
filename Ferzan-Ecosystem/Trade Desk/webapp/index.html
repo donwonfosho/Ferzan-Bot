@@ -164,6 +164,55 @@
   .skeleton { background: var(--sunk); border-radius: 8px; height: 1em; animation: pulse 1.2s ease-in-out infinite; }
   @keyframes pulse { 50% { opacity: .5; } }
   @media (prefers-reduced-motion: reduce) { .skeleton { animation: none; } }
+
+  /* ---- Ferzan brand layer: always the dark navy desk, cyan accent ---- */
+  html:root:root:root {
+    --bg: #050a1e; --card: #0b1330; --sunk: #111c40; --ink: #e8eefc; --muted: #8b9ac4;
+    --link: #38e0d0; --btn: #19c9c0; --btn-ink: #031014; --gain: #34d399; --loss: #fb7185;
+    --line: rgba(160,190,255,.12); --glow: rgba(25,201,192,.38); color-scheme: dark;
+  }
+  body { background: radial-gradient(120% 60% at 50% -10%, #0e1f4d 0%, #050a1e 55%) fixed; padding-bottom: calc(96px + env(safe-area-inset-bottom)); }
+  header { position: sticky; top: 0; z-index: 8; margin: -16px -16px 14px; padding: 12px 16px 10px;
+           background: linear-gradient(#050a1e 70%, rgba(5,10,30,0)); backdrop-filter: blur(6px); }
+  .brand { display: inline-flex; align-items: center; gap: 8px; font-weight: 800; letter-spacing: .14em; font-size: 14px; }
+  .brand .mark { width: 28px; height: 28px; border-radius: 9px; display: grid; place-items: center; font-weight: 900; font-size: 16px; letter-spacing: 0;
+                 color: #031014; background: linear-gradient(135deg, #7ff5ea, #19a7c9); box-shadow: 0 0 18px var(--glow); }
+  .brand small { color: var(--muted); font-weight: 600; letter-spacing: .08em; font-size: 11px; }
+  .head-r { display: flex; align-items: center; gap: 10px; }
+  .wallet-chip { border: 1px solid var(--line); background: var(--card); }
+  .hero { font-size: 44px; background: linear-gradient(180deg, #ffffff, #9fe9f2); -webkit-background-clip: text; background-clip: text;
+          -webkit-text-fill-color: transparent; text-shadow: none; filter: drop-shadow(0 0 14px var(--glow)); }
+  .tile, .list, .trade, .sec, .empty, .error { border: 1px solid var(--line); }
+  .tile, .trade { background: linear-gradient(180deg, rgba(255,255,255,.04), rgba(255,255,255,0)), var(--card); }
+  .tiles.perf { margin-top: -8px; }
+  .perf .v { font-size: 15px; }
+  .btn { background: linear-gradient(180deg, #2fe3d8, #12b3ae); box-shadow: 0 6px 18px -8px var(--glow); transition: transform .12s ease, filter .12s ease; }
+  .btn:active, .act:active, .chip:active, .choice:active, .tab:active { transform: scale(.96); filter: brightness(1.15); }
+  .btn.ghost { background: var(--sunk); box-shadow: none; }
+  input:focus, select:focus { outline: 2px solid var(--link); outline-offset: 1px; }
+  .act.primary { background: linear-gradient(180deg, #2fe3d8, #12b3ae); }
+  .grid3 { gap: 10px; }
+  .grid3 .btn { padding: 15px 6px; font-size: 15px; border-radius: 12px; }
+  .custom { margin-top: 10px; }
+  .custom .est { color: var(--muted); font-size: 12px; margin: 6px 2px 0; min-height: 1.2em; }
+  .share { width: 100%; margin: -6px 0 22px; padding: 12px; }
+  .pos { transition: background .15s ease; }
+  .pos:active { background: rgba(255,255,255,.04); }
+  h2 { scroll-margin-top: 64px; }
+  .tabbar { position: fixed; left: 10px; right: 10px; bottom: calc(10px + env(safe-area-inset-bottom)); z-index: 12; display: grid;
+            grid-template-columns: repeat(5, 1fr); gap: 2px; padding: 6px; border-radius: 20px; border: 1px solid var(--line);
+            background: rgba(11,19,48,.86); backdrop-filter: blur(14px); box-shadow: 0 10px 30px rgba(0,0,0,.45); }
+  .tab { border: 0; background: none; color: var(--muted); font: inherit; font-size: 10.5px; font-weight: 700; padding: 7px 0 5px;
+         border-radius: 14px; display: grid; gap: 1px; justify-items: center; transition: color .15s ease, background .15s ease; }
+  .tab b { font-size: 18px; line-height: 1; filter: grayscale(.6); transition: filter .15s ease, transform .15s ease; }
+  .tab.on { color: var(--link); background: rgba(25,201,192,.12); }
+  .tab.on b { filter: none; transform: translateY(-1px) scale(1.08); }
+  .toast { bottom: calc(86px + env(safe-area-inset-bottom)); border: 1px solid var(--line); background: #0f1a3f; color: var(--ink); box-shadow: 0 10px 30px rgba(0,0,0,.5); }
+  .sheet { border-top: 1px solid var(--line); background: #08102a; }
+  #confetti { position: fixed; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 30; }
+  @keyframes rise { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+  .rise { animation: rise .45s cubic-bezier(.2,.8,.2,1) both; }
+  @media (prefers-reduced-motion: reduce) { .rise { animation: none; } .btn, .tab, .tab b { transition: none; } }
 </style>
 </head>
 <body>
@@ -175,8 +224,11 @@
   <label class="remember"><input type="checkbox" id="rememberApp"> Always open the app</label>
 </div>
 <header>
-  <button class="wallet-chip" id="walletChip" aria-label="Active wallet">👛 <span id="walletName">…</span></button>
-  <button class="refresh" id="refresh">↻ Refresh</button>
+  <span class="brand"><span class="mark" aria-hidden="true">F</span>FERZAN <small>DESK</small></span>
+  <span class="head-r">
+    <button class="wallet-chip" id="walletChip" aria-label="Active wallet">👛 <span id="walletName">…</span></button>
+    <button class="refresh" id="refresh" aria-label="Refresh">↻</button>
+  </span>
 </header>
 
 <p class="hero-label">Desk value</p>
@@ -189,8 +241,15 @@
   <div class="tile"><div class="k">📊 Positions</div><div class="v num" id="npos">–</div><div class="s">open bags</div></div>
 </div>
 
-<h2>Trade</h2>
-<div class="trade">
+<div class="tiles perf rise" id="perf" hidden>
+  <div class="tile"><div class="k">🏆 Best</div><div class="v num" id="bestV">–</div><div class="s num" id="bestS"></div></div>
+  <div class="tile"><div class="k">📉 Worst</div><div class="v num" id="worstV">–</div><div class="s num" id="worstS"></div></div>
+  <div class="tile"><div class="k">✅ Win rate</div><div class="v num" id="winV">–</div><div class="s num" id="winS"></div></div>
+</div>
+<button class="btn share" id="shareBest" hidden>📸 Share my best trade</button>
+
+<h2 id="sec-trade">Trade</h2>
+<div class="trade rise">
   <form class="row" id="findForm" autocomplete="off">
     <input id="ca" placeholder="Paste a token address" aria-label="Token address" spellcheck="false">
     <button class="btn" id="findBtn" type="submit">Find</button>
@@ -198,13 +257,13 @@
   <div class="tok" id="tok" hidden></div>
 </div>
 
-<h2>Positions</h2>
+<h2 id="sec-pos">Positions</h2>
 <div id="positions" class="list" role="list"></div>
 
-<h2 style="margin-top:24px">Alerts</h2>
+<h2 id="sec-alerts" style="margin-top:24px">Alerts</h2>
 <div id="alerts" class="list"><div class="empty">Loading…</div></div>
 
-<h2 style="margin-top:24px">Tracked wallets · copy</h2>
+<h2 id="sec-copy" style="margin-top:24px">Tracked wallets · copy</h2>
 <div class="trade" id="tracker">
   <div class="master"><span id="copyLiveTxt">Live copy-mirror</span><button class="chip" id="copyLive">…</button></div>
   <div id="twallets" class="list"></div>
@@ -216,7 +275,7 @@
   </form>
 </div>
 
-<div class="wallets">
+<div class="wallets" id="sec-wallets">
   <h2>Wallets</h2>
   <div id="wallets" class="list"></div>
 </div>
@@ -231,6 +290,14 @@
   <div id="sheetBody"></div>
 </div>
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
+<nav class="tabbar" id="tabbar" aria-label="Sections">
+  <button class="tab on" data-go="sec-trade"><b>⚡</b>Trade</button>
+  <button class="tab" data-go="sec-pos"><b>💼</b>Bags</button>
+  <button class="tab" data-go="sec-alerts"><b>🔔</b>Alerts</button>
+  <button class="tab" data-go="sec-copy"><b>👯</b>Copy</button>
+  <button class="tab" data-go="sec-wallets"><b>👛</b>Wallets</button>
+</nav>
+<canvas id="confetti" aria-hidden="true"></canvas>
 
 <script>
 (() => {
@@ -238,10 +305,51 @@
   const $ = (id) => document.getElementById(id);
   let data = null, bot = "";
 
+  const reduceMotion = window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const buzz = (kind) => { try { tg && tg.HapticFeedback && tg.HapticFeedback.impactOccurred(kind || "light"); } catch (e) { /* no haptics */ } };
+  document.documentElement.dataset.theme = "dark";  // the Ferzan desk is always the dark navy theme
   if (tg) {
     tg.ready(); tg.expand();
-    document.documentElement.dataset.theme = tg.colorScheme === "dark" ? "dark" : "light";
-    tg.onEvent("themeChanged", () => { document.documentElement.dataset.theme = tg.colorScheme; });
+    try { tg.setHeaderColor("#050a1e"); tg.setBackgroundColor("#050a1e"); if (tg.setBottomBarColor) tg.setBottomBarColor("#050a1e"); } catch (e) { /* older clients */ }
+  }
+  // A light tap on every button, so the whole desk feels responsive.
+  document.addEventListener("click", (e) => { if (e.target.closest("button, .act, .chip, .tab")) buzz("light"); }, true);
+
+  // Numbers count up to their new value instead of jumping.
+  function countUsd(el, to) {
+    if (typeof to !== "number" || !isFinite(to)) { el.textContent = usd(to); return; }
+    const from = typeof el._v === "number" ? el._v : 0;
+    el._v = to;
+    if (reduceMotion || from === to) { el.textContent = usd(to); return; }
+    const t0 = performance.now(), ms = 650;
+    const step = (t) => {
+      const k = Math.min(1, (t - t0) / ms), eased = 1 - Math.pow(1 - k, 3);
+      el.textContent = usd(from + (to - from) * eased);
+      if (k < 1) requestAnimationFrame(step); else el.textContent = usd(to);
+    };
+    requestAnimationFrame(step);
+  }
+  // A short burst when a trade lands.
+  function confetti() {
+    if (reduceMotion) return;
+    const c = $("confetti"), x = c.getContext("2d");
+    c.width = innerWidth * devicePixelRatio; c.height = innerHeight * devicePixelRatio;
+    const cols = ["#2fe3d8", "#7ff5ea", "#ffffff", "#19a7c9", "#34d399"];
+    const ps = Array.from({ length: 70 }, () => ({
+      x: c.width / 2, y: c.height * 0.62, vx: (Math.random() - 0.5) * 16 * devicePixelRatio, vy: (-Math.random() * 14 - 6) * devicePixelRatio,
+      s: (3 + Math.random() * 5) * devicePixelRatio, r: Math.random() * 6, c: cols[(Math.random() * cols.length) | 0] }));
+    const t0 = performance.now();
+    (function frame(t) {
+      const k = (t - t0) / 1100;
+      x.clearRect(0, 0, c.width, c.height);
+      if (k >= 1) return;
+      for (const p of ps) {
+        p.vy += 0.5 * devicePixelRatio; p.x += p.vx; p.y += p.vy; p.r += 0.2;
+        x.globalAlpha = 1 - k; x.fillStyle = p.c;
+        x.save(); x.translate(p.x, p.y); x.rotate(p.r); x.fillRect(-p.s / 2, -p.s / 3, p.s, p.s / 1.6); x.restore();
+      }
+      requestAnimationFrame(frame);
+    })(t0);
   }
 
   const usd = (v) => v == null ? "—" : (Math.abs(v) >= 1000
@@ -270,13 +378,14 @@
     data = d; bot = d.bot || "";
     const active = (d.wallets || []).find((w) => w.active);
     $("walletName").textContent = active ? active.label : "Wallet";
-    $("total").textContent = usd(d.total_usd);
+    countUsd($("total"), d.total_usd);
     $("pnl").innerHTML = d.pnl_usd == null ? "" : delta(d.pnl_usd, null) + ` <span class="flat">on tracked buys</span>`;
     $("sol").textContent = d.balances.sol.toFixed(4);
     $("solUsd").textContent = d.balances.sol_usd == null ? "" : usd(d.balances.sol_usd);
     $("eth").textContent = d.balances.eth_base.toFixed(5);
     $("ethUsd").textContent = d.balances.eth_usd == null ? "" : usd(d.balances.eth_usd);
     $("npos").textContent = String(d.positions.length);
+    paintPerf(d.positions);
 
     const box = $("positions");
     if (!d.positions.length) {
@@ -284,8 +393,9 @@
       box.innerHTML = "No open bags yet.<br>Paste a token address in the bot to make your first buy.";
     } else {
       box.className = "list";
+      const anim = !render._done;
       box.innerHTML = d.positions.map((p, i) => `
-        <button class="pos" role="listitem" data-i="${i}" aria-expanded="false">
+        <button class="pos${anim ? " rise" : ""}" ${anim ? `style="animation-delay:${Math.min(i, 8) * 45}ms"` : ""} role="listitem" data-i="${i}" aria-expanded="false">
           <div><span class="sym">$${esc(p.symbol)}</span><span class="chain">${esc(p.chain)}</span></div>
           <div class="val num">${p.priced ? usd(p.value) : "unpriced"}</div>
           <div class="sub num">${amt(p.amount)} · ${chg(p.chg24)}</div>
@@ -308,7 +418,30 @@
         <span>${w.active ? "✅" : "▫️"} ${esc(w.label)}${!w.active && ws.length > 1 ? '<span class="hint">Switch</span>' : ""}</span>
         <code>${esc(w.sol.slice(0, 4))}…${esc(w.sol.slice(-4))}</code></button>`).join("");
     $("foot").textContent = `Updated ${new Date(d.ts * 1000).toLocaleTimeString()} · trades run through the bot`;
+    render._done = true;
   }
+
+  // Best / worst bag and win rate, worked out from the open positions.
+  let bestPos = null;
+  function paintPerf(ps) {
+    const rated = (ps || []).filter((p) => typeof p.pnl_pct === "number");
+    $("perf").hidden = !rated.length;
+    bestPos = null;
+    $("shareBest").hidden = true;
+    if (!rated.length) return;
+    const sorted = [...rated].sort((a, b) => b.pnl_pct - a.pnl_pct);
+    const best = sorted[0], worst = sorted[sorted.length - 1];
+    const fmt = (p) => `${p.pnl_pct > 0 ? "+" : ""}${p.pnl_pct.toFixed(1)}%`;
+    $("bestV").innerHTML = `<span class="${best.pnl_pct >= 0 ? "up" : "down"}">${fmt(best)}</span>`;
+    $("bestS").textContent = "$" + best.symbol;
+    $("worstV").innerHTML = `<span class="${worst.pnl_pct >= 0 ? "up" : "down"}">${fmt(worst)}</span>`;
+    $("worstS").textContent = "$" + worst.symbol;
+    const wins = rated.filter((p) => p.pnl_pct > 0).length;
+    $("winV").textContent = Math.round(wins * 100 / rated.length) + "%";
+    $("winS").textContent = `${wins} of ${rated.length} bags`;
+    if (best.pnl_pct > 0) { bestPos = best; $("shareBest").hidden = false; }
+  }
+  $("shareBest").addEventListener("click", () => { if (bestPos) sendCard(bestPos.mint); });
 
   $("positions").addEventListener("click", (e) => {
     const sp = e.target.closest("[data-sellpct]");
@@ -389,6 +522,7 @@
         if (["done", "failed", "expired"].includes(st.status)) {
           const ok = st.status === "done";
           tg && tg.HapticFeedback && tg.HapticFeedback.notificationOccurred(ok ? "success" : "error");
+          if (ok) confetti();
           // Stays up until tapped, so a result that lands while you look away isn't missed.
           toast((st.result || (ok ? "✅ Done" : "🔴 Failed")) + "\n\nTap to close", 0);
           load(true);
@@ -419,6 +553,11 @@
         ${t.safety ? `<div class="safety">${esc(t.safety)}</div>` : ""}
         <div class="grid3">${(t.presets || []).map((v) =>
           `<button class="btn" data-buy="${v}">Buy ${v} ${esc(t.unit)}</button>`).join("")}</div>
+        <form class="custom" id="customBuy" autocomplete="off">
+          <div class="row"><input id="customAmt" inputmode="decimal" placeholder="Custom amount in ${esc(t.unit)}" aria-label="Custom buy amount">
+            <button class="btn" type="submit">Buy</button></div>
+          <div class="est num" id="customEst"></div>
+        </form>
         ${(data && data.multi >= 2) ? `<label class="remember" style="justify-content:flex-start;margin:8px 0 0"><input type="checkbox" id="multiBuy" checked> 👥 Buy in all ${data.multi} multi-buy wallets</label>` : ""}
         <form class="row" id="alertForm" style="margin-top:8px" autocomplete="off">
           <input id="alertTarget" placeholder="🔔 Alert at 2m, +50%, price 0.0012" aria-label="Alert target">
@@ -432,8 +571,15 @@
   });
   $("tok").addEventListener("click", (e) => {
     const b = e.target.closest("[data-buy]");
-    if (b && token) {
-      const n = +b.dataset.buy, px = token.native_usd || 0, cap = token.max_usd || 0;
+    if (b && token) { buyNative(+b.dataset.buy); return; }
+    const ru = e.target.closest("[data-rules]");
+    if (ru) { openRules(ru.dataset.rules, ru.dataset.sym, +ru.dataset.px); return; }
+    const c = e.target.closest("[data-chart]");
+    if (c) { e.preventDefault(); openLink(c.dataset.chart); }
+  });
+  function buyNative(n) {
+    {
+      const px = token.native_usd || 0, cap = token.max_usd || 0;
       const mb = $("multiBuy"), wallets = mb && mb.checked ? (data.multi || 1) : 1;
       let q = `Buy ${n} ${token.unit} of $${token.symbol}`;
       if (px) {
@@ -447,12 +593,20 @@
         }
       } else if (wallets > 1) q += ` in each of ${wallets} wallets`;
       order({ side: "buy", mint: token.mint, chain: token.chain, amount: n, unit: "native", multi: wallets > 1 }, q + "?");
-      return;
     }
-    const ru = e.target.closest("[data-rules]");
-    if (ru) { openRules(ru.dataset.rules, ru.dataset.sym, +ru.dataset.px); return; }
-    const c = e.target.closest("[data-chart]");
-    if (c) { e.preventDefault(); openLink(c.dataset.chart); }
+  }
+  $("tok").addEventListener("input", (e) => {
+    if (e.target.id !== "customAmt" || !token) return;
+    const n = parseFloat(String(e.target.value).replace(",", "."));
+    const px = token.native_usd || 0;
+    $("customEst").textContent = n > 0 && px ? `≈ $${(n * px).toFixed(2)}` : "";
+  });
+  $("tok").addEventListener("submit", (e) => {
+    if (e.target.id !== "customBuy" || !token) return;
+    e.preventDefault();
+    const n = parseFloat(String($("customAmt").value).replace(",", "."));
+    if (!(n > 0) || !isFinite(n)) { toast("Enter an amount greater than 0.", 2500); return; }
+    buyNative(n);
   });
 
   // ---- wallets: tap one to make it the active wallet --------------------
@@ -620,7 +774,7 @@
       $("positions").textContent = err.message || "Couldn't load your desk.";
       $("total").textContent = data ? usd(data.total_usd) : "—";
     } finally {
-      inflight = false; $("refresh").textContent = "↻ Refresh";
+      inflight = false; $("refresh").textContent = "↻";
     }
   }
   $("refresh").addEventListener("click", () => load(true));
@@ -735,6 +889,30 @@
       const b = bot || menuBot;
       if (b) { bot = b; openBot("home"); } else if (tg) { tg.close(); }
     });
+  }
+  // ---- bottom tab bar: jump to a section, highlight the one in view -------
+  const tabs = [...document.querySelectorAll(".tab")];
+  tabs.forEach((t) => t.addEventListener("click", () => {
+    const el = $(t.dataset.go);
+    if (el) el.scrollIntoView({ behavior: reduceMotion ? "auto" : "smooth", block: "start" });
+  }));
+  const secs = tabs.map((t) => $(t.dataset.go));
+  let tick = false;
+  const syncTabs = () => {
+    tick = false;
+    let cur = secs[0];
+    secs.forEach((el) => { if (el && el.getBoundingClientRect().top <= 150) cur = el; });
+    if (innerHeight + scrollY >= document.body.scrollHeight - 4) cur = secs[secs.length - 1];
+    tabs.forEach((t) => t.classList.toggle("on", !!cur && t.dataset.go === cur.id));
+  };
+  addEventListener("scroll", () => { if (!tick) { tick = true; requestAnimationFrame(syncTabs); } }, { passive: true });
+  syncTabs();
+
+  // A link from a buy alert opens the app with the token already looked up.
+  const preCa = (qs.get("ca") || "").trim();
+  if (/^(0x[0-9a-fA-F]{40}|[1-9A-HJ-NP-Za-km-z]{32,44}|T[1-9A-HJ-NP-Za-km-z]{33}|[A-Za-z0-9_-]{48})$/.test(preCa)) {
+    $("ca").value = preCa;
+    setTimeout(() => { $("sec-trade").scrollIntoView(); $("findForm").requestSubmit ? $("findForm").requestSubmit() : $("findBtn").click(); }, 350);
   }
   load(false);
   loadWatch();
