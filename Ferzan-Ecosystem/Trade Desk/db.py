@@ -182,6 +182,19 @@ def init_db() -> None:
                 PRIMARY KEY(user_id, mint)
             );
 
+            CREATE TABLE IF NOT EXISTS signal_tracks (
+                chat_id INTEGER NOT NULL,
+                msg_id INTEGER NOT NULL,
+                token TEXT NOT NULL,
+                chain TEXT NOT NULL DEFAULT '',
+                symbol TEXT NOT NULL DEFAULT '',
+                posted_at INTEGER NOT NULL DEFAULT 0,
+                base_price REAL NOT NULL DEFAULT 0,
+                last_mult INTEGER NOT NULL DEFAULT 0,
+                done INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY(chat_id, msg_id)
+            );
+
             CREATE TABLE IF NOT EXISTS dev_alerts (
                 user_id INTEGER NOT NULL,
                 mint TEXT NOT NULL,
@@ -2886,6 +2899,50 @@ def dev_alert_set(user_id: int, mint: str, level: int) -> None:
             "ON CONFLICT(user_id, mint) DO UPDATE SET level = excluded.level, at = excluded.at",
             (int(user_id), mint, int(level), int(time.time())),
         )
+        conn.commit()
+
+
+def signal_track_add(chat_id: int, msg_id: int, token: str, chain: str, symbol: str) -> None:
+    """Remember a signal post so the follow-up job can reply when the coin hits 2x, 5x, 10x..."""
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO signal_tracks (chat_id, msg_id, token, chain, symbol, posted_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (int(chat_id), int(msg_id), token, chain, symbol[:24], int(time.time())),
+        )
+        conn.commit()
+
+
+def signal_track_open(max_age_s: int = 172800) -> list[dict]:
+    """Posts still being tracked. Also closes (and prunes) the ones that aged out."""
+    now = int(time.time())
+    with get_conn() as conn:
+        conn.execute("UPDATE signal_tracks SET done = 1 WHERE done = 0 AND posted_at < ?", (now - int(max_age_s),))
+        conn.execute("DELETE FROM signal_tracks WHERE posted_at < ?", (now - 7 * 86400,))
+        rows = conn.execute(
+            "SELECT chat_id, msg_id, token, chain, symbol, posted_at, base_price, last_mult FROM signal_tracks "
+            "WHERE done = 0 ORDER BY posted_at DESC LIMIT 400"
+        ).fetchall()
+        conn.commit()
+    keys = ("chat_id", "msg_id", "token", "chain", "symbol", "posted_at", "base_price", "last_mult")
+    return [dict(zip(keys, r)) for r in rows]
+
+
+def signal_track_set(chat_id: int, msg_id: int, base_price: float | None = None,
+                     last_mult: int | None = None, done: bool | None = None) -> None:
+    sets, args = [], []
+    if base_price is not None:
+        sets.append("base_price = ?")
+        args.append(float(base_price))
+    if last_mult is not None:
+        sets.append("last_mult = ?")
+        args.append(int(last_mult))
+    if done is not None:
+        sets.append("done = ?")
+        args.append(1 if done else 0)
+    if not sets:
+        return
+    with get_conn() as conn:
+        conn.execute(f"UPDATE signal_tracks SET {', '.join(sets)} WHERE chat_id = ? AND msg_id = ?", (*args, int(chat_id), int(msg_id)))
         conn.commit()
 
 

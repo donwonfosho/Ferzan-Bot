@@ -4816,9 +4816,9 @@ def _feed_muted(chat_id: int) -> bool:
     return fails >= FEED_MUTE_AFTER and (time.time() - last) < FEED_RETRY_MUTED_S
 
 
-async def send_launch(bot, chat_id: int, text: str, markup, promo: bool = True) -> None:
+async def send_launch(bot, chat_id: int, text: str, markup, promo: bool = True, photo: bytes | None = None):
     try:
-        await _send_launch(bot, chat_id, text, markup, promo)
+        return await _send_launch(bot, chat_id, text, markup, promo, photo)
     except Exception as exc:
         new_id = getattr(exc, "new_chat_id", None)
         if new_id:  # telegram.error.ChatMigrated
@@ -4830,6 +4830,55 @@ async def send_launch(bot, chat_id: int, text: str, markup, promo: bool = True) 
 
 
 TG_TEXT_MAX = 4096
+SIGNAL_IMAGES = os.getenv("FERZAN_SIGNAL_IMAGES", "1").strip().lower() not in {"0", "false", "no", "off"}
+_MILESTONES = (2, 3, 5, 10, 25, 50, 100)
+
+
+def _signal_png(ln) -> bytes | None:
+    """The branded image for a signal, or None (disabled, missing Pillow, any render problem)."""
+    if not SIGNAL_IMAGES:
+        return None
+    try:
+        import signal_card
+
+        cid = resolve_chain(ln.chain or "") or (ln.chain or "")
+        chg = float(getattr(ln, "chg_1h", 0) or 0)
+        age_m = _age_minutes(getattr(ln, "created_at", "") or "")
+        tags = []
+        if age_m is not None and age_m <= 15:
+            tags.append("NEW")
+        if getattr(ln, "source", "") == "dexscreener-boost" or chg >= 50:
+            tags.append("HOT")
+        return signal_card.render(
+            symbol=_clip_plain(ln.symbol or "?", 20),
+            chain=(CHAINS.get(cid, {}).get("label") or cid or "?"),
+            mc=float(getattr(ln, "fdv_usd", 0) or 0),
+            liq=float(ln.liquidity_usd or 0),
+            price=float(getattr(ln, "price_usd", 0) or 0),
+            chg_1h=chg,
+            age=_pair_age(getattr(ln, "created_at", "") or ""),
+            ca=(ln.token or ln.query or "").strip(),
+            tags=tuple(tags),
+        )
+    except Exception:
+        logger.exception("signal image render failed")
+        return None
+
+
+async def post_signal(bot, chat_id: int, ln, promo: bool = False):
+    """One signal into a channel: branded image with a short caption when possible, else the text card.
+    Returns the message id so the follow-up job can reply to it later."""
+    png = await asyncio.to_thread(_signal_png, ln)
+    text, markup = await asyncio.to_thread(launch_card, ln, bool(png))
+    mid = await send_launch(bot, chat_id, text, markup, promo=promo, photo=png)
+    if mid and (ln.token or "").strip():
+        try:
+            db.signal_track_add(int(chat_id), int(mid), (ln.token or "").strip(), str(ln.chain or ""), str(ln.symbol or ""))
+        except Exception:
+            logger.exception("signal track add failed")
+    return mid
+
+
 TG_CAPTION_MAX = 1024
 
 
@@ -4853,8 +4902,20 @@ def _fit_html(text: str, limit: int = TG_TEXT_MAX - 96) -> str:
     return "\n".join(out) + "\n…"
 
 
-async def _send_launch(bot, chat_id: int, text: str, markup, promo: bool = True) -> None:
+async def _send_launch(bot, chat_id: int, text: str, markup, promo: bool = True, photo: bytes | None = None):
+    """Returns the sent message's id (or None). photo = PNG bytes for an image post; any image failure that is not a
+    dead-chat error falls back to the plain text card."""
     text = _fit_html(text)
+    if photo and len(text) <= TG_CAPTION_MAX:
+        try:
+            import io as _io
+
+            m = await bot.send_photo(chat_id, photo=_io.BytesIO(photo), caption=text, parse_mode="HTML", reply_markup=markup)
+            return getattr(m, "message_id", None)
+        except Exception as exc:
+            if _is_dead_chat_error(exc) or getattr(exc, "new_chat_id", None):
+                raise
+            logger.warning("signal image post failed for %s, sending text: %s", chat_id, str(exc)[:120])
     clip = PROMO_PATH if promo and PROMO_PATH.exists() else None
     want_gif = (
         bool(clip)
@@ -4865,7 +4926,7 @@ async def _send_launch(bot, chat_id: int, text: str, markup, promo: bool = True)
     try:
         if want_gif:
             with clip.open("rb") as gif:
-                await bot.send_animation(
+                _m = await bot.send_animation(
                     chat_id,
                     animation=gif,
                     caption=text,
@@ -4873,14 +4934,15 @@ async def _send_launch(bot, chat_id: int, text: str, markup, promo: bool = True)
                     reply_markup=markup,
                 )
             _PROMO_TS[int(chat_id)] = time.time()
-            return
-        await bot.send_message(
+            return getattr(_m, "message_id", None)
+        _m = await bot.send_message(
             chat_id,
             text,
             parse_mode="HTML",
             reply_markup=markup,
             disable_web_page_preview=True,
         )
+        return getattr(_m, "message_id", None)
     except Exception as exc:
         if _is_dead_chat_error(exc) or getattr(exc, "new_chat_id", None):
             # Let the caller count it / migrate the chat instead of logging a
@@ -4892,21 +4954,22 @@ async def _send_launch(bot, chat_id: int, text: str, markup, promo: bool = True)
             await asyncio.sleep(min(wait, 20))
         if name in {"RetryAfter", "TimedOut", "NetworkError", "TelegramError"} or wait:
             try:
-                await bot.send_message(
+                _m = await bot.send_message(
                     chat_id,
                     text,
                     parse_mode="HTML",
                     reply_markup=markup,
                     disable_web_page_preview=True,
                 )
-                return
+                return getattr(_m, "message_id", None)
             except Exception:
                 logger.exception("signal send retry failed for %s", chat_id)
-                return
+                return None
         logger.exception("signal send failed for %s", chat_id)
 
 
-def launch_card(ln) -> tuple[str, InlineKeyboardMarkup]:
+def launch_card(ln, compact: bool = False) -> tuple[str, InlineKeyboardMarkup]:
+    """compact=True is the caption under a signal image: the image already shows MC, liquidity, price, 1h and age."""
     ca = (ln.token or ln.query or "").strip()[:64]
     # Token symbols come straight from chain metadata; EVM tokens can set any
     # length (spam tokens use thousands of chars). Never let them size the card.
@@ -4957,18 +5020,19 @@ def launch_card(ln) -> tuple[str, InlineKeyboardMarkup]:
         tags.append("🔥 HOT")
     tag_txt = ("   " + "  ".join(tags)) if tags else ""
     lines = [f"{mark} <b>${name}</b>  ·  {chain}{tag_txt}", "━━━━━━━━━━━━━━"]
-    lines.append(
-        f"🧢 <b>{_esc(_fmt_mc(mc) if mc else '—')}</b> MC     💧 <b>{_esc(_fmt_mc(liq) if liq else '—')}</b> Liq"
-    )
-    px_line = f"💵 {_esc(_fmt_px(px))}" if px else ""
-    if abs(chg) >= 1:
-        n = min(5, int(abs(chg) // 20) + 1)
-        sq = ("🟩" if chg > 0 else "🟥") * n + "⬜" * (5 - n)
-        px_line = (px_line + "   " if px_line else "") + f"{'▲' if chg > 0 else '▼'} {chg:+.1f}% 1h {sq}"
-    if px_line:
-        lines.append(px_line)
-    if age_m is not None:
-        lines.append(f"⏱ {_esc(_pair_age(getattr(ln, 'created_at', '') or ''))}")
+    if not compact:
+        lines.append(
+            f"🧢 <b>{_esc(_fmt_mc(mc) if mc else '—')}</b> MC     💧 <b>{_esc(_fmt_mc(liq) if liq else '—')}</b> Liq"
+        )
+        px_line = f"💵 {_esc(_fmt_px(px))}" if px else ""
+        if abs(chg) >= 1:
+            n = min(5, int(abs(chg) // 20) + 1)
+            sq = ("🟩" if chg > 0 else "🟥") * n + "⬜" * (5 - n)
+            px_line = (px_line + "   " if px_line else "") + f"{'▲' if chg > 0 else '▼'} {chg:+.1f}% 1h {sq}"
+        if px_line:
+            lines.append(px_line)
+        if age_m is not None:
+            lines.append(f"⏱ {_esc(_pair_age(getattr(ln, 'created_at', '') or ''))}")
     if getattr(ln, "pulse_chg", None) is not None:
         lines.append(
             f"{'▲' if float(ln.pulse_chg) >= 0 else '▼'} {float(ln.pulse_chg):+.2f}% since last pulse"
@@ -4980,7 +5044,8 @@ def launch_card(ln) -> tuple[str, InlineKeyboardMarkup]:
         lines.append("⚠️ <i>No liquidity indexed yet. Wait for a pool before buying.</i>")
     elif liq < 5000:
         lines.append("⚠️ <i>Thin liquidity: even small buys can move the price a lot.</i>")
-    lines.append("")
+    if not compact or len(lines) > 2:
+        lines.append("")
     lines.append(f"<code>{html.escape(ca)}</code>")
     lines.append("<i>Tap the address to copy</i>")
     text = "\n".join(lines)
@@ -8749,9 +8814,8 @@ async def _launch_feed_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             key = f"ch:{chat_id}:{ln.chain}:{(ln.token or '')[:20]}"
             if not db.should_resend_signal(int(chat_id), key, 1, cooldown_s=4 * 60):
                 continue
-            text, markup = await asyncio.to_thread(launch_card, ln)
             try:
-                await send_launch(context.bot, chat_id, text, markup, promo=False)
+                await post_signal(context.bot, chat_id, ln)
                 sent += 1
             except ChatMoved as moved:
                 await _feed_chat_moved(context.bot, int(chat_id), moved.new_chat_id)
@@ -8846,6 +8910,66 @@ NATIVE_CA = {
     "hood": "0x4200000000000000000000000000000000000006",
     "ink": "0x4200000000000000000000000000000000000006",
 }
+
+
+async def signal_followup_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Every 5 min: when a coin we signalled has multiplied (2x, 3x, 5x, 10x...), reply under the original post.
+    The base price is the first DexScreener reading after the post, so both numbers come from the same source."""
+    import portfolio
+
+    rows = await asyncio.to_thread(db.signal_track_open)
+    if not rows:
+        return
+    tokens = sorted({r["token"] for r in rows})
+    try:
+        prices = await asyncio.to_thread(portfolio._ds_prices, tokens)
+    except Exception:
+        logger.exception("signal followup: price fetch failed")
+        return
+    lowered = {k.lower(): v for k, v in prices.items()}
+    bot_user = (os.getenv("FERZAN_BOT_USERNAME") or "").lstrip("@")
+    sent_per_chat: dict[int, int] = {}
+    for r in rows:
+        info = prices.get(r["token"]) or lowered.get(r["token"].lower())
+        if not info:
+            continue
+        px, liq = float(info.get("price") or 0), float(info.get("liq") or 0)
+        if px <= 0:
+            continue
+        chat_id, msg_id = int(r["chat_id"]), int(r["msg_id"])
+        base = float(r["base_price"] or 0)
+        if base <= 0:
+            if liq >= 500:
+                db.signal_track_set(chat_id, msg_id, base_price=px)
+            continue
+        mult = px / base
+        if liq < 1000 or mult > 1000:  # thin or glitchy readings never count as a win
+            continue
+        hit = max([m for m in _MILESTONES if m <= mult and m > int(r["last_mult"] or 0)], default=0)
+        if not hit or sent_per_chat.get(chat_id, 0) >= 3:
+            continue
+        sym = html.escape(_clip_plain(str(info.get("symbol") or r["symbol"] or "?").upper(), 20))
+        text = (
+            f"🚀 <b>${sym}</b> is up <b>{mult:.1f}x</b> since this signal\n"
+            f"💵 {_esc(_fmt_px(px))}   💧 {_esc(_fmt_mc(liq))} Liq\n"
+            "<i>Past moves are not a promise. Do your own research.</i>"
+        )
+        kb = None
+        if bot_user:
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("⚡ Buy", url=f"https://t.me/{bot_user}?start=buy_{r['token'][:48]}")]])
+        try:
+            await context.bot.send_message(
+                chat_id, text, parse_mode="HTML", reply_markup=kb, reply_to_message_id=msg_id,
+                allow_sending_without_reply=True, disable_web_page_preview=True,
+            )
+            db.signal_track_set(chat_id, msg_id, last_mult=hit)
+            sent_per_chat[chat_id] = sent_per_chat.get(chat_id, 0) + 1
+            await asyncio.sleep(0.6)
+        except Exception as exc:
+            if _is_dead_chat_error(exc):
+                db.signal_track_set(chat_id, msg_id, done=True)
+            else:
+                logger.warning("signal followup send failed for %s: %s", chat_id, str(exc)[:120])
 
 
 async def native_pulse_job(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -9081,6 +9205,7 @@ def main() -> None:
         jq.run_repeating(snipe_job, interval=SNIPE_POLL_SECONDS, first=18)
         jq.run_repeating(live_exit_job, interval=45, first=50)
         jq.run_repeating(ops_watch_job, interval=300, first=20)
+        jq.run_repeating(signal_followup_job, interval=300, first=120)
         jq.run_daily(digest_job, time=dt.time(hour=13, minute=0, tzinfo=dt.timezone.utc))
         jq.run_repeating(auto_exit_job, interval=20, first=30)
         jq.run_repeating(lp_watch_job, interval=40, first=70)
