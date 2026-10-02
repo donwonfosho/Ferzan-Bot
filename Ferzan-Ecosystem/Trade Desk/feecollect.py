@@ -96,18 +96,18 @@ def skim_buy(
                 return False, ""
             ok, _res = withdraw.send_evm_native(evm_secret, evm_chain, dest, int(fee_usd / px * 1e18))
         elif family == "ton":
-            # Off unless FEE_COLLECT_TON=1 and FEE_WALLET_TON is set (buys only; sells stay uncollected).
+            # Off unless FEE_COLLECT_TON=1 and FEE_WALLET_TON is set (sells too, with FEE_COLLECT_SELLS=1).
             dest = fees.fee_wallets()["ton"]
-            if side != "buy" or not _flag("FEE_COLLECT_TON") or not dest or not sol_secret:
+            if not _flag("FEE_COLLECT_TON") or not dest or not sol_secret:
                 return False, ""
             px = _native_usd("the-open-network")
             if px <= 0:
                 return False, ""
             ok, _res = withdraw.send_ton(sol_secret, dest, int(fee_usd / px * 1e9))
         elif family == "trx":
-            # Off unless FEE_COLLECT_TRON=1 and FEE_WALLET_TRON is set (buys only; sells stay uncollected).
+            # Off unless FEE_COLLECT_TRON=1 and FEE_WALLET_TRON is set (sells too, with FEE_COLLECT_SELLS=1).
             dest = fees.fee_wallets()["trx"]
-            if side != "buy" or not _flag("FEE_COLLECT_TRON") or not dest or not evm_secret:
+            if not _flag("FEE_COLLECT_TRON") or not dest or not evm_secret:
                 return False, ""
             px = _native_usd("tron")
             if px <= 0:

@@ -56,3 +56,20 @@ def test_ton_and_tron_fee_skim_is_off_by_default_and_works_when_on(monkeypatch):
     assert feecollect.skim_buy(901, 100, "trx", evm_secret="k")[0] is True
     assert sent["ton"] == ("EQdest", 500_000_000)   # $1 fee at $2/TON = 0.5 TON
     assert sent["trx"] == ("Tdest", 500_000)        # 0.5 TRX
+
+
+def test_ton_tron_sell_fee_needs_sell_switch(monkeypatch):
+    import feecollect
+    import withdraw
+
+    monkeypatch.setenv("FEE_COLLECT_LIVE", "1")
+    monkeypatch.setenv("FEE_COLLECT_TON", "1")
+    monkeypatch.setenv("FEE_WALLET_TON", "EQdest")
+    monkeypatch.setenv("FEE_COLLECT_SELLS", "0")
+    monkeypatch.setattr(feecollect.db, "add_fee", lambda *a, **k: None)
+    monkeypatch.setattr(feecollect.fees, "current_bps", lambda uid=None: 100)
+    monkeypatch.setattr(feecollect, "_native_usd", lambda cg: 2.0)
+    monkeypatch.setattr(withdraw, "send_ton", lambda s, d, n: (True, "x"))
+    assert feecollect.skim_buy(902, 100, "ton", sol_secret="s", side="sell") == (False, "")
+    monkeypatch.setenv("FEE_COLLECT_SELLS", "1")
+    assert feecollect.skim_buy(902, 100, "ton", sol_secret="s", side="sell")[0] is True

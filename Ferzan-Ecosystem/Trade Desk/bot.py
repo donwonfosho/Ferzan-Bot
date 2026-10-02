@@ -2036,11 +2036,11 @@ class _SellEstimate:
 def _skim_sell(uid: int, mint: str, cid: str, usd: float, sol_secret: str, evm_secret: str) -> str:
     """Fee on a live sell, from the native coin the sale paid. Returns the confirmation line ("" if none).
     Every sell path calls this so the fee does not depend on which button was tapped."""
-    if not (feecollect.sells_enabled() and usd > 0 and cid not in {"trx", "ton"}):
+    if not (feecollect.sells_enabled() and usd > 0):
         return ""
     try:
         _taken, line = feecollect.skim_buy(
-            uid, usd, "sol" if cid == "sol" else "evm", sol_secret=sol_secret or "", evm_secret=evm_secret or "",
+            uid, usd, {"sol": "sol", "ton": "ton", "trx": "trx"}.get(cid, "evm"), sol_secret=sol_secret or "", evm_secret=evm_secret or "",
             evm_chain=cid, kind="manual", note=mint[:12], side="sell")
         return line
     except Exception:
