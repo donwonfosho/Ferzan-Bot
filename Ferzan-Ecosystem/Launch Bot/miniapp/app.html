@@ -449,7 +449,7 @@
 
   /* ---- app or classic (menu button asks first, like the Trade Bot) ---- */
   const qs = new URLSearchParams(location.search), menuBot = (qs.get("bot") || "").replace(/[^A-Za-z0-9_]/g, "");
-  const toChat = () => { if (menuBot && tg && tg.openTelegramLink) tg.openTelegramLink("https://t.me/" + menuBot); else if (tg) tg.close(); };
+  const toChat = () => { const u = "https://t.me/" + menuBot + "?start=home"; if (menuBot && tg && tg.openTelegramLink) { tg.openTelegramLink(u); setTimeout(() => { try { tg.close(); } catch (e) {} }, 150); } else if (tg) tg.close(); else location.href = u; };
   let skip = false; try { skip = localStorage.getItem("ferzan_launch_open") === "app"; } catch (e) {}
   $("#toClassic").onclick = () => { try { localStorage.removeItem("ferzan_launch_open"); } catch (e) {} toChat(); };
   if (qs.get("from") === "menu" && !skip) {
