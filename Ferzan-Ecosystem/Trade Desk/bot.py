@@ -5010,6 +5010,61 @@ def _signal_png(ln, safety: tuple[str, str, str] | None = None) -> bytes | None:
         return None
 
 
+_JUNK_SYMBOLS = {
+    "ETH", "WETH", "BNB", "WBNB", "SOL", "WSOL", "USDC", "USDT", "DAI", "WBTC", "BTC", "AVAX", "WAVAX",
+    "POL", "MATIC", "WMATIC", "TRX", "WTRX", "TON", "HYPE", "WHYPE", "S", "WS", "MON", "WMON", "PLS", "WPLS",
+}
+
+
+def _junk_signal(ln) -> bool:
+    """Native coins, wrapped natives, stables and the zero address are not launches. Never post them."""
+    ca = (ln.token or "").strip()
+    if not ca or (ca.startswith("0x") and set(ca[2:]) <= {"0"}) or ca == "So11111111111111111111111111111111111111112":
+        return True
+    return (ln.symbol or "").strip().upper() in _JUNK_SYMBOLS
+
+
+def _enrich_launch(ln):
+    """Fill missing market data (and the real ticker for boosted profiles) from DexScreener's best pool for the
+    token. Returns a copy; the original is untouched. On any failure the signal is returned unchanged."""
+    import dataclasses
+
+    ca = (ln.token or "").strip()
+    need = (
+        float(ln.liquidity_usd or 0) <= 0
+        or float(getattr(ln, "fdv_usd", 0) or 0) <= 0
+        or float(getattr(ln, "price_usd", 0) or 0) <= 0
+        or getattr(ln, "source", "") == "dexscreener-boost"
+    )
+    if not ca or not need:
+        return ln
+    try:
+        r = requests.get(f"https://api.dexscreener.com/latest/dex/tokens/{ca}", timeout=4)
+        pairs = [x for x in ((r.json() or {}).get("pairs") or []) if isinstance(x, dict)]
+        want = (resolve_chain(ln.chain or "") or (ln.chain or "")).lower()
+        same = [x for x in pairs if (resolve_chain(str(x.get("chainId") or "")) or str(x.get("chainId") or "")).lower() == want]
+        pairs = same or pairs
+        if not pairs:
+            return ln
+        p = max(pairs, key=lambda x: float((x.get("liquidity") or {}).get("usd") or 0))
+        base = p.get("baseToken") or {}
+        upd = {
+            "liquidity_usd": float((p.get("liquidity") or {}).get("usd") or 0) or ln.liquidity_usd,
+            "fdv_usd": float(p.get("fdv") or p.get("marketCap") or 0) or ln.fdv_usd,
+            "price_usd": float(p.get("priceUsd") or 0) or ln.price_usd,
+            "chg_1h": float((p.get("priceChange") or {}).get("h1") or 0) or ln.chg_1h,
+        }
+        if base.get("symbol"):
+            upd["symbol"] = str(base["symbol"])
+        if not (ln.created_at or "").strip() and p.get("pairCreatedAt"):
+            from datetime import datetime, timezone
+
+            upd["created_at"] = datetime.fromtimestamp(float(p["pairCreatedAt"]) / 1000, timezone.utc).isoformat()
+        return dataclasses.replace(ln, **upd)
+    except Exception:
+        return ln
+
+
 async def post_signal(bot, chat_id: int, ln, promo: bool = False, safety: tuple[str, str, str] | None = None):
     """One signal into a channel: branded image with a short caption when possible, else the text card.
     Returns the message id so the follow-up job can reply to it later."""
@@ -8960,12 +9015,15 @@ async def _launch_feed_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         sent = 0
         min_liq = db.feed_min_liq_get(int(chat_id))
         for ln in pool[:12]:
-            if min_liq > 0 and float(ln.liquidity_usd or 0) < min_liq:
+            if _junk_signal(ln):
                 continue
             key = f"ch:{chat_id}:{ln.chain}:{(ln.token or '')[:20]}"
             if not db.should_resend_signal(int(chat_id), key, 1, cooldown_s=4 * 60):
                 continue
             try:
+                ln = await asyncio.to_thread(_enrich_launch, ln)
+                if _junk_signal(ln) or float(ln.liquidity_usd or 0) <= 0 or (min_liq > 0 and float(ln.liquidity_usd or 0) < min_liq):
+                    continue  # no pool data (or under this channel's floor): a card full of dashes helps nobody
                 sf = await asyncio.to_thread(_signal_safety, ln.chain or "", (ln.token or "").strip())
                 if sf and sf[1] == "bad" and SIGNAL_SKIP_HONEYPOT:
                     continue  # never advertise a confirmed honeypot in a signals channel
