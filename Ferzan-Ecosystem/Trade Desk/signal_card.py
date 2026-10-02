@@ -10,7 +10,7 @@ import io
 from functools import lru_cache
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFilter, ImageFont
+from PIL import Image, ImageDraw, ImageFilter
 
 from pnl_card import _crest, _font  # same crest crop and font fallback as the PnL card
 
