@@ -31,6 +31,33 @@
   #empty { text-align: center; opacity: .6; padding: 40px 0; display: none; }
   #err { color: #c0392b; font-size: 14px; display: none; margin-top: 10px; }
 </style>
+<style id="ferzan-theme">
+  :root { --bg:#050a1e; --card:#0b1330; --sunk:#111c40; --ink:#e8eefc; --muted:#8b9ac4; --link:#38e0d0; --line:rgba(160,190,255,.14); --glow:rgba(25,201,192,.38); color-scheme: dark; }
+  html, body { background:#050a1e !important; }
+  body { color:var(--ink) !important; background: radial-gradient(120% 60% at 50% -10%, #0e1f4d 0%, #050a1e 55%) fixed !important;
+         font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",Roboto,sans-serif; -webkit-font-smoothing:antialiased; padding-bottom:calc(24px + env(safe-area-inset-bottom)) !important; }
+  h2 { background:linear-gradient(180deg,#fff,#9fe9f2); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent; }
+  h2 a { -webkit-text-fill-color:var(--link); }
+  .sub, .quote, .meta, .small, .row small, #walletChoices .sub { color:var(--muted) !important; opacity:1 !important; }
+  button { border-radius:12px !important; font-weight:800; transition:transform .12s ease, filter .12s ease; } button:active { transform:scale(.97); filter:brightness(1.15); }
+  button.primary, #claimBtn, .tabs button.on, .chains button.on, .tab.on { background:linear-gradient(180deg,#2fe3d8,#12b3ae) !important; color:#031014 !important; box-shadow:0 6px 18px -8px var(--glow); }
+  .tabs button, .chains button, .chip, .tab { background:var(--sunk) !important; color:var(--ink) !important; border:1px solid var(--line) !important; }
+  .tabs button.on, .chains button.on, .tab.on { background:linear-gradient(180deg,#2fe3d8,#12b3ae) !important; color:#031014 !important; border:0 !important; }
+  .wallet-btn { background:var(--sunk) !important; color:var(--ink) !important; border:1px solid var(--line) !important; }
+  .sell { background:#e11d48 !important; color:#fff !important; }
+  input, textarea, select { background:var(--sunk) !important; color:var(--ink) !important; border:1px solid var(--line) !important; }
+  input:focus { outline:2px solid var(--link); outline-offset:1px; }
+  #status { background:var(--card) !important; color:var(--ink) !important; border:1px solid var(--line); }
+  #status a { color:var(--link) !important; }
+  #status.error, .error { background:rgba(251,113,133,.12) !important; color:#fda4af !important; }
+  #status.success, .success { background:rgba(52,211,153,.12) !important; color:#6ee7b7 !important; }
+  #status.hint, .hint { background:rgba(56,224,208,.10) !important; color:#99f6e4 !important; }
+  .row, .detail-row, .card { border-bottom:1px solid var(--line) !important; } .detail-row { color:var(--muted); } .detail-row b { color:var(--ink); }
+  .bar { background:var(--sunk) !important; } .fill { background:linear-gradient(90deg,#19c9c0,#7c5cff) !important; }
+  .logo { background:var(--sunk) !important; } .badge { background:var(--sunk) !important; color:var(--muted); }
+  .best a, a { color:var(--link); } .crown { color:#fbbf24; } #err { color:#fda4af !important; }
+  .total { color:#fff; }
+</style>
 </head>
 <body>
 <h2>🏆 Top creators <a href="launches.html">🚀 Launches</a></h2>
