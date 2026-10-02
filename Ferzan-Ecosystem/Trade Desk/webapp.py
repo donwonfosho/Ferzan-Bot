@@ -265,6 +265,13 @@ def token_info(mint: str) -> dict:
             safety = rugcheck.security_line(rugcheck.sol_report(mint))
         except Exception:
             safety = ""
+    elif mint.startswith("0x") and cid in ("eth", "bsc", "base", "arb", "avax"):
+        try:
+            import evm_security
+
+            safety = evm_security.security_line(cid, mint)
+        except Exception:
+            safety = ""
     info = {
         "mint": mint,
         "symbol": m.get("symbol") or "?",
