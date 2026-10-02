@@ -3474,11 +3474,108 @@ async def _degen_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, da
         await _safe_answer(q, "Cancelled")
 
 
+def _qrow(uid: int, label: str, prefix: str, vals: tuple, cur: float, pre: str = "", post: str = "") -> list:
+    """A row of quick-pick buttons; the current value shows a check. The label goes in the first slot's neighbour
+    as a caption-free row, so keep values short to fit four across."""
+    return [
+        InlineKeyboardButton(f"{'✅ ' if abs(float(cur) - v) < 1e-9 else ''}{pre}{v}{post}", callback_data=f"{prefix}:{v}")
+        for v in vals
+    ]
+
+
+def _settings_panel(uid: int):
+    user = db.get_user(uid)
+    rug = db.flag_on(uid, "rug_buy", 1)
+    honey = db.flag_on(uid, "honeypot", 1)
+    lpw = db.flag_on(uid, "lp_watch", 0)
+    gate = db.flag_on(uid, "score_gate", 0)
+    auto = db.flag_on(uid, "auto_buy", 0)
+    mev = db.flag_on(uid, "anti_mev", 1)
+    mev_paused = signer.anti_mev_paused()
+    mev_line = "⏸ Anti-MEV paused for maintenance — buys use the fast normal route" if mev_paused else (
+        f"{'🟢' if mev else '🔴'} Anti-MEV")
+    mev_btn = "⏸ Anti-MEV paused" if mev_paused else f"{'🟢' if mev else '🔴'} Anti-MEV"
+    copy_live = db.flag_on(uid, "copy_live", 0)
+    buy_usd = float(user.get("buy_usd") or 25)
+    bslip = float(user.get("buy_slip_pct") or 10)
+    sslip = float(user.get("sell_slip_pct") or 10)
+    abuy = float(user.get("auto_buy_usd") or 0)
+    text = (
+        "⚙️ Ferzan desk\n"
+        f"💵 Default buy  ${buy_usd:.0f}   ( /settings buy 25 )\n"
+        f"📉 Buy slip {bslip:.0f}%   Sell slip {sslip:.0f}%\n"
+        f"   /settings buyslip 10   /settings sellslip 10\n"
+        f"⚡️ Auto-buy paste  {'ON $'+str(int(abuy)) if auto and abuy else 'OFF'}\n"
+        f"   /settings autobuy 25   (0 = off)\n"
+        f"{mev_line}\n"
+        f"🎯 Score floor  {user['min_confluence']}   ( /settings floor 0 )\n"
+        "👇 Quick picks, top to bottom: buy size · buy slip · sell slip · auto-buy · score floor\n\n"
+        "🛡 Protection — you turn these on or off\n"
+        f"{'🟢' if gate else '🔴'} Block buy if score under floor\n"
+        f"{'🟢' if rug else '🔴'} Block buys if liq is thin / gone\n"
+        f"{'🟢' if honey else '🔴'} Block buys if honeypot / unsellable\n"
+        f"{'🟢' if lpw else '🔴'} Rug Guard: auto-sell if LP is pulled, the dev dumps or top holders dump\n"
+        f"DM alerts {'on' if user.get('alerts_on') else 'off'}"
+    )
+    kb = InlineKeyboardMarkup(
+            [
+                _qrow(uid, "Buy", "stg:buy", (10, 25, 50, 100), buy_usd, "$"),
+                _qrow(uid, "Buy slip", "stg:bs", (5, 10, 20, 30), bslip, "", "%"),
+                _qrow(uid, "Sell slip", "stg:ss", (5, 10, 20, 30), sslip, "", "%"),
+                _qrow(uid, "Auto-buy", "stg:ab", (10, 25, 50, 100), abuy if auto else 0, "$"),
+                _qrow(uid, "Score floor", "stg:fl", (0, 20, 40, 60), float(user["min_confluence"]), ""),
+                [InlineKeyboardButton(
+                    f"{'🟢' if user.get('alerts_on') else '🔴'} DM launch alerts",
+                    callback_data="flg:alerts",
+                )],
+                [InlineKeyboardButton(
+                    f"{'🟢' if auto else '🔴'} Auto-buy pasted CA",
+                    callback_data="flg:auto_buy",
+                )],
+                [InlineKeyboardButton(
+                    mev_btn,
+                    callback_data="flg:anti_mev",
+                )],
+                [InlineKeyboardButton(
+                    f"{'🟢' if copy_live else '🔴'} Live copy-mirror",
+                    callback_data="flg:copy_live",
+                )],
+                [InlineKeyboardButton(
+                    f"{'🟢' if gate else '🔴'} Score floor gate",
+                    callback_data="flg:score_gate",
+                )],
+                [InlineKeyboardButton(
+                    f"{'🟢' if rug else '🔴'} Rug buy-block",
+                    callback_data="flg:rug_buy",
+                )],
+                [InlineKeyboardButton(
+                    f"{'🟢' if honey else '🔴'} Honeypot block",
+                    callback_data="flg:honeypot",
+                )],
+                [InlineKeyboardButton(
+                    f"{'🟢' if lpw else '🔴'} Rug Guard auto-sell",
+                    callback_data="flg:lp_watch",
+                )],
+                [InlineKeyboardButton(
+                    f"{'🟢' if db.flag_on(uid, 'daily_recap', 1) else '🔴'} Daily morning recap",
+                    callback_data="flg:daily_recap",
+                )],
+                [
+                    InlineKeyboardButton("⚙️ Buy/sell presets", callback_data="pst:sol"),
+                    InlineKeyboardButton("🎓 Migration sniper", callback_data="mig:x:panel"),
+                ],
+                [InlineKeyboardButton("📡 Per-chain feeds", callback_data="go:feeds")],
+                [InlineKeyboardButton(_degen_btn(uid), callback_data="dgn:t")],
+                [InlineKeyboardButton("↩️ Home", callback_data="go:home")],
+            ]
+        )
+    return text, kb
+
+
 async def settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update):
         return
     uid = update.effective_user.id
-    user = db.get_user(uid)
     if context.args and len(context.args) == 2:
         key, raw = context.args[0].lower(), context.args[1]
         try:
@@ -3533,85 +3630,9 @@ async def settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         except ValueError:
             await update.effective_message.reply_text("Out of range.")
             return
-        user = db.get_user(uid)
         await update.effective_message.reply_text("Updated.")
-    rug = db.flag_on(uid, "rug_buy", 1)
-    honey = db.flag_on(uid, "honeypot", 1)
-    lpw = db.flag_on(uid, "lp_watch", 0)
-    gate = db.flag_on(uid, "score_gate", 0)
-    auto = db.flag_on(uid, "auto_buy", 0)
-    mev = db.flag_on(uid, "anti_mev", 1)
-    mev_paused = signer.anti_mev_paused()
-    mev_line = "⏸ Anti-MEV paused for maintenance — buys use the fast normal route" if mev_paused else (
-        f"{'🟢' if mev else '🔴'} Anti-MEV")
-    mev_btn = "⏸ Anti-MEV paused" if mev_paused else f"{'🟢' if mev else '🔴'} Anti-MEV"
-    copy_live = db.flag_on(uid, "copy_live", 0)
-    buy_usd = float(user.get("buy_usd") or 25)
-    bslip = float(user.get("buy_slip_pct") or 10)
-    sslip = float(user.get("sell_slip_pct") or 10)
-    abuy = float(user.get("auto_buy_usd") or 0)
-    await update.effective_message.reply_text(
-        "⚙️ Ferzan desk\n"
-        f"💵 Default buy  ${buy_usd:.0f}   ( /settings buy 25 )\n"
-        f"📉 Buy slip {bslip:.0f}%   Sell slip {sslip:.0f}%\n"
-        f"   /settings buyslip 10   /settings sellslip 10\n"
-        f"⚡️ Auto-buy paste  {'ON $'+str(int(abuy)) if auto and abuy else 'OFF'}\n"
-        f"   /settings autobuy 25   (0 = off)\n"
-        f"{mev_line}\n"
-        f"🎯 Score floor  {user['min_confluence']}   ( /settings floor 0 )\n\n"
-        "🛡 Protection — you turn these on or off\n"
-        f"{'🟢' if gate else '🔴'} Block buy if score under floor\n"
-        f"{'🟢' if rug else '🔴'} Block buys if liq is thin / gone\n"
-        f"{'🟢' if honey else '🔴'} Block buys if honeypot / unsellable\n"
-        f"{'🟢' if lpw else '🔴'} Rug Guard: auto-sell if LP is pulled, the dev dumps or top holders dump\n"
-        f"DM alerts {'on' if user.get('alerts_on') else 'off'}",
-        reply_markup=InlineKeyboardMarkup(
-            [
-                [InlineKeyboardButton(
-                    f"{'🟢' if user.get('alerts_on') else '🔴'} DM launch alerts",
-                    callback_data="flg:alerts",
-                )],
-                [InlineKeyboardButton(
-                    f"{'🟢' if auto else '🔴'} Auto-buy pasted CA",
-                    callback_data="flg:auto_buy",
-                )],
-                [InlineKeyboardButton(
-                    mev_btn,
-                    callback_data="flg:anti_mev",
-                )],
-                [InlineKeyboardButton(
-                    f"{'🟢' if copy_live else '🔴'} Live copy-mirror",
-                    callback_data="flg:copy_live",
-                )],
-                [InlineKeyboardButton(
-                    f"{'🟢' if gate else '🔴'} Score floor gate",
-                    callback_data="flg:score_gate",
-                )],
-                [InlineKeyboardButton(
-                    f"{'🟢' if rug else '🔴'} Rug buy-block",
-                    callback_data="flg:rug_buy",
-                )],
-                [InlineKeyboardButton(
-                    f"{'🟢' if honey else '🔴'} Honeypot block",
-                    callback_data="flg:honeypot",
-                )],
-                [InlineKeyboardButton(
-                    f"{'🟢' if lpw else '🔴'} Rug Guard auto-sell",
-                    callback_data="flg:lp_watch",
-                )],
-                [InlineKeyboardButton(
-                    f"{'🟢' if db.flag_on(uid, 'daily_recap', 1) else '🔴'} Daily morning recap",
-                    callback_data="flg:daily_recap",
-                )],
-                [
-                    InlineKeyboardButton("⚙️ Buy/sell presets", callback_data="pst:sol"),
-                    InlineKeyboardButton("🎓 Migration sniper", callback_data="mig:x:panel"),
-                ],
-                [InlineKeyboardButton("📡 Per-chain feeds", callback_data="go:feeds")],
-                [InlineKeyboardButton(_degen_btn(uid), callback_data="dgn:t")],
-            ]
-        ),
-    )
+    text, kb = _settings_panel(uid)
+    await update.effective_message.reply_text(text, reply_markup=kb)
 
 
 FEED_CHAINS = (
@@ -6309,6 +6330,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if data.startswith(("asn:", "dva:")):
         await _panel_callback(update, context, data)
         return
+    if data.startswith("stg:"):
+        await _settings_callback(update, context, data)
+        return
     if data.startswith("dgn:"):
         await _degen_callback(update, context, data)
         return
@@ -6354,6 +6378,13 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             on = not bool(user.get("alerts_on"))
             db.update_user(uid, alerts_on=1 if on else 0)
             await _safe_answer(query, "Saved")
+            if (query.message is not None and (query.message.text or "").startswith("⚙️ Ferzan desk")):
+                text, kb = _settings_panel(uid)
+                try:
+                    await query.edit_message_text(text, reply_markup=kb)
+                    return
+                except Exception:
+                    pass
             await context.bot.send_message(uid, f"{'🟢' if on else '🔴'} DM launch alerts")
             return
         if flag not in {
@@ -6385,6 +6416,13 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             except Exception:
                 pass
             return
+        if (query.message is not None and (query.message.text or "").startswith("⚙️ Ferzan desk")):
+            text, kb = _settings_panel(uid)
+            try:
+                await query.edit_message_text(text, reply_markup=kb)
+                return
+            except Exception:
+                pass
         await context.bot.send_message(
             uid,
             f"{'🟢 ON' if now else '🔴 OFF'} {flag.replace('_', ' ')}",
@@ -8327,6 +8365,41 @@ def _dva_panel(uid: int) -> tuple[str, InlineKeyboardMarkup]:
         [InlineKeyboardButton("🤖 Auto-snipe", callback_data="asn:show"), InlineKeyboardButton("↩️ Home", callback_data="go:home")],
     ]
     return text, InlineKeyboardMarkup(rows)
+
+
+async def _settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, data: str) -> None:
+    """Settings quick-picks: change a value and redraw the same message."""
+    uid = update.effective_user.id
+    q = update.callback_query
+    if update.effective_chat and update.effective_chat.type != "private":
+        return
+    parts = data.split(":")
+    if len(parts) != 3:
+        return
+    try:
+        v = float(parts[2])
+    except ValueError:
+        return
+    key = parts[1]
+    if key == "buy" and 1 <= v <= 5000:
+        db.update_user(uid, buy_usd=v)
+    elif key == "bs" and 0.1 <= v <= 99:
+        db.update_user(uid, buy_slip_pct=v)
+    elif key == "ss" and 0.1 <= v <= 99:
+        db.update_user(uid, sell_slip_pct=v)
+    elif key == "ab" and 0 <= v <= 5000:
+        db.update_user(uid, auto_buy_usd=v)
+        db.set_flag(uid, "auto_buy", v > 0)
+    elif key == "fl" and 0 <= v <= 90:
+        db.update_user(uid, min_confluence=int(v))
+    else:
+        return
+    await _safe_answer(q, "Saved")
+    text, kb = _settings_panel(uid)
+    try:
+        await q.edit_message_text(text, reply_markup=kb)
+    except Exception:
+        pass
 
 
 async def _panel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, data: str) -> None:
