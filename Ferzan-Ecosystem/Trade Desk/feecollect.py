@@ -1,4 +1,4 @@
-"""Collect the Ferzan trading fee on LIVE buys.
+"""Collect the Ferzan trading fee on LIVE buys (and, with FEE_COLLECT_SELLS=1, sells).
 
 After a live buy lands, send the fee as one small native-coin transfer from
 the user's own wallet to the Ferzan fee wallet (FEE_WALLET_SOL / FEE_WALLET_EVM).
@@ -28,6 +28,11 @@ def enabled() -> bool:
     return (os.getenv("FEE_COLLECT_LIVE") or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def sells_enabled() -> bool:
+    """Fee on sells has its own switch (FEE_COLLECT_SELLS=1) on top of FEE_COLLECT_LIVE, so buys can run alone."""
+    return enabled() and (os.getenv("FEE_COLLECT_SELLS") or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def exempt(user_id: int) -> bool:
     """Operators listed in FEE_EXEMPT_USER_IDS (comma-separated Telegram ids) trade with no fee."""
     raw = os.getenv("FEE_EXEMPT_USER_IDS") or ""
@@ -55,9 +60,11 @@ def skim_buy(
     evm_chain: str = "base",
     kind: str = "manual",
     note: str = "",
+    side: str = "buy",
 ) -> tuple[bool, str]:
-    """Returns (collected, line for the trade message). collected=False means no fee was taken."""
-    if not enabled() or exempt(uid):
+    """Returns (collected, line for the trade message). collected=False means no fee was taken.
+    side="sell": usd is the estimated value sold; the fee comes out of the native coin the sale just paid."""
+    if not enabled() or exempt(uid) or (side == "sell" and not sells_enabled()):
         return False, ""
     bps = live_bps(uid, kind)
     fee_usd = round(float(usd) * bps / 10_000.0, 6)
@@ -90,7 +97,7 @@ def skim_buy(
         log.warning("fee transfer errored for %s: %s", uid, str(exc)[:160])
         ok = False
     try:
-        db.add_fee(uid, "live_buy" if ok else "live_buy_failed", float(usd), bps, fee_usd if ok else 0.0,
+        db.add_fee(uid, f"live_{side}" if ok else f"live_{side}_failed", float(usd), bps, fee_usd if ok else 0.0,
                    note=(f"{kind} {note}".strip())[:80])
     except Exception:
         log.exception("fee ledger write failed")

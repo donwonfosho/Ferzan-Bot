@@ -2080,7 +2080,18 @@ def _sell_any(uid: int, mint: str, pct: int = 100) -> tuple[bool, str, str]:
     else:
         ok, msg = evm_signer.sell_evm(cid, mint, key_hex=evm_secret, pct=pct, user_id=uid)
     if ok:
-        _log_trade_safe(uid, "sell", mint, cid, _est.value())
+        _sold_usd = _est.value()
+        _log_trade_safe(uid, "sell", mint, cid, _sold_usd)
+        if feecollect.sells_enabled() and _sold_usd > 0 and cid not in {"trx", "ton"}:
+            try:
+                _fam = "sol" if cid == "sol" else "evm"
+                _taken, _fline = feecollect.skim_buy(
+                    uid, _sold_usd, _fam, sol_secret=sol_secret or "", evm_secret=evm_secret or "",
+                    evm_chain=cid, kind="manual", note=mint[:12], side="sell")
+                if _fline:
+                    msg = f"{msg}\n{_fline}"
+            except Exception:
+                logger.exception("sell fee failed for %s", uid)
         try:
             if pct >= 100:
                 db.clear_live_cost(uid, mint)
