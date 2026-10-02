@@ -990,7 +990,6 @@ def home_keyboard(private: bool = True, hot: list | None = None) -> InlineKeyboa
         [
             InlineKeyboardButton("🤖 Auto-snipe", callback_data="go:autosnipe"),
             InlineKeyboardButton("🚩 Dev alerts", callback_data="go:devalerts"),
-            InlineKeyboardButton("💸 Fees", callback_data="go:fees"),
         ],
         [
             InlineKeyboardButton("🚀 Launch a coin", callback_data="go:launches"),
