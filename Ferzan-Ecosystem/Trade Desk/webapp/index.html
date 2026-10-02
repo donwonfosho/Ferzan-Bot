@@ -1056,6 +1056,13 @@
           <div class="tile"><div class="k">Referral $</div><div class="v num">${usd(r.open)}</div><div class="s num">earned ${usd(r.earned)}</div></div>
         </div>
         ${nt && me.fee_live ? `<p class="dsub" style="margin:0 2px 10px">Trade ${usd(nt.at - me.volume30)} more in 30 days to drop your fee to ${(nt.bps / 100).toFixed(2)}%.</p>` : ""}
+        <details class="sec" style="margin-bottom:12px"><summary style="font-weight:700;cursor:pointer">💎 Fee schedule and perks${me.fee_live ? "" : " (starts soon)"}</summary>
+          <div class="dsub" style="margin-top:8px;line-height:1.6">
+            Standard 0.50% · snipes and auto orders 1.00%<br>
+            $5k traded in 30 days → 0.40% · $25k → 0.35% · $100k → 0.25%<br>
+            Staking 100 / 1,000 / 10,000 units → a further 0.05 / 0.10 / 0.15% off<br>
+            Invite friends: earn a share of their fees, up to 3 levels deep
+          </div></details>
         ${r.link ? `<button class="btn share" id="shareRef" data-link="${esc(r.link)}">🔗 Share my invite link</button>` : ""}
         ${cp && cp.volume && cp.volume.length ? `<h2 style="margin-top:8px">Weekly volume race</h2><div class="list">${cp.volume.slice(0, 5).map((a, i) => row(a, i, usd(a.volume_usd))).join("")}</div>` : ""}
         ${cp && cp.profit && cp.profit.length ? `<h2 style="margin-top:16px">Weekly profit race</h2><div class="list">${cp.profit.slice(0, 5).map((a, i) => row(a, i, "+" + usd(a.pnl_usd))).join("")}</div>` : ""}`;
