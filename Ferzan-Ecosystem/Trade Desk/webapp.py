@@ -201,6 +201,21 @@ def _valid_mint(mint: str) -> bool:
     return bool(re.fullmatch(r"(EQ|UQ|kQ)[A-Za-z0-9_-]{46}", mint))
 
 
+def _curve_market(mint: str) -> dict:
+    """Same lookup the bot's buy card uses, shaped like a DexScreener mark."""
+    try:
+        from price_fetcher import load_market
+
+        snap = load_market(mint)
+        if not snap or not (snap.price_usd or 0) > 0:
+            return {}
+        return {"price": snap.price_usd, "liq": snap.liquidity_usd or 0, "chain": snap.chain or "",
+                "chg24": snap.change_24h, "url": snap.url or "", "mc": snap.fdv or 0,
+                "symbol": snap.symbol, "name": snap.name, "dex": snap.dex}
+    except Exception:
+        return {}
+
+
 def token_info(mint: str) -> dict:
     now = time.time()
     hit = _TOKEN_CACHE.get(mint)
@@ -211,9 +226,13 @@ def token_info(mint: str) -> dict:
     marks = portfolio._ds_prices([mint])
     m = marks.get(mint) or {}
     if not m:
+        m = _curve_market(mint)  # Ferzan curve / TON / Tron coins have no DEX pool yet
+    if not m:
         _TOKEN_CACHE[mint] = (now, None)  # negative cache: no re-lookup spam
         raise LookupError("not found")
     cid = portfolio.DS_TO_CID.get(m.get("chain", ""), "")
+    if not cid and m.get("chain") in ("base", "eth", "bsc", "avax", "arb"):
+        cid = m["chain"]
     if m.get("chain") == "solana":
         cid = "sol"
     elif m.get("chain") == "ton":
@@ -241,6 +260,8 @@ def token_info(mint: str) -> dict:
         "native_usd": portfolio._price({"sol": "solana", "bsc": "binancecoin", "avax": "avalanche-2",
                                         "ton": "the-open-network"}.get(cid, "ethereum")),
         "max_usd": _max_usd(),
+        "bot_only": cid not in ("sol", "bsc", "avax", "ton", "base", "eth", "arb"),
+        "bot": _bot_username(),
     }
     _TOKEN_CACHE[mint] = (now, info)
     if len(_TOKEN_CACHE) > 2000:

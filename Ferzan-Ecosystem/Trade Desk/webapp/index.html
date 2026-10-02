@@ -600,6 +600,12 @@
         <div class="btnrow" style="margin-top:8px"><button class="btn ghost" data-rules="${esc(t.mint)}" data-sym="${esc(t.symbol)}" data-px="${t.price || 0}">⏳ Limit buy · 📅 DCA</button></div>
         <div id="chartslot">${embedUrl(t.chart) ? `<iframe class="chartbox" style="margin-top:10px" loading="lazy" title="Chart" src="${esc(embedUrl(t.chart))}"></iframe>` : ""}</div>
         ${t.chart ? `<p style="margin:10px 0 0"><a href="#" data-chart="${esc(t.chart)}" style="color:var(--link)">Open full chart ↗</a></p>` : ""}`;
+      if (t.bot_only) {
+        box.querySelectorAll(".grid3, #customBuy, #multiBuy, #alertForm, [data-rules]").forEach((n) => (n.closest(".btnrow") || n.closest("label") || n).hidden = true);
+        const a = document.createElement("button"); a.className = "btn"; a.style.width = "100%"; a.textContent = "Buy in the Ferzan bot →";
+        a.onclick = () => { const u = `https://t.me/${t.bot || ""}?start=buy_${t.mint.slice(0, 48)}`; tg && tg.openTelegramLink ? tg.openTelegramLink(u) : window.open(u); };
+        box.querySelector(".stats").after(a);
+      }
       loadVerdict(t.mint); loadCandles(t);
     } catch (err) {
       box.innerHTML = `<div class="error" style="padding:12px">${esc(err.message)}</div>`;
