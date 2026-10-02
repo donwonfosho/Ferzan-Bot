@@ -172,6 +172,12 @@ PROMOS = [
 GENERAL_TAGS = ["#crypto", "#altcoins", "#Web3", "#cryptocurrency", "#DeFi"]
 
 
+def ramp(now: float | None = None) -> bool:
+    """Final 3 days before launch: more posts (X cap at least 10/day, a promo at least every 3h). PROMO_RAMP=0 turns it off."""
+    now = time.time() if now is None else now
+    return os.environ.get("PROMO_RAMP") != "0" and LAUNCH_AT - 3 * 86400 <= now < LAUNCH_AT + 86400
+
+
 def x_len(text: str) -> int:
     """X counts every link as 23 characters."""
     return sum(23 if w.startswith("http") else len(w) for w in text.split(" ")) + text.count(" ")
@@ -235,6 +241,8 @@ def post(s: dict, key: str, text: str, x_text: str | None = None, groups: bool =
             if not fm.tg_photo(g, text, pic):
                 admins(f"Could not post in {g}: add @Ferzan_Launch_Bot to it (admin in a channel, member in a group).")
     cap = int(os.environ.get("PROMO_X_PER_DAY") or 6)
+    if ramp():
+        cap = max(cap, 10)
     if x_text is not None and len(s["x_log"]) < cap:
         try:
             ok, info = fm.x_post(x_text[:280], pic)
@@ -279,7 +287,8 @@ def recap(s: dict, now: float) -> None:
 
 
 def promo(s: dict, now: float) -> None:
-    every = float(os.environ.get("PROMO_EVERY_HOURS") or 4) * 3600
+    hours = float(os.environ.get("PROMO_EVERY_HOURS") or 4)
+    every = (min(hours, 3.0) if ramp(now) else hours) * 3600
     if now - float(s.get("last_promo") or 0) < every - 300:  # 5 minutes of slack so the 10-minute timer never skips a slot
         return
     if LAUNCH_AT - 3 * 3600 < now < LAUNCH_AT + 3 * 3600:
