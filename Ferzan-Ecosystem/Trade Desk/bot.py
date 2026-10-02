@@ -5121,11 +5121,18 @@ async def _send_launch(bot, chat_id: int, text: str, markup, promo: bool = True,
         try:
             import io as _io
 
-            m = await bot.send_photo(chat_id, photo=_io.BytesIO(photo), caption=text, parse_mode="HTML", reply_markup=markup)
+            m = await bot.send_photo(
+                chat_id, photo=_io.BytesIO(photo), caption=text, parse_mode="HTML", reply_markup=markup,
+                read_timeout=45, write_timeout=45, connect_timeout=15, pool_timeout=15,
+            )
             return getattr(m, "message_id", None)
         except Exception as exc:
             if _is_dead_chat_error(exc) or getattr(exc, "new_chat_id", None):
                 raise
+            if type(exc).__name__ == "TimedOut":
+                # Telegram often HAS the upload by now; sending the text card too would post every signal twice.
+                logger.warning("signal image post timed out for %s; not resending as text", chat_id)
+                return None
             logger.warning("signal image post failed for %s, sending text: %s", chat_id, str(exc)[:120])
     clip = PROMO_PATH if promo and PROMO_PATH.exists() else None
     want_gif = (
