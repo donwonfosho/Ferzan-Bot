@@ -830,7 +830,7 @@ async def api_stats(request: Request) -> JSONResponse:
     uid = _auth(body)
     if not _rate_ok(uid, "stats", 12):
         raise HTTPException(status_code=429, detail="Too many refreshes — give it a minute.")
-    st = await asyncio.to_thread(db.trade_stats, uid)
+    st = await asyncio.to_thread(db.streak_stats, uid)
     st["badges"] = badges_for(st)
     return JSONResponse(st)
 

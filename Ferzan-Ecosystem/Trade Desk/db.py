@@ -2937,7 +2937,7 @@ def autosnipe_done(user_id: int, mint: str, ok: bool) -> None:
         conn.commit()
 
 
-def trade_stats(user_id: int, days: int = 35) -> dict:
+def streak_stats(user_id: int, days: int = 35) -> dict:
     """Streaks, a daily PNL calendar and the numbers badges are earned from. UTC days, live trades only."""
     now = int(time.time())
     uid = int(user_id)
