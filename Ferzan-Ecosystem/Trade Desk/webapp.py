@@ -741,8 +741,9 @@ def me_info(uid: int) -> dict:
     import feecollect
 
     return {
-        "fee_bps": bps,
+        "fee_bps": 0 if feecollect.exempt(uid) else bps,
         "fee_live": feecollect.enabled(),
+        "fee_exempt": feecollect.exempt(uid),
         "volume30": round(vol30, 2),
         "next_tier": {"at": nxt[0], "bps": nxt[1]} if nxt else None,
         "ref": {"tier": st["tier"], "invites": st["invites"], "volume": st["volume"], "earned": st["earned"],

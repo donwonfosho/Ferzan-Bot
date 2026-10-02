@@ -28,6 +28,12 @@ def enabled() -> bool:
     return (os.getenv("FEE_COLLECT_LIVE") or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def exempt(user_id: int) -> bool:
+    """Operators listed in FEE_EXEMPT_USER_IDS (comma-separated Telegram ids) trade with no fee."""
+    raw = os.getenv("FEE_EXEMPT_USER_IDS") or ""
+    return str(int(user_id)) in {x.strip() for x in raw.replace(";", ",").split(",") if x.strip()}
+
+
 def live_bps(user_id: int, kind: str = "manual") -> int:
     """Manual trades pay the normal (volume-discounted) rate; snipes and auto orders pay 0.5% more, capped at 1%."""
     return max(0, min(fees.MAX_FEE_BPS, fees.current_bps(user_id) + KIND_EXTRA_BPS.get(kind, 0)))
@@ -51,7 +57,7 @@ def skim_buy(
     note: str = "",
 ) -> tuple[bool, str]:
     """Returns (collected, line for the trade message). collected=False means no fee was taken."""
-    if not enabled():
+    if not enabled() or exempt(uid):
         return False, ""
     bps = live_bps(uid, kind)
     fee_usd = round(float(usd) * bps / 10_000.0, 6)

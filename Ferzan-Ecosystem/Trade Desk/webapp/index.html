@@ -1080,11 +1080,11 @@
       const row = (a, i, val) => `<div class="lb"><span class="num">${i + 1}</span><span>${esc(a.short)}${a.wallet && !/^0x/i.test(a.wallet) ? ` <button class="chip" data-track="${esc(a.wallet)}" data-lab="${esc(a.short)}">👀 Track</button>` : ""}</span><span class="num">${val}</span></div>`;
       box.innerHTML = recordHtml(st) + `
         <div class="rwtile">
-          <div class="tile"><div class="k">Your fee</div><div class="v num">${me.fee_live ? (me.fee_bps / 100).toFixed(2) + "%" : "0%"}</div><div class="s num">${me.fee_live ? "30d vol " + usd(me.volume30) : "launch period"}</div></div>
+          <div class="tile"><div class="k">Your fee</div><div class="v num">${me.fee_live ? (me.fee_bps / 100).toFixed(2) + "%" : "0%"}</div><div class="s num">${me.fee_exempt ? "fee-exempt" : me.fee_live ? "30d vol " + usd(me.volume30) : "launch period"}</div></div>
           <div class="tile"><div class="k">Rank</div><div class="v">${esc(r.tier)}</div><div class="s num">${r.invites} invited</div></div>
           <div class="tile"><div class="k">Referral $</div><div class="v num">${usd(r.open)}</div><div class="s num">earned ${usd(r.earned)}</div></div>
         </div>
-        ${nt && me.fee_live ? `<p class="dsub" style="margin:0 2px 10px">Trade ${usd(nt.at - me.volume30)} more in 30 days to drop your fee to ${(nt.bps / 100).toFixed(2)}%.</p>` : ""}
+        ${nt && me.fee_live && !me.fee_exempt ? `<p class="dsub" style="margin:0 2px 10px">Trade ${usd(nt.at - me.volume30)} more in 30 days to drop your fee to ${(nt.bps / 100).toFixed(2)}%.</p>` : ""}
         <details class="sec" style="margin-bottom:12px"><summary style="font-weight:700;cursor:pointer">💎 Fee schedule and perks${me.fee_live ? "" : " (starts soon)"}</summary>
           <div class="dsub" style="margin-top:8px;line-height:1.6">
             Standard 0.50% · snipes and auto orders 1.00%<br>
