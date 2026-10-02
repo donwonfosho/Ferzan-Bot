@@ -506,11 +506,10 @@ def complete_request(request_id: str, body: CompleteRequest):
             logger.warning("set_payout_wallet failed user=%s: %s", req.telegram_user_id, exc)
 
     text = _launch_card(req, token_addr, curve_addr, body.tx_hash)
-    _notify_telegram(req.chat_id, text, photo=req.image_url or "", markup=_growth_buttons(req, token_addr, curve_addr))
+    _announce(req.chat_id, req, text, _growth_buttons(req, token_addr, curve_addr))
     channel = (os.environ.get("FERZAN_LAUNCHES_CHANNEL") or "").strip()
     if channel:
-        _notify_telegram(channel, text, photo=req.image_url or "",
-                         markup=_growth_buttons(req, token_addr, curve_addr, trade_only=True))
+        _announce(channel, req, text, _growth_buttons(req, token_addr, curve_addr, trade_only=True))
     try:  # people who follow this creator get a DM (Launch Bot /start follow_<wallet>)
         _notify_followers(req, token_addr, curve_addr or "")
     except Exception as exc:
@@ -948,6 +947,64 @@ def _launch_card(req, token_addr: str, curve_addr: str, tx_hash: str) -> str:
     return "\n".join(lines)
 
 
+_X_TAG = {"solana": "Solana", "base": "Base", "bsc": "BNBChain", "ethereum": "Ethereum", "robinhood": "RobinhoodChain",
+          "tron": "Tron", "ton": "TON"}
+
+
+def _share_row(chain: str, token_addr: str, text: str, wallet: str = "") -> list:
+    """Share to X / Telegram buttons. The link is the coin's share page, so the card image and the creator credit
+    (callers board) come along. Empty when the token address isn't known yet."""
+    from urllib.parse import quote
+
+    if not _re.fullmatch(r"[a-z]{2,12}", chain or "") or not _re.fullmatch(r"[0-9A-Za-z_-]{20,70}", token_addr or ""):
+        return []
+    base = (os.environ.get("LAUNCH_PUBLIC_URL") or "https://launch.ferzaneco.com").rstrip("/")
+    link = f"{base}/api/share/{chain}/{token_addr}"
+    if wallet and _re.fullmatch(_ADDR_ANY, wallet):
+        link += "?r=" + wallet
+    tags = "memecoin," + _X_TAG.get(chain, "crypto")
+    x = f"https://twitter.com/intent/tweet?text={quote(text)}&url={quote(link, safe='')}&hashtags={tags}"
+    tg = f"https://t.me/share/url?url={quote(link, safe='')}&text={quote(text)}"
+    return [{"text": "𝕏 Share to X", "url": x}, {"text": "📣 Share on Telegram", "url": tg}]
+
+
+def _notify_photo_bytes(chat_id: int, png: bytes, caption: str, markup: dict | None = None) -> bool:
+    """Uploads a generated image. Caption must fit Telegram's 1024; returns False so the caller can fall back."""
+    import json as _j
+
+    if not chat_id or not png or not TELEGRAM_BOT_TOKEN or len(caption) > 1024:
+        return False
+    try:
+        data = {"chat_id": str(chat_id), "caption": caption, "parse_mode": "HTML"}
+        if markup:
+            data["reply_markup"] = _j.dumps(markup)
+        r = requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto", data=data,
+                          files={"photo": ("ferzan-launch.png", png, "image/png")}, timeout=40)
+        return r.ok
+    except requests.RequestException:
+        return False
+
+
+def _announce(chat_id: int, req, text: str, markup: dict | None) -> None:
+    """Launch announcement with the branded card. A long card text goes as a message right after a short photo."""
+    if not chat_id:
+        return
+    png = None
+    try:
+        curve_mode = req.mode in ("bonding_curve", "meteora")
+        png = _draw_card(req.name, req.symbol, req.chain, 0.0, 0.0 if curve_mode else None, False, req.image_url or "")
+    except Exception as exc:  # never block a launch announcement on the picture
+        logger.info("launch card image skipped: %s", exc)
+    if png:
+        if _notify_photo_bytes(chat_id, png, text, markup):
+            return
+        short = f"🚀 <b>{_html.escape(req.name)}</b> (${_html.escape(req.symbol)}) is live on {_html.escape(_CHAIN_NAME.get(req.chain, req.chain))}"
+        if _notify_photo_bytes(chat_id, png, short):
+            _notify_text(chat_id, text, markup)
+            return
+    _notify_telegram(chat_id, text, photo=req.image_url or "", markup=markup)
+
+
 def _growth_buttons(req, token_addr: str, curve_addr: str = "", trade_only: bool = False):
     """Buttons under a launch card: trade (curve page + Trade Bot), then Buy Bot and Guardian."""
     buy = (os.environ.get("FERZAN_BUY_BOT") or "Ferzan_Buy_Bot").lstrip("@")
@@ -963,6 +1020,12 @@ def _growth_buttons(req, token_addr: str, curve_addr: str = "", trade_only: bool
         rows.append([{"text": "⚡ Buy in Ferzan Trade Bot", "url": f"https://t.me/{trade}?start=buy_{token_addr}"}])
     if trade_only:
         return {"inline_keyboard": rows} if rows else None
+    sym = _html.unescape(req.symbol or "")
+    share = _share_row(req.chain, token_addr,
+                       f"🚀 I just launched ${sym} on @ferzaneco Ferzan Factory ({_CHAIN_NAME.get(req.chain, req.chain)}). Trade it here:",
+                       (req.wallet_address or "").strip())
+    if share:
+        rows.append(share)
     if key and token_addr and _re.fullmatch(r"[0-9A-Za-z]{32,44}", token_addr.replace("0x", "", 1)):
         rows.append([{"text": "🟢 Add Buy Bot to your group", "url": f"https://t.me/{buy}?startgroup=trk_{key}_{token_addr}"}])
     rows.append([{"text": "🛡 Add Guardian to your group", "url": f"https://t.me/{guard}?startgroup=ferzan"}])
@@ -2287,7 +2350,7 @@ _OG_CACHE: dict = {}
 
 
 @app.get("/api/og/{chain}/{token}.png")
-def og_card(chain: str, token: str):
+def og_card(chain: str, token: str, fresh: int = 0):
     """1200x630 PNG: logo, name, ticker, market cap, graduation progress, chain. Cached 5 minutes."""
     from fastapi.responses import Response
     from io import BytesIO
@@ -2296,7 +2359,7 @@ def og_card(chain: str, token: str):
         raise HTTPException(404, "not found")
     key = f"{chain}:{token}"
     hit = _OG_CACHE.get(key)
-    if hit and time.time() - hit[0] < 300:
+    if hit and not fresh and time.time() - hit[0] < 300:
         return Response(hit[1], media_type="image/png", headers={"Cache-Control": "public, max-age=300"})
     name, sym, mcap, prog, grad, image = "Ferzan coin", "", 0.0, None, False, ""
     r = None

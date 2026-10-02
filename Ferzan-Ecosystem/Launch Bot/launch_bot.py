@@ -627,6 +627,108 @@ async def _watch_loop(application: Application):
             logger.warning("watch loop: %s", str(e)[:160])
 
 
+_MS_STEPS = (("p25", 25.0), ("p50", 50.0), ("p90", 90.0), ("grad", 100.0))
+_MS_SYMBOLS = {"p25": "🔥", "p50": "🚀", "p90": "⚡", "grad": "🎓"}
+_MS_TAGS = {"solana": "Solana", "base": "Base", "bsc": "BNBChain", "ethereum": "Ethereum", "robinhood": "RobinhoodChain"}
+
+
+def _ms_caption(kind: str, sym: str) -> str:
+    s = _esc(sym)
+    return {
+        "p25": f"🔥 <b>${s}</b> just hit <b>25%</b> of the way to graduation.",
+        "p50": f"🚀 Halfway there! <b>${s}</b> is at <b>50%</b> of the way to graduation.",
+        "p90": f"⚡ Almost there: <b>${s}</b> is at <b>90%</b>. Graduation is close.",
+        "grad": f"🎓 <b>${s} GRADUATED!</b> Its liquidity now moves to the DEX pool.",
+    }[kind]
+
+
+def _ms_conn():
+    import sqlite3
+    conn = sqlite3.connect(db.DB_PATH, timeout=10)
+    conn.execute("CREATE TABLE IF NOT EXISTS creator_milestones (request_id TEXT NOT NULL, kind TEXT NOT NULL, "
+                 "sent_at INTEGER NOT NULL, PRIMARY KEY (request_id, kind))")
+    return conn
+
+
+def _ms_due(progress: float, graduated: bool, sent: set) -> list:
+    """Milestones reached and not yet sent, in order. A coin that jumped past several gets one message (the top one)."""
+    reached = [k for k, at in _MS_STEPS if (graduated if k == "grad" else progress >= at)]
+    return [k for k in reached if k not in sent]
+
+
+async def _milestone_loop(application: Application):
+    """Every 90s: tell a creator when their coin reaches 25 / 50 / 90 percent and when it graduates, with the
+    card image and a Share to X button. The first pass after a deploy only records where coins already are, so
+    nobody is messaged about an old milestone."""
+    if os.environ.get("LAUNCH_MILESTONES", "1").strip().lower() in {"0", "false", "no", "off"}:
+        return
+    import datetime as _dt
+    import json
+    import requests
+    from urllib.parse import quote
+    while True:
+        await asyncio.sleep(90)
+        try:
+            conn = _ms_conn()
+            first = conn.execute("SELECT 1 FROM creator_milestones WHERE request_id = '__init__'").fetchone() is None
+            cutoff = (_dt.datetime.utcnow() - _dt.timedelta(days=21)).isoformat()
+            rows = conn.execute(
+                "SELECT id, chat_id, chain, name, symbol, result_token_address, extra_params FROM launch_requests "
+                "WHERE status = 'confirmed' AND chat_id != 0 AND result_token_address != '' AND mode IN ('bonding_curve','meteora') "
+                "AND created_at >= ? ORDER BY created_at DESC LIMIT 400", (cutoff,)).fetchall()
+            sent_map: dict = {}
+            for rid, kind in conn.execute("SELECT request_id, kind FROM creator_milestones").fetchall():
+                sent_map.setdefault(rid, set()).add(kind)
+            for rid, chat_id, chain, name, sym, token, extra in rows:
+                r = _coin_state(chain, token)
+                if not r:
+                    continue
+                prog, grad = _coin_progress(r), bool(r["graduated"])
+                due = _ms_due(prog, grad, sent_map.get(rid, set()))
+                if not due:
+                    continue
+                now = int(time.time())
+                for k in due:  # record everything reached; only the top one is announced
+                    conn.execute("INSERT OR IGNORE INTO creator_milestones VALUES (?, ?, ?)", (rid, k, now))
+                conn.commit()
+                if first:
+                    continue
+                top = due[-1]
+                png = None
+                try:
+                    resp = await asyncio.to_thread(lambda: requests.get(f"{LAUNCH_API}/api/og/{chain}/{token}.png?fresh=1", timeout=20))
+                    png = resp.content if resp.ok else None
+                except Exception:
+                    png = None
+                base = (os.environ.get("LAUNCH_PUBLIC_URL") or "https://launch.ferzaneco.com").rstrip("/")
+                link = f"{base}/api/share/{chain}/{token}"
+                said = {"p25": "is 25% of the way to graduating", "p50": "is halfway to graduating", "p90": "is at 90% and about to graduate",
+                        "grad": "just graduated"}[top]
+                tweet = f"{_MS_SYMBOLS[top]} ${sym} {said} on @ferzaneco Ferzan Factory."
+                x = f"https://twitter.com/intent/tweet?text={quote(tweet)}&url={quote(link, safe='')}&hashtags=memecoin,{_MS_TAGS.get(chain, 'crypto')}"
+                kb = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("𝕏 Share this win", url=x)],
+                    [InlineKeyboardButton("📈 Open coin", url=_coin_link(chain, token, str((json.loads(extra or '{}') or {}).get('curve_address') or ''))),
+                     InlineKeyboardButton("💰 Claim fees", callback_data="go:claim")],
+                ])
+                cap = _ms_caption(top, sym)
+                try:
+                    if png:
+                        import io as _io
+                        await application.bot.send_photo(chat_id=chat_id, photo=_io.BytesIO(png), caption=cap, parse_mode="HTML", reply_markup=kb)
+                    else:
+                        await application.bot.send_message(chat_id=chat_id, text=cap, parse_mode="HTML", reply_markup=kb)
+                except Exception as e:
+                    logger.info("milestone %s not delivered: %s", rid, str(e)[:80])
+                await asyncio.sleep(0.1)
+            if first:
+                conn.execute("INSERT OR IGNORE INTO creator_milestones VALUES ('__init__', 'ran', ?)", (int(time.time()),))
+                conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.warning("milestone loop: %s", str(e)[:160])
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     if context.args and (context.args[0] or "").startswith("watch_"):
@@ -2237,6 +2339,7 @@ def main():
         await _post(application)
         application.create_task(_draft_loop(application))
         application.create_task(_watch_loop(application))
+        application.create_task(_milestone_loop(application))
 
     app.post_init = _post_all
     logger.info("Ferzan Launch starting...")
