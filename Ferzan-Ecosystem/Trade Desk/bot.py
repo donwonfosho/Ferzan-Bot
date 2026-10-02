@@ -8921,11 +8921,25 @@ async def _launch_feed_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 keep.append(ln)
         return keep or list(rows[:8])
 
+    dm_pool: list | None = None  # same quality bar as the channels, worked out once per cycle (not once per user)
+    try:
+        dm_floor = max(0.0, float(os.getenv("FERZAN_FEED_MIN_LIQ", "1000") or 0))
+    except ValueError:
+        dm_floor = 1000.0
     for user in db.list_users():
         if not user.get("alerts_on"):
             continue
         uid = int(user["user_id"])
-        diverse = _interesting(await asyncio.to_thread(_pool_for, "*"), False)
+        if dm_pool is None:
+            dm_pool = []
+            for cand in _interesting(await asyncio.to_thread(_pool_for, "*"), False)[:8]:
+                if _junk_signal(cand):
+                    continue
+                cand = await asyncio.to_thread(_enrich_launch, cand)
+                if _junk_signal(cand) or _dead_or_stable(cand) or float(cand.liquidity_usd or 0) < max(dm_floor, 1):
+                    continue
+                dm_pool.append(cand)
+        diverse = dm_pool
         for ln in diverse[:8]:
             cid = resolve_chain(ln.chain) or (ln.chain or "").lower()
             if cid and not db.flag_on(uid, f"feed_{cid}", 1):
