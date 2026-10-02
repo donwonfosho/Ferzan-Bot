@@ -769,10 +769,16 @@ def card_keyboard(
             callback_data=f"mwt:{q}"[:64],
         )])
     default_usd = _default_buy_usd(uid) if uid else 25.0
+    fee_tag = ""
+    try:
+        if uid and feecollect.enabled() and not feecollect.exempt(uid):
+            fee_tag = f" +{feecollect.live_bps(uid) / 100:.2f}% fee"
+    except Exception:
+        fee_tag = ""
     rows += [
         [
             InlineKeyboardButton(f"✏️ Buy X {unit}", callback_data=f"buyx:{q}"),
-            InlineKeyboardButton(f"💵 Buy ${default_usd:g}{times}", callback_data=f"buyz:{default_usd:g}:{q}"),
+            InlineKeyboardButton(f"💵 Buy ${default_usd:g}{times}{fee_tag}", callback_data=f"buyz:{default_usd:g}:{q}"),
         ],
         [
             InlineKeyboardButton(
@@ -982,6 +988,11 @@ def home_keyboard(private: bool = True, hot: list | None = None) -> InlineKeyboa
             InlineKeyboardButton("🎓 Migrate", callback_data="go:mig"),
         ],
         [
+            InlineKeyboardButton("🤖 Auto-snipe", callback_data="go:autosnipe"),
+            InlineKeyboardButton("🚩 Dev alerts", callback_data="go:devalerts"),
+            InlineKeyboardButton("💸 Fees", callback_data="go:fees"),
+        ],
+        [
             InlineKeyboardButton("🚀 Launch a coin", callback_data="go:launches"),
             InlineKeyboardButton("🤝 Refer & earn", callback_data="go:ref"),
         ],
@@ -1079,12 +1090,13 @@ def _hot_rows() -> list:
 
 LEVELS = ((250, "Legend", "👑"), (100, "Sniper", "🎯"), (50, "Whale Hunter", "🐋"), (20, "Degen", "😈"),
           (5, "Ape", "🦍"), (1, "Scout", "🔭"), (0, "Newcomer", "🌱"))
-WHATS_NEW_ID = "2026-09-29"
+WHATS_NEW_ID = "2026-10-02"
 WHATS_NEW = ("🆕 <b>What's new</b>\n"
-             "• Safe / Caution / Danger call on every card\n"
-             "• /protect: auto take-profit and stop-loss on every buy\n"
-             "• /pin: optional PIN for withdrawals and key export\n"
-             "• Live cards, Hot on Ferzan, /digest morning summary")
+             "• 📱 App: Discover new launches, creator checks, live charts, Rewards and streaks\n"
+             "• 🚩 /devalerts: a ping if a coin's creator starts selling\n"
+             "• 🤖 /autosnipe: auto-buy new Safe-badge Ferzan launches (opt-in, with caps)\n"
+             "• 🛡 One-tap auto-sell presets in the app\n"
+             "• /fees: see your rate and discounts")
 
 
 def _level_line(uid: int) -> str:
@@ -4471,23 +4483,27 @@ async def fees_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     uid = update.effective_user.id
     mine = db.fee_totals(uid)
-    ready, live_note = fees.live_ready()
-    wallets = fees.fee_wallets()
-    lines = [
-        f"Cut {fees.current_bps() / 100:.2f}% per paper fill (hard-capped at 1%).",
-        f"You have paid ${mine['fee_usd']:,.4f} across {mine['count']} tickets.",
-        live_note,
+    live = feecollect.enabled()
+    base = fees.current_bps(uid) / 100
+    lines = ["💸 <b>Fees</b>"]
+    if feecollect.exempt(uid):
+        lines.append("You are fee-exempt: no trading fee on your live trades.")
+    elif live:
+        lines += [
+            f"Manual buys: <b>{feecollect.live_bps(uid) / 100:.2f}%</b> (your rate, with volume and staking discounts).",
+            f"Auto-snipes and auto orders: <b>{feecollect.live_bps(uid, 'snipe') / 100:.2f}%</b>.",
+            "The fee is added on top of your buy and sent after the trade lands. Fees under $0.05 are skipped.",
+        ]
+    else:
+        lines.append("Live trading fees start soon. Until then live trades carry no Ferzan fee.")
+    lines += [
+        "",
+        "Volume discounts (30 days): $5k → 0.40% · $25k → 0.35% · $100k → 0.25%.",
+        "Staking discounts: 100 / 1,000 / 10,000 units → 0.05 / 0.10 / 0.15% off.",
+        "Coins launched on Ferzan also pay 1% on the curve itself (that part is in the contract).",
+        f"Practice (paper) trades use {base:.2f}%.",
+        f"You have paid ${mine['fee_usd']:,.4f} across {mine['count']} tickets so far.",
     ]
-    if wallets["sol"]:
-        lines.append(f"SOL fee wallet {wallets['sol']}")
-    if wallets["evm"]:
-        lines.append(f"EVM fee wallet {wallets['evm']}")
-    if wallets["jupiter_fee_account"]:
-        lines.append(f"Jupiter fee account {wallets['jupiter_fee_account']}")
-    lines.append(
-        "Live path: Jupiter platformFeeBps + feeAccount, or 0x swapFeeRecipient. "
-        "No seed phrases. The router pays the cut on-chain."
-    )
     if _is_operator(uid):
         all_fees = db.fee_totals()
         lines.append(
@@ -4498,7 +4514,7 @@ async def fees_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             lines.append(
                 f"  {row['kind']} ${row['fee_usd']:.4f} ({row['fee_bps']}bps) u{row['user_id']}"
             )
-    await update.effective_message.reply_text("\n".join(lines))
+    await update.effective_message.reply_text("\n".join(lines), parse_mode="HTML")
 
 
 async def signer_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -6013,6 +6029,12 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await chains_cmd(update, context)
         elif kind == "fees":
             await fees_cmd(update, context)
+        elif kind == "autosnipe":
+            context.args = []
+            await autosnipe_cmd(update, context)
+        elif kind == "devalerts":
+            context.args = []
+            await devalerts_cmd(update, context)
         elif kind == "wallets":
             await wallet_cmd(update, context)
         elif kind == "bridge":
@@ -8706,28 +8728,28 @@ def main() -> None:
         try:
             await application.bot.set_my_commands(
                 [
-                    BotCommand("start", "Home"),
-                    BotCommand("tour", "Quick 3-step tour"),
-                    BotCommand("signal", "Score a market"),
-                    BotCommand("buy", "Live buy a CA"),
-                    BotCommand("quote", "Quote + cut"),
-                    BotCommand("positions", "Live bag"),
-                    BotCommand("snipe", "Arm a gated snipe"),
-                    BotCommand("launches", "New pools"),
-                    BotCommand("chains", "Venues"),
-                    BotCommand("fees", "Your cut"),
-                    BotCommand("signer", "Signer pubkey"),
-                    BotCommand("wallet", "Your deposit wallets"),
-                    BotCommand("bag", "Live wallet tokens"),
-                    BotCommand("wallets", "Copy trading"),
-                    BotCommand("livesell", "Sell a live Solana mint"),
-                    BotCommand("settings", "Risk vault"),
+                    BotCommand("start", "Home menu"),
+                    BotCommand("tour", "3-step tour"),
+                    BotCommand("buy", "Buy a coin"),
+                    BotCommand("bag", "My coins · sell"),
+                    BotCommand("signal", "Safety score for a coin"),
+                    BotCommand("quote", "Price + fee preview"),
+                    BotCommand("wallet", "Deposit address"),
                     BotCommand("withdraw", "Send funds out"),
-                    BotCommand("alerts", "Token alerts"),
-                    BotCommand("migsnipe", "Graduation sniper"),
+                    BotCommand("alerts", "Price alerts"),
+                    BotCommand("wallets", "Copy a wallet's trades"),
+                    BotCommand("autosnipe", "Auto-buy new Ferzan launches"),
+                    BotCommand("devalerts", "Warn me if a dev sells"),
+                    BotCommand("snipe", "Snipe a new pool"),
+                    BotCommand("migsnipe", "Buy at graduation"),
+                    BotCommand("launches", "New pools"),
+                    BotCommand("settings", "Safety + trade settings"),
                     BotCommand("presets", "Quick-buy amounts"),
+                    BotCommand("fees", "Fees + discounts"),
                     BotCommand("recap", "Your day"),
-                    BotCommand("referral", "Invite + earn"),
+                    BotCommand("referral", "Invite friends + earn"),
+                    BotCommand("chains", "Supported chains"),
+                    BotCommand("livesell", "Sell a Solana coin"),
                 ]
             )
         except Exception:
