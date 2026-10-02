@@ -122,7 +122,18 @@ def _result(ts, txid: str, creator: str, factory: str, supply: int, wait_s: int 
     receipt = info.get("receipt") or {}
     burned = (info.get("fee") or 0) / 1e6
     if receipt.get("result") != "SUCCESS":
-        return {"ok": False, "txid": txid, "burned_trx": burned, "error": f"failed on-chain ({receipt.get('result')})"}
+        why = receipt.get("result")
+        try:  # say why, in words: the contract's own message if it gave one, and the energy spent against the cap
+            import tron_diag
+
+            said = tron_diag.decode_revert((info.get("contractResult") or [""])[0])
+        except Exception:
+            said = ""
+        if said:
+            why = f"{why}: {said[:80]}"
+        elif why in {"OUT_OF_ENERGY", "OUT_OF_TIME"}:
+            why = f"{why}: ran out of the {CURVE_FEE_LIMIT_SUN / 1e6:g} TRX fee limit after {burned:,.0f} TRX"
+        return {"ok": False, "txid": txid, "burned_trx": burned, "error": f"failed on-chain ({why})"}
     topic = keccak(TOPIC.encode()).hex()
     fac_hex = ts._to_hex(factory)[2:]
     token = ""
@@ -155,7 +166,7 @@ def info(args: dict) -> None:
 
 # ------------------------------------------------------------------ bonding curve launch --
 CURVE_SPARE_SUN = 65_000_000       # a curve launch burns about 50 TRX of energy (measured on Nile)
-CURVE_FEE_LIMIT_SUN = 120_000_000
+CURVE_FEE_LIMIT_SUN = int(float(os.getenv("TRON_CURVE_FEE_LIMIT_TRX") or 120) * 1_000_000)  # a cap, only what is used is burned
 CURVE_TOPIC = "CurveLaunched(address,address,address)"
 
 
