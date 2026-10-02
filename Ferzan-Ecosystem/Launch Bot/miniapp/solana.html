@@ -29,6 +29,31 @@
   #successScreen .txlink { word-break: break-all; font-size: 12px; color: #888; margin-top: 12px; display:block; }
   #mainContent.hidden { display:none; }
 </style>
+<style id="ferzan-theme">
+  :root { --bg:#050a1e; --card:#0b1330; --sunk:#111c40; --ink:#e8eefc; --muted:#8b9ac4; --link:#38e0d0; --line:rgba(160,190,255,.14); --glow:rgba(25,201,192,.38); color-scheme: dark; }
+  html, body { background:#050a1e !important; }
+  body { color:var(--ink) !important; background: radial-gradient(120% 60% at 50% -10%, #0e1f4d 0%, #050a1e 55%) fixed !important;
+         font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",Roboto,sans-serif; padding:16px 16px calc(24px + env(safe-area-inset-bottom)) !important; -webkit-font-smoothing:antialiased; }
+  h2 { font-size:22px; margin:6px 0 14px; background:linear-gradient(180deg,#fff,#9fe9f2); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent; }
+  #details { background:linear-gradient(180deg,rgba(255,255,255,.04),rgba(255,255,255,0)),var(--card); border:1px solid var(--line); border-radius:14px; padding:6px 14px; }
+  .detail-row { border-bottom:1px solid var(--line) !important; padding:10px 0 !important; color:var(--muted); } .detail-row:last-child { border-bottom:0 !important; } .detail-row b { color:var(--ink); }
+  button { border-radius:12px !important; font-weight:800; transition:transform .12s ease, filter .12s ease; } button:active { transform:scale(.97); filter:brightness(1.15); }
+  button.primary, #closeBtn { background:linear-gradient(180deg,#2fe3d8,#12b3ae) !important; color:#031014 !important; box-shadow:0 6px 18px -8px var(--glow); }
+  .wallet-btn { background:var(--sunk) !important; color:var(--ink) !important; border:1px solid var(--line) !important; }
+  #walletChoices .sub { color:var(--muted) !important; }
+  #status { background:var(--card) !important; color:var(--ink) !important; border:1px solid var(--line); }
+  #status a { color:var(--link) !important; }
+  #status.error, .error { background:rgba(251,113,133,.12) !important; color:#fda4af !important; border-color:rgba(251,113,133,.35) !important; }
+  #status.success, .success { background:rgba(52,211,153,.12) !important; color:#6ee7b7 !important; border-color:rgba(52,211,153,.35) !important; }
+  #status.hint, .hint { background:rgba(56,224,208,.10) !important; color:#99f6e4 !important; }
+  #successScreen p, #fzWin p { color:var(--muted) !important; } #successScreen .txlink { color:var(--muted) !important; }
+  #fzWin { text-align:center; padding:18px 4px 0; } #fzWin h2 { font-size:28px; }
+  #fzWin .row { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:8px; } #fzWin .row button, #fzWin .row a { margin:0; }
+  #fzWin .ghost { background:var(--sunk) !important; color:var(--ink) !important; border:1px solid var(--line) !important; box-shadow:none !important; }
+  #fzWin a.btn { display:block; padding:14px; border-radius:12px; font-weight:800; text-decoration:none; font-size:16px; background:var(--sunk); color:var(--ink); border:1px solid var(--line); }
+  #fzWin a.btn.main { background:linear-gradient(180deg,#2fe3d8,#12b3ae); color:#031014; border:0; box-shadow:0 6px 18px -8px var(--glow); }
+  #fzConfetti { position:fixed; inset:0; width:100%; height:100%; pointer-events:none; z-index:50; }
+</style>
 </head>
 <body>
 <div id="mainContent">
@@ -86,6 +111,39 @@
   let connectedAddress = null;
   let walletProvider = null;
   let launchReq = null;
+
+
+  /* ---- Ferzan celebration: confetti + share kit after a confirmed launch ---- */
+  function fzCelebrate(o) {
+    try {
+      const origin = 'https://launch.ferzaneco.com', share = o.token ? `${origin}/api/share/${o.chain}/${o.token}` : '';
+      const sym = String(o.symbol || '').replace(/[^A-Za-z0-9]/g, '').slice(0, 10);
+      const tags = { solana: 'Solana', base: 'Base', bsc: 'BNBChain', ethereum: 'Ethereum' }[o.chain] || 'crypto';
+      const msg = `$${sym} just launched on Ferzan Factory 🚀 @ferzaneco`;
+      const x = `https://twitter.com/intent/tweet?text=${encodeURIComponent(msg)}${share ? '&url=' + encodeURIComponent(share) : ''}&hashtags=memecoin,${tags}`;
+      const t = share ? `https://t.me/share/url?url=${encodeURIComponent(share)}&text=${encodeURIComponent(msg)}` : '';
+      const go = (u) => { if (tg?.openLink) tg.openLink(u); else window.open(u, '_blank'); };
+      const box = document.createElement('div'); box.id = 'fzWin';
+      box.innerHTML = `<div style="font-size:64px;line-height:1">🎉</div><h2>$${sym} is live!</h2><p>Your coin is on-chain. Share it now while it's fresh.</p>
+        <div class="row"><button class="primary" id="fzX">𝕏 Post it</button>${t ? '<button class="ghost" id="fzT">✈️ Telegram</button>' : '<span></span>'}</div>
+        ${o.trade ? `<div class="row" style="grid-template-columns:1fr"><a class="btn" id="fzTrade">📈 Open coin page</a></div>` : ''}
+        <div class="row" style="grid-template-columns:1fr"><a class="btn main" id="fzApp">📱 Back to the Launch app</a></div>`;
+      document.body.appendChild(box);
+      box.querySelector('#fzX').onclick = () => go(x);
+      if (t) box.querySelector('#fzT').onclick = () => go(t);
+      if (o.trade) box.querySelector('#fzTrade').onclick = () => { location.href = o.trade; };
+      box.querySelector('#fzApp').onclick = () => { location.href = 'app.html'; };
+      box.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      try { tg?.HapticFeedback?.notificationOccurred('success'); } catch (e) {}
+      if (matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+      const cv = document.createElement('canvas'); cv.id = 'fzConfetti'; document.body.appendChild(cv);
+      const c = cv.getContext('2d'); cv.width = innerWidth; cv.height = innerHeight;
+      const cols = ['#2fe3d8', '#7c5cff', '#fbbf24', '#ffffff', '#34d399'];
+      const ps = Array.from({ length: 140 }, () => ({ x: Math.random() * cv.width, y: -20 - Math.random() * cv.height * .5, r: 3 + Math.random() * 4, vy: 2 + Math.random() * 4, vx: -1.5 + Math.random() * 3, c: cols[(Math.random() * cols.length) | 0], a: Math.random() * 6 }));
+      let f = 0; (function tick() { c.clearRect(0, 0, cv.width, cv.height); ps.forEach((p) => { p.x += p.vx; p.y += p.vy; p.a += .15; c.fillStyle = p.c; c.save(); c.translate(p.x, p.y); c.rotate(p.a); c.fillRect(-p.r, -p.r / 2, p.r * 2, p.r); c.restore(); });
+        if (++f < 200) requestAnimationFrame(tick); else cv.remove(); })();
+    } catch (e) { /* the launch itself already succeeded */ }
+  }
 
   function showStatus(text, kind, html) {
     statusEl.style.display = 'block';
@@ -349,6 +407,7 @@
 
       await api('complete', { tx_hash: signature, result_token_address: mint_address || '' });
       showSuccess(signature);
+      fzCelebrate({ chain: 'solana', token: mint_address, symbol: launchReq.symbol, trade: mint_address ? `https://jup.ag/tokens/${mint_address}` : '' });
     } catch (e) {
       showStatus(`Failed: ${e.message}`, 'error');
       signBtn.disabled = false;
