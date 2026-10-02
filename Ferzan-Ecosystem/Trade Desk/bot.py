@@ -4863,49 +4863,33 @@ SIGNAL_IMAGES = os.getenv("FERZAN_SIGNAL_IMAGES", "1").strip().lower() not in {"
 _MILESTONES = (2, 3, 5, 10, 25, 50, 100)
 
 
-_SAFETY_CACHE: dict[str, tuple[float, tuple[str, str] | None]] = {}
+_SAFETY_CACHE: dict[str, tuple[float, tuple[str, str, str]]] = {}
 SIGNAL_SAFETY = os.getenv("FERZAN_SIGNAL_SAFETY", "1").strip().lower() not in {"0", "false", "no", "off"}
 SIGNAL_SKIP_HONEYPOT = os.getenv("FERZAN_SIGNAL_SKIP_HONEYPOT", "1").strip().lower() not in {"0", "false", "no", "off"}
 
 
-def _signal_safety(chain: str, ca: str) -> tuple[str, str] | None:
-    """(label, state) from GoPlus for EVM chains, cached an hour. None when unknown: no badge, never a guess.
-    state: ok / warn / bad. Short timeout so a slow API cannot hold up the feed."""
+def _signal_safety(chain: str, ca: str) -> tuple[str, str, str] | None:
+    """(label, state, detail) for a signal, cached an hour. None when unknown: no badge, never a guess.
+    EVM chains: GoPlus honeypot/tax/owner flags plus top-10 and dev share. Solana: mint and freeze authority read
+    straight from the mint account (not a honeypot test, so it is labelled for what it is).
+    state: ok / warn / bad. Short timeouts so a slow API cannot hold up the feed."""
     if not SIGNAL_SAFETY:
         return None
     ids = {"eth": "1", "bsc": "56", "base": "8453", "arb": "42161", "avax": "43114"}
-    cid = ids.get((resolve_chain(chain or "") or (chain or "")).lower())
+    cname = (resolve_chain(chain or "") or (chain or "")).lower()
+    cid = ids.get(cname)
     ca = (ca or "").strip()
-    if not cid or not ca.startswith("0x"):
+    is_sol = cname == "sol" and bool(ca) and not ca.startswith("0x")
+    if not (is_sol or (cid and ca.startswith("0x"))):
         return None
-    key = f"{cid}:{ca.lower()}"
+    key = f"{cname}:{ca.lower()}"
     hit = _SAFETY_CACHE.get(key)
     now = time.time()
     if hit and now - hit[0] < 3600:
         return hit[1]
-    res: tuple[str, str] | None = None
+    res = None
     try:
-        r = requests.get(
-            f"https://api.gopluslabs.io/api/v1/token_security/{cid}",
-            params={"contract_addresses": ca},
-            timeout=4,
-        )
-        blob = ((r.json() or {}).get("result") or {}).get(ca.lower()) or {}
-        if blob:
-            def _pct(k):
-                try:
-                    return float(blob.get(k) or 0)
-                except ValueError:
-                    return 0.0
-
-            if blob.get("is_honeypot") == "1":
-                res = ("HONEYPOT RISK", "bad")
-            elif blob.get("cannot_sell_all") == "1" or _pct("sell_tax") >= 0.25:
-                res = ("HIGH SELL TAX / LOCKED", "bad")
-            elif any(blob.get(k) == "1" for k in ("hidden_owner", "can_take_back_ownership", "owner_change_balance", "is_blacklisted", "is_mintable")):
-                res = ("CHECK CONTRACT", "warn")
-            else:
-                res = ("NO HONEYPOT FLAG", "ok")
+        res = _sol_mint_safety(ca) if is_sol else _evm_safety(cid, ca)
     except Exception:
         res = None
     if len(_SAFETY_CACHE) > 2000:
@@ -4915,14 +4899,85 @@ def _signal_safety(chain: str, ca: str) -> tuple[str, str] | None:
     return res
 
 
-def _safety_caption(sf: tuple[str, str] | None) -> str:
+def _evm_safety(cid: str, ca: str):
+    r = requests.get(
+        f"https://api.gopluslabs.io/api/v1/token_security/{cid}",
+        params={"contract_addresses": ca},
+        timeout=4,
+    )
+    blob = ((r.json() or {}).get("result") or {}).get(ca.lower()) or {}
+    if not blob:
+        return None
+
+    def _pct(k):
+        try:
+            return float(blob.get(k) or 0)
+        except ValueError:
+            return 0.0
+
+    if blob.get("is_honeypot") == "1":
+        label, state = "HONEYPOT RISK", "bad"
+    elif blob.get("cannot_sell_all") == "1" or _pct("sell_tax") >= 0.25:
+        label, state = "HIGH SELL TAX / LOCKED", "bad"
+    elif any(blob.get(k) == "1" for k in ("hidden_owner", "can_take_back_ownership", "owner_change_balance", "is_blacklisted", "is_mintable")):
+        label, state = "CHECK CONTRACT", "warn"
+    else:
+        label, state = "NO HONEYPOT FLAG", "ok"
+    bits = []
+    try:
+        hs = [h for h in (blob.get("holders") or []) if str(h.get("is_contract", "0")) != "1"][:10]
+        if hs:
+            bits.append(f"Top 10 hold {sum(float(h.get('percent') or 0) for h in hs) * 100:.0f}%")
+    except Exception:
+        pass
+    if blob.get("creator_percent") not in (None, ""):
+        bits.append(f"Dev holds {_pct('creator_percent') * 100:.1f}%")
+    return (label, state, " · ".join(bits))
+
+
+def _sol_mint_safety(mint: str):
+    body = {"jsonrpc": "2.0", "id": 1, "method": "getAccountInfo", "params": [mint, {"encoding": "jsonParsed"}]}
+    r = signer._rpc_post(json=body, timeout=4)
+    info = (((r.json() or {}).get("result") or {}).get("value") or {}).get("data", {})
+    parsed = (info.get("parsed") or {}).get("info") if isinstance(info, dict) else None
+    if not isinstance(parsed, dict) or "mintAuthority" not in parsed:
+        return None
+    mint_on, freeze_on = bool(parsed.get("mintAuthority")), bool(parsed.get("freezeAuthority"))
+    if mint_on and freeze_on:
+        return ("MINT + FREEZE ACTIVE", "warn", "Creator can mint more and freeze wallets")
+    if mint_on:
+        return ("MINT AUTHORITY ACTIVE", "warn", "Creator can mint more supply")
+    if freeze_on:
+        return ("FREEZE AUTHORITY ACTIVE", "warn", "Creator can freeze wallets")
+    return ("MINT & FREEZE REVOKED", "ok", "")
+
+
+def _safety_caption(sf) -> str:
     if not sf:
         return ""
     icon = {"ok": "✅", "warn": "⚠️", "bad": "🚨"}.get(sf[1], "")
-    return f"{icon} <b>{html.escape(sf[0].title())}</b> <i>(automated check, not a guarantee)</i>"
+    out = f"{icon} <b>{html.escape(sf[0].capitalize())}</b>"
+    if len(sf) > 2 and sf[2]:
+        out += f"\n👥 {html.escape(sf[2])}"
+    return out + "\n<i>Automated check, not a guarantee.</i>"
 
 
-def _signal_png(ln, safety: tuple[str, str] | None = None) -> bytes | None:
+def _signal_kind(ln) -> tuple[str, str]:
+    """(tag, subtitle) saying WHY this was posted: new launch, trending, mover or paid boost."""
+    src = getattr(ln, "source", "") or ""
+    if src == "geckoterminal-trend":
+        return "TRENDING", "trending now"
+    if src in {"geckoterminal-mover", "dexscreener-mover"}:
+        return "MOVER", "on the move"
+    if src == "dexscreener-boost":
+        return "BOOSTED", "paid boost"
+    age_m = _age_minutes(getattr(ln, "created_at", "") or "")
+    if age_m is not None and age_m <= 15:
+        return "NEW", "new on-chain launch"
+    return "", "on-chain signal"
+
+
+def _signal_png(ln, safety: tuple[str, str, str] | None = None) -> bytes | None:
     """The branded image for a signal, or None (disabled, missing Pillow, any render problem)."""
     if not SIGNAL_IMAGES:
         return None
@@ -4931,13 +4986,14 @@ def _signal_png(ln, safety: tuple[str, str] | None = None) -> bytes | None:
 
         cid = resolve_chain(ln.chain or "") or (ln.chain or "")
         chg = float(getattr(ln, "chg_1h", 0) or 0)
-        age_m = _age_minutes(getattr(ln, "created_at", "") or "")
         tags = []
-        if age_m is not None and age_m <= 15:
-            tags.append("NEW")
-        if getattr(ln, "source", "") == "dexscreener-boost" or chg >= 50:
+        kind, sub = _signal_kind(ln)
+        if kind:
+            tags.append(kind)
+        if chg >= 50 and kind != "BOOSTED":
             tags.append("HOT")
         return signal_card.render(
+            subtitle=sub,
             symbol=_clip_plain(ln.symbol or "?", 20),
             chain=(CHAINS.get(cid, {}).get("label") or cid or "?"),
             mc=float(getattr(ln, "fdv_usd", 0) or 0),
@@ -4954,7 +5010,7 @@ def _signal_png(ln, safety: tuple[str, str] | None = None) -> bytes | None:
         return None
 
 
-async def post_signal(bot, chat_id: int, ln, promo: bool = False, safety: tuple[str, str] | None = None):
+async def post_signal(bot, chat_id: int, ln, promo: bool = False, safety: tuple[str, str, str] | None = None):
     """One signal into a channel: branded image with a short caption when possible, else the text card.
     Returns the message id so the follow-up job can reply to it later."""
     png = await asyncio.to_thread(_signal_png, ln, safety)
@@ -5104,11 +5160,11 @@ def launch_card(ln, compact: bool = False) -> tuple[str, InlineKeyboardMarkup]:
         href = f"https://solscan.io/token/{ca}"
     chg = float(getattr(ln, "chg_1h", 0) or 0)
     age_m = _age_minutes(getattr(ln, "created_at", "") or "")
-    hot = getattr(ln, "source", "") == "dexscreener-boost" or chg >= 50
+    kind, _sub = _signal_kind(ln)
     tags = []
-    if age_m is not None and age_m <= 15:
-        tags.append("🆕 NEW")
-    if hot:
+    if kind:
+        tags.append({"NEW": "🆕 NEW", "TRENDING": "📈 TRENDING", "MOVER": "🚀 MOVER", "BOOSTED": "📣 PAID BOOST"}[kind])
+    if chg >= 50 and kind != "BOOSTED":
         tags.append("🔥 HOT")
     tag_txt = ("   " + "  ".join(tags)) if tags else ""
     lines = [f"{mark} <b>${name}</b>  ·  {chain}{tag_txt}", "━━━━━━━━━━━━━━"]

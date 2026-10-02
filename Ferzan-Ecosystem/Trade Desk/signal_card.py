@@ -90,7 +90,8 @@ def render(
     ca: str = "",
     tags: tuple[str, ...] = (),
     note: str = "",
-    safety: tuple[str, str] | None = None,
+    safety: tuple[str, str, str] | None = None,
+    subtitle: str = "new on-chain launches",
 ) -> bytes:
     up = chg_1h >= 0
     accent = GREEN if up else RED
@@ -109,7 +110,7 @@ def render(
     if crest is not None:
         img.paste(crest, (56, 44), crest)
     d.text((158, 56), "FERZAN SIGNALS", font=_font(30, True), fill=WHITE)
-    d.text((158, 94), "new on-chain launches", font=_font(22), fill=MUTED)
+    d.text((158, 94), subtitle or "on-chain signals", font=_font(22), fill=MUTED)
     chain_txt = (chain or "?").upper()[:14]
     cf = _font(30, True)
     cw = int(d.textlength(chain_txt, font=cf)) + 56
@@ -121,7 +122,7 @@ def render(
     tag_w = 0
     tag_specs = []
     for t in tags[:2]:
-        tag_specs.append((t, GOLD if t == "HOT" else CYAN))
+        tag_specs.append((t, GOLD if t in ("HOT", "BOOSTED", "TRENDING", "MOVER") else CYAN))
     tag_w = sum(int(d.textlength(t, font=_font(26, True))) + 36 + 14 for t, _ in tag_specs)
     sf = _fit(d, sym, W - 112 - tag_w, 132, True, 56)
     d.text((56, 150), sym, font=sf, fill=WHITE)
@@ -134,7 +135,7 @@ def render(
         d.text((60, 300), px_txt, font=_font(34), fill=MUTED)
 
     if safety:
-        label, state = safety
+        label, state = safety[0], safety[1]
         col = {"ok": GREEN, "warn": GOLD, "bad": RED}.get(state, MUTED)
         sf2 = _font(26, True)
         pw = int(d.textlength(label, font=sf2)) + 36
