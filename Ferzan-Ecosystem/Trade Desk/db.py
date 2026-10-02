@@ -166,6 +166,14 @@ def init_db() -> None:
                 status TEXT NOT NULL DEFAULT 'armed'
             );
 
+            CREATE TABLE IF NOT EXISTS dev_alerts (
+                user_id INTEGER NOT NULL,
+                mint TEXT NOT NULL,
+                level INTEGER NOT NULL DEFAULT 0,
+                at INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY(user_id, mint)
+            );
+
             CREATE TABLE IF NOT EXISTS user_flags (
                 user_id INTEGER NOT NULL,
                 flag TEXT NOT NULL,
@@ -2840,3 +2848,26 @@ def degen_disable(user_id: int) -> None:
             set_flag(user_id, f, bool(on))
     update_user(user_id, degen_prev=None)
     set_flag(user_id, "degen", False)
+
+
+def live_holders() -> list[tuple[int, str]]:
+    """Every (user, token) with an open Ferzan-bought bag."""
+    with get_conn() as conn:
+        rows = conn.execute("SELECT user_id, mint FROM live_basis WHERE cost_usd > 0").fetchall()
+    return [(int(r[0]), str(r[1])) for r in rows]
+
+
+def dev_alert_level(user_id: int, mint: str) -> int:
+    with get_conn() as conn:
+        row = conn.execute("SELECT level FROM dev_alerts WHERE user_id = ? AND mint = ?", (int(user_id), mint)).fetchone()
+    return int(row[0]) if row else 0
+
+
+def dev_alert_set(user_id: int, mint: str, level: int) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO dev_alerts (user_id, mint, level, at) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(user_id, mint) DO UPDATE SET level = excluded.level, at = excluded.at",
+            (int(user_id), mint, int(level), int(time.time())),
+        )
+        conn.commit()

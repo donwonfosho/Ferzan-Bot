@@ -216,6 +216,26 @@ def _curve_market(mint: str) -> dict:
         return {}
 
 
+def _fill_from_launch(info: dict, mint: str) -> None:
+    """Curve coins: take name, symbol, market cap and curve progress from the Launch API's own index."""
+    try:
+        data = _launch_get(f"/api/launches?sort=new&limit=5&q={mint.lower()}", 20)
+        items = data.get("items") if isinstance(data, dict) else data
+        for it in items or []:
+            if str(it.get("token") or "").lower() == mint.lower():
+                if info["symbol"] in ("?", ""):
+                    info["symbol"] = it.get("symbol") or info["symbol"]
+                info["name"] = info["name"] or it.get("name") or ""
+                if not info["mc"]:
+                    info["mc"] = it.get("mcap_usd") or 0
+                if it.get("progress") is not None and not it.get("graduated"):
+                    pr = float(it["progress"])
+                    info["progress"] = round(pr * 100 if pr <= 1 else pr)
+                return
+    except Exception:
+        pass
+
+
 def token_info(mint: str) -> dict:
     now = time.time()
     hit = _TOKEN_CACHE.get(mint)
@@ -263,6 +283,8 @@ def token_info(mint: str) -> dict:
         "bot_only": cid not in ("sol", "bsc", "avax", "ton", "base", "eth", "arb"),
         "bot": _bot_username(),
     }
+    if mint.startswith("0x") and (info["symbol"] in ("?", "") or not info["mc"]):
+        _fill_from_launch(info, mint)
     _TOKEN_CACHE[mint] = (now, info)
     if len(_TOKEN_CACHE) > 2000:
         for k in sorted(_TOKEN_CACHE, key=lambda k: _TOKEN_CACHE[k][0])[:1000]:

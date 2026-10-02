@@ -4325,6 +4325,7 @@ _FLAG_DEFAULTS = {
     "copy_live": 0,
     "daily_recap": 1,
     "multi_buy": 0,
+    "dev_alerts": 1,
 }
 
 
@@ -8141,6 +8142,68 @@ async def snipe_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             logger.exception("snipe notify failed for %s", user_id)
 
 
+def dev_sold_level(score: dict) -> int:
+    """0 = nothing to say, 1 = the dev has sold some, 2 = the dev has dumped at least half of what they bought."""
+    if not isinstance(score, dict) or not score.get("found"):
+        return 0
+    sold = float(score.get("dev_sold") or 0)
+    bought = float(score.get("dev_bought") or 0)
+    if sold <= 0:
+        return 0
+    if bought > 0 and sold >= bought * 0.5:
+        return 2
+    return 1
+
+
+async def dev_sold_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Tell holders when the creator of a Ferzan-launched coin they hold starts selling. One ping per level."""
+    try:
+        base = (os.getenv("LAUNCH_API_URL") or "http://127.0.0.1:8000").rstrip("/")
+        holders = await asyncio.to_thread(db.live_holders)
+        scores: dict[str, int] = {}
+        for uid, mint in holders[:400]:
+            if not db.flag_on(uid, "dev_alerts", 1):
+                continue
+            if mint not in scores:
+                try:
+                    r = await asyncio.to_thread(requests.get, f"{base}/api/creator-score/{mint}", timeout=4)
+                    scores[mint] = dev_sold_level(r.json() if r.status_code == 200 else {})
+                except Exception:
+                    scores[mint] = 0
+            lvl = scores[mint]
+            if lvl <= db.dev_alert_level(uid, mint):
+                continue
+            db.dev_alert_set(uid, mint, lvl)
+            sym = ""
+            head = "🚩 The dev is dumping" if lvl == 2 else "⚠️ The dev has started selling"
+            try:
+                await context.bot.send_message(
+                    uid,
+                    f"{head} {('$' + sym) if sym else 'a coin you hold'}.\n"
+                    f"<code>{html.escape(mint)}</code>\n"
+                    "Open your bag to sell or set a stop. Turn these alerts off with /devalerts.",
+                    parse_mode="HTML",
+                )
+            except Exception:
+                logger.exception("dev-sold alert failed for %s", uid)
+    except Exception:
+        logger.exception("dev sold job crashed; will retry next cycle")
+
+
+async def devalerts_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard(update):
+        return
+    uid = update.effective_user.id
+    arg = (context.args[0].lower() if context.args else "")
+    if arg in ("on", "off"):
+        db.set_flag(uid, "dev_alerts", arg == "on")
+    on = db.flag_on(uid, "dev_alerts", 1)
+    await update.effective_message.reply_text(
+        f"{'🟢' if on else '🔴'} Dev-sold alerts are {'ON' if on else 'OFF'}.\n"
+        "I'll message you if the creator of a Ferzan coin you hold starts selling.\n"
+        "Use /devalerts on or /devalerts off.")
+
+
 async def dca_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         await _dca_job(context)
@@ -8648,6 +8711,7 @@ def main() -> None:
     app.add_handler(CommandHandler("protect", protect_cmd))
     app.add_handler(CommandHandler("pin", pin_cmd))
     app.add_handler(CommandHandler("degen", degen_cmd))
+    app.add_handler(CommandHandler("devalerts", devalerts_cmd))
     app.add_handler(CommandHandler("digest", digest_cmd))
     app.add_handler(CommandHandler("status", status_cmd))
     app.add_handler(CommandHandler("ref", ref_cmd))
@@ -8690,6 +8754,7 @@ def main() -> None:
         jq.run_repeating(launch_feed_job, interval=LAUNCH_FEED_SECONDS, first=35)
         jq.run_repeating(native_pulse_job, interval=600, first=50)
         jq.run_repeating(dca_job, interval=300, first=90)
+        jq.run_repeating(dev_sold_job, interval=120, first=100)
         jq.run_repeating(token_alert_job, interval=60, first=30)
         jq.run_repeating(migration_job, interval=int(os.getenv("MIG_POLL_SECONDS", "20")), first=45)
         jq.run_repeating(webapp_order_job, interval=2, first=10)

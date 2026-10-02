@@ -570,6 +570,8 @@
     } finally { busy = false; document.body.classList.remove("busy"); }
   }
   let token = null;
+  const fmtPx = (v) => { v = Number(v); if (!(v > 0)) return "0"; if (v >= 1) return v.toFixed(v >= 100 ? 2 : 4);
+    return v.toFixed(Math.min(12, Math.max(4, 3 - Math.floor(Math.log10(v))))); };
   $("findForm").addEventListener("submit", async (e) => {
     e.preventDefault();
     const mint = $("ca").value.trim();
@@ -582,8 +584,9 @@
       const t = token;
       box.innerHTML = `
         <div class="head"><span class="name">$${esc(t.symbol)} <span class="chain">${esc((t.chain || "").toUpperCase())}</span></span>
-          <span class="num">${t.price ? "$" + Number(t.price).toPrecision(4) : ""}</span></div>
+          <span class="num">${t.price ? "$" + fmtPx(t.price) : ""}</span></div>
         <div class="stats num">MC ${usd(t.mc)} · Liq ${usd(t.liq)} · ${chg(t.chg24)}</div>
+        ${t.progress != null ? `<div class="bar" aria-label="${t.progress}% to graduation" style="margin:0 0 10px"><i style="width:${Math.min(100, t.progress)}%"></i></div><div class="dsub" style="margin:-6px 0 10px">${t.progress}% to graduation</div>` : ""}
         ${t.safety ? `<div class="safety">${esc(t.safety)}</div>` : ""}
         <div id="verdict"></div>
         <div class="grid3">${(t.presets || []).map((v) =>
@@ -733,11 +736,19 @@
     catch (err) { $("sheetBody").innerHTML = `<div class="error">${esc(err.message)}</div>`; }
   }
   const val = (v) => v == null ? "" : String(v);
+  $("sheetBody").addEventListener("click", (e) => {
+    const c = e.target.closest("[data-preset]"); if (!c) return;
+    const [tp, sl, tr] = c.dataset.preset.split(",");
+    if ($("rTp")) { $("rTp").value = tp; $("rSl").value = sl; $("rTr").value = tr; buzz(); }
+  });
   function renderRules(r) {
     const ex = r.exit || {};
     const exitSec = r.has_cost ? `
       <div class="sec"><h3>🎯 Exit rules</h3>
         <p class="why">Sells the whole bag automatically. Leave a box empty to turn that rule off.</p>
+        <div class="chips" style="margin:0 0 8px"><button class="chip" data-preset="50,20,">🛡 Safe +50 / −20</button>
+          <button class="chip" data-preset="100,30,20">⚖️ Balanced +100 / −30 / trail 20</button>
+          <button class="chip" data-preset="300,40,25">🚀 Moon +300 / −40 / trail 25</button></div>
         <label class="field">Take profit at +%<input id="rTp" inputmode="decimal" placeholder="off" value="${val(ex.tp)}"></label>
         <label class="field">Stop loss at −%<input id="rSl" inputmode="decimal" placeholder="off" value="${val(ex.sl)}"></label>
         <label class="field">Trailing stop %<input id="rTr" inputmode="decimal" placeholder="off" value="${val(ex.trail)}"></label>
@@ -1037,7 +1048,7 @@
     try {
       const [me, cp] = await Promise.all([api("/api/me", {}), api("/api/compete", {}).catch(() => null)]);
       const r = me.ref, nt = me.next_tier;
-      const row = (a, i, val) => `<div class="lb"><span class="num">${i + 1}</span><span>${esc(a.short)}</span><span class="num">${val}</span></div>`;
+      const row = (a, i, val) => `<div class="lb"><span class="num">${i + 1}</span><span>${esc(a.short)}${a.wallet && !/^0x/i.test(a.wallet) ? ` <button class="chip" data-track="${esc(a.wallet)}" data-lab="${esc(a.short)}">👀 Track</button>` : ""}</span><span class="num">${val}</span></div>`;
       box.innerHTML = `
         <div class="rwtile">
           <div class="tile"><div class="k">Your fee</div><div class="v num">${(me.fee_bps / 100).toFixed(2)}%</div><div class="s num">30d vol ${usd(me.volume30)}</div></div>
@@ -1051,6 +1062,14 @@
     } catch (e) { box.innerHTML = `<div class="empty">Rewards will show here shortly.</div>`; }
   }
   $("rewards").addEventListener("click", async (e) => {
+    const tr = e.target.closest("[data-track]");
+    if (tr) {
+      tr.disabled = true;
+      try { await api("/api/wallets/add", { address: tr.dataset.track, label: tr.dataset.lab, chain: "sol" });
+        tr.textContent = "✅ Tracking"; toast("Tracking this trader. Turn on copy in the Copy section when you want to follow their buys.", 4500); loadWatch(); }
+      catch (err) { tr.disabled = false; toast("🔴 " + err.message, 4000); }
+      return;
+    }
     const b = e.target.closest("#shareRef"); if (!b) return;
     const link = b.dataset.link;
     const url = "https://t.me/share/url?url=" + encodeURIComponent(link) + "&text=" + encodeURIComponent("Trade on Ferzan with me");
