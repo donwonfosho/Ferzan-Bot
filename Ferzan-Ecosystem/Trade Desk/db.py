@@ -166,6 +166,22 @@ def init_db() -> None:
                 status TEXT NOT NULL DEFAULT 'armed'
             );
 
+            CREATE TABLE IF NOT EXISTS autosnipe_cfg (
+                user_id INTEGER PRIMARY KEY,
+                on_ INTEGER NOT NULL DEFAULT 0,
+                usd REAL NOT NULL DEFAULT 10,
+                daily_usd REAL NOT NULL DEFAULT 50
+            );
+
+            CREATE TABLE IF NOT EXISTS autosnipe_log (
+                user_id INTEGER NOT NULL,
+                mint TEXT NOT NULL,
+                usd REAL NOT NULL DEFAULT 0,
+                at INTEGER NOT NULL,
+                ok INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY(user_id, mint)
+            );
+
             CREATE TABLE IF NOT EXISTS dev_alerts (
                 user_id INTEGER NOT NULL,
                 mint TEXT NOT NULL,
@@ -2870,4 +2886,52 @@ def dev_alert_set(user_id: int, mint: str, level: int) -> None:
             "ON CONFLICT(user_id, mint) DO UPDATE SET level = excluded.level, at = excluded.at",
             (int(user_id), mint, int(level), int(time.time())),
         )
+        conn.commit()
+
+
+def autosnipe_get(user_id: int) -> dict:
+    with get_conn() as conn:
+        r = conn.execute("SELECT on_, usd, daily_usd FROM autosnipe_cfg WHERE user_id = ?", (int(user_id),)).fetchone()
+    return {"on": bool(r[0]), "usd": float(r[1]), "daily_usd": float(r[2])} if r else {"on": False, "usd": 10.0, "daily_usd": 50.0}
+
+
+def autosnipe_set(user_id: int, on: bool, usd: float | None = None, daily_usd: float | None = None) -> None:
+    cur = autosnipe_get(user_id)
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO autosnipe_cfg (user_id, on_, usd, daily_usd) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(user_id) DO UPDATE SET on_ = excluded.on_, usd = excluded.usd, daily_usd = excluded.daily_usd",
+            (int(user_id), 1 if on else 0, float(usd if usd is not None else cur["usd"]),
+             float(daily_usd if daily_usd is not None else cur["daily_usd"])),
+        )
+        conn.commit()
+
+
+def autosnipe_active() -> list[dict]:
+    with get_conn() as conn:
+        rows = conn.execute("SELECT user_id, usd, daily_usd FROM autosnipe_cfg WHERE on_ = 1").fetchall()
+    return [{"user_id": int(r[0]), "usd": float(r[1]), "daily_usd": float(r[2])} for r in rows]
+
+
+def autosnipe_spent_today(user_id: int) -> float:
+    with get_conn() as conn:
+        r = conn.execute("SELECT COALESCE(SUM(usd),0) FROM autosnipe_log WHERE user_id = ? AND at >= ?",
+                         (int(user_id), int(time.time()) - 86400)).fetchone()
+    return float(r[0] or 0)
+
+
+def autosnipe_claim(user_id: int, mint: str, usd: float) -> bool:
+    """True only the first time this user is offered this coin: the row is written BEFORE any money moves."""
+    with get_conn() as conn:
+        cur = conn.execute("INSERT OR IGNORE INTO autosnipe_log (user_id, mint, usd, at, ok) VALUES (?, ?, ?, ?, 0)",
+                           (int(user_id), mint, float(usd), int(time.time())))
+        conn.commit()
+        return cur.rowcount == 1
+
+
+def autosnipe_done(user_id: int, mint: str, ok: bool) -> None:
+    with get_conn() as conn:
+        # A failed buy spent nothing: take it out of the daily total but keep the row so it is never retried.
+        conn.execute("UPDATE autosnipe_log SET ok = ?, usd = CASE WHEN ? THEN usd ELSE 0 END WHERE user_id = ? AND mint = ?",
+                     (1 if ok else 0, 1 if ok else 0, int(user_id), mint))
         conn.commit()

@@ -1051,11 +1051,11 @@
       const row = (a, i, val) => `<div class="lb"><span class="num">${i + 1}</span><span>${esc(a.short)}${a.wallet && !/^0x/i.test(a.wallet) ? ` <button class="chip" data-track="${esc(a.wallet)}" data-lab="${esc(a.short)}">👀 Track</button>` : ""}</span><span class="num">${val}</span></div>`;
       box.innerHTML = `
         <div class="rwtile">
-          <div class="tile"><div class="k">Your fee</div><div class="v num">${(me.fee_bps / 100).toFixed(2)}%</div><div class="s num">30d vol ${usd(me.volume30)}</div></div>
+          <div class="tile"><div class="k">Your fee</div><div class="v num">${me.fee_live ? (me.fee_bps / 100).toFixed(2) + "%" : "0%"}</div><div class="s num">${me.fee_live ? "30d vol " + usd(me.volume30) : "launch period"}</div></div>
           <div class="tile"><div class="k">Rank</div><div class="v">${esc(r.tier)}</div><div class="s num">${r.invites} invited</div></div>
           <div class="tile"><div class="k">Referral $</div><div class="v num">${usd(r.open)}</div><div class="s num">earned ${usd(r.earned)}</div></div>
         </div>
-        ${nt ? `<p class="dsub" style="margin:0 2px 10px">Trade ${usd(nt.at - me.volume30)} more in 30 days to drop your fee to ${(nt.bps / 100).toFixed(2)}%.</p>` : ""}
+        ${nt && me.fee_live ? `<p class="dsub" style="margin:0 2px 10px">Trade ${usd(nt.at - me.volume30)} more in 30 days to drop your fee to ${(nt.bps / 100).toFixed(2)}%.</p>` : ""}
         ${r.link ? `<button class="btn share" id="shareRef" data-link="${esc(r.link)}">🔗 Share my invite link</button>` : ""}
         ${cp && cp.volume && cp.volume.length ? `<h2 style="margin-top:8px">Weekly volume race</h2><div class="list">${cp.volume.slice(0, 5).map((a, i) => row(a, i, usd(a.volume_usd))).join("")}</div>` : ""}
         ${cp && cp.profit && cp.profit.length ? `<h2 style="margin-top:16px">Weekly profit race</h2><div class="list">${cp.profit.slice(0, 5).map((a, i) => row(a, i, "+" + usd(a.pnl_usd))).join("")}</div>` : ""}`;

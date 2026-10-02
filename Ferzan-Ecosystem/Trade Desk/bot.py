@@ -45,6 +45,7 @@ from telegram.ext import (
 )
 
 import db
+import feecollect
 import fees
 import onchain
 try:
@@ -1743,7 +1744,7 @@ _BUY_OK: dict = {}  # uid -> mint of the last live buy that went through, until 
 def _live_buy(
     uid: int, card, query: str, force: bool, usd_override: float | None = None,
     secrets_override: tuple[str, str] | None = None, record_basis: bool = True,
-    gates_checked: bool = False,
+    gates_checked: bool = False, fee_kind: str = "manual",
 ) -> tuple[bool, str]:
     """Blocking — call via _off(). Returns (ok, message). Guard refusals
     return their original text (other code matches on those prefixes);
@@ -1814,7 +1815,16 @@ def _live_buy(
         _log_trade_safe(uid, "buy", mint, label, usd)
         if liq_mark and record_basis:
             db.set_lp_mark(uid, mint, float(card.snapshot.liquidity_usd or 0))
-        extra = db.credit_desk_share(uid, usd)
+        fee_taken, fee_line = False, ""
+        if feecollect.enabled():
+            fam = "ton" if label == "TON" else "trx" if label == "TRX" else "evm" if mint.startswith("0x") else "sol"
+            fee_taken, fee_line = feecollect.skim_buy(
+                uid, usd, fam, sol_secret=sol_secret or "", evm_secret=evm_secret or "",
+                evm_chain=(resolve_chain(chain) or chain or "base"), kind=fee_kind, note=mint[:12])
+            if fee_line:
+                msg = f"{msg}\n{fee_line}"
+        # With collection on, referrers are only paid out of a fee that was really taken.
+        extra = db.credit_desk_share(uid, usd) if (fee_taken or not feecollect.enabled()) else ""
         if extra:
             msg = f"{msg}\n{extra}"
         msg = f"{msg}\n⚡ Filled in {time.time() - _t0:.1f}s"
@@ -8190,6 +8200,101 @@ async def dev_sold_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         logger.exception("dev sold job crashed; will retry next cycle")
 
 
+AUTOSNIPE_CHAINS = {c.strip() for c in (os.getenv("AUTOSNIPE_CHAINS") or "solana,base,bsc").split(",") if c.strip()}
+AUTOSNIPE_MAX_AGE_S = int(os.getenv("AUTOSNIPE_MAX_AGE_S", "300"))
+
+
+def autosnipe_pick(items: list, now: float) -> list[dict]:
+    """New Ferzan launches worth sniping: still on the curve, fresh, on an allowed chain, and carrying the Safe launch badge."""
+    out = []
+    for it in items or []:
+        if not isinstance(it, dict) or not it.get("token") or it.get("graduated") or not it.get("safe"):
+            continue
+        if str(it.get("chain") or "") not in AUTOSNIPE_CHAINS:
+            continue
+        age = now - float(it.get("launched_ts") or 0)
+        if age < 0 or age > AUTOSNIPE_MAX_AGE_S:
+            continue
+        out.append(it)
+    return out
+
+
+def _autosnipe_buy(uid: int, mint: str, usd: float) -> tuple[bool, str]:
+    card = analyze(mint)
+    return _live_buy(uid, card, mint, True, usd, fee_kind="snipe")
+
+
+async def _autosnipe_one(context, uid: int, it: dict, usd: float) -> None:
+    mint = str(it["token"])
+    try:
+        ok, msg = await _off(uid, _autosnipe_buy, uid, mint, usd, _busy=(False, "Another trade was running, so this snipe was skipped."))
+    except Exception as exc:
+        logger.exception("autosnipe buy failed for %s", uid)
+        ok, msg = False, f"Snipe failed: {exc}"
+    db.autosnipe_done(uid, mint, bool(ok))
+    try:
+        await context.bot.send_message(
+            uid, f"🎯 Auto-snipe ${html.escape(str(it.get('symbol') or '?'))}\n{msg}", disable_web_page_preview=True)
+    except Exception:
+        pass
+
+
+async def autosnipe_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    try:
+        users = await asyncio.to_thread(db.autosnipe_active)
+        if not users or _auto_trading_killed():
+            return
+        base = (os.getenv("LAUNCH_API_URL") or "http://127.0.0.1:8000").rstrip("/")
+        r = await asyncio.to_thread(requests.get, f"{base}/api/launches?sort=new&limit=20", timeout=5)
+        data = r.json() if r.status_code == 200 else {}
+        picks = autosnipe_pick(data.get("items") if isinstance(data, dict) else data, time.time())
+        for it in picks:
+            for u in users:
+                uid = u["user_id"]
+                if not _allowed(uid):
+                    continue
+                usd = min(signer.max_usd(), max(1.0, float(u["usd"])))
+                if db.autosnipe_spent_today(uid) + usd > float(u["daily_usd"]):
+                    continue
+                if not db.autosnipe_claim(uid, str(it["token"]), usd):
+                    continue
+                asyncio.create_task(_autosnipe_one(context, uid, it, usd))
+    except Exception:
+        logger.exception("autosnipe job crashed; will retry next cycle")
+
+
+async def autosnipe_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard(update):
+        return
+    if update.effective_chat and update.effective_chat.type != "private":
+        return
+    uid = update.effective_user.id
+    args = [a.lower() for a in (context.args or [])]
+    cfg = db.autosnipe_get(uid)
+    if args and args[0] == "off":
+        db.autosnipe_set(uid, False)
+        cfg = db.autosnipe_get(uid)
+    elif args and args[0] == "on":
+        try:
+            usd = float(args[1]) if len(args) > 1 else cfg["usd"]
+            daily = float(args[2]) if len(args) > 2 else max(cfg["daily_usd"], usd * 3)
+        except ValueError:
+            await update.effective_message.reply_text("Use: /autosnipe on <usd per coin> <daily cap usd>  e.g. /autosnipe on 10 50")
+            return
+        usd = min(signer.max_usd(), max(1.0, usd))
+        daily = max(usd, min(1000.0, daily))
+        db.autosnipe_set(uid, True, usd, daily)
+        cfg = db.autosnipe_get(uid)
+    state = "🟢 ON" if cfg["on"] else "🔴 OFF"
+    await update.effective_message.reply_text(
+        f"🎯 Auto-snipe is {state}\n"
+        f"Buys each brand-new Ferzan launch that carries the Safe launch badge, within minutes of launch.\n"
+        f"Per coin: ${cfg['usd']:,.0f} · Daily cap: ${cfg['daily_usd']:,.0f} · Spent in the last 24h: ${db.autosnipe_spent_today(uid):,.0f}\n\n"
+        "Real money from your Ferzan wallet. Even Safe-badge coins can lose everything, and a sniped coin can fall fast. "
+        "Fees: 1% per snipe once fees are live. Your rules (stop loss, auto-protect) apply to what you buy.\n"
+        "Set it: /autosnipe on 10 50   ·   Stop it: /autosnipe off")
+
+
 async def devalerts_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update):
         return
@@ -8712,6 +8817,7 @@ def main() -> None:
     app.add_handler(CommandHandler("pin", pin_cmd))
     app.add_handler(CommandHandler("degen", degen_cmd))
     app.add_handler(CommandHandler("devalerts", devalerts_cmd))
+    app.add_handler(CommandHandler("autosnipe", autosnipe_cmd))
     app.add_handler(CommandHandler("digest", digest_cmd))
     app.add_handler(CommandHandler("status", status_cmd))
     app.add_handler(CommandHandler("ref", ref_cmd))
@@ -8755,6 +8861,7 @@ def main() -> None:
         jq.run_repeating(native_pulse_job, interval=600, first=50)
         jq.run_repeating(dca_job, interval=300, first=90)
         jq.run_repeating(dev_sold_job, interval=120, first=100)
+        jq.run_repeating(autosnipe_job, interval=12, first=60)
         jq.run_repeating(token_alert_job, interval=60, first=30)
         jq.run_repeating(migration_job, interval=int(os.getenv("MIG_POLL_SECONDS", "20")), first=45)
         jq.run_repeating(webapp_order_job, interval=2, first=10)

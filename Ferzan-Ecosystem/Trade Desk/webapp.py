@@ -736,8 +736,11 @@ def me_info(uid: int) -> dict:
     vol30 = db.user_volume_usd(uid, 30)
     bps = fees.current_bps(uid)
     nxt = next(((t, b) for t, b in ((5_000, 40), (25_000, 35), (100_000, 25)) if vol30 < t and b < bps), None)
+    import feecollect
+
     return {
         "fee_bps": bps,
+        "fee_live": feecollect.enabled(),
         "volume30": round(vol30, 2),
         "next_tier": {"at": nxt[0], "bps": nxt[1]} if nxt else None,
         "ref": {"tier": st["tier"], "invites": st["invites"], "volume": st["volume"], "earned": st["earned"],
