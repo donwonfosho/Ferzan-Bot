@@ -1193,8 +1193,8 @@
         const name = t.symbol ? "$" + esc(t.symbol) : esc(t.mint.slice(0, 4) + "…" + t.mint.slice(-4));
         const res = t.pnl == null ? "" : `<span class="${t.pnl >= 0 ? "up" : "down"}">${t.pnl >= 0 ? "+" : "−"}$${Math.abs(t.pnl).toFixed(2)}${t.pnl_pct == null ? "" : ` (${t.pnl_pct > 0 ? "+" : ""}${t.pnl_pct.toFixed(0)}%)`}</span>`;
         return `<div class="pos" role="listitem" style="cursor:default">
-          <div><span class="sym">${t.side === "buy" ? "🟢 Buy" : "🔴 Sell"} ${name}</span><span class="chain">${esc(t.chain)}</span></div>
-          <div class="val num">${t.usd > 0 ? "$" + t.usd.toFixed(2) : "–"}</div>
+          <div><span class="sym">${t.side === "buy" ? "🟢 Buy" : "🔴 Sell"} ${name}</span><span class="chain">${esc((t.chain || "").toUpperCase())}</span></div>
+          <div class="val num">${t.usd > 0 ? "$" + t.usd.toFixed(2) : (t.side === "sell" ? "sold" : "–")}</div>
           <div class="sub num">${esc(when)}${t.source ? " · " + esc(t.source) : ""}</div>
           <div class="right-sub num">${res}</div></div>`;
       }).join("");
