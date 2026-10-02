@@ -2343,8 +2343,14 @@ def main():
         if MINI_APP_BASE_URL.startswith("https://"):
             try:
                 from telegram import MenuButtonWebApp
+                try:
+                    me = await application.bot.get_me()
+                except Exception:
+                    me = None
+                # the menu button opens a chooser first: the app, or classic chat mode
+                menu_url = f"{MINI_APP_BASE_URL}/app.html?from=menu&bot={getattr(me, 'username', '') or ''}"
                 await application.bot.set_chat_menu_button(
-                    menu_button=MenuButtonWebApp(text="Launch app", web_app=WebAppInfo(url=f"{MINI_APP_BASE_URL}/app.html")))
+                    menu_button=MenuButtonWebApp(text="🚀 Launch", web_app=WebAppInfo(url=menu_url)))
             except Exception as e:
                 logger.info("menu button not set: %s", str(e)[:80])
         application.create_task(_draft_loop(application))
