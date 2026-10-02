@@ -605,6 +605,168 @@ async def api_copy_live(request: Request) -> JSONResponse:
     return JSONResponse(await asyncio.to_thread(_watch_state, uid))
 
 
+# ------------------------------------------------------- phase B extras ----
+_LAUNCH_CACHE: dict[str, tuple[float, object]] = {}
+_FEED_SORTS = {"new", "trending", "koth", "graduated", "volume"}
+_GT_NETS = {"sol": "solana", "bsc": "bsc", "avax": "avax", "eth": "eth", "base": "base", "arb": "arbitrum", "ton": "ton"}
+
+
+def _launch_get(path: str, ttl: int, timeout: float = 4.0):
+    """GET the Launch API on loopback with a short cache; None when it is down."""
+    now = time.time()
+    hit = _LAUNCH_CACHE.get(path)
+    if hit and now - hit[0] < ttl:
+        return hit[1]
+    base = (os.getenv("LAUNCH_API_URL") or "http://127.0.0.1:8000").rstrip("/")
+    try:
+        r = requests.get(base + path, timeout=timeout)
+        data = r.json() if r.status_code == 200 else None
+    except Exception:
+        data = None
+    if data is not None:
+        _LAUNCH_CACHE[path] = (now, data)
+        if len(_LAUNCH_CACHE) > 400:
+            for k in sorted(_LAUNCH_CACHE, key=lambda k: _LAUNCH_CACHE[k][0])[:200]:
+                _LAUNCH_CACHE.pop(k, None)
+    elif hit:
+        return hit[1]  # stale beats empty
+    return data
+
+
+def feed_items(sort: str) -> list[dict]:
+    data = _launch_get(f"/api/launches?sort={sort}&limit=24", 20)
+    items = data.get("items") if isinstance(data, dict) else data
+    out = []
+    for it in (items or [])[:24]:
+        if not isinstance(it, dict) or not it.get("token"):
+            continue
+        out.append({k: it.get(k) for k in ("chain", "token", "name", "symbol", "image", "progress", "graduated",
+                                          "mcap_usd", "launched_ts", "trades", "safe", "native")})
+    return out
+
+
+def verdict_for(mint: str) -> dict:
+    d = _launch_get(f"/api/creator-score/{mint}", 60)
+    if not isinstance(d, dict) or not d.get("found"):
+        return {"found": False}
+    keep = ("score", "label", "lines", "launches", "graduated_before", "dev_hold_pct")
+    return {"found": True, **{k: d[k] for k in keep if k in d}}
+
+
+def candles_for(mint: str) -> dict:
+    info = token_info(mint)
+    net = _GT_NETS.get(info.get("chain") or "")
+    if not net:
+        raise LookupError("no chart network")
+    hit = _CANDLE_CACHE.get(mint)
+    if hit and time.time() - hit[0] < 45:
+        return hit[1]
+    h = {"accept": "application/json;version=20230302"}
+    pools = requests.get(f"https://api.geckoterminal.com/api/v2/networks/{net}/tokens/{mint}/pools?page=1",
+                         headers=h, timeout=6).json()
+    pool = ((pools.get("data") or [{}])[0].get("attributes") or {}).get("address")
+    if not pool:
+        raise LookupError("no pool")
+    j = requests.get(f"https://api.geckoterminal.com/api/v2/networks/{net}/pools/{pool}/ohlcv/minute"
+                     "?aggregate=5&limit=96&currency=usd", headers=h, timeout=6).json()
+    rows = ((j.get("data") or {}).get("attributes") or {}).get("ohlcv_list") or []
+    rows = sorted(rows, key=lambda r: r[0])
+    out = {"candles": [[int(r[0]), float(r[1]), float(r[2]), float(r[3]), float(r[4])] for r in rows if len(r) >= 5],
+           "step": 300}
+    if not out["candles"]:
+        raise LookupError("no candles")
+    _CANDLE_CACHE[mint] = (time.time(), out)
+    if len(_CANDLE_CACHE) > 300:
+        for k in sorted(_CANDLE_CACHE, key=lambda k: _CANDLE_CACHE[k][0])[:150]:
+            _CANDLE_CACHE.pop(k, None)
+    return out
+
+
+_CANDLE_CACHE: dict[str, tuple[float, dict]] = {}
+
+
+def me_info(uid: int) -> dict:
+    import fees
+
+    st = db.referral_stats(uid)
+    bot = _bot_username()
+    vol30 = db.user_volume_usd(uid, 30)
+    bps = fees.current_bps(uid)
+    nxt = next(((t, b) for t, b in ((5_000, 40), (25_000, 35), (100_000, 25)) if vol30 < t and b < bps), None)
+    return {
+        "fee_bps": bps,
+        "volume30": round(vol30, 2),
+        "next_tier": {"at": nxt[0], "bps": nxt[1]} if nxt else None,
+        "ref": {"tier": st["tier"], "invites": st["invites"], "volume": st["volume"], "earned": st["earned"],
+                "open": st["open"], "link": f"https://t.me/{bot}?start=ref_{uid}" if bot else ""},
+    }
+
+
+@app.post("/api/feed")
+async def api_feed(request: Request) -> JSONResponse:
+    body = await _json(request)
+    uid = _auth(body)
+    sort = str(body.get("sort") or "new")
+    if sort not in _FEED_SORTS:
+        raise HTTPException(status_code=400, detail="Unknown list.")
+    if not _rate_ok(uid, "feed", 30):
+        raise HTTPException(status_code=429, detail="Too many refreshes — give it a minute.")
+    items = await asyncio.to_thread(feed_items, sort)
+    return JSONResponse({"items": items, "sort": sort})
+
+
+@app.post("/api/verdict")
+async def api_verdict(request: Request) -> JSONResponse:
+    body = await _json(request)
+    uid = _auth(body)
+    mint = str(body.get("mint") or "").strip()
+    if not _valid_mint(mint):
+        raise HTTPException(status_code=400, detail="That doesn't look like a token address.")
+    if not _rate_ok(uid, "verdict", 20):
+        raise HTTPException(status_code=429, detail="Too many lookups — give it a minute.")
+    return JSONResponse(await asyncio.to_thread(verdict_for, mint))
+
+
+@app.post("/api/candles")
+async def api_candles(request: Request) -> JSONResponse:
+    body = await _json(request)
+    uid = _auth(body)
+    mint = str(body.get("mint") or "").strip()
+    if not _valid_mint(mint):
+        raise HTTPException(status_code=400, detail="That doesn't look like a token address.")
+    if not _rate_ok(uid, "candles", 12):
+        raise HTTPException(status_code=429, detail="Too many chart loads — give it a minute.")
+    try:
+        return JSONResponse(await asyncio.to_thread(candles_for, mint))
+    except Exception:
+        raise HTTPException(status_code=404, detail="No chart data yet.")
+
+
+@app.post("/api/compete")
+async def api_compete(request: Request) -> JSONResponse:
+    body = await _json(request)
+    uid = _auth(body)
+    if not _rate_ok(uid, "compete", 12):
+        raise HTTPException(status_code=429, detail="Too many refreshes — give it a minute.")
+    data = await asyncio.to_thread(_launch_get, "/api/compete", 60)
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=502, detail="Rewards board is unavailable — try again.")
+    data = {k: v for k, v in data.items() if k in ("start", "end", "now", "prizes", "volume", "profit", "traders", "rules")}
+    for k in ("volume", "profit"):
+        if isinstance(data.get(k), list):
+            data[k] = data[k][:10]
+    return JSONResponse(data)
+
+
+@app.post("/api/me")
+async def api_me(request: Request) -> JSONResponse:
+    body = await _json(request)
+    uid = _auth(body)
+    if not _rate_ok(uid, "me", 20):
+        raise HTTPException(status_code=429, detail="Too many refreshes — give it a minute.")
+    return JSONResponse(await asyncio.to_thread(me_info, uid))
+
+
 async def _json(request: Request) -> dict:
     try:
         body = await request.json()

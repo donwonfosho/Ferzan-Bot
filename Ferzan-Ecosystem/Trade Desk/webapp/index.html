@@ -210,6 +210,25 @@
   .toast { bottom: calc(86px + env(safe-area-inset-bottom)); border: 1px solid var(--line); background: #0f1a3f; color: var(--ink); box-shadow: 0 10px 30px rgba(0,0,0,.5); }
   .sheet { border-top: 1px solid var(--line); background: #08102a; }
   #confetti { position: fixed; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 30; }
+  .tabbar { grid-template-columns: repeat(6, 1fr); }
+  .tab { font-size: 10px; }
+  .dchips { display: flex; gap: 6px; overflow-x: auto; margin-bottom: 8px; scrollbar-width: none; }
+  .dchips::-webkit-scrollbar { display: none; }
+  .drow { display: grid; grid-template-columns: 38px 1fr auto; gap: 10px; align-items: center; width: 100%; text-align: left; border: 0;
+          background: none; color: inherit; font: inherit; padding: 10px 12px; border-bottom: 1px solid var(--line); }
+  .drow:last-child { border-bottom: 0; }
+  .drow:active { background: rgba(255,255,255,.04); }
+  .dimg { width: 38px; height: 38px; border-radius: 10px; background: var(--sunk); object-fit: cover; display: grid; place-items: center; font-weight: 800; }
+  .dname { font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .dsub { color: var(--muted); font-size: 12px; }
+  .bar { height: 5px; border-radius: 3px; background: var(--sunk); margin-top: 5px; overflow: hidden; }
+  .bar i { display: block; height: 100%; background: linear-gradient(90deg, #19c9c0, #7c5cff); }
+  .verdict { font-size: 12px; white-space: pre-line; border-radius: 10px; padding: 8px 10px; margin-bottom: 10px; background: var(--sunk); }
+  .verdict b { display: block; margin-bottom: 2px; }
+  .candles { width: 100%; height: 220px; border-radius: 12px; background: var(--sunk); display: block; margin-top: 10px; }
+  .rwtile { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 12px; }
+  .lb { display: grid; grid-template-columns: 26px 1fr auto; gap: 8px; padding: 9px 12px; border-bottom: 1px solid var(--line); font-size: 13px; }
+  .lb:last-child { border-bottom: 0; }
   @keyframes rise { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
   .rise { animation: rise .45s cubic-bezier(.2,.8,.2,1) both; }
   @media (prefers-reduced-motion: reduce) { .rise { animation: none; } .btn, .tab, .tab b { transition: none; } }
@@ -257,6 +276,15 @@
   <div class="tok" id="tok" hidden></div>
 </div>
 
+<h2 id="sec-disc">Discover</h2>
+<div class="dchips" id="dchips" role="tablist" aria-label="Discover lists">
+  <button class="chip on" data-sort="new">🆕 New</button>
+  <button class="chip" data-sort="trending">🔥 Hot</button>
+  <button class="chip" data-sort="koth">👑 Close</button>
+  <button class="chip" data-sort="graduated">🎓 Graduated</button>
+</div>
+<div id="discover" class="list" role="list" style="margin-bottom:24px"><div class="skeleton" style="height:56px"></div></div>
+
 <h2 id="sec-pos">Positions</h2>
 <div id="positions" class="list" role="list"></div>
 
@@ -290,12 +318,18 @@
   <div id="sheetBody"></div>
 </div>
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
+<div class="wallets" id="sec-rew" style="margin-bottom:96px">
+  <h2>Rewards</h2>
+  <div id="rewards"><div class="skeleton" style="height:90px"></div></div>
+</div>
+
 <nav class="tabbar" id="tabbar" aria-label="Sections">
   <button class="tab on" data-go="sec-trade"><b>⚡</b>Trade</button>
+  <button class="tab" data-go="sec-disc"><b>🔭</b>Discover</button>
   <button class="tab" data-go="sec-pos"><b>💼</b>Bags</button>
   <button class="tab" data-go="sec-alerts"><b>🔔</b>Alerts</button>
   <button class="tab" data-go="sec-copy"><b>👯</b>Copy</button>
-  <button class="tab" data-go="sec-wallets"><b>👛</b>Wallets</button>
+  <button class="tab" data-go="sec-rew"><b>🏆</b>Rewards</button>
 </nav>
 <canvas id="confetti" aria-hidden="true"></canvas>
 
@@ -551,6 +585,7 @@
           <span class="num">${t.price ? "$" + Number(t.price).toPrecision(4) : ""}</span></div>
         <div class="stats num">MC ${usd(t.mc)} · Liq ${usd(t.liq)} · ${chg(t.chg24)}</div>
         ${t.safety ? `<div class="safety">${esc(t.safety)}</div>` : ""}
+        <div id="verdict"></div>
         <div class="grid3">${(t.presets || []).map((v) =>
           `<button class="btn" data-buy="${v}">Buy ${v} ${esc(t.unit)}</button>`).join("")}</div>
         <form class="custom" id="customBuy" autocomplete="off">
@@ -563,8 +598,9 @@
           <input id="alertTarget" placeholder="🔔 Alert at 2m, +50%, price 0.0012" aria-label="Alert target">
           <button class="btn ghost" type="submit">Set</button></form>
         <div class="btnrow" style="margin-top:8px"><button class="btn ghost" data-rules="${esc(t.mint)}" data-sym="${esc(t.symbol)}" data-px="${t.price || 0}">⏳ Limit buy · 📅 DCA</button></div>
-        ${embedUrl(t.chart) ? `<iframe class="chartbox" style="margin-top:10px" loading="lazy" title="Chart" src="${esc(embedUrl(t.chart))}"></iframe>` : ""}
+        <div id="chartslot">${embedUrl(t.chart) ? `<iframe class="chartbox" style="margin-top:10px" loading="lazy" title="Chart" src="${esc(embedUrl(t.chart))}"></iframe>` : ""}</div>
         ${t.chart ? `<p style="margin:10px 0 0"><a href="#" data-chart="${esc(t.chart)}" style="color:var(--link)">Open full chart ↗</a></p>` : ""}`;
+      loadVerdict(t.mint); loadCandles(t);
     } catch (err) {
       box.innerHTML = `<div class="error" style="padding:12px">${esc(err.message)}</div>`;
     } finally { $("findBtn").disabled = false; $("findBtn").textContent = "Find"; }
@@ -908,6 +944,114 @@
   addEventListener("scroll", () => { if (!tick) { tick = true; requestAnimationFrame(syncTabs); } }, { passive: true });
   syncTabs();
 
+
+  // ---- Phase B: creator check, native chart, discover feed, rewards --------
+  async function loadVerdict(mint) {
+    try {
+      const v = await api("/api/verdict", { mint });
+      const el = $("verdict");
+      if (!v.found || !el || !token || token.mint !== mint) return;
+      el.innerHTML = `<div class="verdict"><b>🧑‍💻 Creator check${v.label ? " · " + esc(v.label) : ""}</b>${(v.lines || []).map((l) => esc(l)).join("\n")}</div>`;
+    } catch (e) { /* best effort: the card works without it */ }
+  }
+  function drawCandles(cv, rows, entry) {
+    const dpr = Math.min(devicePixelRatio || 1, 2), w = cv.clientWidth, h = cv.clientHeight;
+    cv.width = w * dpr; cv.height = h * dpr;
+    const c = cv.getContext("2d"); c.scale(dpr, dpr);
+    const css = getComputedStyle(document.documentElement);
+    const up = "#19c98a", dn = "#ff5c6c", mut = css.getPropertyValue("--muted").trim() || "#8a94a6";
+    let lo = Math.min(...rows.map((r) => r[3])), hi = Math.max(...rows.map((r) => r[2]));
+    if (entry) { lo = Math.min(lo, entry); hi = Math.max(hi, entry); }
+    const pad = (hi - lo) * 0.08 || hi * 0.05 || 1; lo -= pad; hi += pad;
+    const y = (v) => 8 + (hi - v) / (hi - lo) * (h - 24), bw = (w - 54) / rows.length;
+    rows.forEach((r, i) => {
+      const x = 4 + i * bw + bw / 2, col = r[4] >= r[1] ? up : dn;
+      c.strokeStyle = col; c.fillStyle = col; c.lineWidth = 1;
+      c.beginPath(); c.moveTo(x, y(r[2])); c.lineTo(x, y(r[3])); c.stroke();
+      const t = y(Math.max(r[1], r[4])), b = y(Math.min(r[1], r[4]));
+      c.fillRect(x - Math.max(bw * 0.32, 1), t, Math.max(bw * 0.64, 2), Math.max(b - t, 1));
+    });
+    c.fillStyle = mut; c.font = "10px system-ui"; c.textAlign = "right";
+    const fmt = (v) => v >= 1 ? v.toFixed(2) : v.toPrecision(3);
+    [hi - pad, lo + pad].forEach((v) => c.fillText("$" + fmt(v), w - 2, y(v) + 3));
+    if (entry) {
+      c.strokeStyle = "#7c5cff"; c.setLineDash([4, 3]); c.beginPath(); c.moveTo(0, y(entry)); c.lineTo(w - 52, y(entry)); c.stroke(); c.setLineDash([]);
+      c.fillStyle = "#7c5cff"; c.textAlign = "left"; c.fillText("your entry", 6, y(entry) - 4);
+    }
+  }
+  async function loadCandles(t) {
+    try {
+      const j = await api("/api/candles", { mint: t.mint });
+      const slot = $("chartslot");
+      if (!slot || !token || token.mint !== t.mint || !j.candles || !j.candles.length) return;
+      slot.innerHTML = `<canvas class="candles" id="candles" role="img" aria-label="Price chart, last 8 hours"></canvas>`;
+      const pos = data && (data.positions || []).find((p) => p.mint === t.mint);
+      const entry = pos && pos.cost && pos.amount ? pos.cost / pos.amount : 0;
+      drawCandles($("candles"), j.candles, entry);
+    } catch (e) { /* keeps the embedded chart */ }
+  }
+
+  let feedSort = "new";
+  const AGE = (ts) => { const m = Math.max(0, Math.floor((Date.now() / 1000 - (ts || 0)) / 60)); return !ts ? "" : m < 60 ? m + "m" : m < 1440 ? Math.floor(m / 60) + "h" : Math.floor(m / 1440) + "d"; };
+  async function loadFeed() {
+    const box = $("discover");
+    try {
+      const j = await api("/api/feed", { sort: feedSort });
+      if (!j.items.length) { box.innerHTML = `<div class="empty">Nothing here yet.</div>`; return; }
+      box.innerHTML = j.items.map((it) => {
+        const img = /^https:\/\//.test(it.image || "") ? `<img class="dimg" referrerpolicy="no-referrer" loading="lazy" alt="${esc((it.symbol || "?").slice(0, 1))}" src="${esc(it.image)}">`
+          : `<div class="dimg">${esc((it.symbol || "?").slice(0, 1))}</div>`;
+        const pr = it.progress != null ? Math.max(0, Math.min(100, Math.round(it.progress * (it.progress <= 1 ? 100 : 1)))) : null;
+        return `<button class="drow" role="listitem" data-mint="${esc(it.token)}">${img}
+          <div style="min-width:0"><div class="dname">$${esc(it.symbol)} <span class="dsub">${esc(it.name || "")}</span></div>
+            ${pr != null && !it.graduated ? `<div class="bar" aria-label="${pr}% to graduation"><i style="width:${pr}%"></i></div>` : `<div class="dsub">${it.graduated ? "🎓 Graduated" : ""}</div>`}</div>
+          <div class="num" style="text-align:right"><div>${it.mcap_usd != null ? usd(it.mcap_usd) : ""}</div><div class="dsub">${AGE(it.launched_ts)}${it.safe ? " · ✅" : ""}</div></div></button>`;
+      }).join("");
+    } catch (e) { box.innerHTML = `<div class="empty">Couldn't load this list. Pull to refresh later.</div>`; }
+  }
+  $("dchips").addEventListener("click", (e) => {
+    const b = e.target.closest("[data-sort]"); if (!b) return;
+    feedSort = b.dataset.sort;
+    [...$("dchips").children].forEach((c) => c.classList.toggle("on", c === b));
+    loadFeed();
+  });
+  $("discover").addEventListener("error", (e) => {
+    const im = e.target; if (!im || im.tagName !== "IMG") return;
+    const d = document.createElement("div"); d.className = "dimg"; d.textContent = (im.alt || "?").slice(0, 1); im.replaceWith(d);
+  }, true);
+  $("discover").addEventListener("click", (e) => {
+    const r = e.target.closest("[data-mint]"); if (!r) return;
+    $("ca").value = r.dataset.mint; buzz && buzz();
+    $("sec-trade").scrollIntoView({ behavior: reduceMotion ? "auto" : "smooth" });
+    $("findForm").requestSubmit ? $("findForm").requestSubmit() : $("findBtn").click();
+  });
+
+  async function loadRewards() {
+    const box = $("rewards");
+    try {
+      const [me, cp] = await Promise.all([api("/api/me", {}), api("/api/compete", {}).catch(() => null)]);
+      const r = me.ref, nt = me.next_tier;
+      const row = (a, i, val) => `<div class="lb"><span class="num">${i + 1}</span><span>${esc(a.short)}</span><span class="num">${val}</span></div>`;
+      box.innerHTML = `
+        <div class="rwtile">
+          <div class="tile"><div class="k">Your fee</div><div class="v num">${(me.fee_bps / 100).toFixed(2)}%</div><div class="s num">30d vol ${usd(me.volume30)}</div></div>
+          <div class="tile"><div class="k">Rank</div><div class="v">${esc(r.tier)}</div><div class="s num">${r.invites} invited</div></div>
+          <div class="tile"><div class="k">Referral $</div><div class="v num">${usd(r.open)}</div><div class="s num">earned ${usd(r.earned)}</div></div>
+        </div>
+        ${nt ? `<p class="dsub" style="margin:0 2px 10px">Trade ${usd(nt.at - me.volume30)} more in 30 days to drop your fee to ${(nt.bps / 100).toFixed(2)}%.</p>` : ""}
+        ${r.link ? `<button class="btn share" id="shareRef" data-link="${esc(r.link)}">🔗 Share my invite link</button>` : ""}
+        ${cp && cp.volume && cp.volume.length ? `<h2 style="margin-top:8px">Weekly volume race</h2><div class="list">${cp.volume.slice(0, 5).map((a, i) => row(a, i, usd(a.volume_usd))).join("")}</div>` : ""}
+        ${cp && cp.profit && cp.profit.length ? `<h2 style="margin-top:16px">Weekly profit race</h2><div class="list">${cp.profit.slice(0, 5).map((a, i) => row(a, i, "+" + usd(a.pnl_usd))).join("")}</div>` : ""}`;
+    } catch (e) { box.innerHTML = `<div class="empty">Rewards will show here shortly.</div>`; }
+  }
+  $("rewards").addEventListener("click", async (e) => {
+    const b = e.target.closest("#shareRef"); if (!b) return;
+    const link = b.dataset.link;
+    const url = "https://t.me/share/url?url=" + encodeURIComponent(link) + "&text=" + encodeURIComponent("Trade on Ferzan with me");
+    if (tg && tg.openTelegramLink) tg.openTelegramLink(url);
+    else { try { await navigator.clipboard.writeText(link); toast("Link copied", 2000); } catch (_) { toast(link, 4000); } }
+  });
+
   // A link from a buy alert opens the app with the token already looked up.
   const preCa = (qs.get("ca") || "").trim();
   if (/^(0x[0-9a-fA-F]{40}|[1-9A-HJ-NP-Za-km-z]{32,44}|T[1-9A-HJ-NP-Za-km-z]{33}|[A-Za-z0-9_-]{48})$/.test(preCa)) {
@@ -916,6 +1060,9 @@
   }
   load(false);
   loadWatch();
+  loadFeed();
+  loadRewards();
+  setInterval(() => { if (!document.hidden) loadFeed(); }, 60000);
   setInterval(() => { if (!document.hidden) load(false); }, 30000);
 })();
 </script>
