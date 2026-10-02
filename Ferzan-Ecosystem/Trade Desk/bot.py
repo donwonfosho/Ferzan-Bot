@@ -316,6 +316,22 @@ def _pair_age(iso: str) -> str:
         return raw[:16]
 
 
+def _age_minutes(iso: str):
+    """Minutes since an ISO timestamp, or None if unknown."""
+    raw = (iso or "").strip()
+    if not raw:
+        return None
+    try:
+        from datetime import datetime, timezone
+
+        ts = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        return max(0, int((datetime.now(timezone.utc) - ts).total_seconds() // 60))
+    except Exception:
+        return None
+
+
 def _security_line(chain: str, ca: str) -> str:
     ids = {"eth": "1", "bsc": "56", "base": "8453", "arb": "42161", "avax": "43114"}
     cid = ids.get((chain or "").lower())
@@ -4923,39 +4939,45 @@ def launch_card(ln) -> tuple[str, InlineKeyboardMarkup]:
     href = (CHAINS.get(cid, {}).get("explorer_addr") or "").format(addr=ca) if ca.startswith("0x") or cid == "sol" else ""
     if cid == "sol" and ca:
         href = f"https://solscan.io/token/{ca}"
-    title = f"{mark} <b>${name}</b>"
-    links = []
-    if href:
-        links.append(f'<a href="{html.escape(href)}">Scan</a>')
-    text = (
-        f"{title}\n"
-        f"CA\n<code>{html.escape(ca)}</code>\n"
-        f"💧 {_esc(cid.upper() if cid else chain)}  ·  ⛓ {chain}\n"
-        f"🧢 MC {_esc(f'${mc:,.0f}' if mc else '—')}   💧 Liq ${_esc(f'{liq:,.0f}')}\n"
-        + (f"💵 {_esc(_fmt_px(px))}\n" if px else "")
-        + (f"⏱ {_esc(_pair_age(getattr(ln, 'created_at', '') or ''))}\n" if getattr(ln, "created_at", None) else "")
-        + ("🔥 DexScreener hot\n" if getattr(ln, "source", "") == "dexscreener-boost" else "")
-        + (
-            f"🚀 {float(getattr(ln, 'chg_1h', 0) or 0):+.1f}% 1h\n"
-            if abs(float(getattr(ln, "chg_1h", 0) or 0)) >= 1
-            else ""
-        )
-        + (
-            (
-                f"{'▲' if float(ln.pulse_chg) >= 0 else '▼'} "
-                f"{float(ln.pulse_chg):+.2f}% since last pulse"
-                f" ({int(getattr(ln, 'pulse_mins', 0) or 0)}m)\n"
-            )
-            if getattr(ln, "pulse_chg", None) is not None
-            else ""
-        )
-        + (" · ".join(links) + "\n" if links else "")
-        + "<i>Tap CA to copy · Buy opens the Ferzan bot</i>"
+    chg = float(getattr(ln, "chg_1h", 0) or 0)
+    age_m = _age_minutes(getattr(ln, "created_at", "") or "")
+    hot = getattr(ln, "source", "") == "dexscreener-boost" or chg >= 50
+    tags = []
+    if age_m is not None and age_m <= 15:
+        tags.append("🆕 NEW")
+    if hot:
+        tags.append("🔥 HOT")
+    tag_txt = ("   " + "  ".join(tags)) if tags else ""
+    lines = [f"{mark} <b>${name}</b>  ·  {chain}{tag_txt}", "━━━━━━━━━━━━━━"]
+    lines.append(
+        f"🧢 <b>{_esc(_fmt_mc(mc) if mc else '—')}</b> MC     💧 <b>{_esc(_fmt_mc(liq) if liq else '—')}</b> Liq"
     )
+    px_line = f"💵 {_esc(_fmt_px(px))}" if px else ""
+    if abs(chg) >= 1:
+        n = min(5, int(abs(chg) // 20) + 1)
+        sq = ("🟩" if chg > 0 else "🟥") * n + "⬜" * (5 - n)
+        px_line = (px_line + "   " if px_line else "") + f"{'▲' if chg > 0 else '▼'} {chg:+.1f}% 1h {sq}"
+    if px_line:
+        lines.append(px_line)
+    if age_m is not None:
+        lines.append(f"⏱ {_esc(_pair_age(getattr(ln, 'created_at', '') or ''))}")
+    if getattr(ln, "pulse_chg", None) is not None:
+        lines.append(
+            f"{'▲' if float(ln.pulse_chg) >= 0 else '▼'} {float(ln.pulse_chg):+.2f}% since last pulse"
+            f" ({int(getattr(ln, 'pulse_mins', 0) or 0)}m)"
+        )
+    if liq <= 0:
+        lines.append("⚠️ <i>No liquidity indexed yet. Wait for a pool before buying.</i>")
+    elif liq < 5000:
+        lines.append("⚠️ <i>Thin liquidity: even small buys can move the price a lot.</i>")
+    lines.append("")
+    lines.append(f"<code>{html.escape(ca)}</code>")
+    lines.append("<i>Tap the address to copy</i>")
+    text = "\n".join(lines)
     ads = db.list_sponsored(cid or "*", "ad")
     trends = db.list_sponsored(cid or "*", "trend")
     if trends:
-        text += f"\n🔥 Trending <b>{html.escape(_clip_plain(trends[0]['title'], 64))}</b>"
+        text += f"\n\n🔥 Trending <b>{html.escape(_clip_plain(trends[0]['title'], 64))}</b>"
     if ads:
         text += f"\n📣 {html.escape(_clip_plain(ads[0]['title'], 120))}"
     elif os.getenv("FERZAN_AD_TITLE", "").strip():
@@ -4966,12 +4988,10 @@ def launch_card(ln) -> tuple[str, InlineKeyboardMarkup]:
     buy_link = f"https://t.me/{bot_user}?start=buy_{short}" if bot_user and short else ""
     rows = [
         [
+            InlineKeyboardButton("⚡ Buy", url=buy_link) if buy_link else InlineKeyboardButton("⚡ Buy", callback_data=f"buy:{short}"),
             InlineKeyboardButton("📡 Score", url=desk) if desk else InlineKeyboardButton("📡 Score", callback_data=f"sig:{short}"),
-            InlineKeyboardButton("💵 Buy", url=buy_link) if buy_link else InlineKeyboardButton("💵 Buy", callback_data=f"buy:{short}"),
         ],
     ]
-    if href:
-        rows.append([InlineKeyboardButton("🔎 Scan", url=href)])
     ds_net = {
         "sol": "solana", "eth": "ethereum", "bsc": "bsc", "base": "base",
         "arb": "arbitrum", "avax": "avalanche", "hood": "robinhood",
@@ -4980,19 +5000,21 @@ def launch_card(ln) -> tuple[str, InlineKeyboardMarkup]:
         "sol": "solana", "eth": "ether", "bsc": "bnb", "base": "base",
         "arb": "arbitrum", "avax": "avalanche",
     }.get(cid or "")
-    charts = []
+    tools = []
     if ca:
-        charts.append(InlineKeyboardButton("📈 DexScreener", url=f"https://dexscreener.com/{ds_net}/{ca}"))
+        tools.append(InlineKeyboardButton("📈 Chart", url=f"https://dexscreener.com/{ds_net}/{ca}"))
     if ca and dt_net:
-        charts.append(InlineKeyboardButton("🛠 DexTools", url=f"https://www.dextools.io/app/en/{dt_net}/pair-explorer/{ca}"))
-    if charts:
-        rows.append(charts)
+        tools.append(InlineKeyboardButton("🛠 Tools", url=f"https://www.dextools.io/app/en/{dt_net}/pair-explorer/{ca}"))
+    if href:
+        tools.append(InlineKeyboardButton("🔎 Scan", url=href))
+    if tools:
+        rows.append(tools)
     chat_url = (os.getenv("FERZAN_CHAT_URL") or "").strip()
     extra_row = []
-    if desk:
-        extra_row.append(InlineKeyboardButton("🤖 Ferzan bot", url=desk))
+    if ca and CopyTextButton is not None:
+        extra_row.append(InlineKeyboardButton("📋 Copy CA", copy_text=CopyTextButton(text=ca)))
     if chat_url:
-        extra_row.append(InlineKeyboardButton("💬 Main chat", url=chat_url))
+        extra_row.append(InlineKeyboardButton("💬 Chat", url=chat_url))
     if extra_row:
         rows.append(extra_row)
     ad_url = (os.getenv("FERZAN_AD_URL") or "").strip()
@@ -5002,10 +5024,6 @@ def launch_card(ln) -> tuple[str, InlineKeyboardMarkup]:
         rows.append([InlineKeyboardButton("📣 Partner", url=ad_url)])
     if trends:
         rows.append([InlineKeyboardButton(f"🔥 {trends[0]['title'][:28]}", url=trends[0]["url"])])
-    if ca and CopyTextButton is not None:
-        rows.append(
-            [InlineKeyboardButton("📋 Copy CA", copy_text=CopyTextButton(text=ca))]
-        )
     return text, InlineKeyboardMarkup(rows)
 
 
