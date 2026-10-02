@@ -278,6 +278,14 @@ def _allowed(user_id: int) -> bool:
     return (not allow) or user_id in allow
 
 
+# DexScreener URL slug per Ferzan chain id; chains missing here get no chart link instead of a wrong one.
+_DS_NETS = {
+    "sol": "solana", "eth": "ethereum", "bsc": "bsc", "base": "base", "arb": "arbitrum", "avax": "avalanche",
+    "pol": "polygon", "hood": "robinhood", "ton": "ton", "trx": "tron", "monad": "monad", "sonic": "sonic",
+    "pulse": "pulsechain", "ink": "ink", "op": "optimism", "linea": "linea", "hype": "hyperevm",
+}
+
+
 def _esc(v: object) -> str:
     return html.escape(str(v))
 
@@ -700,9 +708,9 @@ def _render_card(card: SignalCard, uid: int | None = None) -> str:
         social.append(f'<a href="{html.escape(str(tw), quote=True)}">X</a>')
     curve = (pump_meta.get("curve") if isinstance(pump_meta, dict) else "") or _pump_curve(ca)
     cid = resolve_chain(s.chain) or ("sol" if ca and not str(ca).startswith("0x") else "eth")
-    ds_net = {"sol": "solana", "eth": "ethereum", "bsc": "bsc", "base": "base", "arb": "arbitrum"}.get(cid, "solana")
+    ds_net = _DS_NETS.get(cid, "")
     dt_net = {"sol": "solana", "eth": "ether", "bsc": "bnb", "base": "base", "arb": "arbitrum"}.get(cid)
-    ds = ds or (f"https://dexscreener.com/{ds_net}/{ca}" if ca else "")
+    ds = ds or (f"https://dexscreener.com/{ds_net}/{ca}" if ca and ds_net else "")
     dt = f"https://www.dextools.io/app/en/{dt_net}/pair-explorer/{ca}" if ca and dt_net else ""
     pump_url = f"https://pump.fun/coin/{ca}" if pump and ca else ""
     links = []
@@ -823,10 +831,7 @@ def card_keyboard(
         ],
     ]
     addr = (ca or query or "").strip()
-    ds_net = {
-        "sol": "solana", "eth": "ethereum", "bsc": "bsc", "base": "base",
-        "arb": "arbitrum", "avax": "avalanche", "pol": "polygon",
-    }.get(cid, "solana")
+    ds_net = _DS_NETS.get(cid, "")
     dt_net = {
         "sol": "solana", "eth": "ether", "bsc": "bnb", "base": "base",
         "arb": "arbitrum", "avax": "avalanche", "pol": "polygon",
@@ -836,7 +841,8 @@ def card_keyboard(
         if "pump" in addr.lower() or cid == "sol":
             if "pump" in addr.lower():
                 links.append(InlineKeyboardButton("🧪 Pump", url=f"https://pump.fun/coin/{addr}"))
-        links.append(InlineKeyboardButton("📈 DS", url=f"https://dexscreener.com/{ds_net}/{addr}"))
+        if ds_net:
+            links.append(InlineKeyboardButton("📈 DS", url=f"https://dexscreener.com/{ds_net}/{addr}"))
         if dt_net:
             links.append(InlineKeyboardButton("🛠 DexTools", url=f"https://www.dextools.io/app/en/{dt_net}/pair-explorer/{addr}"))
     if links:
@@ -4913,6 +4919,8 @@ def launch_card(ln) -> tuple[str, InlineKeyboardMarkup]:
     marks = {
         "sol": "🟣", "bsc": "🟡", "base": "🔵", "eth": "♦️",
         "arb": "🔷", "avax": "🔺", "hood": "🪶", "hype": "💚",
+        "ton": "💎", "trx": "🔴", "monad": "🟪", "sonic": "⚡", "pol": "🟣",
+        "pulse": "💗", "ink": "🖋", "op": "🔴", "linea": "⬛", "arc": "🌐",
     }
     mark = marks.get(cid, "⛓")
     liq = float(ln.liquidity_usd or 0)
@@ -4966,7 +4974,9 @@ def launch_card(ln) -> tuple[str, InlineKeyboardMarkup]:
             f"{'▲' if float(ln.pulse_chg) >= 0 else '▼'} {float(ln.pulse_chg):+.2f}% since last pulse"
             f" ({int(getattr(ln, 'pulse_mins', 0) or 0)}m)"
         )
-    if liq <= 0:
+    if liq <= 0 and (getattr(ln, "pool", "") or "").strip():
+        lines.append("ℹ️ <i>Pool found, liquidity not reported yet. Check the chart before buying.</i>")
+    elif liq <= 0:
         lines.append("⚠️ <i>No liquidity indexed yet. Wait for a pool before buying.</i>")
     elif liq < 5000:
         lines.append("⚠️ <i>Thin liquidity: even small buys can move the price a lot.</i>")
@@ -4992,16 +5002,13 @@ def launch_card(ln) -> tuple[str, InlineKeyboardMarkup]:
             InlineKeyboardButton("📡 Score", url=desk) if desk else InlineKeyboardButton("📡 Score", callback_data=f"sig:{short}"),
         ],
     ]
-    ds_net = {
-        "sol": "solana", "eth": "ethereum", "bsc": "bsc", "base": "base",
-        "arb": "arbitrum", "avax": "avalanche", "hood": "robinhood",
-    }.get(cid or "", "solana")
+    ds_net = _DS_NETS.get(cid or "", "")
     dt_net = {
         "sol": "solana", "eth": "ether", "bsc": "bnb", "base": "base",
         "arb": "arbitrum", "avax": "avalanche",
     }.get(cid or "")
     tools = []
-    if ca:
+    if ca and ds_net:
         tools.append(InlineKeyboardButton("📈 Chart", url=f"https://dexscreener.com/{ds_net}/{ca}"))
     if ca and dt_net:
         tools.append(InlineKeyboardButton("🛠 Tools", url=f"https://www.dextools.io/app/en/{dt_net}/pair-explorer/{ca}"))
