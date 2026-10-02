@@ -129,7 +129,9 @@ def app_me(body: AppBody):
         for r in rows:
             item = {"id": r.id, "chain": r.chain, "mode": r.mode, "name": r.name, "symbol": r.symbol, "status": r.status,
                     "image": r.image_url or "", "token": r.result_token_address or "", "created_at": r.created_at,
-                    "progress": None, "graduated": False, "mcap_usd": 0.0, "trades": 0}
+                    "progress": None, "graduated": False, "mcap_usd": 0.0, "trades": 0, "url": "", "share": ""}
+            if r.status == "confirmed" and r.result_token_address:
+                item["share"] = f"{A._PUBLIC_ORIGIN}/api/share/{r.chain}/{r.result_token_address}"
             if r.status == "confirmed" and r.result_token_address and c is not None:
                 cur = c.execute("SELECT * FROM curves WHERE chain = ? AND lower(token) = lower(?)",
                                 (r.chain, r.result_token_address)).fetchone()
@@ -139,6 +141,7 @@ def app_me(body: AppBody):
                     item["progress"] = 100.0 if cur["graduated"] else (min(100.0, int(cur["real_eth"] or 0) * 100.0 / g) if g else 0.0)
                     item["mcap_usd"] = float((cur["mcap"] or 0) * A._native_usd(r.chain))
                     item["trades"] = int(cur["trades"] or 0)
+                    item["url"] = A._trade_url(r.chain, cur["curve"], r.result_token_address)
                     graduated += 1 if cur["graduated"] else 0
                     best = max(best, item["mcap_usd"])
             out.append(item)
@@ -148,7 +151,10 @@ def app_me(body: AppBody):
     chains = A.chain_status()["chains"]
     return {"user": {"id": uid, "name": user.get("first_name") or ""}, "launches": out,
             "stats": {"launched": sum(1 for x in out if x["status"] == "confirmed"), "graduated": graduated, "best_mcap_usd": best},
-            "chains": chains, "native": A._NATIVE_SYM, "grad_default": GRAD_DEFAULT, "grad_presets": GRAD_PRESETS, "dev_presets": DEVBUY_PRESETS, "base": A.MINI_APP_BASE}
+            "chains": chains, "native": A._NATIVE_SYM, "grad_default": GRAD_DEFAULT, "grad_presets": GRAD_PRESETS, "dev_presets": DEVBUY_PRESETS, "base": A.MINI_APP_BASE, "origin": A._PUBLIC_ORIGIN,
+            "bots": {"buy": (os.environ.get("FERZAN_BUY_BOT") or "Ferzan_Buy_Bot").lstrip("@"),
+                     "guardian": (os.environ.get("FERZAN_GUARDIAN_BOT") or "Ferzan_Guardian_Bot").lstrip("@"),
+                     "chat": os.environ.get("FERZAN_CHAT_URL") or "https://t.me/Ferzan_Chat"}}
 
 
 @router.post("/api/app/launch")

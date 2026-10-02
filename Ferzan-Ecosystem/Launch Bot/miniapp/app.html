@@ -98,6 +98,14 @@
   .choice b { display: block; font-size: 17px; margin-bottom: 2px; } .choice span { color: var(--muted); font-size: 13px; }
   .remember { display: flex; gap: 8px; align-items: center; justify-content: center; color: var(--muted); font-size: 13px; margin-top: 6px; }
   .classic { background: none; border: 0; color: var(--link); font-size: 12px; font-weight: 700; padding: 4px 0; }
+  .sheet-bg { position: fixed; inset: 0; background: rgba(0,0,0,.55); z-index: 30; }
+  .sheet { position: fixed; left: 0; right: 0; bottom: 0; z-index: 31; background: #08102a; border-top: 1px solid var(--line); border-radius: 20px 20px 0 0;
+           padding: 16px 16px calc(20px + env(safe-area-inset-bottom)); max-height: 90vh; overflow: auto; box-shadow: 0 -10px 40px rgba(0,0,0,.5); }
+  .sheet .top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+  .sheet .top b { font-size: 18px; } .sheet .x { background: var(--sunk); border: 0; border-radius: 999px; width: 32px; height: 32px; font-size: 16px; }
+  .sheet img.card { width: 100%; aspect-ratio: 1200/630; border-radius: 14px; background: var(--sunk); display: block; margin-bottom: 12px; object-fit: cover; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 8px; }
+  .tip { background: var(--sunk); border-radius: 12px; padding: 10px 12px; font-size: 13px; color: var(--muted); margin: 8px 0; }
   @keyframes rise { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
   .view:not([hidden]) { animation: rise .35s cubic-bezier(.2,.8,.2,1) both; }
   @media (prefers-reduced-motion: reduce) { .view:not([hidden]) { animation: none; } .skel { animation: none; } }
@@ -178,6 +186,8 @@
   <button class="tab" data-t="explore"><b>🔭</b>Explore</button>
   <button class="tab" data-t="top"><b>🏆</b>Top</button>
 </nav>
+<div class="sheet-bg" id="sbg" hidden></div>
+<div class="sheet" id="sheet" hidden></div>
 <div class="toast" id="toast"></div>
 
 <script>
@@ -329,10 +339,35 @@
       renderChains();
     } catch (e) { $("#mineList").innerHTML = '<div class="empty">Open this from the Ferzan Launch bot in Telegram.</div>'; }
   }
+  const closeSheet = () => { $("#sheet").hidden = true; $("#sbg").hidden = true; };
+  $("#sbg").onclick = closeSheet;
+  const openUrl = (u) => { if (tg && tg.openLink) tg.openLink(u); else window.open(u, "_blank"); };
+  const copy = async (t) => { try { await navigator.clipboard.writeText(t); toast("Link copied"); } catch (e) { toast(t); } };
+  function openSheet(l) {
+    const me = state.me || {}, o = me.origin || API, bots = me.bots || {};
+    const share = l.share || "", p = l.progress == null ? null : Math.round(l.progress);
+    const msg = l.graduated ? "$" + l.symbol + " just graduated on Ferzan Factory 🎓" : "$" + l.symbol + " is live on Ferzan Factory 🚀";
+    const x = "https://twitter.com/intent/tweet?text=" + encodeURIComponent(msg + " @ferzaneco") + "&url=" + encodeURIComponent(share) + "&hashtags=memecoin," + (({ solana: "Solana", base: "Base", bsc: "BNBChain", ethereum: "Ethereum" })[l.chain] || "crypto");
+    const t = "https://t.me/share/url?url=" + encodeURIComponent(share) + "&text=" + encodeURIComponent(msg);
+    $("#sheet").innerHTML = `<div class="top"><b>${esc(l.name)} <span class="pill">$${esc(l.symbol)}</span></b><button class="x" id="sx" type="button">✕</button></div>
+      <img class="card" alt="" src="${o}/api/og/${encodeURIComponent(l.chain)}/${encodeURIComponent(l.token)}.png?fresh=1">
+      <div class="tiles" style="margin-bottom:10px"><div class="tile"><div class="k">Progress</div><div class="v num">${l.graduated ? "🎓" : p == null ? "–" : p + "%"}</div></div><div class="tile"><div class="k">Market cap</div><div class="v num">${usd(l.mcap_usd)}</div></div><div class="tile"><div class="k">Trades</div><div class="v num">${l.trades || 0}</div></div></div>
+      <h2 style="margin-top:6px">Share it</h2>
+      <div class="grid2"><button class="btn" data-o="${esc(x)}" type="button">𝕏 Post</button><button class="btn ghost" data-o="${esc(t)}" type="button">✈️ Telegram</button></div>
+      <div class="grid2"><button class="btn ghost" id="cp" type="button">🔗 Copy link</button>${l.url ? `<button class="btn ghost" data-o="${esc(l.url)}" type="button">📈 Open coin</button>` : "<span></span>"}</div>
+      <h2>Grow your community</h2>
+      <div class="tip">Add these to your coin's Telegram group: buy alerts post every buy, and Guardian keeps scammers out.</div>
+      <div class="grid2"><button class="btn ghost" data-o="https://t.me/${esc(bots.buy)}" type="button">🟢 Buy alerts</button><button class="btn ghost" data-o="https://t.me/${esc(bots.guardian)}" type="button">🛡️ Guardian</button></div>`;
+    $("#sheet").hidden = false; $("#sbg").hidden = false;
+    $("#sx").onclick = closeSheet; $("#cp").onclick = () => copy(share);
+    $("#sheet").querySelectorAll("[data-o]").forEach((b) => (b.onclick = () => openUrl(b.dataset.o)));
+  }
   $("#mineList").addEventListener("click", (e) => {
-    const r = e.target.closest(".row2"); if (!r || !["pending", "built", "submitted"].includes(r.dataset.st)) return;
-    const page = r.dataset.ch === "solana" ? "solana.html" : "evm.html";
-    location.href = `${(state.me && state.me.base) || ""}/${page}?request_id=${encodeURIComponent(r.dataset.id)}`;
+    const r = e.target.closest(".row2"); if (!r) return;
+    const l = ((state.me && state.me.launches) || []).find((x) => x.id === r.dataset.id); if (!l) return;
+    if (["pending", "built", "submitted"].includes(l.status)) {
+      location.href = `${(state.me && state.me.base) || ""}/${l.chain === "solana" ? "solana.html" : "evm.html"}?request_id=${encodeURIComponent(l.id)}`;
+    } else if (l.status === "confirmed" && l.token) openSheet(l);
   });
   $("#claim").onclick = () => { location.href = `${(state.me && state.me.base) || ""}/claim.html?role=creator`; };
 
