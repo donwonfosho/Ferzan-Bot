@@ -849,6 +849,35 @@ def _ferzan_badge(chain: str, wallet: str) -> str:
     return badge
 
 
+_CREATOR_CACHE: dict[str, tuple[float, str]] = {}
+
+
+def _creator_line(ca: str) -> str:
+    """One line on who launched a Ferzan-launched coin: '🧑‍💻 Creator: Good · 12 launches · 1 graduated'. '' for any other coin. Never raises."""
+    hit = _CREATOR_CACHE.get(ca)
+    if hit and time.time() - hit[0] < 120:
+        return hit[1]
+    line = ""
+    try:
+        r = requests.get(f"{FERZAN_API}/creator-score/{ca}", timeout=1.5)
+        d = r.json() if r.status_code == 200 else {}
+        if d.get("found"):
+            bits = [str(d.get("label") or "").strip()]
+            n = int(d.get("launches") or 0)
+            if n > 1:
+                bits.append(f"{n} launches")
+                g = int(d.get("graduated_before") or 0)
+                if g:
+                    bits.append(f"{g} graduated")
+            line = "🧑‍💻  Creator " + " · ".join(b for b in bits if b)
+    except Exception:
+        return ""
+    if len(_CREATOR_CACHE) > 3000:
+        _CREATOR_CACHE.clear()
+    _CREATOR_CACHE[ca] = (time.time(), line)
+    return line
+
+
 def _card(chain: str, ca: str, tr: dict, attrs: dict, emoji: str = "🟢", tg_url: str = "", cluster: int = 1, discord_url: str = "", x_url: str = "", whale: bool = False, vip: bool = False) -> tuple[str, InlineKeyboardMarkup]:
     usd = float(tr.get("volume_in_usd") or 0)
     got = tr.get("to_token_amount") or tr.get("to_token_output") or ""
@@ -971,6 +1000,9 @@ def _card(chain: str, ca: str, tr: dict, attrs: dict, emoji: str = "🟢", tg_ur
         lines.append(f"{_icon('ROUTE', 5, '🛣')}  Dex     {_esc(dex_name)}")
     if holders:
         lines.append(f"{_icon('HOLD', 7, '👥')}  Holders {_esc(str(holders))}")
+    _cl = _creator_line(ca)
+    if _cl:
+        lines.append(_esc(_cl))
     if extra:
         lines.append("⚠  " + " · ".join(extra))
     links = f"{_icon('BUYER', 6, '👤')}  <a href=\"{_esc(buyer_url)}\">Buyer</a>  ·  <a href=\"{_esc(scan)}\">Txn</a>"
