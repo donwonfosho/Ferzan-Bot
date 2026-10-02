@@ -182,6 +182,11 @@ def init_db() -> None:
                 PRIMARY KEY(user_id, mint)
             );
 
+            CREATE TABLE IF NOT EXISTS feed_filters (
+                chat_id INTEGER PRIMARY KEY,
+                min_liq REAL NOT NULL DEFAULT 0
+            );
+
             CREATE TABLE IF NOT EXISTS signal_tracks (
                 chat_id INTEGER NOT NULL,
                 msg_id INTEGER NOT NULL,
@@ -2910,6 +2915,39 @@ def signal_track_add(chat_id: int, msg_id: int, token: str, chain: str, symbol: 
             (int(chat_id), int(msg_id), token, chain, symbol[:24], int(time.time())),
         )
         conn.commit()
+
+
+def feed_min_liq_get(chat_id: int) -> float:
+    """Smallest liquidity (USD) a signal needs for this channel; falls back to FERZAN_FEED_MIN_LIQ, default 0 (no filter)."""
+    with get_conn() as conn:
+        r = conn.execute("SELECT min_liq FROM feed_filters WHERE chat_id = ?", (int(chat_id),)).fetchone()
+    if r is not None:
+        return float(r[0])
+    try:
+        return max(0.0, float(os.getenv("FERZAN_FEED_MIN_LIQ", "0") or 0))
+    except ValueError:
+        return 0.0
+
+
+def feed_min_liq_set(chat_id: int, usd: float) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO feed_filters (chat_id, min_liq) VALUES (?, ?) "
+            "ON CONFLICT(chat_id) DO UPDATE SET min_liq = excluded.min_liq",
+            (int(chat_id), max(0.0, float(usd))),
+        )
+        conn.commit()
+
+
+def signal_track_recent(hours: int = 24) -> list[dict]:
+    """Every tracked post from the last N hours, including ones already closed."""
+    since = int(time.time()) - int(hours) * 3600
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT chat_id, msg_id, token, chain, symbol, base_price FROM signal_tracks WHERE posted_at >= ?", (since,)
+        ).fetchall()
+    keys = ("chat_id", "msg_id", "token", "chain", "symbol", "base_price")
+    return [dict(zip(keys, r)) for r in rows]
 
 
 def signal_track_open(max_age_s: int = 172800) -> list[dict]:

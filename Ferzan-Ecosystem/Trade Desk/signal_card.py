@@ -90,6 +90,7 @@ def render(
     ca: str = "",
     tags: tuple[str, ...] = (),
     note: str = "",
+    safety: tuple[str, str] | None = None,
 ) -> bytes:
     up = chg_1h >= 0
     accent = GREEN if up else RED
@@ -131,6 +132,14 @@ def render(
     px_txt = _price(price)
     if px_txt:
         d.text((60, 300), px_txt, font=_font(34), fill=MUTED)
+
+    if safety:
+        label, state = safety
+        col = {"ok": GREEN, "warn": GOLD, "bad": RED}.get(state, MUTED)
+        sf2 = _font(26, True)
+        pw = int(d.textlength(label, font=sf2)) + 36
+        d.rounded_rectangle((W - 56 - pw, 292, W - 56, 292 + 48), radius=24, outline=col, width=3)
+        d.text((W - 56 - pw + 18, 301), label, font=sf2, fill=col)
 
     # three stat cards
     stats = [

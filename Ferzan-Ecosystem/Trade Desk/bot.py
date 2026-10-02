@@ -3732,6 +3732,35 @@ async def setfeed_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     )
 
 
+async def feedmin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/feedmin 10000 -> this channel only gets signals with at least $10k liquidity. /feedmin off clears it."""
+    chat = update.effective_chat
+    is_chan = bool(update.channel_post) or (chat and chat.type == "channel")
+    if not is_chan and not await guard(update):
+        return
+    if not chat or chat.type not in {"channel", "group", "supergroup"}:
+        await update.effective_message.reply_text("Send /feedmin 10000 inside the signals channel.")
+        return
+    if not context.args:
+        cur = db.feed_min_liq_get(chat.id)
+        await update.effective_message.reply_text(
+            f"Minimum liquidity here: {'$' + format(cur, ',.0f') if cur > 0 else 'none'}\n"
+            "/feedmin 10000 · /feedmin 2500 · /feedmin off"
+        )
+        return
+    raw = context.args[0].lower().replace("$", "").replace(",", "")
+    try:
+        val = 0.0 if raw in {"off", "none", "0"} else float(raw[:-1]) * 1000 if raw.endswith("k") else float(raw)
+    except ValueError:
+        await update.effective_message.reply_text("Use a number like /feedmin 10000, or /feedmin off.")
+        return
+    val = max(0.0, min(val, 10_000_000.0))
+    db.feed_min_liq_set(chat.id, val)
+    await update.effective_message.reply_text(
+        f"✅ Signals here need at least ${val:,.0f} liquidity." if val > 0 else "✅ Liquidity filter off for this channel."
+    )
+
+
 async def sponsor_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update):
         return
@@ -4834,7 +4863,66 @@ SIGNAL_IMAGES = os.getenv("FERZAN_SIGNAL_IMAGES", "1").strip().lower() not in {"
 _MILESTONES = (2, 3, 5, 10, 25, 50, 100)
 
 
-def _signal_png(ln) -> bytes | None:
+_SAFETY_CACHE: dict[str, tuple[float, tuple[str, str] | None]] = {}
+SIGNAL_SAFETY = os.getenv("FERZAN_SIGNAL_SAFETY", "1").strip().lower() not in {"0", "false", "no", "off"}
+SIGNAL_SKIP_HONEYPOT = os.getenv("FERZAN_SIGNAL_SKIP_HONEYPOT", "1").strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _signal_safety(chain: str, ca: str) -> tuple[str, str] | None:
+    """(label, state) from GoPlus for EVM chains, cached an hour. None when unknown: no badge, never a guess.
+    state: ok / warn / bad. Short timeout so a slow API cannot hold up the feed."""
+    if not SIGNAL_SAFETY:
+        return None
+    ids = {"eth": "1", "bsc": "56", "base": "8453", "arb": "42161", "avax": "43114"}
+    cid = ids.get((resolve_chain(chain or "") or (chain or "")).lower())
+    ca = (ca or "").strip()
+    if not cid or not ca.startswith("0x"):
+        return None
+    key = f"{cid}:{ca.lower()}"
+    hit = _SAFETY_CACHE.get(key)
+    now = time.time()
+    if hit and now - hit[0] < 3600:
+        return hit[1]
+    res: tuple[str, str] | None = None
+    try:
+        r = requests.get(
+            f"https://api.gopluslabs.io/api/v1/token_security/{cid}",
+            params={"contract_addresses": ca},
+            timeout=4,
+        )
+        blob = ((r.json() or {}).get("result") or {}).get(ca.lower()) or {}
+        if blob:
+            def _pct(k):
+                try:
+                    return float(blob.get(k) or 0)
+                except ValueError:
+                    return 0.0
+
+            if blob.get("is_honeypot") == "1":
+                res = ("HONEYPOT RISK", "bad")
+            elif blob.get("cannot_sell_all") == "1" or _pct("sell_tax") >= 0.25:
+                res = ("HIGH SELL TAX / LOCKED", "bad")
+            elif any(blob.get(k) == "1" for k in ("hidden_owner", "can_take_back_ownership", "owner_change_balance", "is_blacklisted", "is_mintable")):
+                res = ("CHECK CONTRACT", "warn")
+            else:
+                res = ("NO HONEYPOT FLAG", "ok")
+    except Exception:
+        res = None
+    if len(_SAFETY_CACHE) > 2000:
+        _SAFETY_CACHE.clear()
+    if res is not None:
+        _SAFETY_CACHE[key] = (now, res)
+    return res
+
+
+def _safety_caption(sf: tuple[str, str] | None) -> str:
+    if not sf:
+        return ""
+    icon = {"ok": "✅", "warn": "⚠️", "bad": "🚨"}.get(sf[1], "")
+    return f"{icon} <b>{html.escape(sf[0].title())}</b> <i>(automated check, not a guarantee)</i>"
+
+
+def _signal_png(ln, safety: tuple[str, str] | None = None) -> bytes | None:
     """The branded image for a signal, or None (disabled, missing Pillow, any render problem)."""
     if not SIGNAL_IMAGES:
         return None
@@ -4859,17 +4947,21 @@ def _signal_png(ln) -> bytes | None:
             age=_pair_age(getattr(ln, "created_at", "") or ""),
             ca=(ln.token or ln.query or "").strip(),
             tags=tuple(tags),
+            safety=safety,
         )
     except Exception:
         logger.exception("signal image render failed")
         return None
 
 
-async def post_signal(bot, chat_id: int, ln, promo: bool = False):
+async def post_signal(bot, chat_id: int, ln, promo: bool = False, safety: tuple[str, str] | None = None):
     """One signal into a channel: branded image with a short caption when possible, else the text card.
     Returns the message id so the follow-up job can reply to it later."""
-    png = await asyncio.to_thread(_signal_png, ln)
+    png = await asyncio.to_thread(_signal_png, ln, safety)
     text, markup = await asyncio.to_thread(launch_card, ln, bool(png))
+    cap = _safety_caption(safety)
+    if cap:
+        text = f"{text}\n{cap}"
     mid = await send_launch(bot, chat_id, text, markup, promo=promo, photo=png)
     if mid and (ln.token or "").strip():
         try:
@@ -8810,12 +8902,18 @@ async def _launch_feed_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 or (ln.chain or "").lower() == bind
             ] or rows[:4]
         sent = 0
+        min_liq = db.feed_min_liq_get(int(chat_id))
         for ln in pool[:12]:
+            if min_liq > 0 and float(ln.liquidity_usd or 0) < min_liq:
+                continue
             key = f"ch:{chat_id}:{ln.chain}:{(ln.token or '')[:20]}"
             if not db.should_resend_signal(int(chat_id), key, 1, cooldown_s=4 * 60):
                 continue
             try:
-                await post_signal(context.bot, chat_id, ln)
+                sf = await asyncio.to_thread(_signal_safety, ln.chain or "", (ln.token or "").strip())
+                if sf and sf[1] == "bad" and SIGNAL_SKIP_HONEYPOT:
+                    continue  # never advertise a confirmed honeypot in a signals channel
+                await post_signal(context.bot, chat_id, ln, safety=sf)
                 sent += 1
             except ChatMoved as moved:
                 await _feed_chat_moved(context.bot, int(chat_id), moved.new_chat_id)
@@ -8972,6 +9070,57 @@ async def signal_followup_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 logger.warning("signal followup send failed for %s: %s", chat_id, str(exc)[:120])
 
 
+async def signal_recap_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Daily scoreboard per signals channel. Honest by construction: every signal we tracked in the last 24h that
+    has a clean reading counts, winners and losers alike. Skipped when fewer than 3 can be measured."""
+    import portfolio
+
+    rows = await asyncio.to_thread(db.signal_track_recent, 24)
+    if not rows:
+        return
+    try:
+        prices = await asyncio.to_thread(portfolio._ds_prices, sorted({r["token"] for r in rows}))
+    except Exception:
+        logger.exception("signal recap: price fetch failed")
+        return
+    lowered = {k.lower(): v for k, v in prices.items()}
+    by_chat: dict[int, list[tuple[float, str]]] = {}
+    for r in rows:
+        info = prices.get(r["token"]) or lowered.get(r["token"].lower())
+        base = float(r["base_price"] or 0)
+        if not info or base <= 0:
+            continue
+        px, liq = float(info.get("price") or 0), float(info.get("liq") or 0)
+        mult = px / base if px > 0 else 0.0
+        if liq < 1000 or mult <= 0 or mult > 1000:
+            continue
+        by_chat.setdefault(int(r["chat_id"]), []).append((mult, str(info.get("symbol") or r["symbol"] or "?").upper()))
+    for chat_id, items in by_chat.items():
+        if len(items) < 3 or _feed_muted(chat_id):
+            continue
+        items.sort(reverse=True)
+        mults = sorted(m for m, _ in items)
+        n = len(mults)
+        median = mults[n // 2] if n % 2 else (mults[n // 2 - 1] + mults[n // 2]) / 2
+        up = sum(1 for m in mults if m > 1.0)
+        lines = [
+            "📊 <b>Ferzan Signals: last 24h</b>",
+            f"{n} signals measured · <b>{up}</b> up · <b>{n - up}</b> flat or down · median <b>{median:.2f}x</b>",
+            "",
+            "🏆 <b>Top 3</b>",
+        ]
+        for i, (m, sym) in enumerate(items[:3], 1):
+            lines.append(f"{i}. ${html.escape(_clip_plain(sym, 18))}  {m:.2f}x")
+        lines.append("")
+        lines.append("<i>Counts every tracked signal, not just the winners. Measured against the price at post time. Not financial advice.</i>")
+        try:
+            await context.bot.send_message(chat_id, "\n".join(lines), parse_mode="HTML", disable_web_page_preview=True)
+            await asyncio.sleep(0.6)
+        except Exception as exc:
+            if not _is_dead_chat_error(exc):
+                logger.warning("signal recap send failed for %s: %s", chat_id, str(exc)[:120])
+
+
 async def native_pulse_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     prices = await asyncio.to_thread(_native_prices)
     if not prices:
@@ -9114,6 +9263,8 @@ def main() -> None:
     app.add_handler(CommandHandler("feeds", feeds_cmd))
     app.add_handler(CommandHandler("setfeed", setfeed_cmd))
     app.add_handler(CommandHandler("setfeed", setfeed_cmd, filters=filters.UpdateType.CHANNEL_POSTS))
+    app.add_handler(CommandHandler("feedmin", feedmin_cmd))
+    app.add_handler(CommandHandler("feedmin", feedmin_cmd, filters=filters.UpdateType.CHANNEL_POSTS))
     app.add_handler(CommandHandler("unsetfeed", unsetfeed_cmd))
     app.add_handler(CommandHandler("sponsor", sponsor_cmd))
     app.add_handler(CommandHandler("unsetfeed", unsetfeed_cmd, filters=filters.UpdateType.CHANNEL_POSTS))
@@ -9207,6 +9358,7 @@ def main() -> None:
         jq.run_repeating(ops_watch_job, interval=300, first=20)
         jq.run_repeating(signal_followup_job, interval=300, first=120)
         jq.run_daily(digest_job, time=dt.time(hour=13, minute=0, tzinfo=dt.timezone.utc))
+        jq.run_daily(signal_recap_job, time=dt.time(hour=1, minute=0, tzinfo=dt.timezone.utc))
         jq.run_repeating(auto_exit_job, interval=20, first=30)
         jq.run_repeating(lp_watch_job, interval=40, first=70)
         jq.run_repeating(buy_limit_job, interval=35, first=80)
