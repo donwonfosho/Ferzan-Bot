@@ -4513,7 +4513,9 @@ async def fees_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             lines.append(
                 f"  {row['kind']} ${row['fee_usd']:.4f} ({row['fee_bps']}bps) u{row['user_id']}"
             )
-    await update.effective_message.reply_text("\n".join(lines), parse_mode="HTML")
+    await update.effective_message.reply_text(
+        "\n".join(lines), parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Home", callback_data="go:home")]]))
 
 
 async def signer_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -6303,6 +6305,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await context.bot.send_message(uid, quotes.format_quote(q))
         except Exception as exc:
             await context.bot.send_message(uid, str(exc))
+        return
+    if data.startswith(("asn:", "dva:")):
+        await _panel_callback(update, context, data)
         return
     if data.startswith("dgn:"):
         await _degen_callback(update, context, data)
@@ -8284,6 +8289,82 @@ async def autosnipe_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         logger.exception("autosnipe job crashed; will retry next cycle")
 
 
+ASN_USD = (5, 10, 25, 50)
+ASN_DAILY = (25, 50, 100, 250)
+
+
+def _asn_panel(uid: int) -> tuple[str, InlineKeyboardMarkup]:
+    cfg = db.autosnipe_get(uid)
+    fee = f"{feecollect.live_bps(uid, 'snipe') / 100:.2f}%" if feecollect.enabled() and not feecollect.exempt(uid) else "none right now"
+    text = (
+        f"🤖 <b>Auto-snipe is {'🟢 ON' if cfg['on'] else '🔴 OFF'}</b>\n"
+        "Buys each brand-new Ferzan launch that carries the Safe launch badge, within minutes of launch.\n\n"
+        f"Per coin: <b>${cfg['usd']:,.0f}</b>  ·  Daily cap: <b>${cfg['daily_usd']:,.0f}</b>\n"
+        f"Spent in the last 24h: ${db.autosnipe_spent_today(uid):,.0f}  ·  Snipe fee: {fee}\n\n"
+        "⚠️ Real money from your Ferzan wallet. Even Safe-badge coins can lose everything, and a sniped coin can fall fast. "
+        "Your stop loss and auto-protect apply to what it buys."
+    )
+    def mark(v, cur):
+        return f"✅ ${v}" if abs(float(v) - cur) < 0.01 else f"${v}"
+    rows = [
+        [InlineKeyboardButton("🔴 Turn OFF" if cfg["on"] else "🟢 Turn ON", callback_data="asn:off" if cfg["on"] else "asn:on")],
+        [InlineKeyboardButton(mark(v, cfg["usd"]), callback_data=f"asn:u:{v}") for v in ASN_USD],
+        [InlineKeyboardButton(("✅ " if abs(float(v) - cfg["daily_usd"]) < 0.01 else "") + f"${v}/day", callback_data=f"asn:d:{v}") for v in ASN_DAILY],
+        [InlineKeyboardButton("🚩 Dev alerts", callback_data="dva:show"), InlineKeyboardButton("↩️ Home", callback_data="go:home")],
+    ]
+    return text, InlineKeyboardMarkup(rows)
+
+
+def _dva_panel(uid: int) -> tuple[str, InlineKeyboardMarkup]:
+    on = db.flag_on(uid, "dev_alerts", 1)
+    text = (
+        f"🚩 <b>Dev-sold alerts are {'🟢 ON' if on else '🔴 OFF'}</b>\n"
+        "I'll message you if the creator of a Ferzan coin you hold starts selling "
+        "(⚠️ first sale, 🚩 at least half of what they bought)."
+    )
+    rows = [
+        [InlineKeyboardButton("🔴 Turn OFF" if on else "🟢 Turn ON", callback_data="dva:off" if on else "dva:on")],
+        [InlineKeyboardButton("🤖 Auto-snipe", callback_data="asn:show"), InlineKeyboardButton("↩️ Home", callback_data="go:home")],
+    ]
+    return text, InlineKeyboardMarkup(rows)
+
+
+async def _panel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, data: str) -> None:
+    """Auto-snipe and dev-alert screens change in place: one message, buttons update it."""
+    uid = update.effective_user.id
+    q = update.callback_query
+    if update.effective_chat and update.effective_chat.type != "private":
+        return
+    parts = data.split(":")
+    if parts[0] == "asn":
+        act = parts[1]
+        if act == "on":
+            db.autosnipe_set(uid, True)
+        elif act == "off":
+            db.autosnipe_set(uid, False)
+        elif act in ("u", "d") and len(parts) == 3:
+            try:
+                v = float(parts[2])
+            except ValueError:
+                return
+            cur = db.autosnipe_get(uid)
+            if act == "u":
+                v = min(signer.max_usd(), max(1.0, v))
+                db.autosnipe_set(uid, cur["on"], v, max(cur["daily_usd"], v))
+            else:
+                db.autosnipe_set(uid, cur["on"], None, max(cur["usd"], min(1000.0, v)))
+        text, kb = _asn_panel(uid)
+    else:
+        if parts[1] in ("on", "off"):
+            db.set_flag(uid, "dev_alerts", parts[1] == "on")
+        text, kb = _dva_panel(uid)
+    try:
+        await q.edit_message_text(text, parse_mode="HTML", reply_markup=kb)
+    except Exception as exc:  # "message is not modified" when nothing changed
+        if "not modified" not in str(exc).lower():
+            await context.bot.send_message(uid, text, parse_mode="HTML", reply_markup=kb)
+
+
 async def autosnipe_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update):
         return
@@ -8291,11 +8372,10 @@ async def autosnipe_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
     uid = update.effective_user.id
     args = [a.lower() for a in (context.args or [])]
-    cfg = db.autosnipe_get(uid)
     if args and args[0] == "off":
         db.autosnipe_set(uid, False)
-        cfg = db.autosnipe_get(uid)
     elif args and args[0] == "on":
+        cfg = db.autosnipe_get(uid)
         try:
             usd = float(args[1]) if len(args) > 1 else cfg["usd"]
             daily = float(args[2]) if len(args) > 2 else max(cfg["daily_usd"], usd * 3)
@@ -8303,17 +8383,9 @@ async def autosnipe_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             await update.effective_message.reply_text("Use: /autosnipe on <usd per coin> <daily cap usd>  e.g. /autosnipe on 10 50")
             return
         usd = min(signer.max_usd(), max(1.0, usd))
-        daily = max(usd, min(1000.0, daily))
-        db.autosnipe_set(uid, True, usd, daily)
-        cfg = db.autosnipe_get(uid)
-    state = "🟢 ON" if cfg["on"] else "🔴 OFF"
-    await update.effective_message.reply_text(
-        f"🎯 Auto-snipe is {state}\n"
-        f"Buys each brand-new Ferzan launch that carries the Safe launch badge, within minutes of launch.\n"
-        f"Per coin: ${cfg['usd']:,.0f} · Daily cap: ${cfg['daily_usd']:,.0f} · Spent in the last 24h: ${db.autosnipe_spent_today(uid):,.0f}\n\n"
-        "Real money from your Ferzan wallet. Even Safe-badge coins can lose everything, and a sniped coin can fall fast. "
-        "Fees: 1% per snipe once fees are live. Your rules (stop loss, auto-protect) apply to what you buy.\n"
-        "Set it: /autosnipe on 10 50   ·   Stop it: /autosnipe off")
+        db.autosnipe_set(uid, True, usd, max(usd, min(1000.0, daily)))
+    text, kb = _asn_panel(uid)
+    await update.effective_message.reply_text(text, parse_mode="HTML", reply_markup=kb)
 
 
 async def devalerts_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -8323,11 +8395,8 @@ async def devalerts_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     arg = (context.args[0].lower() if context.args else "")
     if arg in ("on", "off"):
         db.set_flag(uid, "dev_alerts", arg == "on")
-    on = db.flag_on(uid, "dev_alerts", 1)
-    await update.effective_message.reply_text(
-        f"{'🟢' if on else '🔴'} Dev-sold alerts are {'ON' if on else 'OFF'}.\n"
-        "I'll message you if the creator of a Ferzan coin you hold starts selling.\n"
-        "Use /devalerts on or /devalerts off.")
+    text, kb = _dva_panel(uid)
+    await update.effective_message.reply_text(text, parse_mode="HTML", reply_markup=kb)
 
 
 async def dca_job(context: ContextTypes.DEFAULT_TYPE) -> None:
