@@ -314,7 +314,9 @@ async def api_token(request: Request) -> JSONResponse:
     except Exception:
         log.exception("token lookup failed")
         raise HTTPException(status_code=502, detail="Lookup failed — try again.")
+    info = dict(info)  # the lookup is cached across users; per-user fields go on a copy
     info["presets"] = db.buy_presets(uid, info["chain"] or "sol")
+    info["mev"] = ("on" if db.flag_on(uid, "anti_mev", 1) else "off") if info.get("chain") == "sol" else ""
     return JSONResponse(info)
 
 
@@ -802,6 +804,35 @@ async def api_compete(request: Request) -> JSONResponse:
         if isinstance(data.get(k), list):
             data[k] = data[k][:10]
     return JSONResponse(data)
+
+
+def badges_for(st: dict) -> list[dict]:
+    """Badges are earned from real live-trade history only."""
+    defs = [
+        ("first", "🥇", "First trade", "Made your first live trade", st["trades"] >= 1),
+        ("t10", "🔟", "10 trades", "10 live trades", st["trades"] >= 10),
+        ("t100", "💯", "100 trades", "100 live trades", st["trades"] >= 100),
+        ("s3", "🔥", "3-day streak", "Traded 3 days in a row", st["best_streak"] >= 3),
+        ("s7", "🌋", "7-day streak", "Traded 7 days in a row", st["best_streak"] >= 7),
+        ("v1k", "💵", "$1k traded", "$1,000 total volume", st["volume"] >= 1_000),
+        ("v10k", "🏦", "$10k traded", "$10,000 total volume", st["volume"] >= 10_000),
+        ("green", "🟢", "In the green", "Closed a trade in profit", st["best_pnl"] > 0),
+        ("x2", "🚀", "2x", "Sold for at least 2x your cost", st["best_mult"] >= 2),
+        ("x10", "🌕", "10x", "Sold for at least 10x your cost", st["best_mult"] >= 10),
+        ("sniper", "🎯", "Sniper", "Auto-sniped a Ferzan launch", st["sniped"] >= 1),
+    ]
+    return [{"id": i, "emoji": e, "name": n, "desc": d, "earned": bool(ok)} for i, e, n, d, ok in defs]
+
+
+@app.post("/api/stats")
+async def api_stats(request: Request) -> JSONResponse:
+    body = await _json(request)
+    uid = _auth(body)
+    if not _rate_ok(uid, "stats", 12):
+        raise HTTPException(status_code=429, detail="Too many refreshes — give it a minute.")
+    st = await asyncio.to_thread(db.trade_stats, uid)
+    st["badges"] = badges_for(st)
+    return JSONResponse(st)
 
 
 @app.post("/api/me")

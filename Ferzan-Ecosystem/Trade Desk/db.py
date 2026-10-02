@@ -2935,3 +2935,64 @@ def autosnipe_done(user_id: int, mint: str, ok: bool) -> None:
         conn.execute("UPDATE autosnipe_log SET ok = ?, usd = CASE WHEN ? THEN usd ELSE 0 END WHERE user_id = ? AND mint = ?",
                      (1 if ok else 0, 1 if ok else 0, int(user_id), mint))
         conn.commit()
+
+
+def trade_stats(user_id: int, days: int = 35) -> dict:
+    """Streaks, a daily PNL calendar and the numbers badges are earned from. UTC days, live trades only."""
+    now = int(time.time())
+    uid = int(user_id)
+    with get_conn() as conn:
+        _pnl_cols(conn)
+        rows = conn.execute(
+            "SELECT ts, side, usd, cost_usd, pnl_usd FROM live_trades WHERE user_id = ? ORDER BY ts", (uid,)
+        ).fetchall()
+        try:
+            sniped = int(conn.execute("SELECT COUNT(*) FROM autosnipe_log WHERE user_id = ? AND ok = 1", (uid,)).fetchone()[0])
+        except Exception:
+            sniped = 0
+    day_of = lambda t: time.strftime("%Y-%m-%d", time.gmtime(int(t)))  # noqa: E731
+    cal: dict[str, dict] = {}
+    active: set[str] = set()
+    volume = realized = best = 0.0
+    wins = losses = 0
+    best_mult = 0.0
+    for r in rows:
+        d = day_of(r["ts"])
+        active.add(d)
+        volume += float(r["usd"] or 0)
+        c = cal.setdefault(d, {"pnl": 0.0, "n": 0})
+        c["n"] += 1
+        if r["side"] == "sell" and r["pnl_usd"] is not None:
+            p = float(r["pnl_usd"])
+            c["pnl"] += p
+            realized += p
+            best = max(best, p)
+            wins += 1 if p > 0 else 0
+            losses += 1 if p < 0 else 0
+            cost = float(r["cost_usd"] or 0)
+            if cost > 0:
+                best_mult = max(best_mult, (float(r["usd"] or 0)) / cost)
+    # streak: consecutive active UTC days ending today (or yesterday, so it survives until you trade today)
+    import datetime as _dt
+
+    today = _dt.datetime.fromtimestamp(now, _dt.timezone.utc).date()
+    dates = sorted(_dt.date.fromisoformat(d) for d in active)
+    dset = set(dates)
+    cur = 0
+    d0 = today if today in dset else today - _dt.timedelta(days=1)
+    while d0 in dset:
+        cur += 1
+        d0 -= _dt.timedelta(days=1)
+    best_streak = run = 0
+    prev = None
+    for d in dates:
+        run = run + 1 if prev is not None and (d - prev).days == 1 else 1
+        best_streak = max(best_streak, run)
+        prev = d
+    out_days = {}
+    for i in range(days):
+        d = day_of(now - i * 86400)
+        out_days[d] = {"pnl": round(cal.get(d, {}).get("pnl", 0.0), 2), "n": cal.get(d, {}).get("n", 0)}
+    return {"streak": cur, "best_streak": best_streak, "trades": len(rows), "volume": round(volume, 2),
+            "realized": round(realized, 2), "wins": wins, "losses": losses, "best_pnl": round(best, 2),
+            "best_mult": round(best_mult, 2), "sniped": sniped, "days": out_days}

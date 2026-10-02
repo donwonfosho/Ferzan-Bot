@@ -229,6 +229,16 @@
   .rwtile { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 12px; }
   .lb { display: grid; grid-template-columns: 26px 1fr auto; gap: 8px; padding: 9px 12px; border-bottom: 1px solid var(--line); font-size: 13px; }
   .lb:last-child { border-bottom: 0; }
+  .cal { display: grid; grid-template-columns: repeat(7, 1fr); gap: 5px; margin: 8px 0 12px; max-width: 240px; }
+  .cal i { aspect-ratio: 1; border-radius: 5px; background: var(--sunk); display: block; }
+  .cal i.g1 { background: rgba(25,201,138,.35); } .cal i.g2 { background: rgba(25,201,138,.7); }
+  .cal i.r1 { background: rgba(255,92,108,.4); } .cal i.r2 { background: rgba(255,92,108,.8); } .cal i.t { background: rgba(124,92,255,.45); }
+  .badges { display: grid; grid-template-columns: repeat(auto-fill, minmax(92px, 1fr)); gap: 8px; margin-bottom: 12px; }
+  .badge { background: var(--card); border-radius: 12px; padding: 10px 6px; text-align: center; font-size: 11px; }
+  .badge b { display: block; font-size: 24px; line-height: 1.2; }
+  .badge.off { opacity: .35; filter: grayscale(1); }
+  .mev { display: inline-block; font-size: 11px; font-weight: 700; padding: 3px 8px; border-radius: 999px; background: color-mix(in srgb, var(--gain) 16%, var(--sunk)); color: var(--gain); margin-bottom: 8px; }
+  .mev.off { background: var(--sunk); color: var(--muted); }
   @keyframes rise { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
   .rise { animation: rise .45s cubic-bezier(.2,.8,.2,1) both; }
   @media (prefers-reduced-motion: reduce) { .rise { animation: none; } .btn, .tab, .tab b { transition: none; } }
@@ -588,6 +598,7 @@
         <div class="stats num">MC ${usd(t.mc)} · Liq ${usd(t.liq)} · ${chg(t.chg24)}</div>
         ${t.progress != null ? `<div class="bar" aria-label="${t.progress}% to graduation" style="margin:0 0 10px"><i style="width:${Math.min(100, t.progress)}%"></i></div><div class="dsub" style="margin:-6px 0 10px">${t.progress}% to graduation</div>` : ""}
         ${t.safety ? `<div class="safety">${esc(t.safety)}</div>` : ""}
+        ${t.mev ? `<span class="mev${t.mev === "on" ? "" : " off"}">${t.mev === "on" ? "🛡 MEV-protected (Jito)" : "⚠️ MEV protection off"}</span>` : ""}
         <div id="verdict"></div>
         <div class="grid3">${(t.presets || []).map((v) =>
           `<button class="btn" data-buy="${v}">Buy ${v} ${esc(t.unit)}</button>`).join("")}</div>
@@ -1043,13 +1054,31 @@
     $("findForm").requestSubmit ? $("findForm").requestSubmit() : $("findBtn").click();
   });
 
+  function recordHtml(st) {
+    if (!st) return "";
+    const days = Object.entries(st.days).sort((a, b) => a[0] < b[0] ? -1 : 1);
+    const cells = days.map(([d, v]) => {
+      const c = !v.n ? "" : v.pnl > 25 ? "g2" : v.pnl > 0 ? "g1" : v.pnl < -25 ? "r2" : v.pnl < 0 ? "r1" : "t";
+      return `<i class="${c}" title="${esc(d)}: ${v.n} trade${v.n === 1 ? "" : "s"}, ${v.pnl >= 0 ? "+" : "−"}$${Math.abs(v.pnl).toFixed(0)}"></i>`;
+    }).join("");
+    const month = days.slice(-30).reduce((a, [, v]) => a + v.pnl, 0);
+    return `<h2 style="margin-top:8px">Your record</h2>
+      <div class="rwtile">
+        <div class="tile"><div class="k">🔥 Streak</div><div class="v num">${st.streak}d</div><div class="s num">best ${st.best_streak}d</div></div>
+        <div class="tile"><div class="k">Realized</div><div class="v num ${st.realized >= 0 ? "up" : "down"}">${st.realized >= 0 ? "+" : "−"}${usd(Math.abs(st.realized))}</div><div class="s num">${st.wins}W · ${st.losses}L</div></div>
+        <div class="tile"><div class="k">30 days</div><div class="v num ${month >= 0 ? "up" : "down"}">${month >= 0 ? "+" : "−"}${usd(Math.abs(month))}</div><div class="s num">${st.trades} trades</div></div>
+      </div>
+      <div class="cal" role="img" aria-label="Daily profit and loss, last 5 weeks">${cells}</div>
+      <div class="badges">${st.badges.map((b) => `<div class="badge${b.earned ? "" : " off"}" title="${esc(b.desc)}"><b>${b.emoji}</b>${esc(b.name)}</div>`).join("")}</div>
+      ${st.streak >= 2 ? `<button class="btn ghost" id="shareStreak" data-streak="${st.streak}" style="width:100%;margin-bottom:12px">🔥 Share my ${st.streak}-day streak</button>` : ""}`;
+  }
   async function loadRewards() {
     const box = $("rewards");
     try {
-      const [me, cp] = await Promise.all([api("/api/me", {}), api("/api/compete", {}).catch(() => null)]);
+      const [me, cp, st] = await Promise.all([api("/api/me", {}), api("/api/compete", {}).catch(() => null), api("/api/stats", {}).catch(() => null)]);
       const r = me.ref, nt = me.next_tier;
       const row = (a, i, val) => `<div class="lb"><span class="num">${i + 1}</span><span>${esc(a.short)}${a.wallet && !/^0x/i.test(a.wallet) ? ` <button class="chip" data-track="${esc(a.wallet)}" data-lab="${esc(a.short)}">👀 Track</button>` : ""}</span><span class="num">${val}</span></div>`;
-      box.innerHTML = `
+      box.innerHTML = recordHtml(st) + `
         <div class="rwtile">
           <div class="tile"><div class="k">Your fee</div><div class="v num">${me.fee_live ? (me.fee_bps / 100).toFixed(2) + "%" : "0%"}</div><div class="s num">${me.fee_live ? "30d vol " + usd(me.volume30) : "launch period"}</div></div>
           <div class="tile"><div class="k">Rank</div><div class="v">${esc(r.tier)}</div><div class="s num">${r.invites} invited</div></div>
@@ -1075,6 +1104,13 @@
       try { await api("/api/wallets/add", { address: tr.dataset.track, label: tr.dataset.lab, chain: "sol" });
         tr.textContent = "✅ Tracking"; toast("Tracking this trader. Turn on copy in the Copy section when you want to follow their buys.", 4500); loadWatch(); }
       catch (err) { tr.disabled = false; toast("🔴 " + err.message, 4000); }
+      return;
+    }
+    const ss = e.target.closest("#shareStreak");
+    if (ss) {
+      const l = (document.getElementById("shareRef") || {}).dataset ? document.getElementById("shareRef").dataset.link : "";
+      const u = "https://t.me/share/url?url=" + encodeURIComponent(l || "https://t.me") + "&text=" + encodeURIComponent(`🔥 ${ss.dataset.streak}-day trading streak on Ferzan`);
+      if (tg && tg.openTelegramLink) tg.openTelegramLink(u); else toast("Open this inside Telegram to share.", 3000);
       return;
     }
     const b = e.target.closest("#shareRef"); if (!b) return;
