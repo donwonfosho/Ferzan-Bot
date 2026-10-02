@@ -239,6 +239,19 @@
   .badge.off { opacity: .35; filter: grayscale(1); }
   .mev { display: inline-block; font-size: 11px; font-weight: 700; padding: 3px 8px; border-radius: 999px; background: color-mix(in srgb, var(--gain) 16%, var(--sunk)); color: var(--gain); margin-bottom: 8px; }
   .mev.off { background: var(--sunk); color: var(--muted); }
+  .flash-up { animation: fup .9s ease; } .flash-dn { animation: fdn .9s ease; }
+  @keyframes fup { from { color: #19c98a; text-shadow: 0 0 12px rgba(25,201,138,.8); } }
+  @keyframes fdn { from { color: #ff5c6c; text-shadow: 0 0 12px rgba(255,92,108,.8); } }
+  .dsearch { width: 100%; margin-bottom: 8px; padding: 10px 12px; border-radius: 12px; border: 1px solid var(--line); background: var(--sunk); color: var(--ink); font: inherit; }
+  .first { border: 1px solid var(--line); background: linear-gradient(180deg, rgba(25,201,192,.10), transparent); border-radius: 14px; padding: 14px; margin-bottom: 18px; }
+  .first ol { margin: 8px 0 10px; padding-left: 20px; line-height: 1.7; }
+  .addr { display: flex; gap: 8px; align-items: center; margin-top: 6px; font-size: 12px; }
+  .addr code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; background: var(--sunk); padding: 6px 8px; border-radius: 8px; }
+  .held { background: var(--sunk); border-radius: 10px; padding: 8px 10px; margin-bottom: 10px; }
+  .held .arow { display: flex; gap: 6px; margin-top: 6px; }
+  .impact-hi { color: #ff5c6c; font-weight: 700; }
+  .upd { color: var(--muted); font-size: 11px; margin-right: 6px; }
+  .star { background: none; border: 0; font-size: 20px; color: var(--link); padding: 0 6px; }
   @keyframes rise { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
   .rise { animation: rise .45s cubic-bezier(.2,.8,.2,1) both; }
   @media (prefers-reduced-motion: reduce) { .rise { animation: none; } .btn, .tab, .tab b { transition: none; } }
@@ -256,7 +269,7 @@
   <span class="brand"><span class="mark" aria-hidden="true">F</span>FERZAN <small>DESK</small></span>
   <span class="head-r">
     <button class="wallet-chip" id="walletChip" aria-label="Active wallet">👛 <span id="walletName">…</span></button>
-    <button class="refresh" id="refresh" aria-label="Refresh">↻</button>
+    <span class="upd num" id="upd"></span><button class="refresh" id="refresh" aria-label="Refresh">↻</button>
   </span>
 </header>
 
@@ -277,16 +290,19 @@
 </div>
 <button class="btn share" id="shareBest" hidden>📸 Share my best trade</button>
 
+<div class="first" id="firstrun" hidden></div>
 <h2 id="sec-trade">Trade</h2>
 <div class="trade rise">
   <form class="row" id="findForm" autocomplete="off">
     <input id="ca" placeholder="Paste a token address" aria-label="Token address" spellcheck="false">
     <button class="btn" id="findBtn" type="submit">Find</button>
   </form>
+  <div class="chips" id="watchrow" style="margin:0 0 10px"></div>
   <div class="tok" id="tok" hidden></div>
 </div>
 
 <h2 id="sec-disc">Discover</h2>
+<input class="dsearch" id="dsearch" placeholder="Search a coin by name or symbol" aria-label="Search coins" autocomplete="off" enterkeyhint="search">
 <div class="dchips" id="dchips" role="tablist" aria-label="Discover lists">
   <button class="chip on" data-sort="new">🆕 New</button>
   <button class="chip" data-sort="trending">🔥 Hot</button>
@@ -430,6 +446,7 @@
     $("ethUsd").textContent = d.balances.eth_usd == null ? "" : usd(d.balances.eth_usd);
     $("npos").textContent = String(d.positions.length);
     paintPerf(d.positions);
+    paintFirstRun(d);
 
     const box = $("positions");
     if (!d.positions.length) {
@@ -579,6 +596,66 @@
       toast("🔴 " + (err.message || "Couldn't send"), 0);
     } finally { busy = false; document.body.classList.remove("busy"); }
   }
+
+  // ---- batch 5: watchlist, impact, held, live card, first-run, search, pull-to-refresh
+  const impactPct = (usdAmt) => { const L = token && token.liq; return L > 0 ? usdAmt / (L / 2 + usdAmt) * 100 : null; };
+  const WK = "fz_watch";
+  const getWatch = () => { try { return JSON.parse(localStorage.getItem(WK) || "[]"); } catch (e) { return []; } };
+  const setWatch = (a) => { try { localStorage.setItem(WK, JSON.stringify(a.slice(0, 12))); } catch (e) { /* no storage */ } };
+  const isWatched = (m) => getWatch().some((w) => w.m === m);
+  function paintWatch() {
+    const w = getWatch();
+    $("watchrow").innerHTML = w.map((x) => `<button class="chip" data-wm="${esc(x.m)}">★ ${esc(x.s)}</button>`).join("");
+  }
+  $("watchrow").addEventListener("click", (e) => {
+    const b = e.target.closest("[data-wm]"); if (!b) return;
+    $("ca").value = b.dataset.wm; $("findForm").requestSubmit ? $("findForm").requestSubmit() : $("findBtn").click();
+  });
+  function heldHtml(t) {
+    const p = data && (data.positions || []).find((x) => x.mint === t.mint);
+    if (!p) return "";
+    return `<div class="held"><b>You hold</b> ${amt(p.amount)} $${esc(t.symbol)} · ${p.priced ? usd(p.value) : "unpriced"}${p.pnl != null ? " · " + delta(p.pnl, p.pnl_pct) : ""}
+      <div class="arow">${[25, 50, 100].map((v) => `<span class="act primary" data-sellpct="${v}" data-mint="${esc(p.mint)}" data-sym="${esc(p.symbol)}">Sell ${v}%</span>`).join("")}</div></div>`;
+  }
+  let liveT = null;
+  function startLive(mint) {
+    clearInterval(liveT);
+    liveT = setInterval(async () => {
+      if (document.hidden || !token || token.mint !== mint || !$("tkPx")) return clearInterval(liveT);
+      try {
+        const n = await api("/api/token", { mint });
+        const old = token.price; Object.assign(token, { price: n.price, mc: n.mc, liq: n.liq, chg24: n.chg24, progress: n.progress });
+        const px = $("tkPx"); px.textContent = "$" + fmtPx(n.price);
+        if (old && n.price !== old) { px.classList.remove("flash-up", "flash-dn"); void px.offsetWidth; px.classList.add(n.price > old ? "flash-up" : "flash-dn"); }
+        $("tkStats").innerHTML = `MC ${usd(n.mc)} · Liq ${usd(n.liq)} · ${chg(n.chg24)}`;
+      } catch (e) { /* keep the last numbers */ }
+    }, 15000);
+  }
+  function paintFirstRun(d) {
+    const box = $("firstrun");
+    const w = (d.wallets || []).find((x) => x.active) || (d.wallets || [])[0];
+    const empty = !(d.positions || []).length && !(d.total_usd > 1);
+    if (!w || !empty) { box.hidden = true; return; }
+    box.hidden = false;
+    box.innerHTML = `<b>👋 Get started in 3 steps</b>
+      <ol><li>Add funds to your Ferzan wallet</li><li>Paste a coin address below, or pick one from Discover</li><li>Tap Buy. Set an auto-sell if you like</li></ol>
+      ${w.sol ? `<div class="addr"><span>◎ SOL</span><code>${esc(w.sol)}</code><button class="chip" data-copy="${esc(w.sol)}">Copy</button></div>` : ""}
+      ${w.evm ? `<div class="addr"><span>Ξ EVM</span><code>${esc(w.evm)}</code><button class="chip" data-copy="${esc(w.evm)}">Copy</button></div>` : ""}`;
+  }
+  $("firstrun").addEventListener("click", async (e) => {
+    const b = e.target.closest("[data-copy]"); if (!b) return;
+    try { await navigator.clipboard.writeText(b.dataset.copy); b.textContent = "Copied"; toast("Address copied", 1800); }
+    catch (_) { toast(b.dataset.copy, 5000); }
+  });
+  let lastUpd = 0;
+  setInterval(() => { const s = Math.round((Date.now() - lastUpd) / 1000); $("upd").textContent = lastUpd ? (s < 5 ? "just now" : s < 90 ? s + "s ago" : Math.round(s / 60) + "m ago") : ""; }, 5000);
+  // pull down from the very top to refresh
+  let py = null;
+  addEventListener("touchstart", (e) => { py = scrollY <= 0 ? e.touches[0].clientY : null; }, { passive: true });
+  addEventListener("touchend", (e) => {
+    if (py != null && e.changedTouches[0].clientY - py > 110 && scrollY <= 0) { buzz(); toast("Refreshing…", 1200); load(true); loadFeed(); }
+    py = null;
+  }, { passive: true });
   let token = null;
   const fmtPx = (v) => { v = Number(v); if (!(v > 0)) return "0"; if (v >= 1) return v.toFixed(v >= 100 ? 2 : 4);
     return v.toFixed(Math.min(12, Math.max(4, 3 - Math.floor(Math.log10(v))))); };
@@ -594,14 +671,16 @@
       const t = token;
       box.innerHTML = `
         <div class="head"><span class="name">$${esc(t.symbol)} <span class="chain">${esc((t.chain || "").toUpperCase())}</span></span>
-          <span class="num">${t.price ? "$" + fmtPx(t.price) : ""}</span></div>
-        <div class="stats num">MC ${usd(t.mc)} · Liq ${usd(t.liq)} · ${chg(t.chg24)}</div>
+          <span class="num"><span id="tkPx">${t.price ? "$" + fmtPx(t.price) : ""}</span> <button class="star" id="starBtn" aria-label="Watch this coin">${isWatched(t.mint) ? "★" : "☆"}</button></span></div>
+        <div class="stats num" id="tkStats">MC ${usd(t.mc)} · Liq ${usd(t.liq)} · ${chg(t.chg24)}</div>
         ${t.progress != null ? `<div class="bar" aria-label="${t.progress}% to graduation" style="margin:0 0 10px"><i style="width:${Math.min(100, t.progress)}%"></i></div><div class="dsub" style="margin:-6px 0 10px">${t.progress}% to graduation</div>` : ""}
         ${t.safety ? `<div class="safety">${esc(t.safety)}</div>` : ""}
         ${t.mev ? `<span class="mev${t.mev === "on" ? "" : " off"}">${t.mev === "on" ? "🛡 MEV-protected (Jito)" : "⚠️ MEV protection off"}</span>` : ""}
         <div id="verdict"></div>
+        ${heldHtml(t)}
         <div class="grid3">${(t.presets || []).map((v) =>
           `<button class="btn" data-buy="${v}">Buy ${v} ${esc(t.unit)}</button>`).join("")}</div>
+        ${t.fee_bps ? `<div class="dsub" style="margin:8px 2px 0">Fee ${(t.fee_bps / 100).toFixed(2)}% is added on top of your buy.</div>` : ""}
         <form class="custom" id="customBuy" autocomplete="off">
           <div class="row"><input id="customAmt" inputmode="decimal" placeholder="Custom amount in ${esc(t.unit)}" aria-label="Custom buy amount">
             <button class="btn" type="submit">Buy</button></div>
@@ -620,12 +699,20 @@
         a.onclick = () => { const u = `https://t.me/${t.bot || ""}?start=buy_${t.mint.slice(0, 48)}`; tg && tg.openTelegramLink ? tg.openTelegramLink(u) : window.open(u); };
         box.querySelector(".stats").after(a);
       }
-      loadVerdict(t.mint); loadCandles(t);
+      loadVerdict(t.mint); loadCandles(t); startLive(t.mint);
     } catch (err) {
       box.innerHTML = `<div class="error" style="padding:12px">${esc(err.message)}</div>`;
     } finally { $("findBtn").disabled = false; $("findBtn").textContent = "Find"; }
   });
   $("tok").addEventListener("click", (e) => {
+    const stb = e.target.closest("#starBtn");
+    if (stb && token) {
+      let w = getWatch();
+      if (isWatched(token.mint)) w = w.filter((x) => x.m !== token.mint); else w.unshift({ m: token.mint, s: token.symbol });
+      setWatch(w); stb.textContent = isWatched(token.mint) ? "★" : "☆"; paintWatch(); buzz(); return;
+    }
+    const sp = e.target.closest("[data-sellpct]");
+    if (sp) { order({ side: "sell", mint: sp.dataset.mint, amount: +sp.dataset.sellpct, unit: "pct" }, `Sell ${sp.dataset.sellpct}% of $${sp.dataset.sym}?`); return; }
     const b = e.target.closest("[data-buy]");
     if (b && token) { buyNative(+b.dataset.buy); return; }
     const ru = e.target.closest("[data-rules]");
@@ -648,6 +735,9 @@
             : ` in each of ${wallets} wallets — about $${total.toFixed(2)} total`;
         }
       } else if (wallets > 1) q += ` in each of ${wallets} wallets`;
+      if (px && token.fee_bps) q += ` + ${(token.fee_bps / 100).toFixed(2)}% fee`;
+      const im = px ? impactPct(Math.min(n * px, cap || Infinity)) : null;
+      if (im != null && im >= 3) q += `\n\n${im >= 10 ? "⚠️ HIGH price impact" : "Price impact"} ~${im.toFixed(1)}% — this coin is thin.`;
       order({ side: "buy", mint: token.mint, chain: token.chain, amount: n, unit: "native", multi: wallets > 1 }, q + "?");
     }
   }
@@ -655,7 +745,10 @@
     if (e.target.id !== "customAmt" || !token) return;
     const n = parseFloat(String(e.target.value).replace(",", "."));
     const px = token.native_usd || 0;
-    $("customEst").textContent = n > 0 && px ? `≈ $${(n * px).toFixed(2)}` : "";
+    const el = $("customEst");
+    if (!(n > 0 && px)) { el.textContent = ""; return; }
+    const v = n * px, fee = token.fee_bps ? v * token.fee_bps / 10000 : 0, im = impactPct(v);
+    el.innerHTML = `≈ $${v.toFixed(2)}${fee ? ` + $${fee.toFixed(2)} fee` : ""}${im != null ? ` · <span class="${im >= 5 ? "impact-hi" : ""}">price impact ~${im < 0.1 ? "<0.1" : im.toFixed(1)}%</span>` : ""}`;
   });
   $("tok").addEventListener("submit", (e) => {
     if (e.target.id !== "customBuy" || !token) return;
@@ -832,6 +925,7 @@
       });
       const j = await r.json();
       if (!r.ok) throw new Error(j.detail || "Couldn't load");
+      lastUpd = Date.now();
       render(j);
     } catch (err) {
       $("positions").className = "error";
@@ -1016,16 +1110,20 @@
       const pos = data && (data.positions || []).find((p) => p.mint === t.mint);
       const entry = pos && pos.cost && pos.amount ? pos.cost / pos.amount : 0;
       drawCandles($("candles"), j.candles, entry);
-    } catch (e) { /* keeps the embedded chart */ }
+    } catch (e) {
+      const slot = $("chartslot");
+      if (slot && !slot.querySelector("iframe")) slot.innerHTML = `<p class="dsub" style="margin:10px 2px 0">No chart yet. Brand-new coins get one after their first trades.</p>`;
+    }
   }
 
   let feedSort = "new";
   const AGE = (ts) => { const m = Math.max(0, Math.floor((Date.now() / 1000 - (ts || 0)) / 60)); return !ts ? "" : m < 60 ? m + "m" : m < 1440 ? Math.floor(m / 60) + "h" : Math.floor(m / 1440) + "d"; };
+  let feedQ = "";
   async function loadFeed() {
     const box = $("discover");
     try {
-      const j = await api("/api/feed", { sort: feedSort });
-      if (!j.items.length) { box.innerHTML = `<div class="empty">Nothing here yet.</div>`; return; }
+      const j = await api("/api/feed", { sort: feedSort, q: feedQ });
+      if (!j.items.length) { box.innerHTML = `<div class="empty">${feedQ ? "No coins match “" + esc(feedQ) + "”." : "Nothing here yet."}</div>`; return; }
       box.innerHTML = j.items.map((it) => {
         const img = /^https:\/\//.test(it.image || "") ? `<img class="dimg" referrerpolicy="no-referrer" loading="lazy" alt="${esc((it.symbol || "?").slice(0, 1))}" src="${esc(it.image)}">`
           : `<div class="dimg">${esc((it.symbol || "?").slice(0, 1))}</div>`;
@@ -1035,8 +1133,11 @@
             ${pr != null && !it.graduated ? `<div class="bar" aria-label="${pr}% to graduation"><i style="width:${pr}%"></i></div>` : `<div class="dsub">${it.graduated ? "🎓 Graduated" : ""}</div>`}</div>
           <div class="num" style="text-align:right"><div>${it.mcap_usd != null ? usd(it.mcap_usd) : ""}</div><div class="dsub">${AGE(it.launched_ts)}${it.safe ? " · ✅" : ""}</div></div></button>`;
       }).join("");
-    } catch (e) { box.innerHTML = `<div class="empty">Couldn't load this list. Pull to refresh later.</div>`; }
+    } catch (e) { box.innerHTML = `<div class="empty">Couldn't load this list.<br><button class="chip" id="feedRetry" style="margin-top:8px">Try again</button></div>`; }
   }
+  let sT = null;
+  $("dsearch").addEventListener("input", () => { clearTimeout(sT); sT = setTimeout(() => { feedQ = $("dsearch").value.trim().slice(0, 40); loadFeed(); }, 350); });
+  $("discover").addEventListener("click", (e) => { if (e.target.id === "feedRetry") loadFeed(); });
   $("dchips").addEventListener("click", (e) => {
     const b = e.target.closest("[data-sort]"); if (!b) return;
     feedSort = b.dataset.sort;
@@ -1128,6 +1229,7 @@
   }
   load(false);
   loadWatch();
+  paintWatch();
   loadFeed();
   loadRewards();
   setInterval(() => { if (!document.hidden) loadFeed(); }, 60000);

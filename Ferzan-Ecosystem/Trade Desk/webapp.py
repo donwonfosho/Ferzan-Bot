@@ -316,6 +316,9 @@ async def api_token(request: Request) -> JSONResponse:
         raise HTTPException(status_code=502, detail="Lookup failed — try again.")
     info = dict(info)  # the lookup is cached across users; per-user fields go on a copy
     info["presets"] = db.buy_presets(uid, info["chain"] or "sol")
+    import feecollect
+
+    info["fee_bps"] = feecollect.live_bps(uid) if feecollect.enabled() and not feecollect.exempt(uid) else 0
     info["mev"] = ("on" if db.flag_on(uid, "anti_mev", 1) else "off") if info.get("chain") == "sol" else ""
     return JSONResponse(info)
 
@@ -678,8 +681,11 @@ def _launch_get(path: str, ttl: int, timeout: float = 4.0):
     return data
 
 
-def feed_items(sort: str) -> list[dict]:
-    data = _launch_get(f"/api/launches?sort={sort}&limit=24", 20)
+def feed_items(sort: str, q: str = "") -> list[dict]:
+    from urllib.parse import quote
+
+    q = " ".join((q or "").split())[:40]
+    data = _launch_get(f"/api/launches?sort={sort}&limit=24" + (f"&q={quote(q)}" if q else ""), 20)
     items = data.get("items") if isinstance(data, dict) else data
     out = []
     for it in (items or [])[:24]:
@@ -760,7 +766,7 @@ async def api_feed(request: Request) -> JSONResponse:
         raise HTTPException(status_code=400, detail="Unknown list.")
     if not _rate_ok(uid, "feed", 30):
         raise HTTPException(status_code=429, detail="Too many refreshes — give it a minute.")
-    items = await asyncio.to_thread(feed_items, sort)
+    items = await asyncio.to_thread(feed_items, sort, str(body.get("q") or ""))
     return JSONResponse({"items": items, "sort": sort})
 
 
