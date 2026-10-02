@@ -3304,7 +3304,8 @@ async def bag_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     except Exception as exc:
         await _done(context.bot, chat_id, status, str(exc))
         return
-    await _done(context.bot, chat_id, status, summary, parse_mode="HTML")
+    await _done(context.bot, chat_id, status, summary, parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Home", callback_data="go:home")]]))
     for text, kb in panels:
         await update.effective_message.reply_text(
             text, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True
@@ -6731,7 +6732,7 @@ def _token_alerts_panel(uid: int) -> tuple[str, InlineKeyboardMarkup | None]:
         return (
             "🔔 <b>Token alerts</b>\nNone set. Tap 🔔 Alert on any token card, or:\n"
             "<code>/alert &lt;CA&gt; 2m</code> · <code>/alert &lt;CA&gt; +50%</code>",
-            None,
+            InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Home", callback_data="go:home")]]),
         )
     lines = ["🔔 <b>Token alerts</b>"]
     kb = []
@@ -6741,6 +6742,7 @@ def _token_alerts_panel(uid: int) -> tuple[str, InlineKeyboardMarkup | None]:
         sym = html.escape(r["symbol"] or r["mint"][:6])
         lines.append(f"#{r['id']} ${sym} {arrow} {what}" + (f" ({html.escape(r['note'])})" if r["note"] else ""))
         kb.append([InlineKeyboardButton(f"❌ #{r['id']} ${r['symbol'] or r['mint'][:6]}", callback_data=f"tax:{r['id']}")])
+    kb.append([InlineKeyboardButton("↩️ Home", callback_data="go:home")])
     return "\n".join(lines), InlineKeyboardMarkup(kb)
 
 
