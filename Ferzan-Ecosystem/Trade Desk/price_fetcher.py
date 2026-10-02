@@ -296,6 +296,13 @@ def _gecko_snap(query: str) -> MarketSnapshot | None:
             ("eth", "ethereum"),
             ("arbitrum", "arbitrum"),
             ("avalanche", "avax"),
+            ("monad", "monad"),
+            ("ink", "ink"),
+            ("hyperevm", "hype"),
+            ("optimism", "op"),
+            ("polygon_pos", "pol"),
+            ("linea", "linea"),
+            ("sonic", "sonic"),
         )
     )
     for net, chain in nets:
@@ -303,7 +310,7 @@ def _gecko_snap(query: str) -> MarketSnapshot | None:
             r = requests.get(
                 f"https://api.geckoterminal.com/api/v2/networks/{net}/tokens/{q}",
                 headers={"Accept": "application/json"},
-                timeout=TIMEOUT,
+                timeout=6,
             )
         except requests.RequestException:
             continue
