@@ -4046,6 +4046,8 @@ def chain_board_keyboard(user_id: int | None = None) -> InlineKeyboardMarkup:
             InlineKeyboardButton("✨ Generate", callback_data="wi:gen"),
         ]
     )
+    if has:
+        rows.append([InlineKeyboardButton("🗝️ Export private keys", callback_data="wi:exp")])
     rows.append([InlineKeyboardButton("↩️ Return", callback_data="go:home")])
     return InlineKeyboardMarkup(rows)
 
@@ -4210,6 +4212,7 @@ def _mywallets_panel(uid: int) -> tuple[str, InlineKeyboardMarkup]:
     if len(slots) >= 2:
         rows.append([InlineKeyboardButton("👥 Multi-buy wallets", callback_data="mwp")])
     rows.append([InlineKeyboardButton("📥 Import into new wallet", callback_data="wi:imp")])
+    rows.append([InlineKeyboardButton("🗝️ Export active wallet's keys", callback_data="wi:exp")])
     rows.append([InlineKeyboardButton("↩️ Chains", callback_data="wi:chains")])
     lines.append(f"\n{len(slots)}/{db.MAX_WALLETS} · rename the active one: /walletname Sniper")
     return "\n".join(lines), InlineKeyboardMarkup(rows)
