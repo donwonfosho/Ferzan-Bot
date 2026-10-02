@@ -252,6 +252,21 @@
   .impact-hi { color: #ff5c6c; font-weight: 700; }
   .upd { color: var(--muted); font-size: 11px; margin-right: 6px; }
   .star { background: none; border: 0; font-size: 20px; color: var(--link); padding: 0 6px; }
+  .livestats { display: flex; gap: 14px; flex-wrap: wrap; justify-content: center; color: var(--muted); font-size: 12px; margin: -4px 0 12px; }
+  .livestats b { color: var(--ink); }
+  .rank { display: flex; align-items: center; gap: 12px; }
+  .rank .em { font-size: 34px; }
+  .rank .tt { font-weight: 800; font-size: 18px; } .rank .ss { color: var(--muted); font-size: 12px; }
+  .ladder { display: grid; gap: 6px; margin-top: 8px; font-size: 13px; }
+  .ladder div { display: flex; justify-content: space-between; background: var(--sunk); border-radius: 10px; padding: 8px 10px; }
+  .ladder div.on { outline: 1.5px solid var(--link); }
+  .trustq { white-space: pre-line; line-height: 1.5; font-size: 13px; color: var(--muted); margin-top: 8px; }
+  .trustq b { color: var(--ink); }
+  @media (min-width: 900px) {
+    body { max-width: 760px; margin-left: auto; margin-right: auto; }
+    .tabbar { left: 50%; right: auto; width: 740px; transform: translateX(-50%); }
+    .tiles, .rwtile { gap: 14px; }
+  }
   @keyframes rise { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
   .rise { animation: rise .45s cubic-bezier(.2,.8,.2,1) both; }
   @media (prefers-reduced-motion: reduce) { .rise { animation: none; } .btn, .tab, .tab b { transition: none; } }
@@ -272,6 +287,7 @@
     <span class="upd num" id="upd"></span><button class="refresh" id="refresh" aria-label="Refresh">↻</button>
   </span>
 </header>
+<div class="livestats" id="liveStats" hidden></div>
 
 <p class="hero-label">Desk value</p>
 <p class="hero num" id="total"><span class="skeleton" style="display:inline-block;width:160px;height:36px"></span></p>
@@ -1204,13 +1220,37 @@
   }
   $("histBtn").addEventListener("click", toggleHistory);
 
+  function trustHtml(tr) {
+    if (!tr) return "";
+    const rk = tr.rank, t = tr.tier || {}, sec = tr.security;
+    const labels = { holder: "🔷 Holder", booster: "🔶 Booster", whale: "🐋 Whale", titan: "👑 Titan" };
+    const ladder = (t.ladder || []).map((l) => `<div class="${t.tier === l.tier ? "on" : ""}"><span>${labels[l.tier] || esc(l.tier)} · ${Number(l.min).toLocaleString()} FERZAN</span><span>${l.trade_fee_discount_pct}% off fees</span></div>`).join("");
+    const tierBlock = t.ladder && t.ladder.length ? `<details class="sec" style="margin-bottom:12px"><summary style="font-weight:700;cursor:pointer">🏅 FERZAN holder tiers${t.active && t.tier !== "none" ? " · you are " + esc(t.tier) : ""}</summary>
+        <div class="dsub" style="margin-top:8px">${t.active ? "Your Solana trading wallet holds " + Number(t.balance || 0).toLocaleString() + " FERZAN." + (t.next_tier ? " Next tier at " + Number(t.next_min).toLocaleString() + "." : "") : "Unlocks when FERZAN launches. Hold more, get more."}</div>
+        <div class="ladder">${ladder}</div></details>` : "";
+    const secBlock = sec ? `<details class="sec" style="margin-bottom:12px"><summary style="font-weight:700;cursor:pointer">🔒 Security: how the desk works</summary>
+        <div class="trustq"><b>Wallets</b>\n${esc(sec.wallets)}\n\n<b>Solana MEV</b>\n${esc(sec.solana_mev)}\n\n<b>EVM MEV</b>\n${esc(sec.evm_mev)}\n\n<b>Safety checks</b>\n${esc(sec.safety)}\n\n<b>Fees</b>\n${esc(sec.fees)}\n\n<b>Audit</b>\n${esc(sec.audit)}</div></details>` : "";
+    return `<div class="sec rise" style="margin-bottom:12px"><div class="rank"><span class="em">${rk.emoji}</span><div style="flex:1"><div class="tt">${esc(rk.title)}</div>
+        <div class="ss num">${rk.next_title ? usd(rk.to_next) + " more volume to " + esc(rk.next_title) : "Top rank"}</div>
+        <div class="bar"><i style="width:${rk.pct}%"></i></div></div></div>
+        <div class="btnrow" style="margin-top:12px"><button class="btn ghost" id="wrapBtn" type="button">🎁 My weekly card</button><button class="btn" id="joinBtn" type="button">🚀 Join FERZAN launch · ${esc(tr.launch_in)}</button></div></div>
+      ${tierBlock}${secBlock}`;
+  }
+  async function loadLiveStats() {
+    try {
+      const r = await fetch("/api/public-stats"); if (!r.ok) return; const j = await r.json();
+      if (!j.trades) return;
+      const el = $("liveStats"); el.hidden = false;
+      el.innerHTML = `<span><b class="num">${j.trades.toLocaleString()}</b> trades</span><span><b class="num">${usd(j.volume_usd)}</b> volume</span><span><b class="num">${usd(j.volume_24h_usd)}</b> today</span>`;
+    } catch (e) { /* strip stays hidden */ }
+  }
   async function loadRewards() {
     const box = $("rewards");
     try {
-      const [me, cp, st] = await Promise.all([api("/api/me", {}), api("/api/compete", {}).catch(() => null), api("/api/stats", {}).catch(() => null)]);
+      const [me, cp, st, tr] = await Promise.all([api("/api/me", {}), api("/api/compete", {}).catch(() => null), api("/api/stats", {}).catch(() => null), api("/api/trust", {}).catch(() => null)]);
       const r = me.ref, nt = me.next_tier;
       const row = (a, i, val) => `<div class="lb"><span class="num">${i + 1}</span><span>${esc(a.short)}${a.wallet && !/^0x/i.test(a.wallet) ? ` <button class="chip" data-track="${esc(a.wallet)}" data-lab="${esc(a.short)}">👀 Track</button>` : ""}</span><span class="num">${val}</span></div>`;
-      box.innerHTML = recordHtml(st) + `
+      box.innerHTML = trustHtml(tr) + recordHtml(st) + `
         <div class="rwtile">
           <div class="tile"><div class="k">Your fee</div><div class="v num">${me.fee_live ? (me.fee_bps / 100).toFixed(2) + "%" : "0%"}</div><div class="s num">${me.fee_exempt ? "fee-exempt" : me.fee_live ? "30d vol " + usd(me.volume30) : "launch period"}</div></div>
           <div class="tile"><div class="k">Rank</div><div class="v">${esc(r.tier)}</div><div class="s num">${r.invites} invited</div></div>
@@ -1230,6 +1270,8 @@
     } catch (e) { box.innerHTML = `<div class="empty">Rewards will show here shortly.</div>`; }
   }
   $("rewards").addEventListener("click", async (e) => {
+    if (e.target.closest("#wrapBtn")) { openBot("wrapped"); return; }
+    if (e.target.closest("#joinBtn")) { openBot("join"); return; }
     const tr = e.target.closest("[data-track]");
     if (tr) {
       tr.disabled = true;
@@ -1263,6 +1305,7 @@
   paintWatch();
   loadFeed();
   loadRewards();
+  loadLiveStats();
   setInterval(() => { if (!document.hidden) loadFeed(); }, 60000);
   setInterval(() => { if (!document.hidden) load(false); }, 30000);
 })();

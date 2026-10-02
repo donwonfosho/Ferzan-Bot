@@ -56,6 +56,11 @@ def current_bps(user_id: int | None = None) -> int:
             bps = max(15, bps - 10)
         elif stake >= 100:
             bps = max(20, bps - 5)
+        import trust  # FERZAN holder tiers: percent off the fee, from the last known balance (0 until FERZAN is live)
+
+        disc = trust.holder_discount_pct(int(user_id))
+        if disc:
+            bps = max(10, int(round(bps * (100 - disc) / 100)))
     except Exception:
         pass
     return max(0, min(MAX_FEE_BPS, bps))

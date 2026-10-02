@@ -3091,3 +3091,34 @@ def streak_stats(user_id: int, days: int = 35) -> dict:
     return {"streak": cur, "best_streak": best_streak, "trades": len(rows), "volume": round(volume, 2),
             "realized": round(realized, 2), "wins": wins, "losses": losses, "best_pnl": round(best, 2),
             "best_mult": round(best_mult, 2), "sniped": sniped, "days": out_days}
+
+
+def desk_stats() -> dict:
+    """Public, anonymous totals from live trades: how much the desk has done. Counts only; never user ids."""
+    now = int(time.time())
+    with get_conn() as conn:
+        tot = conn.execute("SELECT COUNT(*), COALESCE(SUM(usd), 0), COUNT(DISTINCT user_id) FROM live_trades").fetchone()
+        day = conn.execute("SELECT COUNT(*), COALESCE(SUM(usd), 0), COUNT(DISTINCT user_id) FROM live_trades WHERE ts > ?",
+                           (now - 86400,)).fetchone()
+        chains = conn.execute("SELECT COUNT(DISTINCT chain) FROM live_trades WHERE chain != ''").fetchone()
+    return {"trades": int(tot[0] or 0), "volume_usd": round(float(tot[1] or 0), 2), "traders": int(tot[2] or 0),
+            "trades_24h": int(day[0] or 0), "volume_24h_usd": round(float(day[1] or 0), 2), "traders_24h": int(day[2] or 0),
+            "chains": int(chains[0] or 0)}
+
+
+def week_stats(user_id: int, days: int = 7) -> dict:
+    """One user's last N days of live trading, for the Wrapped card."""
+    since = int(time.time()) - days * 86400
+    with get_conn() as conn:
+        _pnl_cols(conn)
+        rows = conn.execute("SELECT side, usd, cost_usd, pnl_usd, mint, chain FROM live_trades WHERE user_id = ? AND ts > ?",
+                            (int(user_id), since)).fetchall()
+    vol = sum(float(r["usd"] or 0) for r in rows)
+    sells = [r for r in rows if r["side"] == "sell" and r["pnl_usd"] is not None]
+    wins = sum(1 for r in sells if float(r["pnl_usd"]) > 0)
+    pnl = sum(float(r["pnl_usd"]) for r in sells)
+    best = max((float(r["pnl_usd"]) for r in sells), default=0.0)
+    return {"trades": len(rows), "volume_usd": round(vol, 2), "sells": len(sells), "wins": wins,
+            "win_rate": round(wins * 100.0 / len(sells), 1) if sells else None, "pnl_usd": round(pnl, 2), "best_usd": round(best, 2),
+            "chains": len({r["chain"] for r in rows if r["chain"]})}
+

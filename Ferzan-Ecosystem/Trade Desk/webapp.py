@@ -903,6 +903,43 @@ async def _json(request: Request) -> dict:
         return {}
 
 
+_PUB_STATS: dict = {"t": 0.0, "v": None}
+
+
+@app.get("/api/public-stats")
+async def api_public_stats() -> JSONResponse:
+    """Anonymous desk totals for the header strip. Cached for a minute."""
+    now = time.time()
+    if _PUB_STATS["v"] is None or now - _PUB_STATS["t"] > 60:
+        _PUB_STATS["v"] = await asyncio.to_thread(db.desk_stats)
+        _PUB_STATS["t"] = now
+    return JSONResponse(_PUB_STATS["v"], headers={"Cache-Control": "public, max-age=30"})
+
+
+@app.post("/api/trust")
+async def api_trust(request: Request) -> JSONResponse:
+    """Rank, FERZAN holder tier (display only), the week's numbers and the security facts, for the Rewards tab."""
+    body = await _json(request)
+    uid = _auth(body)
+    if not _rate_ok(uid, "trust", 12):
+        raise HTTPException(status_code=429, detail="Too many refreshes. Give it a minute.")
+
+    def build() -> dict:
+        import trust
+
+        st = db.streak_stats(uid)
+        w = db.get_user_wallet(uid) or {}
+        out = {"rank": trust.rank_for(st["volume"]), "week": db.week_stats(uid),
+               "tier": trust.holder_tier(w.get("sol_pub") or ""), "launch_in": trust.countdown(), "security": None}
+        try:
+            out["security"] = trust.security_facts()
+        except Exception:
+            log.exception("security facts failed")
+        return out
+
+    return JSONResponse(await asyncio.to_thread(build))
+
+
 @app.get("/healthz")
 def healthz() -> dict:
     return {"ok": True}

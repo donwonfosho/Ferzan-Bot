@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import html
+from urllib.parse import quote_plus
 import logging
 import os
 import datetime as dt
@@ -1166,6 +1167,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             )
         except Exception as exc:
             await update.effective_message.reply_text(f"Couldn't open that bag: {exc}")
+        return
+    if extra in {"security", "join", "wrapped"}:
+        await {"security": security_cmd, "join": join_cmd, "wrapped": wrapped_cmd}[extra](update, context)
         return
     if extra == "wallets":
         text, kb = _mywallets_panel(update.effective_user.id)
@@ -3001,6 +3005,94 @@ async def sellall_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     status, detail = await _sell_everywhere(uid, mint, "sellall")
     icon = {"sold": "✅ Sold", "partial": "⚠️ Partly sold", "failed": "❌ Sell failed", "empty": "▫️ Nothing held"}[status]
     await msg.edit_text(f"{icon} <code>{_mint_label(mint)}</code>\n{html.escape(detail)}", parse_mode="HTML")
+
+
+async def security_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/security: what the desk really does with keys, MEV and safety checks, read from live settings."""
+    import trust
+
+    try:
+        text = await asyncio.to_thread(trust.security_text)
+    except Exception:
+        logger.exception("security text failed")
+        await update.effective_message.reply_text("Couldn't load the security page. Try again in a minute.")
+        return
+    await update.effective_message.reply_text(text, parse_mode="HTML", disable_web_page_preview=True)
+
+
+async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/stats: anonymous desk totals, straight from the trade log."""
+    st = await asyncio.to_thread(db.desk_stats)
+    await update.effective_message.reply_text(
+        "📊 <b>Ferzan Trade Desk, live</b>\n\n"
+        f"Trades: <b>{st['trades']:,}</b> ({st['trades_24h']:,} in 24h)\n"
+        f"Volume: <b>${st['volume_usd']:,.0f}</b> (${st['volume_24h_usd']:,.0f} in 24h)\n"
+        f"Traders: <b>{st['traders']:,}</b> ({st['traders_24h']:,} active today)\n"
+        f"Chains traded: <b>{st['chains']}</b>\n\n"
+        "Counted from live trades on this desk only. No paper trades.",
+        parse_mode="HTML",
+    )
+
+
+async def rank_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    import trust
+
+    uid = update.effective_user.id
+    st = await asyncio.to_thread(db.streak_stats, uid)
+    rk = trust.rank_for(st["volume"])
+    bar = "█" * int(rk["pct"] // 10) + "░" * (10 - int(rk["pct"] // 10))
+    nxt = f"\n{bar} {rk['pct']:.0f}%\n${rk['to_next']:,.0f} more volume to <b>{rk['next_title']}</b>" if rk["next_title"] else "\nTop rank reached."
+    await update.effective_message.reply_text(
+        f"{rk['emoji']} <b>{rk['title']}</b>\nLifetime volume ${rk['volume']:,.0f}{nxt}\n\n"
+        "Ranks: 🌱 Rookie · ⚡ Trader $1k · 🎯 Sniper $10k · 🐋 Whale $100k · 👑 Factory Boss $1M\n"
+        "Get your weekly card with /wrapped.",
+        parse_mode="HTML",
+    )
+
+
+async def wrapped_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/wrapped: a shareable card of the user's last 7 days."""
+    import trust
+    import wrapped_card
+
+    uid = update.effective_user.id
+    wk, st = await asyncio.gather(asyncio.to_thread(db.week_stats, uid), asyncio.to_thread(db.streak_stats, uid))
+    if not wk["trades"]:
+        await update.effective_message.reply_text("No live trades in the last 7 days yet. Make a trade and your Wrapped card appears here.")
+        return
+    rk = trust.rank_for(st["volume"])
+    bot = os.getenv("FERZAN_BOT_USERNAME", "Ferzan_Trade_Bot").lstrip("@")
+    name = (update.effective_user.first_name or update.effective_user.username or "Trader")
+    png = await asyncio.to_thread(wrapped_card.render, name=name, week=wk, rank=rk, footer=f"t.me/{bot}?start=ref_{uid}")
+    share = f"https://t.me/share/url?url={quote_plus(f'https://t.me/{bot}?start=ref_{uid}')}&text={quote_plus('My week on the Ferzan Trade Desk')}"
+    await update.effective_message.reply_photo(
+        photo=png, caption=f"{rk['emoji']} <b>{rk['title']}</b> · your week on Ferzan", parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔗 Share my week", url=share)]]))
+
+
+async def join_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Join the FERZAN launch: countdown, wallet funding status and the auto-snipe switch in one place."""
+    import trust
+
+    uid = update.effective_user.id
+    w = await asyncio.to_thread(user_wallets.ensure, uid)
+    addr = w.get("sol_pub") or ""
+    try:
+        sol = (await asyncio.to_thread(signer.sol_balance_lamports, addr)) / 1e9 if addr else 0.0
+    except Exception:
+        sol = None
+    ready = sol is not None and sol >= 0.05
+    funded = ("Couldn't read the balance right now" if sol is None else
+              f"<b>{sol:.3f} SOL</b> " + ("✅ ready" if ready else "⚠️ add at least 0.05 SOL to be ready"))
+    await update.effective_message.reply_text(
+        "🚀 <b>FERZAN launch</b>\n\n"
+        f"Opens in <b>{trust.countdown()}</b> (Oct 15, 4:00 PM ET)\n\n"
+        f"Your Solana trading wallet\n<code>{html.escape(addr)}</code>\n{funded}\n\n"
+        "1. Fund this wallet with SOL.\n2. Turn on Auto-snipe to buy new Ferzan launches the moment they appear (opt-in, capped).\n"
+        "3. Or buy by hand from the launch post.",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🤖 Auto-snipe", callback_data="go:autosnipe"),
+                                            InlineKeyboardButton("👛 My wallets", callback_data="go:wallets")]]))
 
 
 async def stake_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -9304,6 +9396,10 @@ def main() -> None:
                 [
                     BotCommand("start", "Home menu"),
                     BotCommand("tour", "3-step tour"),
+                    BotCommand("security", "How the desk protects you"),
+                    BotCommand("stats", "Live desk numbers"),
+                    BotCommand("rank", "Your rank and progress"),
+                    BotCommand("wrapped", "Your weekly card"),
                     BotCommand("buy", "Buy a coin"),
                     BotCommand("bag", "My coins · sell"),
                     BotCommand("signal", "Safety score for a coin"),
@@ -9402,6 +9498,8 @@ def main() -> None:
     app.add_handler(CommandHandler("xbuy", xbuy_cmd))
     _xb_prices()  # warm the price cache in the background so the first buy after a restart can check
     app.add_handler(CommandHandler("stake", stake_cmd))
+    for _n, _f in (("security", security_cmd), ("stats", stats_cmd), ("rank", rank_cmd), ("wrapped", wrapped_cmd), ("join", join_cmd)):
+        app.add_handler(CommandHandler(_n, _f))
     app.add_handler(CommandHandler("lpguard", lpguard_cmd))
     app.add_handler(CommandHandler("buylimit", buylimit_cmd))
     app.add_handler(CommandHandler("limits", limits_cmd))
