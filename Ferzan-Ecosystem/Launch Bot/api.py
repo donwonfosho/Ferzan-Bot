@@ -105,6 +105,8 @@ RPC_URLS = {
 PLATFORM_TREASURY_EVM = os.environ.get("PLATFORM_TREASURY_EVM", "")
 
 app = FastAPI(title="Launch Bot API")
+import launch_app as _launch_app  # noqa: E402
+app.include_router(_launch_app.router)
 
 # Mini App runs in Telegram's in-app browser -- CORS needs to allow that
 # origin. Tighten this to your actual Mini App domain once deployed

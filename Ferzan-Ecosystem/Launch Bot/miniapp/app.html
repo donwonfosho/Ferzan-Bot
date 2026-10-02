@@ -1,0 +1,320 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Ferzan Launch</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  :root {
+    --bg: #050a1e; --card: #0b1330; --sunk: #111c40; --ink: #e8eefc; --muted: #8b9ac4;
+    --link: #38e0d0; --btn: #19c9c0; --btn-ink: #031014; --gain: #34d399; --loss: #fb7185; --gold: #fbbf24;
+    --line: rgba(160,190,255,.12); --glow: rgba(25,201,192,.38); color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--ink); }
+  body { font: 15px/1.4 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, sans-serif; -webkit-font-smoothing: antialiased;
+         background: radial-gradient(120% 60% at 50% -10%, #0e1f4d 0%, #050a1e 55%) fixed;
+         padding: 16px 16px calc(96px + env(safe-area-inset-bottom)); }
+  button, input, textarea, select { font: inherit; color: inherit; }
+  .num { font-variant-numeric: tabular-nums; }
+  header { position: sticky; top: 0; z-index: 8; margin: -16px -16px 14px; padding: 12px 16px 10px; display: flex; justify-content: space-between; align-items: center;
+           background: linear-gradient(#050a1e 70%, rgba(5,10,30,0)); backdrop-filter: blur(6px); }
+  .brand { display: inline-flex; align-items: center; gap: 8px; font-weight: 800; letter-spacing: .14em; font-size: 14px; }
+  .mark { width: 28px; height: 28px; border-radius: 9px; display: grid; place-items: center; font-weight: 900; font-size: 16px; letter-spacing: 0;
+          color: #031014; background: linear-gradient(135deg, #7ff5ea, #19a7c9); box-shadow: 0 0 18px var(--glow); }
+  .brand small { color: var(--muted); font-weight: 600; letter-spacing: .08em; font-size: 11px; }
+  .hi { color: var(--muted); font-size: 13px; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 18px 0 8px; font-weight: 600; }
+  .sec { background: linear-gradient(180deg, rgba(255,255,255,.04), rgba(255,255,255,0)), var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 14px; margin-bottom: 12px; }
+  .btn { border: 0; border-radius: 12px; padding: 14px; font-weight: 800; font-size: 15px; width: 100%; color: var(--btn-ink);
+         background: linear-gradient(180deg, #2fe3d8, #12b3ae); box-shadow: 0 6px 18px -8px var(--glow); transition: transform .12s ease, filter .12s ease; }
+  .btn:active { transform: scale(.97); filter: brightness(1.15); }
+  .btn:disabled { opacity: .5; }
+  .btn.ghost { background: var(--sunk); color: var(--ink); box-shadow: none; }
+  .btn.sm { padding: 9px 12px; font-size: 13px; width: auto; }
+  .chips { display: flex; gap: 8px; flex-wrap: wrap; }
+  .chip { border: 1px solid var(--line); background: var(--sunk); color: var(--muted); border-radius: 999px; padding: 8px 14px; font-weight: 700; font-size: 13px; }
+  .chip.on { color: var(--btn-ink); background: linear-gradient(180deg, #2fe3d8, #12b3ae); border-color: transparent; }
+  .chip:disabled { opacity: .35; }
+  label.f { display: block; font-size: 12px; color: var(--muted); margin: 12px 0 5px; font-weight: 600; }
+  .in { width: 100%; border: 1px solid var(--line); background: var(--sunk); border-radius: 12px; padding: 12px; font-size: 16px; }
+  .in:focus { outline: 2px solid var(--link); outline-offset: 1px; }
+  textarea.in { resize: none; height: 64px; }
+  .two { display: grid; grid-template-columns: 1fr 120px; gap: 10px; }
+  .logo { display: flex; gap: 12px; align-items: center; }
+  .logo .pick { width: 64px; height: 64px; border-radius: 18px; border: 1.5px dashed var(--line); background: var(--sunk) center/cover; display: grid; place-items: center; font-size: 24px; flex: none; }
+  .logo p { margin: 0; color: var(--muted); font-size: 12px; }
+  .prev { position: relative; overflow: hidden; border-radius: 18px; padding: 16px; margin-bottom: 14px; border: 1px solid var(--line);
+          background: radial-gradient(90% 120% at 100% 0%, rgba(25,201,192,.22), transparent 60%), linear-gradient(160deg, #0d1a45, #070d26); }
+  .prev .row { display: flex; gap: 12px; align-items: center; }
+  .prev .av { width: 54px; height: 54px; border-radius: 16px; background: var(--sunk) center/cover; display: grid; place-items: center; font-weight: 900; font-size: 22px; flex: none; }
+  .prev .nm { font-weight: 800; font-size: 19px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .prev .sy { color: var(--link); font-weight: 700; font-size: 13px; }
+  .prev .tag { position: absolute; top: 12px; right: 12px; font-size: 10px; font-weight: 800; letter-spacing: .08em; padding: 3px 8px; border-radius: 999px; background: rgba(25,201,192,.16); color: var(--link); }
+  .bar { height: 7px; border-radius: 4px; background: var(--sunk); margin-top: 12px; overflow: hidden; }
+  .bar i { display: block; height: 100%; background: linear-gradient(90deg, #19c9c0, #7c5cff); transition: width .4s ease; }
+  .prev .meta { display: flex; justify-content: space-between; color: var(--muted); font-size: 12px; margin-top: 6px; }
+  .toggle { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 12px; background: var(--sunk); border-radius: 12px; margin-top: 12px; }
+  .toggle b { display: block; font-size: 14px; }
+  .toggle small { color: var(--muted); font-size: 12px; }
+  .sw { appearance: none; width: 48px; height: 28px; border-radius: 999px; background: #1a2754; position: relative; flex: none; border: 0; transition: background .15s; }
+  .sw::after { content: ""; position: absolute; top: 3px; left: 3px; width: 22px; height: 22px; border-radius: 50%; background: #fff; transition: transform .15s; }
+  .sw:checked { background: #19c9c0; } .sw:checked::after { transform: translateX(20px); }
+  details summary { cursor: pointer; color: var(--link); font-weight: 700; font-size: 13px; margin-top: 12px; }
+  .row2 { display: grid; grid-template-columns: 44px 1fr auto; gap: 10px; align-items: center; padding: 11px 12px; border-bottom: 1px solid var(--line); width: 100%; background: none; border-top: 0; border-left: 0; border-right: 0; text-align: left; }
+  .row2:last-child { border-bottom: 0; }
+  .row2 .av { width: 44px; height: 44px; border-radius: 13px; background: var(--sunk) center/cover; display: grid; place-items: center; font-weight: 800; }
+  .row2 .t { font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .row2 .s { color: var(--muted); font-size: 12px; }
+  .row2 .r { text-align: right; font-weight: 700; font-size: 13px; }
+  .pill { font-size: 10px; font-weight: 800; padding: 2px 7px; border-radius: 999px; background: var(--sunk); color: var(--muted); margin-left: 6px; letter-spacing: .04em; }
+  .pill.ok { color: var(--gain); } .pill.bad { color: var(--loss); } .pill.gold { color: var(--gold); }
+  .list { background: var(--card); border: 1px solid var(--line); border-radius: 14px; overflow: hidden; }
+  .tiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 14px; }
+  .tile { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 12px; min-width: 0; }
+  .tile .k { color: var(--muted); font-size: 12px; } .tile .v { font-weight: 800; font-size: 20px; margin-top: 2px; }
+  .empty { text-align: center; color: var(--muted); padding: 22px 14px; }
+  .lvl { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
+  .lvl .b { font-size: 28px; } .lvl .n { font-weight: 800; } .lvl small { color: var(--muted); display: block; font-size: 12px; }
+  .tabbar { position: fixed; left: 10px; right: 10px; bottom: calc(10px + env(safe-area-inset-bottom)); z-index: 12; display: grid; grid-template-columns: repeat(4, 1fr); gap: 2px; padding: 6px;
+            border-radius: 20px; border: 1px solid var(--line); background: rgba(11,19,48,.86); backdrop-filter: blur(14px); box-shadow: 0 10px 30px rgba(0,0,0,.45); }
+  .tab { border: 0; background: none; color: var(--muted); font-size: 10.5px; font-weight: 700; padding: 7px 0 5px; border-radius: 14px; display: grid; gap: 1px; justify-items: center; }
+  .tab b { font-size: 18px; line-height: 1; filter: grayscale(.6); transition: filter .15s, transform .15s; }
+  .tab.on { color: var(--link); background: rgba(25,201,192,.12); } .tab.on b { filter: none; transform: translateY(-1px) scale(1.08); }
+  .toast { position: fixed; left: 16px; right: 16px; bottom: calc(86px + env(safe-area-inset-bottom)); background: #0f1a3f; border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; display: none; z-index: 20; box-shadow: 0 10px 30px rgba(0,0,0,.5); }
+  .toast.show { display: block; }
+  .skel { height: 58px; border-radius: 12px; background: linear-gradient(90deg, var(--sunk), #17245a, var(--sunk)); background-size: 200% 100%; animation: sk 1.2s linear infinite; margin-bottom: 8px; }
+  @keyframes sk { to { background-position: -200% 0; } }
+  .view[hidden] { display: none; }
+  @keyframes rise { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+  .view:not([hidden]) { animation: rise .35s cubic-bezier(.2,.8,.2,1) both; }
+  @media (prefers-reduced-motion: reduce) { .view:not([hidden]) { animation: none; } .skel { animation: none; } }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand"><span class="mark">F</span><span>FERZAN <small>LAUNCH</small></span></div>
+  <span class="hi" id="hi"></span>
+</header>
+
+<section class="view" id="v-launch">
+  <div class="prev" id="prev">
+    <span class="tag" id="pTag">NEW</span>
+    <div class="row"><div class="av" id="pAv">?</div><div style="min-width:0"><div class="nm" id="pNm">Your coin</div><div class="sy" id="pSy">$TICKER</div></div></div>
+    <div class="bar"><i style="width:0%"></i></div>
+    <div class="meta"><span id="pChain">Pick a chain</span><span>0% to graduation</span></div>
+  </div>
+
+  <div class="sec">
+    <div class="chips" id="chainChips"></div>
+    <label class="f" for="name">Name &amp; ticker</label>
+    <div class="two"><input class="in" id="name" maxlength="32" placeholder="Moon Cat" autocomplete="off"><input class="in" id="sym" maxlength="10" placeholder="MCAT" autocapitalize="characters" autocomplete="off"></div>
+    <label class="f">Logo</label>
+    <div class="logo"><div class="pick" id="pick">🖼️</div><div><button class="btn ghost sm" id="pickBtn" type="button">Choose image</button><p>Square works best. Under 300 KB after resize.</p></div></div>
+    <input type="file" id="file" accept="image/png,image/jpeg,image/webp" hidden>
+    <div class="toggle" id="shieldRow"><div><b>🛡️ Fair Launch Shield</b><small id="shieldTxt">Caps any single buy so snipers can't grab the curve.</small></div><input type="checkbox" class="sw" id="shield" checked></div>
+    <details>
+      <summary>More options</summary>
+      <label class="f" for="desc">Description</label><textarea class="in" id="desc" maxlength="500" placeholder="What is this coin about?"></textarea>
+      <div id="evmOpts"><label class="f" for="grad">Graduation target <span id="gUnit"></span></label><input class="in num" id="grad" inputmode="decimal" placeholder="default">
+      <label class="f" for="supply">Supply</label><input class="in num" id="supply" inputmode="numeric" value="1000000000"></div>
+      <label class="f" for="dev">Your first buy (dev buy) <span id="dUnit"></span></label><input class="in num" id="dev" inputmode="decimal" placeholder="0">
+      <label class="f" for="web">Links</label><input class="in" id="web" placeholder="Website (optional)" style="margin-bottom:8px"><input class="in" id="xh" placeholder="X link (optional)" style="margin-bottom:8px"><input class="in" id="tgl" placeholder="Telegram link (optional)">
+    </details>
+  </div>
+  <button class="btn" id="go" type="button">Review &amp; sign in your wallet</button>
+  <p class="hi" style="text-align:center;margin-top:10px">You sign in your own wallet. Ferzan never holds keys.</p>
+</section>
+
+<section class="view" id="v-mine" hidden>
+  <div class="lvl" id="lvl"></div>
+  <div class="tiles" id="tiles"></div>
+  <button class="btn ghost" id="claim" type="button" style="margin-bottom:6px">💰 Claim creator fees</button>
+  <h2>My launches</h2><div class="list" id="mineList"><div class="skel"></div></div>
+</section>
+
+<section class="view" id="v-explore" hidden>
+  <div class="chips" id="sortChips" style="margin-bottom:10px"></div>
+  <div class="list" id="exList"><div class="skel"></div></div>
+</section>
+
+<section class="view" id="v-top" hidden>
+  <div class="chips" id="perChips" style="margin-bottom:10px"></div>
+  <div class="list" id="topList"><div class="skel"></div></div>
+</section>
+
+<nav class="tabbar" id="tabbar">
+  <button class="tab on" data-t="launch"><b>🚀</b>Launch</button>
+  <button class="tab" data-t="mine"><b>📈</b>Mine</button>
+  <button class="tab" data-t="explore"><b>🔭</b>Explore</button>
+  <button class="tab" data-t="top"><b>🏆</b>Top</button>
+</nav>
+<div class="toast" id="toast"></div>
+
+<script>
+(() => {
+  const tg = window.Telegram && Telegram.WebApp;
+  const API = location.origin;
+  const $ = (s) => document.querySelector(s);
+  const esc = (s) => String(s == null ? "" : s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  const NAMES = { solana: "Solana", base: "Base", bsc: "BNB Chain", ethereum: "Ethereum", robinhood: "Robinhood Chain" };
+  const LAUNCH = ["solana", "base", "bsc", "ethereum", "robinhood"];
+  const state = { chain: "", me: null, image: "", sort: "new", per: "all" };
+  if (tg) { try { tg.ready(); tg.expand(); tg.setHeaderColor("#050a1e"); tg.setBackgroundColor("#050a1e"); } catch (e) {} }
+  const buzz = (k) => { try { tg && tg.HapticFeedback && tg.HapticFeedback.impactOccurred(k || "light"); } catch (e) {} };
+  const toast = (m) => { const t = $("#toast"); t.textContent = m; t.classList.add("show"); clearTimeout(toast.h); toast.h = setTimeout(() => t.classList.remove("show"), 3500); };
+  const usd = (n) => !n ? "$0" : n >= 1e6 ? "$" + (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? "$" + (n / 1e3).toFixed(1) + "K" : "$" + n.toFixed(0);
+  const initData = () => (tg && tg.initData) || "";
+  async function post(path, body) {
+    const r = await fetch(API + path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(Object.assign({ initData: initData() }, body || {})) });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.detail || "Something went wrong");
+    return j;
+  }
+  const get = async (p) => { const r = await fetch(API + p); if (!r.ok) throw new Error("load failed"); return r.json(); };
+
+  /* ---- tabs ---- */
+  function show(t) {
+    document.querySelectorAll(".view").forEach((v) => (v.hidden = v.id !== "v-" + t));
+    document.querySelectorAll(".tab").forEach((b) => b.classList.toggle("on", b.dataset.t === t));
+    window.scrollTo(0, 0);
+    if (t === "mine") loadMine(); if (t === "explore") loadExplore(); if (t === "top") loadTop();
+  }
+  $("#tabbar").addEventListener("click", (e) => { const b = e.target.closest(".tab"); if (b) { buzz(); show(b.dataset.t); } });
+
+  /* ---- live card preview ---- */
+  function preview() {
+    const nm = $("#name").value.trim(), sy = $("#sym").value.trim().toUpperCase();
+    $("#pNm").textContent = nm || "Your coin"; $("#pSy").textContent = "$" + (sy || "TICKER");
+    $("#pChain").textContent = state.chain ? NAMES[state.chain] : "Pick a chain";
+    const av = $("#pAv"); av.style.backgroundImage = state.image ? "url(" + state.image + ")" : ""; av.textContent = state.image ? "" : ((nm || "?")[0] || "?").toUpperCase();
+    $("#pick").style.backgroundImage = state.image ? "url(" + state.image + ")" : ""; $("#pick").textContent = state.image ? "" : "🖼️";
+  }
+  ["name", "sym"].forEach((id) => $("#" + id).addEventListener("input", preview));
+  $("#sym").addEventListener("input", (e) => { e.target.value = e.target.value.replace(/[^a-zA-Z0-9]/g, "").toUpperCase(); preview(); });
+
+  /* ---- logo: resize to a small JPEG so it always fits ---- */
+  $("#pickBtn").onclick = $("#pick").onclick = () => $("#file").click();
+  $("#file").onchange = (e) => {
+    const f = e.target.files[0]; if (!f) return;
+    const img = new Image(), url = URL.createObjectURL(f);
+    img.onload = () => {
+      const S = 512, c = document.createElement("canvas"); c.width = c.height = S;
+      const x = c.getContext("2d"), m = Math.min(img.width, img.height);
+      x.drawImage(img, (img.width - m) / 2, (img.height - m) / 2, m, m, 0, 0, S, S);
+      let q = 0.9, d = c.toDataURL("image/jpeg", q);
+      while (d.length > 380000 && q > 0.3) { q -= 0.1; d = c.toDataURL("image/jpeg", q); }
+      URL.revokeObjectURL(url); state.image = d; preview();
+    };
+    img.onerror = () => toast("That image could not be read");
+    img.src = url;
+  };
+
+  /* ---- chains ---- */
+  function renderChains() {
+    const open = {}, ch = (state.me && state.me.chains) || {};
+    LAUNCH.forEach((c) => { open[c] = c === "solana" ? !!(ch.solana && ch.solana.curve) : !!(ch[c] && ch[c].curve); });
+    if (!state.chain || !open[state.chain]) state.chain = LAUNCH.find((c) => open[c]) || "";
+    $("#chainChips").innerHTML = LAUNCH.map((c) => `<button class="chip ${c === state.chain ? "on" : ""}" data-c="${c}" ${open[c] ? "" : "disabled"}>${NAMES[c]}</button>`).join("");
+    chainUi();
+  }
+  function chainUi() {
+    const sol = state.chain === "solana", nat = (state.me && state.me.native && state.me.native[state.chain]) || "";
+    $("#evmOpts").hidden = sol; $("#shieldRow").hidden = sol;
+    $("#gUnit").textContent = nat ? "(" + nat + ")" : ""; $("#dUnit").textContent = nat ? "(" + nat + ")" : "";
+    const gd = (state.me && state.me.grad_default) || {};
+    $("#grad").placeholder = "default " + (gd[state.chain] || gd.default || "2.5");
+    preview();
+  }
+  $("#chainChips").addEventListener("click", (e) => { const b = e.target.closest(".chip"); if (!b || b.disabled) return; buzz(); state.chain = b.dataset.c; renderChains(); });
+
+  /* ---- launch ---- */
+  $("#go").onclick = async () => {
+    const name = $("#name").value.trim(), symbol = $("#sym").value.trim();
+    if (!state.chain) return toast("No chain is open for launches right now");
+    if (!name || !symbol) return toast("Add a name and ticker first");
+    const b = $("#go"); b.disabled = true; b.textContent = "Preparing…";
+    try {
+      const j = await post("/api/app/launch", { chain: state.chain, name, symbol, description: $("#desc").value, image: state.image,
+        supply_whole: $("#supply").value || "1000000000", grad_native: $("#grad").value, dev_buy: $("#dev").value || "0",
+        shield: $("#shield").checked, website: $("#web").value, x: $("#xh").value, telegram: $("#tgl").value });
+      buzz("medium"); location.href = j.sign_url;
+    } catch (e) { toast(e.message); b.disabled = false; b.textContent = "Review & sign in your wallet"; }
+  };
+
+  /* ---- mine ---- */
+  function lvl(n, g) {
+    const L = g >= 5 ? ["👑", "Legend"] : g >= 2 ? ["💎", "Diamond"] : g >= 1 ? ["🎓", "Graduate"] : n >= 3 ? ["🚀", "Builder"] : n >= 1 ? ["🌱", "Launcher"] : ["✨", "Newcomer"];
+    const next = g >= 5 ? "Top of the board" : g >= 2 ? (5 - g) + " more graduations to Legend" : g >= 1 ? "1 more graduation to Diamond" : n >= 3 ? "Graduate a coin to level up" : "Launch " + Math.max(1, 3 - n) + " more to reach Builder";
+    return `<span class="b">${L[0]}</span><div><div class="n">${L[1]}</div><small>${next}</small></div>`;
+  }
+  const statusPill = (s) => s === "confirmed" ? '<span class="pill ok">LIVE</span>' : s === "failed" || s === "expired" ? '<span class="pill bad">' + s.toUpperCase() + "</span>" : '<span class="pill gold">PENDING</span>';
+  async function loadMine() {
+    try {
+      const me = state.me = await post("/api/app/me");
+      const s = me.stats;
+      $("#lvl").innerHTML = lvl(s.launched, s.graduated);
+      $("#tiles").innerHTML = `<div class="tile"><div class="k">Launched</div><div class="v num">${s.launched}</div></div><div class="tile"><div class="k">Graduated</div><div class="v num">${s.graduated}</div></div><div class="tile"><div class="k">Best cap</div><div class="v num">${usd(s.best_mcap_usd)}</div></div>`;
+      $("#mineList").innerHTML = me.launches.length ? me.launches.map((l) => {
+        const p = l.progress == null ? null : Math.round(l.progress);
+        return `<div class="row2" data-id="${esc(l.id)}" data-st="${esc(l.status)}" data-ch="${esc(l.chain)}" data-mode="${esc(l.mode)}"><div class="av" style="background-image:url('${esc(l.image)}')">${l.image ? "" : esc((l.symbol || "?")[0])}</div>
+          <div style="min-width:0"><div class="t">${esc(l.name)} <span class="pill">$${esc(l.symbol)}</span>${statusPill(l.status)}</div>
+          <div class="s">${NAMES[l.chain] || esc(l.chain)}${l.graduated ? " · 🎓 graduated" : ""}${p != null && !l.graduated ? " · " + p + "% to graduation" : ""}</div>
+          ${p != null ? `<div class="bar" style="margin-top:6px"><i style="width:${p}%"></i></div>` : ""}</div>
+          <div class="r">${l.mcap_usd ? usd(l.mcap_usd) : ""}</div></div>`;
+      }).join("") : '<div class="empty">No launches yet.<br>Tap 🚀 Launch to create your first coin.</div>';
+      renderChains();
+    } catch (e) { $("#mineList").innerHTML = '<div class="empty">Open this from the Ferzan Launch bot in Telegram.</div>'; }
+  }
+  $("#mineList").addEventListener("click", (e) => {
+    const r = e.target.closest(".row2"); if (!r || !["pending", "built", "submitted"].includes(r.dataset.st)) return;
+    const page = r.dataset.ch === "solana" ? "solana.html" : "evm.html";
+    location.href = `${(state.me && state.me.base) || ""}/${page}?request_id=${encodeURIComponent(r.dataset.id)}`;
+  });
+  $("#claim").onclick = () => { location.href = `${(state.me && state.me.base) || ""}/claim.html?role=creator`; };
+
+  /* ---- explore & top ---- */
+  const SORTS = [["new", "🆕 New"], ["koth", "👑 King of the Hill"], ["trending", "🔥 Trending"], ["graduated", "🎓 Graduated"]];
+  $("#sortChips").innerHTML = SORTS.map((s) => `<button class="chip ${s[0] === state.sort ? "on" : ""}" data-s="${s[0]}">${s[1]}</button>`).join("");
+  $("#sortChips").addEventListener("click", (e) => { const b = e.target.closest(".chip"); if (!b) return; state.sort = b.dataset.s; buzz();
+    document.querySelectorAll("#sortChips .chip").forEach((c) => c.classList.toggle("on", c === b)); loadExplore(); });
+  async function loadExplore() {
+    $("#exList").innerHTML = '<div class="skel"></div><div class="skel"></div>';
+    try {
+      const j = await get("/api/launches?limit=30&sort=" + state.sort);
+      $("#exList").innerHTML = j.items.length ? j.items.map((it) => {
+        const p = it.progress == null ? null : Math.round(it.progress);
+        return `<button class="row2" data-u="${esc(it.url || "")}"><div class="av" style="background-image:url('${esc(it.image || "")}')">${it.image ? "" : esc((it.symbol || "?")[0])}</div>
+          <div style="min-width:0"><div class="t">${esc(it.name)} <span class="pill">$${esc(it.symbol)}</span>${it.safe ? '<span class="pill ok">SAFE</span>' : ""}</div>
+          <div class="s">${NAMES[it.chain] || esc(it.chain)}${it.graduated ? " · 🎓" : p != null ? " · " + p + "%" : ""}</div>${p != null && !it.graduated ? `<div class="bar" style="margin-top:6px"><i style="width:${p}%"></i></div>` : ""}</div>
+          <div class="r">${it.mcap_usd ? usd(it.mcap_usd) : ""}</div></button>`;
+      }).join("") : '<div class="empty">Nothing here yet.</div>';
+    } catch (e) { $("#exList").innerHTML = '<div class="empty">Could not load. Pull to retry.</div>'; }
+  }
+  $("#exList").addEventListener("click", (e) => { const r = e.target.closest(".row2"); if (!r || !r.dataset.u) return; if (tg && tg.openLink) tg.openLink(r.dataset.u); else window.open(r.dataset.u, "_blank"); });
+  const PERS = [["all", "All time"], ["30d", "30 days"], ["7d", "7 days"]];
+  $("#perChips").innerHTML = PERS.map((s) => `<button class="chip ${s[0] === state.per ? "on" : ""}" data-p="${s[0]}">${s[1]}</button>`).join("");
+  $("#perChips").addEventListener("click", (e) => { const b = e.target.closest(".chip"); if (!b) return; state.per = b.dataset.p; buzz();
+    document.querySelectorAll("#perChips .chip").forEach((c) => c.classList.toggle("on", c === b)); loadTop(); });
+  async function loadTop() {
+    $("#topList").innerHTML = '<div class="skel"></div><div class="skel"></div>';
+    try {
+      const j = await get("/api/leaderboard?limit=25&period=" + state.per);
+      const med = ["🥇", "🥈", "🥉"];
+      $("#topList").innerHTML = j.items.length ? j.items.map((a) => `<div class="row2"><div class="av">${med[a.rank - 1] || a.rank}</div>
+        <div style="min-width:0"><div class="t">${esc(String(a.creator).slice(0, 6))}…${esc(String(a.creator).slice(-4))}</div>
+        <div class="s">${a.launches} launched · ${a.graduated} graduated${a.best ? " · best $" + esc(a.best.symbol) : ""}</div></div><div class="r">${usd(a.volume_usd)}</div></div>`).join("")
+        : '<div class="empty">No creators ranked yet.</div>';
+    } catch (e) { $("#topList").innerHTML = '<div class="empty">Could not load.</div>'; }
+  }
+
+  /* ---- boot ---- */
+  const u = tg && tg.initDataUnsafe && tg.initDataUnsafe.user; if (u && u.first_name) $("#hi").textContent = "Hi, " + u.first_name;
+  document.addEventListener("click", (e) => { if (e.target.closest(".btn, .chip")) buzz("light"); }, true);
+  preview(); renderChains();
+  post("/api/app/me").then((m) => { state.me = m; renderChains(); }).catch(() => { $("#chainChips").innerHTML = '<div class="empty" style="width:100%">Open this from the Ferzan Launch bot in Telegram.</div>'; });
+})();
+</script>
+</body>
+</html>

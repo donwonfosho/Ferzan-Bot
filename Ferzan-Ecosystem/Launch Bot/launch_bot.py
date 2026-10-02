@@ -742,8 +742,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if raw.isdigit():
             if db.set_referrer(uid, int(raw)):
                 await update.effective_message.reply_text("Referral locked. You launch, they earn a cut of curve fees.")
+    rows0 = []
+    if update.effective_chat and update.effective_chat.type == "private" and MINI_APP_BASE_URL.startswith("https://"):
+        rows0 = [[InlineKeyboardButton("📱 Open Launch app", web_app=WebAppInfo(url=f"{MINI_APP_BASE_URL}/app.html"))]]
     kb = InlineKeyboardMarkup(
-        [
+        rows0 + [
             [InlineKeyboardButton("🚀 Launch a token", callback_data="go:launch")],
             [InlineKeyboardButton("🆕 New launches · 👑 King of the Hill", callback_data="go:feed")],
             [InlineKeyboardButton("📜 My launches", callback_data="go:history"),
@@ -2337,6 +2340,13 @@ def main():
 
     async def _post_all(application):
         await _post(application)
+        if MINI_APP_BASE_URL.startswith("https://"):
+            try:
+                from telegram import MenuButtonWebApp
+                await application.bot.set_chat_menu_button(
+                    menu_button=MenuButtonWebApp(text="Launch app", web_app=WebAppInfo(url=f"{MINI_APP_BASE_URL}/app.html")))
+            except Exception as e:
+                logger.info("menu button not set: %s", str(e)[:80])
         application.create_task(_draft_loop(application))
         application.create_task(_watch_loop(application))
         application.create_task(_milestone_loop(application))
