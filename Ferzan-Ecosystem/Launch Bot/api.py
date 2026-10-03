@@ -315,8 +315,8 @@ def build_tx(request_id: str, body: BuildTxRequest):
                 raise HTTPException(400, str(e))
             response = {"chain": "tron", "transaction": tx["transaction"], "fee_sun": tx["fee_sun"],
                         "factory": _tron.curve_factory() if req.mode == "bonding_curve" else _tron.factory(),
-                        "note": "Sign in TronLink. About 50 TRX of energy + the launch fee." if req.mode == "bonding_curve"
-                        else "Sign in TronLink. About 16 TRX of energy + the launch fee."}
+                        "note": ("Sign in TronLink. About 50 TRX of energy" if req.mode == "bonding_curve" else "Sign in TronLink. About 16 TRX of energy")
+                        + (" (no Ferzan launch fee)." if not tx["fee_sun"] else " + the launch fee.")}
 
         elif req.chain == "ton":
             if (os.environ.get("TON_LAUNCH_LIVE") or "").strip() != "1" and not (req.mode == "bonding_curve" and _ton_curve_live()):

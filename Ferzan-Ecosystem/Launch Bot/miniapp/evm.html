@@ -219,10 +219,10 @@
       rows.push(['Max buy', Number(extra.max_buy || 0) > 0 ? `${extra.max_buy} ${sym} per wallet` : 'no limit']);
       rows.push(['Token', 'Fixed supply · no owner · pool liquidity burned at graduation']);
       if (extra.allocs) rows.push(['Team tokens', 'locked until the curve graduates']);
-      rows.push(['Cost', 'Launch fee + dev buy + gas, shown before you sign']);
+      rows.push(['Cost', 'No Ferzan launch fee: dev buy + gas, shown before you sign']);
     } else {
       rows.push(['Token', 'Fixed supply · no owner · can never be minted again']);
-      rows.push(['Cost', 'Launch fee + network gas, shown in your wallet']);
+      rows.push(['Cost', 'No Ferzan launch fee: just network gas, shown in your wallet']);
     }
     detailsEl.innerHTML = rows.map(([k, v]) =>
       `<div class="detail-row"><span>${k}</span><b>${String(v ?? '').replace(/</g, '&lt;').slice(0, 90)}</b></div>`
@@ -331,9 +331,9 @@
       const devWei = BigInt(String(tx.dev_buy_wei || 0));
       const feeWei = tx.launch_fee_wei != null ? BigInt(String(tx.launch_fee_wei)) : fee - devWei;
       const costTxt = devWei > 0n
-        ? `${fmtNative(fee)} total (${fmtNative(feeWei)} launch fee + ${fmtNative(devWei)} dev buy)`
-        : `the ${fmtNative(fee)} launch fee`;
-      showStatus(`You'll pay ${costTxt} + network gas.\n\nPlease review and approve in your wallet...`, 'hint');
+        ? `${fmtNative(fee)} total (${feeWei > 0n ? fmtNative(feeWei) + ' launch fee + ' : ''}${fmtNative(devWei)} dev buy)`
+        : (fee > 0n ? `the ${fmtNative(fee)} launch fee` : 'no Ferzan launch fee, only');
+      showStatus(`You'll pay ${costTxt} ${fee > 0n || devWei > 0n ? '+ ' : ''}network gas.\n\nPlease review and approve in your wallet...`, 'hint');
       const req = { from: account, to: tx.to, data: tx.data, value: hex(fee) };
       if (tx.gas) req.gas = hex(tx.gas);
       hash = await provider.request({ method: 'eth_sendTransaction', params: [req] });

@@ -325,6 +325,7 @@ def _pct(bps: int) -> str:
 def _tiers_text(own: dict | None = None, wallet: str = "") -> str:
     """The public tier ladder (from ferzan_perks) plus, when given, this user's own tier. Never shows the mint."""
     base = fp.base_bridge_bps()
+    _launch_free = (os.environ.get("LAUNCH_FEE_LAMPORTS") or "50000000").strip() == "0"
     lines = ["<b>🏅 FERZAN holder tiers</b>", "",
              f"Hold FERZAN in a Solana wallet and get perks across Ferzan. They start at the FERZAN launch: "
              f"<b>{PERKS_START_TEXT}</b>.", ""]
@@ -332,7 +333,7 @@ def _tiers_text(own: dict | None = None, wallet: str = "") -> str:
         off = int(t["launch_fee_off_pct"])
         launch = "free" if off >= 100 else "half price" if off == 50 else f"{off}% off"
         lines.append(f"{_esc(t['badge'])} — {_fmt_int(int(t['min']))}+ FERZAN\n"
-                     f"   Launch fee: {launch} · Bridge fee: {_pct(int(t['bridge_fee_bps']))} (else {_pct(base)}) · "
+                     f"   {'' if _launch_free else f'Launch fee: {launch} · '}Bridge fee: {_pct(int(t['bridge_fee_bps']))} (else {_pct(base)}) · "
                      f"Trade Bot fees: {int(t['trade_fee_discount_pct'])}% off (soon)")
     lines += ["", "<i>Launch-fee perks apply to Solana launches, for the Solana wallet you launch from.</i>"]
     if wallet:
@@ -371,6 +372,8 @@ async def _solana_fee_row(uid: int) -> tuple[str, str]:
         base = int(os.environ.get("LAUNCH_FEE_LAMPORTS") or "50000000")
     except ValueError:
         base = 50_000_000
+    if base == 0:  # launches are free for everyone: only Solana's own rent and network fees remain
+        return ("Free + network cost (about 0.03 SOL of Solana rent and fees)", "")
     wallet = _get_perk_wallet(uid)
     if wallet:
         try:
@@ -1510,7 +1513,7 @@ async def _show_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if ton_curve:
         fee_ton = tl.launch_fee_nano() / 1e9
         contracts = (tcv.CURVE_TON + tl.DEPLOY_TON + tl.ADMIN_TON) / 1e9
-        rows.append(("Launch fee", f"{fee_ton:g} TON"))
+        rows.append(("Launch fee", "Free" if fee_ton == 0 else f"{fee_ton:g} TON"))
         rows.append(("Contracts + gas", f"{contracts:g} TON (the excess comes back as change; "
                      f"{tcv.CURVE_TON / 1e9:g} TON stays in the curve as its gas buffer)"))
         rows.append(("You send", f"about {_ton_need_nano('bonding_curve') / 1e9:g} TON, plus a small wallet network fee"))
@@ -1518,7 +1521,7 @@ async def _show_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                  timeout=45, script="ton_launch_exec.py")
     elif mode == "plain" and chain == "ton":
         fee_ton = int(os.environ.get("LAUNCH_FEE_NANOTON") or "300000000") / 1e9
-        rows.append(("Launch fee", f"{fee_ton:g} TON + about 0.3 TON for the contract (most comes back)"))
+        rows.append(("Launch fee", ("Free" if fee_ton == 0 else f"{fee_ton:g} TON") + " + about 0.3 TON for the contract (most comes back)"))
     elif mode == "plain" and chain in PLAIN_FEE_TEXT:
         rows.append(("Launch fee", PLAIN_FEE_TEXT[chain] + " + network gas"))
     perk_note = ""

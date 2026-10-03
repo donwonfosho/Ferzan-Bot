@@ -86,7 +86,7 @@
     const whole = BigInt(String(launchReq.total_supply || '0')) / 10n ** BigInt(launchReq.decimals || 9);
     const rows = [['Name', launchReq.name], ['Symbol', launchReq.symbol], ['Chain', 'TON'], ['Mode', 'Standard token (jetton)'],
       ['Supply', whole.toLocaleString('en-US')], ['Token', 'Fixed supply · no owner · can never be minted again'],
-      ['Cost', 'Launch fee + about 0.3 TON for the contract (most comes back), shown in your wallet']];
+      ['Cost', 'No Ferzan launch fee. About 0.3 TON for the contract (most comes back), shown in your wallet']];
     detailsEl.innerHTML = rows.map(([k, v]) => `<div class="detail-row"><span>${k}</span><b>${esc(v).slice(0, 90)}</b></div>`).join('');
     if (launchReq.chain !== 'ton') { showStatus('This page is for TON launches.', 'error'); return; }
     if (!ui.connected) showStatus('Connect Telegram Wallet, Tonkeeper or another TON wallet to continue.', 'hint');
