@@ -75,7 +75,10 @@ def sell_hood(token: str, key_hex: str | None = None) -> tuple[bool, str]:
         return False, "No EVM key for Hood sell."
     acct = Account.from_key("0x" + raw)
     meta = dict(CHAINS["hood"])
-    bal = _erc20_balance(meta["rpc"], token, acct.address)
+    try:
+        bal = _erc20_balance(meta["rpc"], token, acct.address)
+    except Exception:
+        return False, "Couldn't read your token balance on Hood (the node is busy). Nothing was sent. Tap sell again in a few seconds."
     if bal <= 0:
         return False, f"No token on Hood for {token}"
     approve = "0x095ea7b3" + _enc_addr(ROUTER) + ("f" * 64)

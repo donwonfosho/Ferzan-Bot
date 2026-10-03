@@ -610,7 +610,7 @@ def _rpc_post(**kwargs):
     fb = _rpc_fallback()
     try:
         r = requests.post(_rpc(), **kwargs)
-        if fb and (r.status_code == 429 or r.status_code >= 500):
+        if fb and (r.status_code in (401, 403, 429) or r.status_code >= 500):  # busy, over its cap or key refused
             raise RuntimeError(f"rpc http {r.status_code}")
         if fb:
             r.json()  # a 200 with a non-JSON body counts as a failure too
@@ -815,8 +815,10 @@ def _token_raw_balance(mint: str, kp=None) -> int:
     )
     try:
         data = r.json() if r.content else {}
-    except Exception:
-        return 0
+    except Exception as exc:
+        raise RuntimeError(f"RPC token balance failed: {exc}") from exc  # never report a failed read as 0
+    if not isinstance((data or {}).get("result"), dict):
+        raise RuntimeError(f"RPC token balance error: {str((data or {}).get('error') or r.status_code)[:120]}")
     total = 0
     for acc in (data.get("result") or {}).get("value") or []:
         info = (((acc.get("account") or {}).get("data") or {}).get("parsed") or {}).get("info") or {}
@@ -834,9 +836,9 @@ _TOKEN_PROGRAMS = (
 )
 
 
-def holdings(secret: str | None = None) -> list[dict]:
+def holdings(secret: str | None = None, strict: bool = False) -> list[dict]:
     kp = keypair_from_secret(secret) if secret else _keypair()
-    return holdings_pub(str(kp.pubkey()))
+    return holdings_pub(str(kp.pubkey()), strict=strict)
 
 
 def holdings_pub(owner: str, strict: bool = False) -> list[dict]:
@@ -885,7 +887,10 @@ def sol_balance_lamports(addr: str) -> int:
         timeout=15,
     )
     data = r.json() if r.content else {}
-    return int(((data.get("result") or {}).get("value")) or 0)
+    res = (data or {}).get("result")
+    if not isinstance(res, dict) or "value" not in res:  # an RPC error is not an empty wallet
+        raise RuntimeError(f"RPC balance error: {str((data or {}).get('error') or r.status_code)[:120]}")
+    return int(res.get("value") or 0)
 
 
 def holdings_text(secret: str | None = None) -> str:

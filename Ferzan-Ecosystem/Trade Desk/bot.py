@@ -537,16 +537,10 @@ def _card_wallet(uid: int | None, ca: str, chain: str, price: float = 0.0) -> st
             rpc = (CHAINS.get(cid) or {}).get("rpc") or ""
             if ca and rpc and str(ca).startswith("0x"):
                 tok = _erc20_amt(rpc, ca, addr)
-    except Exception:
-        if cid in ("ton", "trx"):  # a failed read is not an empty wallet: don't tell them to fund it
-            return (
-                "<blockquote>"
-                f"💰 <b>{html.escape(label)}</b>\nBalance not loading right now · tap Refresh"
-                "</blockquote>"
-            )
+    except Exception:  # a failed read is not an empty wallet: never tell them to fund it
         return (
             "<blockquote>"
-            f"💰 <b>{html.escape(label)}</b>\nFund /wallet"
+            f"💰 <b>{html.escape(label)}</b>\nBalance not loading right now · tap Refresh"
             "</blockquote>"
         )
     bag = ticker or "token"
@@ -599,11 +593,7 @@ def _token_amount(uid: int, ca: str, chain: str) -> float:
             import tron_signer
 
             addr_t, _ = tron_signer.evm_key_to_tron(evm_secret.replace("0x", ""))
-            th = tron_signer._to_hex(ca)
-            w = tron_signer._const(th, tron_signer._to_hex(addr_t), "balanceOf(address)",
-                                   tron_signer._w(tron_signer._to_hex(addr_t)))
-            dec = (tron_signer._const(th, th, "decimals()", "") or [6])[0]
-            return (w[0] if w else 0) / 10 ** dec
+            return tron_signer.token_balance(addr_t, ca)
         from eth_account import Account
 
         addr = Account.from_key(evm_secret).address
@@ -3237,18 +3227,15 @@ def _bag_position_amount(uid: int, mint: str) -> tuple[float, str, str]:
 
         _sol, evm_secret = user_wallets.secrets(uid)
         addr_t, _ = tron_signer.evm_key_to_tron(evm_secret.replace("0x", ""))
-        return _token_amount(uid, mint, "trx"), addr_t, "TRX"
+        return tron_signer.token_balance(addr_t, mint), addr_t, "TRX"  # raises if TronGrid can't answer: never a fake 0
     if mint.startswith("0x"):
         evm_addr = (db.get_user_wallet(uid) or {}).get("evm_pub") or ""
-        try:
-            held = _exit_holdings(uid, mint)  # real decimals, every wallet
-        except Exception:
-            held = []
+        held = _exit_holdings(uid, mint)  # real decimals, every wallet; raises if a node can't answer
         if held:
             return sum(h[3] for h in held), evm_addr, held[0][2].upper()
         return 0.0, evm_addr, "EVM"
     addr = str(signer.keypair_from_secret(sol_secret).pubkey())
-    for row in signer.holdings(sol_secret):
+    for row in signer.holdings(sol_secret, strict=True):
         if row.get("mint") == mint:
             return float(row.get("amount") or 0), addr, "SOL"
     return 0.0, addr, "SOL"
@@ -3261,21 +3248,24 @@ def _bag_build(uid: int) -> tuple[str, list[tuple[str, InlineKeyboardMarkup]]]:
     sol_secret, _evm = user_wallets.secrets(uid)
     kp = signer.keypair_from_secret(sol_secret)
     addr = str(kp.pubkey())
-    rows = signer.holdings(sol_secret)
+    rows = signer.holdings(sol_secret, strict=True)  # raises on an RPC error: an empty bag must mean empty
     lamports = signer.sol_balance_lamports(addr)
     positions: list[tuple[str, float, str, str]] = [
         (r["mint"], float(r["amount"] or 0), addr, "") for r in rows[:6]
     ]
+    unread = 0  # tokens whose balance could not be read right now (shown as a note, never hidden)
     evm_addr = (db.get_user_wallet(uid) or {}).get("evm_pub") or ""
     if evm_addr:
         for mint in db.live_mints(uid):
             if not str(mint).startswith("0x"):
                 continue
+            failed = 0
             for cid in _EVM_SCAN:
                 try:
                     raw = evm_signer._erc20_balance(CHAINS[cid]["rpc"], mint, evm_addr)
                 except Exception:
                     raw = 0
+                    failed += 1
                 if raw > 0:
                     try:
                         amt = raw / 10 ** _erc20_decimals(cid, mint)
@@ -3283,7 +3273,9 @@ def _bag_build(uid: int) -> tuple[str, list[tuple[str, InlineKeyboardMarkup]]]:
                         break  # unknown decimals: skip rather than show a wrong value
                     positions.append((mint, amt, evm_addr, cid.upper()))
                     break
-    unread = 0  # TON/Tron tokens whose balance could not be read right now (shown as a note, never hidden)
+            else:
+                if failed == len(_EVM_SCAN):  # every chain failed to answer: unknown, not zero
+                    unread += 1
     for mint in db.live_mints(uid):
         if not str(mint).startswith(("EQ", "UQ", "kQ")):
             continue
@@ -3535,7 +3527,8 @@ async def bag_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         d = await _bag_data(uid, force=True)
     except Exception as exc:
-        await _done(context.bot, chat_id, status, str(exc))
+        logger.info("bag load failed for %s: %s", uid, exc)
+        await _done(context.bot, chat_id, status, "Couldn't read your wallet just now (the network node is busy). Nothing is wrong with your funds. Tap /bag again in a few seconds.")
         return
     text, kb = _bag_render(d, 0)
     await _done(context.bot, chat_id, status, text, parse_mode="HTML", reply_markup=kb)
@@ -8565,7 +8558,20 @@ def _exit_holdings(uid: int, mint: str) -> list[tuple[str, str, str, float]]:
     whichever wallets it sits, so switching wallets never strands a stop."""
     out = []
     for _sid, _lab, sol, evm in user_wallets.all_secrets(uid):
-        if mint.startswith("0x"):
+        if mint.startswith(("EQ", "UQ", "kQ")):
+            import ton_signer
+
+            amt = float(ton_signer.jetton_holding(sol, mint)[0] or 0)  # raises if no source answers: never a guess
+            if amt > 0:
+                out.append((sol, evm, "ton", amt))
+        elif mint.startswith("T") and len(mint) == 34:
+            import tron_signer
+
+            addr_t, _ = tron_signer.evm_key_to_tron(evm.replace("0x", ""))
+            amt = float(tron_signer.token_balance(addr_t, mint) or 0)  # raises if TronGrid can't answer
+            if amt > 0:
+                out.append((sol, evm, "trx", amt))
+        elif mint.startswith("0x"):
             from eth_account import Account
 
             addr = Account.from_key(evm if evm.startswith("0x") else "0x" + evm).address
@@ -8603,7 +8609,16 @@ def _exit_sell_all(uid: int, mint: str, holdings: list, pct: int) -> tuple[bool,
         _px = 0.0
     for sol, evm, cid, amt in holdings:
         try:
-            if mint.startswith("0x"):
+            if cid == "ton":
+                import ton_signer
+
+                slip = f"{max(1, _slip_bps(uid, 'sell', 'ton')) / 10000:.4f}"
+                ok, msg = ton_signer.sell_ton(mint, secret=sol, pct=pct, slip=slip)
+            elif cid == "trx":
+                import tron_signer
+
+                ok, msg = tron_signer.sell_tron(mint, key_hex=evm, slip_bps=_slip_bps(uid, "sell", "trx"), pct=pct)
+            elif mint.startswith("0x"):
                 ok, msg = evm_signer.sell_evm(cid, mint, key_hex=evm, pct=pct, user_id=uid)
             else:
                 ok, msg = signer.sell_sol(

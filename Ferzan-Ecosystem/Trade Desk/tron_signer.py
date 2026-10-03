@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import threading as _threading
 import time
 
 import requests
@@ -84,8 +85,25 @@ def _headers() -> dict:
     return h
 
 
-def _post(path: str, body: dict) -> dict:
-    r = requests.post(f"{TRONGRID}{path}", json=body, headers=_headers(), timeout=20)
+def _post(path: str, body: dict, retries: int = 3) -> dict:
+    """POST to TronGrid. Busy answers (HTTP 429 / 5xx) and network errors are retried with a short pause; a
+    broadcast passes retries=1 on a read timeout so a transaction that may have gone out is never sent twice."""
+    last: Exception | None = None
+    r = None
+    for i in range(max(1, retries)):
+        try:
+            r = requests.post(f"{TRONGRID}{path}", json=body, headers=_headers(), timeout=20)
+        except requests.RequestException as exc:
+            last = exc
+            if isinstance(exc, requests.ReadTimeout) and retries == 1:
+                break
+        else:
+            if r.status_code != 429 and r.status_code < 500:
+                break
+        if i + 1 < retries:
+            time.sleep(1.0 * (i + 1))
+    if r is None:
+        raise last if last else RuntimeError("TronGrid unreachable")
     try:
         return r.json()
     except Exception:
@@ -101,13 +119,17 @@ def _sign(raw_hex: str, key_hex: str) -> str:
     return (sig.r.to_bytes(32, "big") + sig.s.to_bytes(32, "big") + bytes([sig.v])).hex()
 
 
+_SENT = _threading.local()  # set once a transaction has been broadcast in this thread, so error messages stay honest
+
+
 def _broadcast(tx: dict, key_hex: str) -> tuple[bool, str]:
     raw = tx.get("raw_data_hex") or ""
     if not raw:
         return False, str(tx.get("Error") or tx.get("message") or "TronGrid built no tx")
     tx["signature"] = [_sign(raw, key_hex)]
-    out = _post("/wallet/broadcasttransaction", tx)
+    out = _post("/wallet/broadcasttransaction", tx, retries=2)
     if out.get("result") is True or out.get("txid") or out.get("txID"):
+        _SENT.flag = True
         txid = out.get("txid") or out.get("txID") or ""
         return True, f"https://tronscan.org/#/transaction/{txid}"
     return False, str(out.get("message") or out.get("Error") or out)[:220]
@@ -138,9 +160,13 @@ def _w(h: str) -> str:
     return (h[2:] if h.startswith("41") and len(h) == 42 else h).zfill(64)
 
 
-def _const(contract_hex: str, owner_hex: str, sig: str, param: str) -> list[int]:
+def _const(contract_hex: str, owner_hex: str, sig: str, param: str, strict: bool = False) -> list[int]:
+    """Read-only contract call. [] means "no answer". With strict=True a node problem (no usable reply at all)
+    raises instead, so a balance read can tell "the node is busy" from "the call reverted / nothing there"."""
     out = _post("/wallet/triggerconstantcontract", {"owner_address": owner_hex, "contract_address": contract_hex,
                                                     "function_selector": sig, "parameter": param, "visible": False})
+    if strict and ("result" not in out and "constant_result" not in out):
+        raise RuntimeError(f"TronGrid read failed: {str(out.get('Error') or out.get('error') or out.get('message') or out)[:100]}")
     res = (out.get("constant_result") or [""])[0] or ""
     if not res or (out.get("result") or {}).get("result") is False:
         return []
@@ -152,12 +178,23 @@ def _const(contract_hex: str, owner_hex: str, sig: str, param: str) -> list[int]
 def _quote_out(amount_in: int, path_hex: list[str], owner_hex: str) -> int:
     """SunSwap V2 getAmountsOut: what the pool would give right now (0 = no pool / no liquidity)."""
     param = f"{int(amount_in):064x}" + f"{64:064x}" + f"{len(path_hex):064x}" + "".join(_w(p) for p in path_hex)
-    words = _const(_to_hex(ROUTER), owner_hex, "getAmountsOut(uint256,address[])", param)
+    words = _const(_to_hex(ROUTER), owner_hex, "getAmountsOut(uint256,address[])", param, strict=True)
     return words[-1] if len(words) >= 2 + len(path_hex) else 0
 
 
 def _trx_balance(owner_hex: str) -> int:
-    return int(_post("/wallet/getaccount", {"address": owner_hex}).get("balance") or 0)
+    out = _post("/wallet/getaccount", {"address": owner_hex})
+    if not isinstance(out, dict) or out.get("Error") or out.get("error"):  # an error answer is not an empty wallet
+        raise RuntimeError(f"TronGrid balance read failed: {str((out or {}).get('Error') or (out or {}).get('error'))[:100]}")
+    return int(out.get("balance") or 0)  # a never-activated account answers {} = really 0
+
+
+def token_balance(owner: str, token: str) -> float:
+    """TRC-20 balance in whole units. Raises when the node can't answer (never returns a fake 0)."""
+    th, oh = _to_hex(token), _to_hex(owner)
+    w = _const(th, oh, "balanceOf(address)", _w(oh), strict=True)
+    dec = (_const(th, th, "decimals()", "", strict=True) or [6])[0]
+    return (w[0] if w else 0) / 10 ** dec
 
 
 def _send_and_wait(built: dict, key_hex: str, timeout_s: int = 60) -> tuple[str, str, float]:
@@ -171,7 +208,10 @@ def _send_and_wait(built: dict, key_hex: str, timeout_s: int = 60) -> tuple[str,
     deadline = time.time() + timeout_s
     while time.time() < deadline:
         time.sleep(3)
-        info = _post("/wallet/gettransactioninfobyid", {"value": txid})
+        try:
+            info = _post("/wallet/gettransactioninfobyid", {"value": txid})
+        except requests.RequestException:
+            continue  # a hiccup while waiting must not look like a failed trade: keep polling
         if info.get("id"):
             return (info.get("receipt") or {}).get("result") or "SUCCESS", link, (info.get("fee") or 0) / 1e6
     return "unconfirmed", link, 0.0
@@ -357,7 +397,7 @@ def plain_meta(token: str) -> dict:
             "fdv_usd": (supply / 10 ** dec) * px, "trx_usd": trx, "has_pool": px > 0}
 
 
-def buy_tron(token: str, usd: float, key_hex: str | None = None, slip_bps: int = 1000) -> tuple[bool, str]:
+def _buy_tron_impl(token: str, usd: float, key_hex: str | None = None, slip_bps: int = 1000) -> tuple[bool, str]:
     """SunSwap V2 buy with a real minimum-out (quote minus your slippage), a balance check first,
     and a result read back from the chain."""
     if not live_enabled():
@@ -408,7 +448,7 @@ def buy_tron(token: str, usd: float, key_hex: str | None = None, slip_bps: int =
                    f"Your TRX stayed in the wallet; about {burned:.2f} TRX went to network energy.\n{link}")
 
 
-def sell_tron(token: str, key_hex: str | None = None, slip_bps: int = 1000, pct: int = 100) -> tuple[bool, str]:
+def _sell_tron_impl(token: str, key_hex: str | None = None, slip_bps: int = 1000, pct: int = 100) -> tuple[bool, str]:
     """Sells the whole balance on SunSwap V2: approves only when needed (and waits for it), then swaps with
     a real minimum-out and reads the result back from the chain."""
     if not live_enabled():
@@ -472,3 +512,27 @@ def status_text(key_hex: str = "") -> str:
     except Exception as exc:
         return f"TRON key error: {exc}"
     return f"TRON {addr}\nSunSwap V2 live. Fund TRX + energy on that address."
+
+
+_NODE_BUSY = "TronGrid is busy right now, so nothing was sent. Tap again in a few seconds."
+_NODE_BUSY_LATE = ("TronGrid went quiet while this trade was in progress. A transaction may already have gone out: "
+                   "check your wallet on tronscan before trying again.")
+
+
+def _guard(fn, *args, **kwargs) -> tuple[bool, str]:
+    """Run a Tron trade; if TronGrid cannot answer, say so honestly (nothing sent, or check the wallet first)."""
+    _SENT.flag = False
+    try:
+        return fn(*args, **kwargs)
+    except (RuntimeError, requests.RequestException) as exc:
+        if "TronGrid" in str(exc) or isinstance(exc, requests.RequestException):
+            return False, (_NODE_BUSY_LATE if getattr(_SENT, "flag", False) else _NODE_BUSY)
+        raise
+
+
+def buy_tron(*args, **kwargs) -> tuple[bool, str]:
+    return _guard(_buy_tron_impl, *args, **kwargs)
+
+
+def sell_tron(*args, **kwargs) -> tuple[bool, str]:
+    return _guard(_sell_tron_impl, *args, **kwargs)

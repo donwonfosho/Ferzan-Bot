@@ -94,15 +94,12 @@ def _trc20_amount(owner_evm: str, token: str) -> float | None:
     try:
         import tron_signer as t
 
-        th, oh = t._to_hex(token), t._to_hex(owner_evm)
-        w = t._const(th, oh, "balanceOf(address)", t._w(oh))
-        dec = (t._const(th, th, "decimals()", "") or [6])[0]
-        return (w[0] if w else 0) / 10 ** dec
+        return t.token_balance(owner_evm, token)  # raises when TronGrid can't answer
     except Exception:
         return None
 
 
-def _ton_tron_positions(uid: int, evm_pub: str) -> list[dict]:
+def _ton_tron_positions(uid: int, evm_pub: str) -> tuple[list[dict], int]:
     """Tokens bought through the desk on TON and Tron. Public reads only: the TON address was saved by the bot."""
     out: list[dict] = []
     mints = db.live_mints(uid)
@@ -116,8 +113,12 @@ def _ton_tron_positions(uid: int, evm_pub: str) -> list[dict]:
     if evm_pub:
         for m in [x for x in mints if str(x).startswith("T") and len(str(x)) == 34][:6]:
             rows.append((m, "TRX", _trc20_amount(evm_pub, m)))
+    unread = 0
     for mint, chain, amt in rows:
-        if not amt or amt <= 0:
+        if amt is None:  # could not be read this time: count it, don't treat it as empty
+            unread += 1
+            continue
+        if amt <= 0:
             continue
         mk = _market(mint)
         price = float(mk.get("price") or 0)
@@ -130,7 +131,7 @@ def _ton_tron_positions(uid: int, evm_pub: str) -> list[dict]:
             "pnl_pct": (pnl / cost * 100) if pnl is not None else None,
             "chg24": mk.get("chg24"), "chart": mk.get("url") or "", "priced": price > 0,
         })
-    return out
+    return out, unread
 
 
 def build_portfolio(uid: int) -> dict:
@@ -142,7 +143,11 @@ def build_portfolio(uid: int) -> dict:
     slots = db.list_wallet_slots(uid)
     sol_pub, evm_pub = wallet.get("sol_pub", ""), wallet.get("evm_pub", "")
 
-    sol_bal = signer.sol_balance_lamports(sol_pub) / 1e9 if sol_pub else 0.0
+    unread = 0  # balances that could not be read this time (a failed read must not look like an empty wallet)
+    try:
+        sol_bal = signer.sol_balance_lamports(sol_pub) / 1e9 if sol_pub else 0.0
+    except Exception:
+        sol_bal, unread = 0.0, unread + 1
     try:
         eth_bal, _ = evm_signer.native_balance("base", evm_pub)
     except Exception:
@@ -150,9 +155,9 @@ def build_portfolio(uid: int) -> dict:
     sol_px, eth_px = _price("solana"), _price("ethereum")
 
     try:
-        sol_holds = signer.holdings_pub(sol_pub)
+        sol_holds = signer.holdings_pub(sol_pub, strict=True)
     except Exception:
-        sol_holds = []
+        sol_holds, unread = [], unread + 1
     amounts = {h["mint"]: float(h.get("amount") or 0) for h in sol_holds[:25]}
     evm_mints = [m for m in db.live_mints(uid) if str(m).startswith("0x")][:10]
     marks = _ds_prices(list(amounts) + evm_mints)
@@ -162,7 +167,10 @@ def build_portfolio(uid: int) -> dict:
         m = marks.get(mint) or {}
         if mint.startswith("0x"):
             cid = DS_TO_CID.get(m.get("chain", ""), "")
-            amt = _erc20_amount(cid, mint, evm_pub) if cid else 0.0
+            try:
+                amt = _erc20_amount(cid, mint, evm_pub) if cid else 0.0
+            except Exception:
+                amt, unread = 0.0, unread + 1
             chain = (cid or "evm").upper()
         else:
             amt = amounts.get(mint, 0.0)
@@ -189,9 +197,11 @@ def build_portfolio(uid: int) -> dict:
             }
         )
     try:
-        positions += _ton_tron_positions(uid, evm_pub)
+        extra, miss = _ton_tron_positions(uid, evm_pub)
+        positions += extra
+        unread += miss
     except Exception:
-        pass  # a slow TON/Tron lookup must never blank the whole Bags screen
+        unread += 1  # a slow TON/Tron lookup must never blank the whole Bags screen
     positions.sort(key=lambda p: p["value"], reverse=True)
 
     native_usd = (sol_bal * sol_px if sol_px else 0) + (float(eth_bal) * eth_px if eth_px else 0)
@@ -212,5 +222,6 @@ def build_portfolio(uid: int) -> dict:
             for s in slots
         ],
         "positions": positions,
+        "unread": unread,
         "ts": int(time.time()),
     }

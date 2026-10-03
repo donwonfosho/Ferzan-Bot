@@ -67,12 +67,11 @@ def native_balance(chain: str, address: str) -> tuple[float, str]:
     rpc = meta.get("rpc")
     if not rpc:
         return 0.0, symbol
-    try:
-        body = _rpc(rpc, "eth_getBalance", [address, "latest"])
-        raw = body.get("result") or "0x0"
-        wei = int(raw, 16) if str(raw).startswith("0x") else int(raw)
-    except Exception:
-        return 0.0, symbol
+    body = _rpc(rpc, "eth_getBalance", [address, "latest"])
+    if not isinstance(body, dict) or body.get("error") or body.get("result") in (None, ""):
+        raise RuntimeError(f"{symbol} balance read failed: {str((body or {}).get('error'))[:80]}")  # never report a failed read as 0
+    raw = body["result"]
+    wei = int(raw, 16) if str(raw).startswith("0x") else int(raw)
     return wei / 10**18, symbol
 
 
@@ -497,8 +496,9 @@ def buy_evm(
 
 def _nonce(rpc: str, addr: str) -> int:
     data = _rpc(rpc, "eth_getTransactionCount", [addr, "pending"])
-    val = data.get("result") or "0x0"
-    return int(val, 16)
+    if data.get("error") or data.get("result") in (None, ""):
+        raise RuntimeError(f"nonce read failed: {str(data.get('error'))[:80]}")  # a guessed 0 would only fail later
+    return int(data["result"], 16)
 
 
 # --- EVM MEV protection -------------------------------------------------
@@ -561,7 +561,16 @@ _RPC_FALLBACKS = {
     "bsc": ["https://bsc-rpc.publicnode.com", "https://bsc-dataseed.binance.org", "https://bsc-dataseed1.defibit.io", "https://1rpc.io/bnb"],
     "eth": ["https://ethereum-rpc.publicnode.com", "https://eth.llamarpc.com", "https://1rpc.io/eth", "https://eth.drpc.org"],
     "hood": ["https://rpc.mainnet.chain.robinhood.com"],
+    # Backups for chains that had a single endpoint. Each is checked once for the right chain id before it is used.
+    "arb": ["https://arbitrum-one-rpc.publicnode.com", "https://arb1.arbitrum.io/rpc", "https://1rpc.io/arb"],
+    "avax": ["https://avalanche-c-chain-rpc.publicnode.com", "https://api.avax.network/ext/bc/C/rpc", "https://1rpc.io/avax/c"],
+    "op": ["https://optimism-rpc.publicnode.com", "https://mainnet.optimism.io", "https://1rpc.io/op"],
+    "pol": ["https://polygon-bor-rpc.publicnode.com", "https://polygon-rpc.com", "https://1rpc.io/matic"],
+    "linea": ["https://linea-rpc.publicnode.com", "https://rpc.linea.build", "https://1rpc.io/linea"],
+    "sonic": ["https://sonic-rpc.publicnode.com", "https://rpc.soniclabs.com"],
+    "pulse": ["https://pulsechain-rpc.publicnode.com", "https://rpc.pulsechain.com"],
 }
+_FB_VERIFIED: dict = {}  # backup url -> True/False (right chain id?), checked once
 for _cid, _env in (("base", "BASE_RPC_URL"), ("bsc", "BSC_RPC_URL"), ("eth", "ETHEREUM_RPC_URL"), ("hood", "ROBINHOOD_RPC_URL")):
     _pref = (os.getenv(_env) or "").strip()
     if _cid in CHAINS:
@@ -579,11 +588,39 @@ def _rpc_urls(rpc: str) -> list:
     return [rpc]
 
 
+def _backup_ok(rpc: str, url: str) -> bool:
+    """A backup endpoint is used only after it proves it is the same chain (eth_chainId matches). Checked once."""
+    if url in _FB_VERIFIED:
+        return _FB_VERIFIED[url]
+    want = 0
+    for cid, alts in _RPC_FALLBACKS.items():
+        if cid in CHAINS and (rpc == CHAINS[cid].get("rpc") or rpc in alts):
+            want = int(CHAINS[cid].get("chain_id") or 0)
+            break
+    if not want:
+        return True  # chain id not known for this chain: nothing to compare against
+    try:
+        r = requests.post(url, json={"jsonrpc": "2.0", "id": 1, "method": "eth_chainId", "params": []}, timeout=8)
+        ok = int(str((r.json() or {}).get("result") or "0"), 16) == want
+    except Exception:  # noqa: BLE001
+        return False  # could not check right now: skip it this time, ask again next time
+    _FB_VERIFIED[url] = ok
+    return ok
+
+
 def _rpc(rpc: str, method: str, params: list):
     urls = _rpc_urls(rpc)
+    if len(urls) == 1:
+        urls = urls * 2  # one endpoint only: give it a second go before giving up
     last_exc = None
     body: dict = {}
     for i, url in enumerate(urls):
+        if i > 0 and url != urls[0] and not _backup_ok(rpc, url):
+            continue
+        if i == 1 and url == urls[0]:
+            import time as _time
+
+            _time.sleep(0.7)
         try:
             r = requests.post(url, json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params}, timeout=20)
             if r.status_code == 429 or r.status_code >= 500:
@@ -614,8 +651,10 @@ def _gas_price(rpc: str) -> int:
 def _erc20_balance(rpc: str, token: str, owner: str) -> int:
     data = "0x70a08231" + owner[2:].lower().zfill(64)
     body = _rpc(rpc, "eth_call", [{"to": token, "data": data}, "latest"])
+    if body.get("error") or "result" not in body:
+        raise RuntimeError(f"token balance read failed: {str(body.get('error'))[:80]}")  # never report a failed read as 0
     val = body.get("result") or "0x0"
-    return int(val, 16)
+    return int(val, 16) if val not in ("0x", "") else 0
 
 
 def _estimate_gas(rpc: str, frm: str, to: str, data: str, value: int) -> int:
@@ -735,15 +774,20 @@ def sell_evm(chain: str, sell_token: str, key_hex: str | None = None, pct: int =
     if cid == "base":
         rpcs += ["https://base.publicnode.com", "https://base.llamarpc.com"]
     bal = 0
+    read_ok = False
     for rpc in rpcs:
         try:
             bal = _erc20_balance(rpc, token, acct.address)
+            read_ok = True
         except Exception:
             bal = 0
         if bal > 0:
             meta = dict(meta)
             meta["rpc"] = rpc
             break
+    if not read_ok:
+        return False, (f"Couldn't read your token balance on {cid.upper()} (the node is busy). "
+                       "Nothing was sent. Tap sell again in a few seconds.")
     pct = max(1, min(100, int(pct)))
     bal = bal * pct // 100
     if bal <= 0:

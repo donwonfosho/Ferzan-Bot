@@ -87,8 +87,8 @@ class MiniAppPositions(unittest.TestCase):
                 mock.patch.object(p.db, "live_cost", return_value=1.5), \
                 mock.patch.object(t, "jetton_amount_pub", return_value=1000.0), \
                 mock.patch.object(p, "_market", return_value={"price": 0.003, "symbol": "FGRID", "chg24": 2.0, "url": "u"}):
-            out = p._ton_tron_positions(7, "")
-        self.assertEqual(len(out), 1)
+            out, miss = p._ton_tron_positions(7, "")
+        self.assertEqual((len(out), miss), (1, 0))
         pos = out[0]
         self.assertEqual((pos["chain"], pos["symbol"], pos["amount"]), ("TON", "FGRID", 1000.0))
         self.assertAlmostEqual(pos["value"], 3.0)
@@ -99,7 +99,7 @@ class MiniAppPositions(unittest.TestCase):
         import portfolio as p
 
         with mock.patch.object(p.db, "live_mints", return_value=["EQtok"]), mock.patch.object(p.db, "get_ton_addr", return_value=""):
-            self.assertEqual(p._ton_tron_positions(7, ""), [])
+            self.assertEqual(p._ton_tron_positions(7, ""), ([], 0))
 
 
 if __name__ == "__main__":

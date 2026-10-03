@@ -502,7 +502,8 @@
       <button class="w" data-wallet="${w.id}" data-label="${esc(w.label)}" ${w.active ? 'aria-current="true"' : ""}>
         <span>${w.active ? "✅" : "▫️"} ${esc(w.label)}${!w.active && ws.length > 1 ? '<span class="hint">Switch</span>' : ""}</span>
         <code>${esc(w.sol.slice(0, 4))}…${esc(w.sol.slice(-4))}</code></button>`).join("");
-    $("foot").textContent = `Updated ${new Date(d.ts * 1000).toLocaleTimeString()} · trades run through the bot`;
+    $("foot").textContent = `Updated ${new Date(d.ts * 1000).toLocaleTimeString()} · trades run through the bot` +
+      (d.unread ? ` · ⚠️ ${d.unread} balance${d.unread === 1 ? "" : "s"} couldn't be read just now, refresh in a moment` : "");
     render._done = true;
   }
 
