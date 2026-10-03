@@ -968,8 +968,13 @@ def home_keyboard(private: bool = True, hot: list | None = None) -> InlineKeyboa
             InlineKeyboardButton("🚩 Dev alerts", callback_data="go:devalerts"),
         ],
         [
-            InlineKeyboardButton("🚀 Launch a coin", callback_data="go:launches"),
-            InlineKeyboardButton("🤝 Refer & earn", callback_data="go:ref"),
+            # Opens the Launch Bot (it used to dump six "fresh pool" cards into this chat).
+            InlineKeyboardButton(
+                "🚀 Launch a coin",
+                url="https://t.me/" + (os.getenv("LAUNCH_BOT_USERNAME") or "Ferzan_Launch_Bot").lstrip("@"),
+            ),
+            InlineKeyboardButton("🆕 New pools", callback_data="go:launches"),
+            InlineKeyboardButton("🤝 Refer", callback_data="go:ref"),
         ],
         [
             InlineKeyboardButton("💬 Community", url=chat),
