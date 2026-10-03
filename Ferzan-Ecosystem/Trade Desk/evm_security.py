@@ -6,9 +6,9 @@ import requests
 
 
 def security_line(chain: str, ca: str) -> str:
-    ids = {"eth": "1", "bsc": "56", "base": "8453", "arb": "42161", "avax": "43114"}
+    ids = {"eth": "1", "bsc": "56", "base": "8453", "arb": "42161", "avax": "43114", "trx": "tron", "tron": "tron"}
     cid = ids.get((chain or "").lower())
-    if not cid or not ca.startswith("0x"):
+    if not cid or not (ca.startswith("0x") or (cid == "tron" and ca.startswith("T"))):
         return ""
     try:
         r = requests.get(
@@ -16,7 +16,8 @@ def security_line(chain: str, ca: str) -> str:
             params={"contract_addresses": ca},
             timeout=8,
         )
-        blob = ((r.json() or {}).get("result") or {}).get(ca.lower()) or {}
+        res = (r.json() or {}).get("result") or {}
+        blob = res.get(ca) or res.get(ca.lower()) or {}
     except Exception:
         return ""
     if not blob:

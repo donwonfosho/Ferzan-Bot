@@ -363,6 +363,12 @@ def _safety_line(chain: str, ca: str) -> str:
     try:
         if ca.startswith("0x"):
             out = _security_line(chain, ca)
+        elif ca.startswith(("EQ", "UQ", "kQ")):
+            import chain_safety
+
+            out = chain_safety.ton_line(ca)
+        elif ca.startswith("T") and len(ca) <= 36:
+            out = _security_line("trx", ca)
         elif _is_sol_mint(ca):
             out = rugcheck.security_line(rugcheck.sol_report(ca))
     except Exception:

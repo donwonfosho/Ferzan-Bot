@@ -30,7 +30,16 @@ MAX_GAS_RESERVE_NANO = 400_000_000  # 0.40 TON safety cap
 
 
 def _headers() -> dict:
-    return {"Accept": "application/json"}
+    h = {"Accept": "application/json"}
+    key = (os.environ.get("TONAPI_KEY") or "").strip()  # optional paid/free key from tonconsole.com: higher limits
+    if key:
+        h["Authorization"] = f"Bearer {key}"
+    return h
+
+
+def _toncenter_headers() -> dict:
+    key = (os.environ.get("TONCENTER_API_KEY") or "").strip()  # optional key from @tonapibot: higher limits
+    return {"X-API-Key": key} if key else {}
 
 
 def simulate(ask: str, units: str, slip: str = "0.05", offer: str | None = None) -> dict:
@@ -127,7 +136,7 @@ def _http_balance_nano(addr: str) -> int | None:
         pass
     try:
         r = requests.get("https://toncenter.com/api/v2/getAddressBalance", params={"address": addr},
-                         headers=_headers(), timeout=10)
+                         headers=_toncenter_headers(), timeout=10)
         j = r.json() or {}
         if r.status_code == 200 and j.get("ok"):
             return int(j.get("result") or 0)
@@ -141,7 +150,7 @@ def _http_seqno(addr: str) -> int | None:
     None on any doubt, so the caller refuses instead of signing with a guessed number."""
     try:
         r = requests.get("https://toncenter.com/api/v2/getWalletInformation", params={"address": addr},
-                         headers=_headers(), timeout=10)
+                         headers=_toncenter_headers(), timeout=10)
         j = r.json() or {}
         res = j.get("result") or {}
         if r.status_code == 200 and j.get("ok") and res.get("seqno") is not None:
@@ -340,7 +349,7 @@ async def broadcast(provider, boc: bytes) -> tuple[bool, str]:
         errs.append(f"liteserver: {str(exc)[:80]}")
     for url in ("https://tonapi.io/v2/blockchain/message", "https://toncenter.com/api/v2/sendBoc"):
         try:
-            r = await asyncio.to_thread(requests.post, url, json={"boc": b64}, timeout=20)
+            r = await asyncio.to_thread(requests.post, url, json={"boc": b64}, headers=(_toncenter_headers() if "toncenter" in url else _headers()), timeout=20)
             if r.status_code == 200:
                 ok = True
             else:
