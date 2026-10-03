@@ -1173,6 +1173,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if extra in {"security", "join", "wrapped"}:
         await {"security": security_cmd, "join": join_cmd, "wrapped": wrapped_cmd}[extra](update, context)
         return
+    if extra == "withdraw":  # the Mini App's Send button lands here: same flow, same PIN and confirm
+        if update.effective_chat and update.effective_chat.type == "private":
+            context.user_data["wd"] = {}
+            bals = await asyncio.to_thread(_wd_balances, update.effective_user.id)
+            text, kb = _wd_menu(update.effective_user.id, bals)
+            await update.effective_message.reply_text(text, parse_mode="HTML", reply_markup=kb)
+        else:
+            await update.effective_message.reply_text("Open /withdraw in your private chat with the bot.")
+        return
     if extra == "wallets":
         text, kb = _mywallets_panel(update.effective_user.id)
         await update.effective_message.reply_text(text, parse_mode="HTML", reply_markup=kb)

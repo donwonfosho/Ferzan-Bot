@@ -335,6 +335,7 @@
 <h2 id="sec-pos">Positions</h2>
 <div id="positions" class="list" role="list"></div>
 
+<button class="btn share" id="sendBtn" style="margin-top:12px">📤 Send funds</button>
 <button class="btn share" id="histBtn" style="margin-top:12px">📜 Trade history</button>
 <div id="history" class="list" role="list" hidden style="margin-top:8px"></div>
 
@@ -1226,6 +1227,7 @@
     }
   }
   $("histBtn").addEventListener("click", toggleHistory);
+  $("sendBtn").addEventListener("click", () => { if (bot) openBot("withdraw"); else if (tg) tg.close(); });
 
   function trustHtml(tr) {
     if (!tr) return "";
