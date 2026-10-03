@@ -78,13 +78,40 @@ def _run_async(coro):
         return ex.submit(runner).result()
 
 
+_BCAST = {"n": 0}  # bumped every time a signed message is handed to the network
+
+
+def _is_node_lag(exc) -> bool:
+    low = str(exc).lower()
+    return any(k in low for k in ("651", "cannot load block", "out of sync", "not in db", "liteserver",
+                                  "timeout", "timed out", "connection", "no alive", "lite server"))
+
+
+def _run_retry(make_coro, tries: int = 3):
+    """Run a whole TON trade attempt; if a public node lags BEFORE anything was broadcast, start over on fresh
+    nodes (a new LiteBalancer picks different liteservers). Never retries once a message has gone out."""
+    import time as _t
+
+    last = None
+    for i in range(tries):
+        before = _BCAST["n"]
+        try:
+            return _run_async(make_coro())
+        except Exception as exc:  # noqa: BLE001
+            last = exc
+            if _BCAST["n"] != before or not _is_node_lag(exc) or i == tries - 1:
+                raise
+            _t.sleep(1.5 * (i + 1))
+    raise last  # pragma: no cover
+
+
 def _friendly_err(exc) -> str:
     """Public liteservers sometimes lag behind the chain ("cannot load block", code 651). That is a node problem,
     not a wallet problem: say so plainly instead of dumping the raw error at the user."""
     s = str(exc)
     low = s.lower()
     if "651" in low or "cannot load block" in low or "out of sync" in low or "not in db" in low or "liteserver" in low:
-        return "a TON network node was out of sync. Nothing was sent. Tap buy again in a few seconds."
+        return "a TON network node was out of sync. Nothing was sent. Tap try again in a few seconds."
     return s[:200]
 
 
@@ -305,6 +332,7 @@ async def broadcast(provider, boc: bytes) -> tuple[bool, str]:
     import base64
 
     b64, errs, ok = base64.b64encode(boc).decode(), [], False
+    _BCAST["n"] += 1
     try:
         await provider.raw_send_message(boc)
         ok = True
@@ -861,7 +889,7 @@ def buy_ton(jetton: str, usd: float, secret: str | None = None, slip_bps: int = 
         except Exception as exc:
             return False, f"TON key: {exc}"
         try:
-            addr, confirmed, spent = _run_async(_buy_v2(seed64, jetton, nano, slip_bps))
+            addr, confirmed, spent = _run_retry(lambda: _buy_v2(seed64, jetton, nano, slip_bps))
         except Exception as exc:
             return False, f"TON send failed: {_friendly_err(exc)}"
         if isinstance(confirmed, str):
@@ -884,8 +912,8 @@ def buy_ton(jetton: str, usd: float, secret: str | None = None, slip_bps: int = 
         return False, f"TON key: {exc}"
 
     try:
-        addr, _msg_hash, confirmed = _run_async(
-            _swap_ton_to_jetton(seed64, router_addr, pton_wallet, ask_wallet, nano, min_out, fwd)
+        addr, _msg_hash, confirmed = _run_retry(
+            lambda: _swap_ton_to_jetton(seed64, router_addr, pton_wallet, ask_wallet, nano, min_out, fwd)
         )
     except Exception as exc:
         return False, f"TON send failed: {_friendly_err(exc)}"
@@ -921,7 +949,7 @@ def sell_ton(jetton: str, secret: str | None = None, pct: int = 100, slip: str =
         except Exception as exc:
             return False, f"TON curve sell failed: {_friendly_err(exc)} Check your wallet before retrying."
     try:
-        return _run_async(_swap_jetton_to_ton(seed64, jetton, pct, slip))
+        return _run_retry(lambda: _swap_jetton_to_ton(seed64, jetton, pct, slip))
     except Exception as exc:
         return False, f"TON sell failed: {_friendly_err(exc)}"
 
