@@ -970,7 +970,7 @@ def home_keyboard(private: bool = True, hot: list | None = None) -> InlineKeyboa
         [
             # Opens the Launch Bot (it used to dump six "fresh pool" cards into this chat).
             InlineKeyboardButton(
-                "🚀 Launch a coin",
+                "🚀 Launch",
                 url="https://t.me/" + (os.getenv("LAUNCH_BOT_USERNAME") or "Ferzan_Launch_Bot").lstrip("@"),
             ),
             InlineKeyboardButton("🆕 New pools", callback_data="go:launches"),
@@ -2472,6 +2472,8 @@ def _bag_panel(
     else:
         _ap_on, _ap_tp, _ap_sl = db.get_auto_protect(uid)
         rows.append([InlineKeyboardButton(f"🛡 Protect me · TP +{_ap_tp:g}% / SL -{_ap_sl:g}%", callback_data=f"prt:{short}")])
+    if worth <= 0:  # no market: offer to tuck it away (it comes back by itself if it ever gets a price)
+        rows.append([InlineKeyboardButton("🙈 Hide this token (no market)", callback_data=f"bagh:{short}")])
     rows += [
         [
             InlineKeyboardButton("📡 Score", callback_data=f"sig:{short}"),
@@ -3404,6 +3406,14 @@ def _bag_build(uid: int) -> tuple[str, list[tuple[str, InlineKeyboardMarkup]]]:
                 continue
             if amount > 0 and venue == "TRX":
                 positions.append((mint, amount, owner, venue))
+    hidden = 0  # tokens the user tucked away AND that still have no market (they return if priced)
+    shown = []
+    for p in positions:
+        if db.flag_on(uid, f"hide:{p[0]}", 0) and float(_token_meta(p[0]).get("px") or 0) <= 0:
+            hidden += 1
+        else:
+            shown.append(p)
+    positions = shown
     total_worth = total_cost = 0.0
     priced = 0
     panels: list[tuple[str, InlineKeyboardMarkup]] = []
@@ -3440,6 +3450,8 @@ def _bag_build(uid: int) -> tuple[str, list[tuple[str, InlineKeyboardMarkup]]]:
     if priced > 0:
         tp = total_worth - total_cost
         head += f"\n{'🟢' if tp >= 0 else '🔴'} Portfolio <b>{tp:+,.2f} USD</b> ({(tp / total_cost * 100) if total_cost > 0 else 0.0:+.1f}%) · worth ${total_worth:,.2f}"
+    if hidden:
+        head += f"\n🙈 {hidden} hidden (no market) · /unhide"
     if unread:
         head += f"\n⚠️ {unread} balance{'s' if unread != 1 else ''} couldn't be read just now. Tap Refresh."
     return summary, panels, infos, head
@@ -3621,6 +3633,14 @@ async def _send_pnl_card(bot, uid: int, mint: str) -> None:
             await status.delete()
     except Exception as exc:
         await _done(bot, uid, status, f"📸 Couldn't send the card: {exc}")
+
+
+async def unhide_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard(update):
+        return
+    n = db.clear_hidden(update.effective_user.id)
+    _BAG_CACHE.pop(update.effective_user.id, None)
+    await update.effective_message.reply_text(f"Showing {n} hidden token{'s' if n != 1 else ''} again. Open /bag." if n else "Nothing is hidden.")
 
 
 async def bag_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -6422,6 +6442,14 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     uid = update.effective_user.id
     data = query.data or ""
+    if data.startswith("bagh:"):
+        db.set_flag(uid, f"hide:{data[5:]}", True)
+        _BAG_CACHE.pop(uid, None)
+        await query.edit_message_text(
+            "🙈 Hidden from your bag. It comes back by itself if the token ever gets a market. /unhide shows everything again.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📊 Bag", callback_data="go:bag")]]),
+        )
+        return
     if data.startswith("br:"):
         st = _bridge_state(context)
         parts = data.split(":")
@@ -9868,6 +9896,7 @@ def main() -> None:
     app.add_handler(CommandHandler("snipes", snipes_cmd))
     app.add_handler(CommandHandler("cancelsnipe", cancelsnipe_cmd))
     app.add_handler(CommandHandler("launches", launches_cmd))
+    app.add_handler(CommandHandler("unhide", unhide_cmd))
     app.add_handler(CommandHandler("chains", chains_cmd))
     app.add_handler(CommandHandler("quote", quote_cmd))
     app.add_handler(CommandHandler("menu", start))

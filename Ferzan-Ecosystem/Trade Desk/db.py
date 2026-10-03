@@ -1673,6 +1673,14 @@ def set_flag(user_id: int, flag: str, on: bool) -> None:
         conn.commit()
 
 
+def clear_hidden(user_id: int) -> int:
+    """Un-hide every bag token the user tucked away. Returns how many."""
+    with get_conn() as conn:
+        cur = conn.execute("DELETE FROM user_flags WHERE user_id = ? AND flag LIKE 'hide:%'", (int(user_id),))
+        conn.commit()
+        return int(cur.rowcount or 0)
+
+
 def lp_mark(user_id: int, mint: str) -> float:
     with get_conn() as conn:
         row = conn.execute(
