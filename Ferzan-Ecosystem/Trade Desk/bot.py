@@ -538,6 +538,12 @@ def _card_wallet(uid: int | None, ca: str, chain: str, price: float = 0.0) -> st
             if ca and rpc and str(ca).startswith("0x"):
                 tok = _erc20_amt(rpc, ca, addr)
     except Exception:
+        if cid in ("ton", "trx"):  # a failed read is not an empty wallet: don't tell them to fund it
+            return (
+                "<blockquote>"
+                f"💰 <b>{html.escape(label)}</b>\nBalance not loading right now · tap Refresh"
+                "</blockquote>"
+            )
         return (
             "<blockquote>"
             f"💰 <b>{html.escape(label)}</b>\nFund /wallet"
@@ -5739,6 +5745,10 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                         "Try again in a minute, or use a $ button (Buy $25).")
             return
         usd_o = amt * px
+        if usd_o < 1.0:  # the desk's floor is $1: refuse out loud instead of quietly buying more than was asked
+            await _done(context.bot, chat_id, status, f"Minimum buy is $1 (about {1.0 / px:.4g} {(CHAINS.get(cid) or {}).get('native') or 'native'} right now). "
+                        f"{amt:g} is only ≈ ${usd_o:.2f}, so nothing was bought.")
+            return
         live_msg = await _off(uid, _live_buy_followup, uid, card, pending, True, True, usd_override=usd_o, multi=True, xbuy=True, _busy=BUSY_MSG)
         await _done(context.bot, chat_id, status, f"{amt:g} native ≈ ${usd_o:.2f}\n{live_msg}")
         await _after_buy(context.bot, chat_id, uid, card, pending)
@@ -6924,7 +6934,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                         "Try again in a minute, or use a $ button (Buy $25).")
             return
         usd_o = amt * px
-        usd_o = min(signer.max_usd(), max(1.0, usd_o))
+        if usd_o < 1.0:
+            await _done(context.bot, uid, status, f"Minimum buy is $1 (about {1.0 / px:.4g} {(CHAINS.get(cid) or {}).get('native') or 'native'} right now). "
+                        f"{amt:g} is only ≈ ${usd_o:.2f}, so nothing was bought.")
+            return
+        usd_o = min(signer.max_usd(), usd_o)
         live_msg = await _off(uid, _live_buy_followup, uid, card, name, True, True, usd_override=usd_o, multi=True, _busy=BUSY_MSG)
         await _done(context.bot, uid, status, f"{amt:g} native ≈ ${usd_o:.2f}\n{live_msg or ''}")
         await _after_buy(context.bot, uid, uid, card, name)

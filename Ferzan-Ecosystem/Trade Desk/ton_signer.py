@@ -78,6 +78,73 @@ def _run_async(coro):
         return ex.submit(runner).result()
 
 
+def _friendly_err(exc) -> str:
+    """Public liteservers sometimes lag behind the chain ("cannot load block", code 651). That is a node problem,
+    not a wallet problem: say so plainly instead of dumping the raw error at the user."""
+    s = str(exc)
+    low = s.lower()
+    if "651" in low or "cannot load block" in low or "out of sync" in low or "not in db" in low or "liteserver" in low:
+        return "a TON network node was out of sync. Nothing was sent. Tap buy again in a few seconds."
+    return s[:200]
+
+
+def _http_balance_nano(addr: str) -> int | None:
+    """Balance in nanoTON from the public HTTP APIs (tonapi, then toncenter). None when neither answers."""
+    try:
+        r = requests.get(f"https://tonapi.io/v2/accounts/{addr}", headers=_headers(), timeout=10)
+        if r.status_code == 200:
+            return int((r.json() or {}).get("balance") or 0)
+        if r.status_code == 404:
+            return 0  # never-used address: the chain has no record of it yet
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        r = requests.get("https://toncenter.com/api/v2/getAddressBalance", params={"address": addr},
+                         headers=_headers(), timeout=10)
+        j = r.json() or {}
+        if r.status_code == 200 and j.get("ok"):
+            return int(j.get("result") or 0)
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
+def _http_seqno(addr: str) -> int | None:
+    """Wallet seqno over HTTP. 0 only when the chain positively says the wallet was never deployed.
+    None on any doubt, so the caller refuses instead of signing with a guessed number."""
+    try:
+        r = requests.get("https://toncenter.com/api/v2/getWalletInformation", params={"address": addr},
+                         headers=_headers(), timeout=10)
+        j = r.json() or {}
+        res = j.get("result") or {}
+        if r.status_code == 200 and j.get("ok") and res.get("seqno") is not None:
+            return int(res["seqno"])
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        r = requests.get(f"https://tonapi.io/v2/accounts/{addr}", headers=_headers(), timeout=10)
+        if r.status_code == 404:
+            return 0
+        if r.status_code == 200 and str((r.json() or {}).get("status") or "").lower() in ("uninit", "nonexist"):
+            return 0
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
+def _offline_address(seed64: bytes) -> str | None:
+    """The wallet address from the key alone (no network). None if pytoniq can't do it without a provider."""
+    try:
+        import asyncio
+
+        from pytoniq import WalletV4R2
+
+        w = asyncio.run(WalletV4R2.from_private_key(None, seed64))
+        return w.address.to_str(is_user_friendly=True, is_bounceable=False)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _ton_keypair_bytes(secret: str):
     """Ferzan's TON wallet reuses the user's Solana ed25519 key (same curve).
     pytoniq's from_private_key wants the full 64-byte NaCl secret key
@@ -126,6 +193,12 @@ def address_and_balance(secret: str) -> tuple[str, float]:
             last = exc
             if attempt < 2:
                 time.sleep(1.5 * (attempt + 1))
+    # Every liteserver try failed: the address comes from the key and the balance from the public HTTP APIs.
+    addr = _offline_address(seed64)
+    if addr:
+        nano = _http_balance_nano(addr)
+        if nano is not None:
+            return addr, nano / 1e9
     raise last if last else RuntimeError("TON lookup failed")
 
 
@@ -156,12 +229,24 @@ async def _seqno_for_send(provider, wallet) -> int:
     """Seqno to sign with. 0 ONLY for a verified-undeployed wallet; if the
     get-method fails on a deployed wallet we raise instead of signing with 0
     (a stale 0 could make a trade that never executes look confirmed)."""
+    import asyncio
+
+    last: Exception | None = None
+    for i in range(3):  # a different liteserver is usually picked on the next try
+        try:
+            return int(await wallet.get_seqno())
+        except Exception as exc:  # noqa: BLE001
+            last = exc
+            await asyncio.sleep(1.0 * (i + 1))
     try:
-        return int(await wallet.get_seqno())
-    except Exception as exc:
         if await _is_uninitialized(provider, wallet):
             return 0
-        raise RuntimeError(f"couldn't read wallet seqno, nothing sent: {exc}") from exc
+    except Exception:  # noqa: BLE001
+        pass
+    sq = await asyncio.to_thread(_http_seqno, wallet.address.to_str(is_user_friendly=True, is_bounceable=False))
+    if sq is not None:
+        return sq
+    raise RuntimeError(f"couldn't read wallet seqno, nothing sent: {_friendly_err(last)}") from last
 
 
 async def _await_seqno(wallet, sent_seqno: int, timeout_s: float = CONFIRM_WAIT_S) -> bool:
@@ -682,7 +767,7 @@ def buy_ton(jetton: str, usd: float, secret: str | None = None, slip_bps: int = 
         try:
             addr, confirmed, spent = _run_async(_buy_v2(seed64, jetton, nano, slip_bps))
         except Exception as exc:
-            return False, f"TON send failed: {exc}"
+            return False, f"TON send failed: {_friendly_err(exc)}"
         if isinstance(confirmed, str):
             return False, confirmed
         if not confirmed:
@@ -707,7 +792,7 @@ def buy_ton(jetton: str, usd: float, secret: str | None = None, slip_bps: int = 
             _swap_ton_to_jetton(seed64, router_addr, pton_wallet, ask_wallet, nano, min_out, fwd)
         )
     except Exception as exc:
-        return False, f"TON send failed: {exc}"
+        return False, f"TON send failed: {_friendly_err(exc)}"
 
     spent = (nano + fwd) / 1e9
     if not confirmed:
