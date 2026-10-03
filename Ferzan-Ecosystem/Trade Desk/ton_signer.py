@@ -148,6 +148,14 @@ def jetton_amount_pub(owner: str, jetton: str) -> float | None:
         return None
 
 
+_ADDR: dict[str, str] = {}  # public key (hex) -> wallet address, filled by every lookup that worked
+
+
+def _remember_addr(seed64: bytes, addr: str) -> None:
+    if addr:
+        _ADDR[bytes(seed64[32:]).hex()] = addr
+
+
 def _offline_address(seed64: bytes) -> str | None:
     """The wallet address from the key alone (no network): remembered from an earlier lookup, else derived.
     None if neither works."""
