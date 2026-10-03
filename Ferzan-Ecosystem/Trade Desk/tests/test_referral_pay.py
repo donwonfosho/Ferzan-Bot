@@ -3,6 +3,7 @@ from pathlib import Path
 from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import db
+import feecollect
 import price_fetcher
 import referral_pay as rp
 import signer
@@ -25,12 +26,27 @@ class Pay(unittest.TestCase):
             mock.patch.object(withdraw, "sol_balance", return_value=5_000_000_000),
             mock.patch.object(price_fetcher, "get_price_usd", return_value=100.0),
             mock.patch.object(withdraw, "validate_address", return_value=(True, DEST)),
+            mock.patch.object(feecollect, "enabled", return_value=True),
         ]
         for p in self.patches: p.start()
 
     def tearDown(self):
         for p in self.patches: p.stop()
         self.env.stop(); db.DB_PATH = self.old_path; self.tmp.cleanup()
+
+    def test_no_autopay_when_fee_collection_is_off(self):
+        with mock.patch.object(feecollect, "enabled", return_value=False), mock.patch.object(withdraw, "send_sol") as s:
+            self.assertEqual(rp.try_pay(1, 10, DEST)[0], "declined")
+            s.assert_not_called()
+
+    def test_referrer_share_uses_the_fee_actually_charged(self):
+        db.ensure_user(8, "ref")
+        db.ensure_user(7, "trader")
+        db.update_user(7, referred_by=8)
+        db.credit_desk_share(7, 1000.0, 25)  # charged 0.25% -> fee $2.50 -> Scout 30% = $0.75
+        with db.get_conn() as c:
+            share = c.execute("SELECT share_usd FROM referral_ledger WHERE user_id = 8 AND COALESCE(level,1)=1").fetchone()[0]
+        self.assertAlmostEqual(share, 0.75, places=4)
 
     def test_off_by_default(self):
         with mock.patch.dict(os.environ, {"REFERRAL_AUTOPAY": "0"}):

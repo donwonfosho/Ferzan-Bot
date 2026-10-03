@@ -1822,7 +1822,11 @@ def _live_buy(
             if fee_line:
                 msg = f"{msg}\n{fee_line}"
         # With collection on, referrers are only paid out of a fee that was really taken.
-        extra = db.credit_desk_share(uid, usd) if (fee_taken or not feecollect.enabled()) and not feecollect.exempt(uid) else ""
+        extra = (
+            db.credit_desk_share(uid, usd, feecollect.live_bps(uid, fee_kind) if feecollect.enabled() else None)
+            if (fee_taken or not feecollect.enabled()) and not feecollect.exempt(uid)
+            else ""
+        )
         if extra:
             msg = f"{msg}\n{extra}"
         msg = f"{msg}\n⚡ Filled in {time.time() - _t0:.1f}s"

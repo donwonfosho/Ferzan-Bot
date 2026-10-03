@@ -90,6 +90,10 @@ def try_pay(uid: int, usd: float, dest: str) -> tuple[str, str]:
 
     if not enabled():
         return "declined", "auto-pay is off"
+    import feecollect
+
+    if not feecollect.enabled():  # shares also accrue when no fee is being collected: never pay real money for those
+        return "declined", "fee collection is off, so there is no real fee behind these earnings"
     ok, norm = withdraw.validate_address("sol", dest)
     if not ok:
         return "declined", "no valid SOL wallet on file"

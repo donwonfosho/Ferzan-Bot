@@ -1722,8 +1722,9 @@ def reduce_live_cost_pct(user_id: int, mint: str, sold_pct: float) -> None:
         _attach_sell_cost(conn, user_id, mint, -delta)
 
 
-def credit_desk_share(trader_id: int, volume_usd: float) -> str:
-    """Pay the referrer from Ferzan's cut. Invitee keeps an Ape Pass window."""
+def credit_desk_share(trader_id: int, volume_usd: float, bps: float | None = None) -> str:
+    """Pay the referrer from Ferzan's cut. Invitee keeps an Ape Pass window.
+    `bps` is the fee rate this trader was really charged; without it the base rate is assumed."""
     vol = max(0.0, float(volume_usd))
     if vol <= 0:
         return ""
@@ -1766,7 +1767,7 @@ def credit_desk_share(trader_id: int, volume_usd: float) -> str:
     pct, tier = _tier_for_volume(tot)
     import fees as _fees
 
-    cut = vol * (_fees.current_bps() / 10_000.0)
+    cut = vol * ((_fees.current_bps() if bps is None else max(0.0, float(bps))) / 10_000.0)
     share = cut * pct
     # Level 2 / 3: the referrer's own referrer, and theirs. Walk the chain,
     # never paying the trader or anyone twice (a corrupted loop can't pay).
