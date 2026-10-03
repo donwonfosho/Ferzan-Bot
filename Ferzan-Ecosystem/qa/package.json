@@ -1,0 +1,8 @@
+{
+  "name": "ferzan-qa",
+  "private": true,
+  "type": "module",
+  "description": "UX checks for Ferzan's own pages",
+  "scripts": { "check": "node ux-check.mjs" },
+  "dependencies": { "@playwright/test": "1.56.0" }
+}
