@@ -3230,6 +3230,7 @@ def _bag_position_amount(uid: int, mint: str) -> tuple[float, str, str]:
         import ton_signer
 
         amount, owner = ton_signer.jetton_holding(sol_secret, mint)
+        db.set_ton_addr(uid, owner)  # lets the Mini App list this wallet's TON tokens from public data
         return amount, owner, "TON"
     if mint.startswith("T") and len(mint) == 34 and (_token_meta(mint).get("chain") or "") in ("tron", "trx"):
         import tron_signer
@@ -3282,6 +3283,7 @@ def _bag_build(uid: int) -> tuple[str, list[tuple[str, InlineKeyboardMarkup]]]:
                         break  # unknown decimals: skip rather than show a wrong value
                     positions.append((mint, amt, evm_addr, cid.upper()))
                     break
+    unread = 0  # TON/Tron tokens whose balance could not be read right now (shown as a note, never hidden)
     for mint in db.live_mints(uid):
         if not str(mint).startswith(("EQ", "UQ", "kQ")):
             continue
@@ -3289,8 +3291,21 @@ def _bag_build(uid: int) -> tuple[str, list[tuple[str, InlineKeyboardMarkup]]]:
             amount, owner, venue = _bag_position_amount(uid, mint)
         except Exception:
             logger.exception("TON bag lookup failed for %s", mint)
+            unread += 1
             continue
         if amount > 0:
+            positions.append((mint, amount, owner, venue))
+    for mint in db.live_mints(uid):
+        m = str(mint)
+        if not (m.startswith("T") and len(m) == 34):
+            continue
+        try:
+            amount, owner, venue = _bag_position_amount(uid, mint)
+        except Exception:
+            logger.exception("Tron bag lookup failed for %s", mint)
+            unread += 1
+            continue
+        if amount > 0 and venue == "TRX":
             positions.append((mint, amount, owner, venue))
     total_worth = total_cost = 0.0
     priced = 0
@@ -3316,7 +3331,9 @@ def _bag_build(uid: int) -> tuple[str, list[tuple[str, InlineKeyboardMarkup]]]:
         )
         if priced < len(positions):
             summary += "\n<i>Only counts positions bought live through Ferzan.</i>"
-    if not positions:
+    if unread:
+        summary += f"\n\n⚠️ Couldn't read {unread} TON/Tron token balance{'s' if unread != 1 else ''} just now. Open /bag again in a few seconds."
+    if not positions and not unread:
         summary += "\n\nNo tokens yet. Paste a CA to buy."
     return summary, panels
 
@@ -5857,11 +5874,22 @@ async def _send_position_panel(bot, chat_id: int, uid: int, card, query: str) ->
         if not mint:
             return
         amount = owner = venue = None
-        for attempt in range(3):  # the balance can trail the swap by a block
-            amount, owner, venue = await asyncio.to_thread(_bag_position_amount, uid, mint)
-            if amount and float(amount) > 0:
-                break
-            await asyncio.sleep(3)
+        slow = mint.startswith(("EQ", "UQ", "kQ"))  # a TON swap pays out a few blocks after it is confirmed
+        tries, gap = (7, 5) if slow else (3, 3)
+        got = False
+        for attempt in range(tries):  # the balance can trail the swap by a block
+            try:
+                amount, owner, venue = await asyncio.to_thread(_bag_position_amount, uid, mint)
+                got = True
+                if amount and float(amount) > 0:
+                    break
+            except Exception:
+                logger.info("bag amount lookup failed (try %s) for %s", attempt + 1, uid)
+            if attempt < tries - 1:
+                await asyncio.sleep(gap)
+        if not got:
+            await bot.send_message(chat_id, "✅ Bought. Your balance is still syncing, so tap /bag in a minute to see the position and PnL.")
+            return
         text, kb = await asyncio.to_thread(_bag_panel, mint, amount, owner, uid, None, venue)
         await bot.send_message(chat_id, text, reply_markup=kb, parse_mode="HTML", disable_web_page_preview=True)
     except Exception:
@@ -6393,6 +6421,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
                 sol_secret, _ = user_wallets.secrets(uid)
                 addr, ton_bal = await asyncio.to_thread(ton_signer.address_and_balance, sol_secret)
+                db.set_ton_addr(uid, addr)
                 bal_line = f"{ton_bal:.6f} TON"
             except Exception as exc:
                 logger.info("ton wallet lookup failed for %s: %s", uid, exc)

@@ -132,15 +132,45 @@ def _http_seqno(addr: str) -> int | None:
     return None
 
 
+def jetton_amount_pub(owner: str, jetton: str) -> float | None:
+    """Jetton balance (whole units) for a wallet address, from public data only. 0.0 when the wallet holds none,
+    None when the answer could not be read. Needs no key, so the Mini App can use it."""
+    try:
+        r = requests.get(f"https://tonapi.io/v2/accounts/{owner}/jettons/{jetton}", headers=_headers(), timeout=10)
+        if r.status_code == 404:
+            return 0.0
+        if r.status_code != 200:
+            return None
+        j = r.json() or {}
+        dec = int(((j.get("jetton") or {}).get("decimals")) or 9)
+        return int(j.get("balance") or 0) / (10 ** dec)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+_ADDR: dict[str, str] = {}  # public key (hex) -> wallet address, filled by every lookup that worked
+
+
+def _remember_addr(seed64: bytes, addr: str) -> None:
+    if addr:
+        _ADDR[bytes(seed64[32:]).hex()] = addr
+
+
 def _offline_address(seed64: bytes) -> str | None:
-    """The wallet address from the key alone (no network). None if pytoniq can't do it without a provider."""
+    """The wallet address from the key alone (no network): remembered from an earlier lookup, else derived.
+    None if neither works."""
+    known = _ADDR.get(bytes(seed64[32:]).hex())
+    if known:
+        return known
     try:
         import asyncio
 
         from pytoniq import WalletV4R2
 
         w = asyncio.run(WalletV4R2.from_private_key(None, seed64))
-        return w.address.to_str(is_user_friendly=True, is_bounceable=False)
+        addr = w.address.to_str(is_user_friendly=True, is_bounceable=False)
+        _remember_addr(seed64, addr)
+        return addr
     except Exception:  # noqa: BLE001
         return None
 
@@ -175,7 +205,9 @@ async def _address_and_balance(seed64: bytes) -> tuple[str, int]:
         nano = int(getattr(state, "balance", 0) or 0)
         # UQ.. (non-bounceable): what people should send to. TON sent to the EQ.. form of a wallet that was
         # never used bounces straight back.
-        return wallet.address.to_str(is_user_friendly=True, is_bounceable=False), nano
+        addr = wallet.address.to_str(is_user_friendly=True, is_bounceable=False)
+        _remember_addr(seed64, addr)
+        return addr, nano
     finally:
         await provider.close_all()
 
@@ -442,8 +474,23 @@ async def _holding(seed64: bytes, jetton: str) -> tuple[int, str]:
 
 def jetton_holding(secret: str, jetton: str) -> tuple[float, str]:
     """(token amount in whole units, TON wallet address). Blocking, read-only."""
-    raw, owner = _run_async(_holding(_ton_keypair_bytes(secret), jetton))
-    return raw / (10 ** _jetton_decimals(jetton)), owner
+    seed64 = _ton_keypair_bytes(secret)
+    last: Exception | None = None
+    for attempt in range(3):  # public liteservers are sometimes behind: a retry usually lands on a good one
+        try:
+            raw, owner = _run_async(_holding(seed64, jetton))
+            _remember_addr(seed64, owner)
+            return raw / (10 ** _jetton_decimals(jetton)), owner
+        except Exception as exc:  # noqa: BLE001
+            last = exc
+            if attempt < 2:
+                time.sleep(1.2 * (attempt + 1))
+    owner = _offline_address(seed64)
+    if owner:
+        amt = jetton_amount_pub(owner, jetton)
+        if amt is not None:
+            return amt, owner
+    raise last if last else RuntimeError("TON holding lookup failed")
 
 
 async def _swap_jetton_to_ton(seed64: bytes, jetton: str, pct: int, slip: str) -> tuple[bool, str]:

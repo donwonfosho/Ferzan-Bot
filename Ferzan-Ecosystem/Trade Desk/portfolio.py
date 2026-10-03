@@ -77,6 +77,62 @@ def _price(coin: str) -> float | None:
         return None
 
 
+def _market(mint: str) -> dict:
+    """Price/symbol/24h/chart link for a TON or Tron token (DexScreener can miss them; the buy card's lookup finds them)."""
+    try:
+        from price_fetcher import load_market
+
+        m = load_market(mint)
+        return {"price": float(m.price_usd or 0), "symbol": (m.symbol or "")[:16], "chg24": float(getattr(m, "change_24h", 0) or 0),
+                "url": getattr(m, "url", "") or ""}
+    except Exception:
+        return {}
+
+
+def _trc20_amount(owner_evm: str, token: str) -> float | None:
+    """TRC-20 balance of the user's Tron address (the same 20 bytes as their EVM address). None if unreadable."""
+    try:
+        import tron_signer as t
+
+        th, oh = t._to_hex(token), t._to_hex(owner_evm)
+        w = t._const(th, oh, "balanceOf(address)", t._w(oh))
+        dec = (t._const(th, th, "decimals()", "") or [6])[0]
+        return (w[0] if w else 0) / 10 ** dec
+    except Exception:
+        return None
+
+
+def _ton_tron_positions(uid: int, evm_pub: str) -> list[dict]:
+    """Tokens bought through the desk on TON and Tron. Public reads only: the TON address was saved by the bot."""
+    out: list[dict] = []
+    mints = db.live_mints(uid)
+    ton_addr = db.get_ton_addr(uid)
+    rows: list[tuple[str, str, float | None]] = []
+    if ton_addr:
+        import ton_signer
+
+        for m in [x for x in mints if str(x).startswith(("EQ", "UQ", "kQ"))][:6]:
+            rows.append((m, "TON", ton_signer.jetton_amount_pub(ton_addr, m)))
+    if evm_pub:
+        for m in [x for x in mints if str(x).startswith("T") and len(str(x)) == 34][:6]:
+            rows.append((m, "TRX", _trc20_amount(evm_pub, m)))
+    for mint, chain, amt in rows:
+        if not amt or amt <= 0:
+            continue
+        mk = _market(mint)
+        price = float(mk.get("price") or 0)
+        value = amt * price
+        cost = float(db.live_cost(uid, mint) or 0)
+        pnl = (value - cost) if (cost > 0 and value > 0) else None
+        out.append({
+            "mint": mint, "symbol": mk.get("symbol") or mint[:4] + "…", "chain": chain, "amount": amt,
+            "price": price, "value": value, "cost": cost, "pnl": pnl,
+            "pnl_pct": (pnl / cost * 100) if pnl is not None else None,
+            "chg24": mk.get("chg24"), "chart": mk.get("url") or "", "priced": price > 0,
+        })
+    return out
+
+
 def build_portfolio(uid: int) -> dict:
     # Public data only: this internet-facing process never decrypts a key
     # and never creates wallets (that happens in the bot).
@@ -132,6 +188,10 @@ def build_portfolio(uid: int) -> dict:
                 "priced": bool(m.get("price")),
             }
         )
+    try:
+        positions += _ton_tron_positions(uid, evm_pub)
+    except Exception:
+        pass  # a slow TON/Tron lookup must never blank the whole Bags screen
     positions.sort(key=lambda p: p["value"], reverse=True)
 
     native_usd = (sol_bal * sol_px if sol_px else 0) + (float(eth_bal) * eth_px if eth_px else 0)

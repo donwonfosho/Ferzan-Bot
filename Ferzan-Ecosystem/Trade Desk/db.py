@@ -1203,6 +1203,35 @@ def set_stake_units(user_id: int, units: float) -> None:
     update_user(int(user_id), stake_units=max(0.0, float(units)))
 
 
+def set_ton_addr(user_id: int, address: str) -> None:
+    """Remember a user's TON wallet address (it is derived from their key, which only the bot may touch), so the
+    Mini App can show their TON tokens from public data. Best effort: never raises."""
+    address = (address or "").strip()
+    if not address:
+        return
+    try:
+        with get_conn() as conn:
+            conn.execute("CREATE TABLE IF NOT EXISTS ton_addr (user_id INTEGER PRIMARY KEY, address TEXT NOT NULL, updated_at INTEGER)")
+            conn.execute(
+                "INSERT INTO ton_addr (user_id, address, updated_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(user_id) DO UPDATE SET address = excluded.address, updated_at = excluded.updated_at",
+                (int(user_id), address, int(time.time())),
+            )
+            conn.commit()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def get_ton_addr(user_id: int) -> str:
+    try:
+        with get_conn() as conn:
+            conn.execute("CREATE TABLE IF NOT EXISTS ton_addr (user_id INTEGER PRIMARY KEY, address TEXT NOT NULL, updated_at INTEGER)")
+            row = conn.execute("SELECT address FROM ton_addr WHERE user_id = ?", (int(user_id),)).fetchone()
+            return str(row["address"]) if row else ""
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def live_cost(user_id: int, mint: str) -> float:
     with get_conn() as conn:
         row = conn.execute(
