@@ -5594,6 +5594,28 @@ async def claim_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     amt = db.request_referral_claim(uid)
     upto = db.max_claimed_ref_id(uid)
     sol_pub = (db.get_user_wallet(uid) or {}).get("sol_pub") or "(no wallet yet)"
+    import referral_pay
+
+    if referral_pay.enabled():
+        verdict, detail = await asyncio.to_thread(referral_pay.try_pay, uid, amt, sol_pub)
+        if verdict == "paid":
+            db.mark_referral_paid(uid, upto)
+            await update.effective_message.reply_text(f"💸 Referral payout of ${amt:.2f} sent to your Ferzan SOL wallet.\n{detail}")
+            await _notify_admins(context.bot, f"💸 Auto-paid referral ${amt:.2f} to {uid}\n{detail}")
+            return
+        if verdict == "unsure":
+            await update.effective_message.reply_text("Your payout was sent but is still confirming. You'll get a message when it lands.")
+            for admin in ADMIN_IDS:
+                try:
+                    await context.bot.send_message(
+                        admin,
+                        f"⚠️ Referral auto-pay to {uid} (${amt:.2f}) is UNCONFIRMED. Check the payout wallet on Solscan before paying again.\n{str(detail)[:300]}\nIf it landed, tap Mark paid.",
+                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅ Mark paid", callback_data=f"refpaid:{uid}:{upto}")]]),
+                    )
+                except Exception:
+                    logger.exception("unsure-payout notify failed for admin %s", admin)
+            return
+        logger.info("referral auto-pay declined for %s: %s", uid, detail)  # falls through to the manual desk below
     await update.effective_message.reply_text(
         f"🧾 Claim of ${amt:.2f} sent to the desk.\n"
         "It's paid from the Ferzan treasury to your SOL wallet — you'll get a message here when it lands."
