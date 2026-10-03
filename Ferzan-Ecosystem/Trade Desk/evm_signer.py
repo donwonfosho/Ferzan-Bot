@@ -866,7 +866,12 @@ def sell_evm(chain: str, sell_token: str, key_hex: str | None = None, pct: int =
         approve_note = ""
     tx = quote.get("transaction") or quote.get("tx") or {}
     if not tx.get("to") or not tx.get("data"):
-        return False, approve_note + str(quote.get("message") or "0x returned no sell tx")
+        why = str(quote.get("message") or "").strip()
+        return False, approve_note + (
+            "No sell route found for this token (no liquidity, or a pool the router can't use)."
+            + (f"\n{why}" if why else "")
+            + "\nYour tokens are still in your wallet; nothing was sold."
+        )
     ok, msg = _broadcast(acct, meta, tx["to"], tx["data"], _as_int(tx.get("value"), 0))
     if not ok:
         return False, approve_note + f"Sell failed: {msg}"

@@ -974,10 +974,11 @@ def home_keyboard(private: bool = True, hot: list | None = None) -> InlineKeyboa
                 url="https://t.me/" + (os.getenv("LAUNCH_BOT_USERNAME") or "Ferzan_Launch_Bot").lstrip("@"),
             ),
             InlineKeyboardButton("🆕 New pools", callback_data="go:launches"),
-            InlineKeyboardButton("🤝 Refer", callback_data="go:ref"),
         ],
         [
-            InlineKeyboardButton("💬 Community", url=chat),
+            # Telegram sizes a photo card's buttons to the photo, so a row of three needs short labels.
+            InlineKeyboardButton("🤝 Refer", callback_data="go:ref"),
+            InlineKeyboardButton("💬 Chat", url=chat),
             InlineKeyboardButton("𝕏 Follow", url=xurl),
         ],
     ]
