@@ -12,7 +12,12 @@ import time
 import db
 import trust
 
-SERVICES = ("ferzan-trade", "ferzan-webapp", "ferzan-launch", "ferzan-launch-api", "ferzan-buy", "ferzan-guardian", "ferzan-liquidity")
+# Always-on bots and APIs: must say "active".
+SERVICES = ("ferzan-trade", "ferzan-webapp", "ferzan-trade-api", "ferzan-launch", "ferzan-launch-api", "ferzan-buy",
+            "ferzan-guardian", "ferzan-liq", "ferzan-curve-indexer")
+# Jobs run by a timer: "inactive" between runs is normal, "failed" means the last run broke.
+JOBS = ("ferzan-refill", "ferzan-watchdog", "ferzan-flywheel", "ferzan-offsite", "ferzan-backup", "ferzan-health", "ferzan-promo")
+TIMERS = ("ferzan-refill.timer", "ferzan-watchdog.timer", "ferzan-promo.timer", "ferzan-health.timer", "ferzan-flagship.timer")
 
 
 def _set(name: str) -> bool:
@@ -23,19 +28,26 @@ def _on(name: str, default: str = "") -> bool:
     return (os.getenv(name, default) or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _services() -> dict[str, str]:
-    out = {}
-    for s in SERVICES:
-        try:
-            r = subprocess.run(["systemctl", "is-active", s], capture_output=True, text=True, timeout=4)
-            st = (r.stdout or "").strip() or "unknown"
-        except Exception:
-            return {}  # not a systemd box (or no permission): skip the section
-        if st != "unknown" and st != "inactive":
-            out[s] = st
-        elif st == "inactive":
-            out[s] = st
-    return out
+def _state(unit: str) -> str:
+    try:
+        r = subprocess.run(["systemctl", "is-active", unit], capture_output=True, text=True, timeout=4)
+        return (r.stdout or "").strip() or "unknown"
+    except Exception:
+        return ""  # not a systemd box (or no permission): skip the section
+
+
+def _timer_next(unit: str) -> int | None:
+    """When a timer will next fire (unix), or None."""
+    try:
+        r = subprocess.run(["systemctl", "show", unit, "-p", "NextElapseUSecRealtime", "--value"],
+                           capture_output=True, text=True, timeout=4)
+        txt = (r.stdout or "").strip()
+        if not txt or txt == "n/a":
+            return None
+        d = subprocess.run(["date", "-d", txt, "+%s"], capture_output=True, text=True, timeout=4)
+        return int((d.stdout or "").strip())
+    except Exception:
+        return None
 
 
 def _fee_health(hours: int = 24) -> tuple[int, int]:
@@ -73,8 +85,24 @@ def checks() -> list[tuple[str, str, str]]:
             rows.append(("warn", "Fee ledger, last 24h", "no fee rows yet: do the $20 buy and sell test"))
         else:
             rows.append(("ok" if bad == 0 else "warn", "Fee ledger, last 24h", f"{ok} collected, {bad} failed"))
-    for name, st in _services().items():
-        rows.append(("ok" if st == "active" else "bad", f"Service {name}", st))
+    if _state("ferzan-trade"):
+        for name in SERVICES:
+            st = _state(name)
+            rows.append(("ok" if st == "active" else "bad", f"Service {name}", st))
+        for name in JOBS:
+            st = _state(name)
+            if st == "failed":
+                rows.append(("bad", f"Job {name}", "last run FAILED: journalctl -u " + name + " -n 20"))
+        for name in TIMERS:
+            st = _state(name)
+            if st != "active":
+                rows.append(("bad", f"Timer {name}", st or "unknown"))
+        nxt = _timer_next("ferzan-flagship.timer")
+        if nxt:
+            gap = abs(nxt - trust.launch_at())
+            fmt = lambda t: time.strftime("%a %b %d %H:%M UTC", time.gmtime(t))  # noqa: E731
+            rows.append(("ok" if gap <= 6 * 3600 else "warn", "Flagship launch timer",
+                         f"fires {fmt(nxt)}" if gap <= 6 * 3600 else f"fires {fmt(nxt)} but the launch time is {fmt(trust.launch_at())}: confirm which is right"))
     return rows
 
 

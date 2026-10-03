@@ -18,7 +18,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 DESK = HERE / "Trade Desk"
-SERVICES = ("ferzan-trade", "ferzan-webapp", "ferzan-launch", "ferzan-launch-api")
+SERVICES = ("ferzan-trade", "ferzan-webapp", "ferzan-launch", "ferzan-launch-api", "ferzan-liq")
 PAGES = ("app", "evm", "solana", "ton", "claim", "curve", "launches", "leaderboard")
 BASE = os.environ.get("MINI_APP_BASE_URL", "https://launch.ferzaneco.com/miniapp").rstrip("/")
 results: list[tuple[bool, str]] = []
@@ -41,7 +41,7 @@ def get(url: str, timeout: int = 10) -> tuple[int, bytes]:
 
 def load_env() -> None:
     """Read KEY=VALUE lines into this process only so modules import the way the bots do. Values are never printed."""
-    for p in (os.environ.get("ENV_FILE", ""), "/opt/ferzan/app/.env", "/opt/ferzan/.env", str(DESK / ".env")):
+    for p in (os.environ.get("ENV_FILE", ""), str(DESK / ".env"), "/opt/ferzan/app/.env", "/opt/ferzan/.env"):  # Trade Desk/.env is what ferzan-trade loads
         if p and Path(p).is_file():
             for line in Path(p).read_text().splitlines():
                 if "=" in line and not line.lstrip().startswith("#"):
