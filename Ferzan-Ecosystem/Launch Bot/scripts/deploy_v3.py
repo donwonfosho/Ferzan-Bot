@@ -51,7 +51,7 @@ CHAINS = {
     # (router 0x1f7d...2EfA -> factory 0x89e5...) and use the USDC editions of the contracts.
     "arc": {
         "rpc": "https://rpc.mainnet.arc.io", "rpc_env": "ARC_RPC_URL", "chain_id": 5042, "sym": "USDC",
-        "fee_wei": 1 * 10**18,  # 1 USDC, in line with other Arc launchpads (Mercuri 1 USDC, Bullcheese free)
+        "fee_wei": 0,  # free (was 1 USDC); trading fees pay for the platform
         "dex": "Uniswap V2 (Arc)", "dex_factory": "0x89e5DB8B5aA49aA85AC63f691524311AEB649eba",
         "weth": "0x3600000000000000000000000000000000000000", "weth_symbol": "USDC",
         "router": "0x1f7d7550B1b028f7571E69A784071F0205FD2EfA", "usdc_quote": True,

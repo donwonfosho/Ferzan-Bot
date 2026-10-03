@@ -1701,7 +1701,7 @@ def leaderboard(period: str = "all", chain: str = "", limit: int = 50):
     return {"period": period, "items": items, "now": int(time.time())}
 
 
-_EVM_LAUNCH_FEE = {"bsc": 0.0, "base": 0.0, "ethereum": 0.0, "robinhood": 0.0, "arc": 1.0}  # native, fixed in the v3 factories
+_EVM_LAUNCH_FEE = {"bsc": 0.0, "base": 0.0, "ethereum": 0.0, "robinhood": 0.0, "arc": 0.0}  # native, fixed in the v3 factories
 _REV_RPC = {"bsc": "https://bsc-rpc.publicnode.com", "base": "https://base-rpc.publicnode.com",
             "ethereum": "https://ethereum-rpc.publicnode.com", "robinhood": "https://rpc.mainnet.chain.robinhood.com",
             "arc": "https://rpc.mainnet.arc.io"}
