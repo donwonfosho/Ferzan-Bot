@@ -3378,7 +3378,7 @@ def _bag_store(uid: int, panels, infos, head: str) -> dict:
 
 def _bag_render(d: dict, i: int, stamp: str = "") -> tuple[str, InlineKeyboardMarkup]:
     """The single bag card for page `i`: portfolio line, the position, its action buttons, then the pager."""
-    home = [InlineKeyboardButton("↩️ Home", callback_data="go:home")]
+    home = [InlineKeyboardButton("📤 Send", callback_data="go:withdraw"), InlineKeyboardButton("↩️ Home", callback_data="go:home")]
     pages = d["pages"]
     n = len(pages)
     if n == 0:
@@ -3411,7 +3411,7 @@ def _bag_list(d: dict) -> tuple[str, InlineKeyboardMarkup]:
         label = f"{i + 1}. ${inf['sym']} · {inf['venue']} · {worth}{tag}"
         lines.append(html.escape(label))
         btns.append([InlineKeyboardButton(label[:60], callback_data=f"bagn:{i}")])
-    btns.append([InlineKeyboardButton("↩️ Home", callback_data="go:home")])
+    btns.append([InlineKeyboardButton("📤 Send", callback_data="go:withdraw"), InlineKeyboardButton("↩️ Home", callback_data="go:home")])
     return "\n".join(lines), InlineKeyboardMarkup(btns)
 
 
