@@ -3,13 +3,13 @@
  * Ferzan UX check: loads a page in clean, isolated browser contexts (optionally through regional
  * proxies, several in parallel), scrolls it so lazy layout renders, clicks one element, and reports.
  *
- *   node qa/ux-check.mjs --url https://ferzan-factory.com --target "Launch a coin"
- *   node qa/ux-check.mjs --url https://ferzan-factory.com --target "#launch-btn" --runs 3
- *   node qa/ux-check.mjs --url ... --target ... --proxy '{"server":"http://host:8080","username":"u","password":"p"}'
- *   node qa/ux-check.mjs --url ... --target ... --proxies proxies.json     # a JSON array of those objects
+ *   node "Liquidity Bot/qa/ux-check.mjs" --url https://ferzan-factory.com --target "Launch a coin"
+ *   node "Liquidity Bot/qa/ux-check.mjs" --url https://ferzan-factory.com --target "#launch-btn" --runs 3
+ *   node "Liquidity Bot/qa/ux-check.mjs" --url ... --target ... --proxy '{"server":"http://host:8080","username":"u","password":"p"}'
+ *   node "Liquidity Bot/qa/ux-check.mjs" --url ... --target ... --proxies proxies.json     # a JSON array of those objects
  *
  * --target is a CSS/XPath selector (starts with # . [ // or contains > : =) or the visible text of a
- * button/link. Exit code 0 only if every run passed. Failures save a screenshot under qa/out/.
+ * button/link. Exit code 0 only if every run passed. Failures save a screenshot under Liquidity Bot/qa/out/.
  *
  * Scope guard: this is a test of OUR pages. It refuses hosts that are not Ferzan's own, uses the stock browser
  * identity (no spoofing), and caps parallel runs at 5. To check a staging host of yours, set QA_ALLOWED_HOSTS=host1,host2.
@@ -114,7 +114,7 @@ async function main() {
   const url = a.url;
   const target = a.target;
   if (!url || !target) {
-    console.error('usage: node qa/ux-check.mjs --url <https://...> --target "<text or selector>" [--runs N] [--proxy JSON | --proxies file.json]');
+    console.error('usage: node "Liquidity Bot/qa/ux-check.mjs" --url <https://...> --target "<text or selector>" [--runs N] [--proxy JSON | --proxies file.json]');
     process.exit(2);
   }
   if (!hostAllowed(url)) {
