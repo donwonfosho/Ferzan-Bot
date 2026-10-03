@@ -159,8 +159,15 @@ def main():
         print(f"Bytecode       : master {len(m_bin) // 2:,} bytes, factory {len(f_bin) // 2:,} bytes, compiled OK")
         print("Est. cost      : about 90-180 TRX of energy for both deploys if the wallet has no staked energy")
         if net.get("factory"):
-            print(f"Already deployed: factory {net['factory']} (master {net.get('master')})")
-            return
+            live = int(const_call(net["factory"], "launchFeeSun()") or "0", 16)
+            if live == fee_sun:
+                print(f"Already deployed: factory {net['factory']} (master {net.get('master')})")
+                return
+            # The fee is fixed per factory: a new fee means a new factory (the master is reused). Keep the old address on record.
+            print(f"Recorded factory {net['factory']} charges {live / 1e6:g} TRX; a new one at {fee_trx:g} TRX will be deployed")
+            if MODE == "send":
+                net[f"factory_old_{live}"] = net.pop("factory")
+                RECORD.write_text(json.dumps(rec, indent=1))
         need = 150  # a real deploy of both contracts burned 88 TRX
         if MODE == "send" and bal < need * 1_000_000:
             sys.exit(f"ABORT: the deployer has {bal / 1e6:,.2f} TRX; send about {need} TRX to {owner} first. Nothing was sent.")

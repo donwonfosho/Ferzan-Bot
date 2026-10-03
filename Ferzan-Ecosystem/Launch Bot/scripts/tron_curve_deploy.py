@@ -195,7 +195,8 @@ def main():
                 print(f"Already deployed: curve factory v2 {f2}")
                 return
             print(f"Factory v2 {f2} has other settings (fee/min {live[0] / 1e6:g}/{live[1] / 1e6:g} TRX): a new factory is needed")
-            net.pop("curve_factory_v2")
+            if MODE == "send":
+                net[f"curve_factory_v2_old_{live[0]}"] = net.pop("curve_factory_v2")  # keep the old address on record
         need = (80_000_000 if net.get("curve_master_v2") else 260_000_000) if net.get("curve_token_master") else 320_000_000
         if bal < need:
             where = "from the Nile faucet (https://nileex.io/join/getJoinPage)" if NET == "nile" else "on Tron"
