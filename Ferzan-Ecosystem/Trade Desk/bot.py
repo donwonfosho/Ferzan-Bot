@@ -3310,6 +3310,7 @@ def _bag_build(uid: int) -> tuple[str, list[tuple[str, InlineKeyboardMarkup]]]:
     total_worth = total_cost = 0.0
     priced = 0
     panels: list[tuple[str, InlineKeyboardMarkup]] = []
+    infos: list[dict] = []
     for mint, amount, owner, venue in positions:
         meta = _token_meta(mint)
         worth = amount * float(meta.get("px") or 0)
@@ -3320,6 +3321,9 @@ def _bag_build(uid: int) -> tuple[str, list[tuple[str, InlineKeyboardMarkup]]]:
                 total_cost += cost
                 priced += 1
         panels.append(_bag_panel(mint, amount, owner, uid, meta=meta, venue_override=venue))
+        sym = (meta.get("symbol") or "").upper() or mint[:5] + "…"
+        pct = ((worth - cost) / cost * 100) if (cost > 0 and worth > 0) else None
+        infos.append({"mint": mint, "sym": sym, "venue": venue or "", "worth": worth, "pct": pct})
     summary = f"🎒 <b>Wallet positions</b> · SOL\n💰 {lamports / 1e9:.6f} SOL\n<code>{html.escape(addr)}</code>"
     if priced > 0:
         total_pnl = total_worth - total_cost
@@ -3335,7 +3339,13 @@ def _bag_build(uid: int) -> tuple[str, list[tuple[str, InlineKeyboardMarkup]]]:
         summary += f"\n\n⚠️ Couldn't read {unread} TON/Tron token balance{'s' if unread != 1 else ''} just now. Open /bag again in a few seconds."
     if not positions and not unread:
         summary += "\n\nNo tokens yet. Paste a CA to buy."
-    return summary, panels
+    head = f"🎒 <b>Your bag</b> · {len(positions)} position{'s' if len(positions) != 1 else ''}\n💰 {lamports / 1e9:.4f} SOL"
+    if priced > 0:
+        tp = total_worth - total_cost
+        head += f"\n{'🟢' if tp >= 0 else '🔴'} Portfolio <b>{tp:+,.2f} USD</b> ({(tp / total_cost * 100) if total_cost > 0 else 0.0:+.1f}%) · worth ${total_worth:,.2f}"
+    if unread:
+        head += f"\n⚠️ {unread} balance{'s' if unread != 1 else ''} couldn't be read just now. Tap Refresh."
+    return summary, panels, infos, head
 
 
 def _is_bag_panel(message) -> bool:
@@ -3350,6 +3360,91 @@ def _is_bag_panel(message) -> bool:
     )
 
 
+# ---- one-card bag: Prev / Next through the positions, all in a single message ------------------------------
+_BAG_CACHE: dict[int, dict] = {}
+_BAG_TTL = 120.0  # paging inside this window reuses the last read; Refresh and /bag read fresh
+
+
+def _bag_store(uid: int, panels, infos, head: str) -> dict:
+    d = {
+        "ts": time.time(),
+        "head": head,
+        "pages": [
+            {"mint": inf["mint"], "text": t, "rows": [list(r) for r in kb.inline_keyboard], "info": inf}
+            for (t, kb), inf in zip(panels, infos)
+        ],
+    }
+    _BAG_CACHE[uid] = d
+    return d
+
+
+def _bag_render(d: dict, i: int, stamp: str = "") -> tuple[str, InlineKeyboardMarkup]:
+    """The single bag card for page `i`: portfolio line, the position, its action buttons, then the pager."""
+    home = [InlineKeyboardButton("↩️ Home", callback_data="go:home")]
+    pages = d["pages"]
+    n = len(pages)
+    if n == 0:
+        return f"{d['head']}\n\nNo tokens yet. Paste a CA to buy.", InlineKeyboardMarkup([home])
+    i %= n
+    pg = pages[i]
+    text = f"{d['head']}\n\n<b>{i + 1} of {n}</b>\n{pg['text']}"
+    if stamp:
+        text += f"\n<i>Updated {stamp} UTC</i>"
+    rows = [list(r) for r in pg["rows"]]
+    nav = [InlineKeyboardButton(f"{i + 1}/{n} · all", callback_data="bagl")]
+    if n > 1:
+        nav = [InlineKeyboardButton("◀️ Prev", callback_data=f"bagn:{(i - 1) % n}")] + nav + [
+            InlineKeyboardButton("Next ▶️", callback_data=f"bagn:{(i + 1) % n}")]
+    rows.append(nav)
+    rows.append(home)
+    return text, InlineKeyboardMarkup(rows)
+
+
+def _bag_list(d: dict) -> tuple[str, InlineKeyboardMarkup]:
+    """Overview of every position, one tap to open any of them."""
+    pages = d["pages"]
+    lines = [d["head"], ""]
+    btns = []
+    for i, pg in enumerate(pages[:12]):
+        inf = pg["info"]
+        pct = inf.get("pct")
+        tag = "" if pct is None else f" {'🟢' if pct >= 0 else '🔴'} {pct:+.1f}%"
+        worth = f"${inf['worth']:,.2f}" if inf.get("worth") else "no price"
+        label = f"{i + 1}. ${inf['sym']} · {inf['venue']} · {worth}{tag}"
+        lines.append(html.escape(label))
+        btns.append([InlineKeyboardButton(label[:60], callback_data=f"bagn:{i}")])
+    btns.append([InlineKeyboardButton("↩️ Home", callback_data="go:home")])
+    return "\n".join(lines), InlineKeyboardMarkup(btns)
+
+
+def _is_bag_card(message) -> bool:
+    try:
+        rows = message.reply_markup.inline_keyboard
+    except Exception:
+        return False
+    return any(str(getattr(b, "callback_data", "") or "") == "bagl" for row in rows for b in row)
+
+
+async def _bag_data(uid: int, force: bool = False) -> dict:
+    d = _BAG_CACHE.get(uid)
+    if d and not force and time.time() - d["ts"] <= _BAG_TTL:
+        return d
+    _summary, panels, infos, head = await asyncio.to_thread(_bag_build, uid)
+    return _bag_store(uid, panels, infos, head)
+
+
+async def _bag_page_callback(query, uid: int, data: str) -> None:
+    try:
+        d = await _bag_data(uid)
+        text, kb = _bag_list(d) if data == "bagl" else _bag_render(d, int(data.split(":", 1)[1]))
+        if data == "bagl" and not d["pages"]:
+            text, kb = _bag_render(d, 0)
+        await query.edit_message_text(text, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True)
+    except Exception as exc:
+        if "not modified" not in str(exc).lower():
+            logger.info("bag page failed for %s: %s", uid, exc)
+
+
 async def _refresh_bag_panel(query, uid: int, mint: str, quiet: bool = False) -> None:
     """Re-render one /bag panel in place with fresh balance + mark."""
     if quiet:
@@ -3359,6 +3454,19 @@ async def _refresh_bag_panel(query, uid: int, mint: str, quiet: bool = False) ->
         amount, owner, venue = await asyncio.to_thread(_bag_position_amount, uid, mint)
         text, kb = await asyncio.to_thread(_bag_panel, mint, amount, owner, uid, None, venue)
         stamp = time.strftime("%H:%M:%S", time.gmtime())
+        d = _BAG_CACHE.get(uid)
+        if d and _is_bag_card(query.message):
+            idx = next((k for k, pg in enumerate(d["pages"]) if pg["mint"] == mint), None)
+            if idx is not None:
+                if not amount or float(amount) <= 0:
+                    d["pages"].pop(idx)  # sold out: drop it from the card and show the next one
+                    idx = min(idx, len(d["pages"]) - 1)
+                else:
+                    pg = d["pages"][idx]
+                    pg["text"], pg["rows"] = text, [list(r) for r in kb.inline_keyboard]
+                ctext, ckb = _bag_render(d, max(idx, 0), stamp)
+                await query.edit_message_text(ctext, parse_mode="HTML", reply_markup=ckb, disable_web_page_preview=True)
+                return
         await query.edit_message_text(
             f"{text}\n<i>Updated {stamp} UTC</i>",
             parse_mode="HTML",
@@ -3425,16 +3533,12 @@ async def bag_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     status = await _progress(context.bot, chat_id, "🎒 Loading your bag…")
     try:
-        summary, panels = await asyncio.to_thread(_bag_build, uid)
+        d = await _bag_data(uid, force=True)
     except Exception as exc:
         await _done(context.bot, chat_id, status, str(exc))
         return
-    await _done(context.bot, chat_id, status, summary, parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Home", callback_data="go:home")]]))
-    for text, kb in panels:
-        await update.effective_message.reply_text(
-            text, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True
-        )
+    text, kb = _bag_render(d, 0)
+    await _done(context.bot, chat_id, status, text, parse_mode="HTML", reply_markup=kb)
 
 
 async def livesell_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -6708,6 +6812,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     if data.startswith("bagr:"):
         await _refresh_bag_panel(query, uid, data[5:])
+        return
+    if data.startswith("bagn:") or data == "bagl":
+        await _bag_page_callback(query, uid, data)
         return
     if data.startswith("pnlc:"):
         await _send_pnl_card(context.bot, uid, data[5:])

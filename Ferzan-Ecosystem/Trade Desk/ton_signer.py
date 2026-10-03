@@ -148,14 +148,6 @@ def jetton_amount_pub(owner: str, jetton: str) -> float | None:
         return None
 
 
-_ADDR: dict[str, str] = {}  # public key (hex) -> wallet address, filled by every lookup that worked
-
-
-def _remember_addr(seed64: bytes, addr: str) -> None:
-    if addr:
-        _ADDR[bytes(seed64[32:]).hex()] = addr
-
-
 def _offline_address(seed64: bytes) -> str | None:
     """The wallet address from the key alone (no network): remembered from an earlier lookup, else derived.
     None if neither works."""
@@ -429,23 +421,72 @@ async def _swap_ton_to_jetton(
         await provider.close_all()
 
 
+def _http_jetton_info(owner: str, jetton: str) -> tuple[str | None, int] | None:
+    """(jetton-wallet address or None, raw balance) from tonapi. (None, 0) when the owner holds none of it,
+    None when the answer could not be read."""
+    try:
+        r = requests.get(f"https://tonapi.io/v2/accounts/{owner}/jettons/{jetton}", headers=_headers(), timeout=10)
+        if r.status_code == 404:
+            return None, 0
+        if r.status_code != 200:
+            return None
+        j = r.json() or {}
+        return ((j.get("wallet_address") or {}).get("address") or None), int(j.get("balance") or 0)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _is_empty_wallet_error(exc: Exception) -> bool:
+    """True when a get-method failed because the contract itself is missing or not active (a jetton wallet that
+    was never deployed), as opposed to the liteserver being behind, busy or unreachable."""
+    low = str(exc).lower()
+    if "651" in low or "cannot load block" in low or "out of sync" in low or "not in db" in low or "liteserver" in low:
+        return False
+    return type(exc).__name__ == "RunGetMethodError" or "exit code" in low or "exit_code" in low
+
+
 async def _jetton_wallet_and_balance(provider, jetton_master: str, owner) -> tuple[object, int]:
     """TEP-74: ask the jetton master for owner's jetton-wallet address, then
-    read that wallet's balance. Balance 0 if the jetton wallet isn't deployed."""
+    read that wallet's balance. Balance 0 only when the jetton wallet is truly not deployed: a node that is behind
+    or busy is retried, then tonapi is asked, and if nobody answers this raises (it never reports a fake 0)."""
+    import asyncio
+
     from pytoniq_core import Address, begin_cell
 
-    res = await provider.run_get_method(
-        address=Address(jetton_master),
-        method="get_wallet_address",
-        stack=[begin_cell().store_address(owner).end_cell().begin_parse()],
-    )
-    jw = res[0].load_address()
-    try:
-        data = await provider.run_get_method(address=jw, method="get_wallet_data", stack=[])
-        bal = int(data[0])
-    except Exception:
-        bal = 0
-    return jw, bal
+    owner_str = owner.to_str(is_user_friendly=True, is_bounceable=False) if hasattr(owner, "to_str") else str(owner)
+    last: Exception | None = None
+    jw = None
+    for i in range(3):
+        try:
+            res = await provider.run_get_method(
+                address=Address(jetton_master),
+                method="get_wallet_address",
+                stack=[begin_cell().store_address(owner).end_cell().begin_parse()],
+            )
+            jw = res[0].load_address()
+            break
+        except Exception as exc:  # noqa: BLE001
+            last = exc
+            await asyncio.sleep(1.0 * (i + 1))
+    if jw is None:
+        info = await asyncio.to_thread(_http_jetton_info, owner_str, jetton_master)
+        if info is not None:
+            addr, raw = info
+            return (Address(addr) if addr else None), raw
+        raise last if last else RuntimeError("jetton wallet lookup failed")
+    for i in range(3):
+        try:
+            data = await provider.run_get_method(address=jw, method="get_wallet_data", stack=[])
+            return jw, int(data[0])
+        except Exception as exc:  # noqa: BLE001
+            if _is_empty_wallet_error(exc):
+                return jw, 0
+            last = exc
+            await asyncio.sleep(1.0 * (i + 1))
+    info = await asyncio.to_thread(_http_jetton_info, owner_str, jetton_master)
+    if info is not None:
+        return jw, info[1]
+    raise last if last else RuntimeError("jetton balance lookup failed")
 
 
 def _jetton_decimals(jetton: str) -> int:
@@ -789,7 +830,7 @@ def buy_ton(jetton: str, usd: float, secret: str | None = None, slip_bps: int = 
         try:
             return _curve_buy(ci, jetton, nano, usd, seed64, slip_bps or CURVE_SLIP_BPS)
         except Exception as exc:
-            return False, f"TON curve buy failed: {str(exc)[:160]}. Check your wallet before retrying."
+            return False, f"TON curve buy failed: {_friendly_err(exc)} Check your wallet before retrying."
 
     sim = simulate(jetton, str(nano))
     if sim.get("error"):
@@ -870,11 +911,11 @@ def sell_ton(jetton: str, secret: str | None = None, pct: int = 100, slip: str =
         try:
             return _curve_sell(ci, jetton, pct, seed64, int(float(slip) * 10_000) or CURVE_SLIP_BPS)
         except Exception as exc:
-            return False, f"TON curve sell failed: {str(exc)[:160]}. Check your wallet before retrying."
+            return False, f"TON curve sell failed: {_friendly_err(exc)} Check your wallet before retrying."
     try:
         return _run_async(_swap_jetton_to_ton(seed64, jetton, pct, slip))
     except Exception as exc:
-        return False, f"TON sell failed: {exc}"
+        return False, f"TON sell failed: {_friendly_err(exc)}"
 
 
 def status_text() -> str:

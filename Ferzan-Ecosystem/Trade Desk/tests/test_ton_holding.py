@@ -55,6 +55,29 @@ class JettonAmount(unittest.TestCase):
         self.assertEqual(t._offline_address(seed), "UQremembered")
 
 
+class SellReads(unittest.TestCase):
+    def test_node_errors_are_not_an_empty_wallet(self):
+        node = RuntimeError("Liteserver crashed with 651 code. Message: cannot load block")
+        self.assertFalse(t._is_empty_wallet_error(node))
+        self.assertTrue(t._is_empty_wallet_error(RuntimeError("run_get_method failed, exit code -13")))
+        self.assertFalse(t._is_empty_wallet_error(RuntimeError("timed out")))
+
+    def test_http_info_reads_wallet_and_raw_balance(self):
+        ans = R(200, {"balance": "123", "wallet_address": {"address": "0:abc"}})
+        with mock.patch.object(t.requests, "get", return_value=ans):
+            self.assertEqual(t._http_jetton_info("UQo", "EQj"), ("0:abc", 123))
+        with mock.patch.object(t.requests, "get", return_value=R(404)):
+            self.assertEqual(t._http_jetton_info("UQo", "EQj"), (None, 0))
+        with mock.patch.object(t.requests, "get", return_value=R(500)):
+            self.assertIsNone(t._http_jetton_info("UQo", "EQj"))
+
+    def test_friendly_error_for_the_exact_screenshot_message(self):
+        msg = ("Liteserver crashed with 651 code. Message: cannot load block (0,8000000000000000,101199520):9AA5F : block "
+               "is not in db (possibly out of sync: shard_client_seqno=96648191 ls_seqno=96681423)")
+        self.assertIn("out of sync", t._friendly_err(RuntimeError(msg)))
+        self.assertNotIn("shard_client_seqno", t._friendly_err(RuntimeError(msg)))
+
+
 class MiniAppPositions(unittest.TestCase):
     def test_ton_position_with_pnl(self):
         import portfolio as p
