@@ -17,14 +17,14 @@ from web3 import Web3
 
 CHAINS = {
     "bsc": {
-        "rpc": "https://bsc-dataseed.binance.org", "chain_id": 56, "sym": "BNB", "fee_wei": 1 * 10**15,  # 0.001 BNB (was 0.015)
+        "rpc": "https://bsc-dataseed.binance.org", "chain_id": 56, "sym": "BNB", "fee_wei": 0,  # free (was 0.015 BNB); trading fees pay for the platform
         "dex": "PancakeSwap V2", "dex_factory": "0xcA143Ce32Fe78f1f7019d7d551a6402fC5350c73",
         "weth": "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c", "weth_symbol": "WBNB",
         "probe": "0x55d398326f99059fF775485246999027B3197955",  # USDT: a WBNB/USDT pool must exist
         "env": "FACTORY_BSC_CURVE", "explorer": "https://bscscan.com/address/",
     },
     "base": {
-        "rpc": "https://mainnet.base.org", "chain_id": 8453, "sym": "ETH", "fee_wei": 2 * 10**14,  # 0.0002 ETH (was 0.003)
+        "rpc": "https://mainnet.base.org", "chain_id": 8453, "sym": "ETH", "fee_wei": 0,  # free (was 0.003 ETH)
         "dex": "Uniswap V2", "dex_factory": "0x8909Dc15e40173Ff4699343b6eB8132c65e18eC6",
         "weth": "0x4200000000000000000000000000000000000006", "weth_symbol": "WETH",
         "probe": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",  # USDC: a WETH/USDC pool must exist
@@ -32,14 +32,14 @@ CHAINS = {
     },
     "ethereum": {
         "rpc": "https://ethereum-rpc.publicnode.com", "rpc_env": "ETHEREUM_RPC_URL", "chain_id": 1, "sym": "ETH",
-        "fee_wei": 2 * 10**14, "dex": "Uniswap V2", "dex_factory": "0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f",
+        "fee_wei": 0, "dex": "Uniswap V2", "dex_factory": "0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f",
         "weth": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2", "weth_symbol": "WETH",
         "probe": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",  # USDC: a WETH/USDC pool must exist
         "env": "FACTORY_ETH_CURVE", "explorer": "https://etherscan.io/address/",
     },
     "robinhood": {
         "rpc": "https://rpc.mainnet.chain.robinhood.com", "rpc_env": "ROBINHOOD_RPC_URL", "chain_id": 4663, "sym": "ETH",
-        "fee_wei": 2 * 10**14, "dex": "Uniswap V2", "dex_factory": "0x8bceaa40b9acdfaedf85adf4ff01f5ad6517937f",
+        "fee_wei": 0, "dex": "Uniswap V2", "dex_factory": "0x8bceaa40b9acdfaedf85adf4ff01f5ad6517937f",
         "weth": "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73", "weth_symbol": "WETH",
         # no well-known stable pool yet: verify via Uniswap's official Router02 (its factory() and WETH() must match)
         "router": "0x89e5db8b5aa49aa85ac63f691524311aeb649eba",

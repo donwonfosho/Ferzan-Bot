@@ -7,7 +7,7 @@ Deploy and test Ferzan's Tron launch contracts (FerzanTrc20 master + FerzanTronF
   python scripts/tron_deploy.py mainnet plan|send|test
 
 Deployer: /opt/ferzan/dbc-keys/evm-deployer.json (the same key as the EVM deploys; Tron address derived from it).
-Treasury (mainnet): PLATFORM_TREASURY_TRX in /opt/ferzan/.env. Launch fee: TRON_FEE_TRX (default 5 TRX; Nile 1 TRX).
+Treasury (mainnet): PLATFORM_TREASURY_TRX in /opt/ferzan/.env. Launch fee: TRON_FEE_TRX (default 0 = free; Nile 1 TRX).
 Addresses are saved in /opt/ferzan/dbc-keys/tron-factories.json before anything else, so nothing deploys twice.
 """
 import hashlib
@@ -141,7 +141,7 @@ def main():
     rec = json.loads(RECORD.read_text()) if RECORD.exists() else {}
     net = rec.setdefault(NET, {})
     owner, key = deployer()
-    fee_trx = float(env_file().get("TRON_FEE_TRX") or (1 if NET == "nile" else 5))
+    fee_trx = float(env_file().get("TRON_FEE_TRX") or (1 if NET == "nile" else 0))
     fee_sun = int(fee_trx * 1_000_000)
     treasury = owner if NET == "nile" else (env_file().get("PLATFORM_TREASURY_TRX") or "").strip()
     if not treasury.startswith("T") or len(treasury) != 34:

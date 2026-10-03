@@ -165,7 +165,7 @@ def main():
     if NET == "nile":  # the .env settings are mainnet's: Nile always uses small test values
         fee_trx, reward_trx, min_grad_trx = 1.0, 5.0, 10.0
     else:
-        fee_trx = float(env.get("TRON_CURVE_FEE_TRX") or 5)
+        fee_trx = float(env.get("TRON_CURVE_FEE_TRX") or 0)
         reward_trx = float(env.get("TRON_CURVE_GRAD_REWARD_TRX") or 300)
         min_grad_trx = float(env.get("TRON_CURVE_MIN_GRAD_TRX") or 5000)
     treasury = owner if NET == "nile" else (env.get("PLATFORM_TREASURY_TRX") or "").strip()

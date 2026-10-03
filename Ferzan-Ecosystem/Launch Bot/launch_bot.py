@@ -66,7 +66,7 @@ NATIVE = {"ethereum": "ETH", "bsc": "BNB", "base": "ETH", "robinhood": "ETH", "a
 # env-var prefix used by api.py for factory addresses
 FACTORY_KEY = {"ethereum": "ETH", "bsc": "BSC", "base": "BASE", "robinhood": "HOOD", "arc": "ARC"}
 # the plain factories' fixed launch fee (set in the contract at deploy time)
-PLAIN_FEE_TEXT = {"bsc": "0.001 BNB", "base": "0.0002 ETH", "ethereum": "0.0002 ETH", "robinhood": "0.0002 ETH", "arc": "1 USDC"}
+PLAIN_FEE_TEXT = {"bsc": "Free", "base": "Free", "ethereum": "Free", "robinhood": "Free", "arc": "1 USDC"}
 
 # quick-pick presets
 SUPPLY_PRESETS = [("1M", 10**6), ("100M", 10**8), ("1B", 10**9), ("10B", 10**10), ("100B", 10**11), ("1T", 10**12)]
@@ -1531,7 +1531,7 @@ async def _show_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tinfo = await tron.run("info", {"uid": update.effective_user.id, "curve": mode == "bonding_curve",
                                         "dev_buy_sun": dev_sun}, timeout=45)
         fee = tinfo.get("fee_trx")
-        rows.append(("Launch fee", (f"{fee:g} TRX" if fee is not None else "the Ferzan fee")
+        rows.append(("Launch fee", ("Free" if fee == 0 else f"{fee:g} TRX" if fee is not None else "the Ferzan fee")
                      + f" + about {tinfo.get('energy_trx', 16)} TRX of Tron network energy"))
         rows.append(("Paid from", "your Ferzan Trade Bot wallet"))
     text = "<b>Review your launch</b>\n\n" + "\n".join(f"{_esc(k)}: <b>{_esc(v)}</b>" for k, v in rows)
