@@ -188,6 +188,21 @@ def fetch_new_pools(chain: str | None = None, limit: int = 20) -> list[Launch]:
     return out
 
 
+def pick_launches(rows: list, n: int = 6) -> list:
+    """One card per token, real new/trending pools first, paid DexScreener boosts only
+    fill what is left, never more than n."""
+    seen: set[str] = set()
+    organic: list = []
+    paid: list = []
+    for ln in rows:
+        key = str(getattr(ln, "token", "") or getattr(ln, "pool", ""))
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        (paid if getattr(ln, "source", "") == "dexscreener-boost" else organic).append(ln)
+    return (organic + paid)[: max(0, int(n))]
+
+
 def _ds_chain_pairs(cid: str) -> list[Launch]:
     meta = CHAINS.get(cid) or {}
     ds = (meta.get("dexscreener") or cid).lower()

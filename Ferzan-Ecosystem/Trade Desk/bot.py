@@ -5547,7 +5547,8 @@ async def launches_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not await guard(update):
         return
     chain = resolve_chain(context.args[0]) if context.args else None
-    launches = sniper.fetch_new_pools(chain, limit=6)
+    launches = await asyncio.to_thread(sniper.fetch_new_pools, chain, 6)
+    launches = sniper.pick_launches(launches, 6)  # fetch_new_pools ignores its limit: this is what flooded the chat
     if not launches:
         await update.effective_message.reply_text(
             "No fresh pools right now. Try /launches sol"
