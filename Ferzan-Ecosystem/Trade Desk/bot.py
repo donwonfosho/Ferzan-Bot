@@ -63,6 +63,7 @@ import signer
 import sniper
 import trading
 import user_wallets
+import natives
 import crossbuy
 import withdraw
 from chains import ACTIVE, CHAINS, chain_list, resolve_chain
@@ -3346,6 +3347,8 @@ def _bag_build(uid: int) -> tuple[str, list[tuple[str, InlineKeyboardMarkup]]]:
     sol_secret, _evm = user_wallets.secrets(uid)
     kp = signer.keypair_from_secret(sol_secret)
     addr = str(kp.pubkey())
+    _nat = _native_readers(uid)
+    natives.prime(_nat)  # every chain's gas coin is read alongside the token reads below
     rows = signer.holdings(sol_secret, strict=True)  # raises on an RPC error: an empty bag must mean empty
     lamports = signer.sol_balance_lamports(addr)
     positions: list[tuple[str, float, str, str]] = [
@@ -3446,7 +3449,9 @@ def _bag_build(uid: int) -> tuple[str, list[tuple[str, InlineKeyboardMarkup]]]:
         summary += f"\n\n⚠️ Couldn't read {unread} TON/Tron token balance{'s' if unread != 1 else ''} just now. Open /bag again in a few seconds."
     if not positions and not unread:
         summary += "\n\nNo tokens yet. Paste a CA to buy."
-    head = f"🎒 <b>Your bag</b> · {len(positions)} position{'s' if len(positions) != 1 else ''}\n💰 {lamports / 1e9:.4f} SOL"
+    _vals = natives.collect(_nat, wait=2.5)
+    _vals["sol"] = lamports / 1e9  # already read above and known good
+    head = f"🎒 <b>Your bag</b> · {len(positions)} position{'s' if len(positions) != 1 else ''}\n" + natives.header_line(_vals)
     if priced > 0:
         tp = total_worth - total_cost
         head += f"\n{'🟢' if tp >= 0 else '🔴'} Portfolio <b>{tp:+,.2f} USD</b> ({(tp / total_cost * 100) if total_cost > 0 else 0.0:+.1f}%) · worth ${total_worth:,.2f}"
@@ -3487,13 +3492,89 @@ def _bag_store(uid: int, panels, infos, head: str) -> dict:
     return d
 
 
+def _native_readers(uid: int) -> dict:
+    """{chain key: (address, reader)} for the gas coin of every main chain, for the ACTIVE wallet."""
+    w = db.get_user_wallet(uid) or {}
+    sol_pub, evm_pub = w.get("sol_pub", ""), w.get("evm_pub", "")
+    readers: dict = {}
+    if sol_pub:
+        readers["sol"] = (sol_pub, lambda: signer.sol_balance_lamports(sol_pub) / 1e9)
+    if evm_pub:
+        for key, _label, _sym, kind, _gid in natives.CHAINS:
+            if kind == "evm":
+                readers[key] = (evm_pub, (lambda k=key: evm_signer.native_balance(k, evm_pub)[0]))
+    try:
+        sol_secret, evm_secret = user_wallets.secrets(uid)
+    except Exception:
+        return readers
+
+    def _ton():
+        import ton_signer
+
+        return ton_signer.address_and_balance(sol_secret)[1]
+
+    def _trx():
+        import tron_signer
+
+        addr_t, _ = tron_signer.evm_key_to_tron(evm_secret.replace("0x", ""))
+        return tron_signer._trx_balance(tron_signer._to_hex(addr_t)) / 1e6
+
+    if sol_pub:
+        readers["ton"] = (sol_pub + ":ton", _ton)
+    if evm_pub:
+        readers["trx"] = (evm_pub + ":trx", _trx)
+    return readers
+
+
+def _balances_view(uid: int, force: bool = False) -> tuple[str, InlineKeyboardMarkup]:
+    """The Balances screen: every main chain's gas coin for the active wallet, with USD. Blocking."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    readers = _native_readers(uid)
+    natives.prime(readers, ttl=0.0 if force else 30.0)
+    vals = natives.collect(readers, wait=9.0)
+    gids = sorted({g for k, _l, _s, _kd, g in natives.CHAINS if (vals.get(k) or 0) > 0})
+    prices: dict = {}
+    if gids:
+        from portfolio import _price
+
+        with ThreadPoolExecutor(max_workers=4) as ex:
+            for gid, px in zip(gids, ex.map(_price, gids)):
+                prices[gid] = px
+    text = natives.balances_text(vals, prices, html.escape(user_wallets.active_label(uid)))
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔄 Refresh", callback_data="bal:r"), InlineKeyboardButton("📊 Bag", callback_data="go:bag")],
+        [InlineKeyboardButton("👛 Wallets", callback_data="go:wallets"), InlineKeyboardButton("📤 Send", callback_data="go:withdraw")],
+        [InlineKeyboardButton("↩️ Home", callback_data="go:home")],
+    ])
+    return text, kb
+
+
+async def balances_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard(update):
+        return
+    status = await update.effective_message.reply_text("⏳ Reading balances…")
+    text, kb = await asyncio.to_thread(_balances_view, update.effective_user.id)
+    try:
+        await status.edit_text(text, parse_mode="HTML", reply_markup=kb)
+    except Exception:
+        await update.effective_message.reply_text(text, parse_mode="HTML", reply_markup=kb)
+
+
+_BAG_MONEY_ROW = [("💰 Balances", "go:balances"), ("👛 Wallets", "go:wallets")]
+
+
+def _bag_money_row() -> list:
+    return [InlineKeyboardButton(t, callback_data=c) for t, c in _BAG_MONEY_ROW]
+
+
 def _bag_render(d: dict, i: int, stamp: str = "") -> tuple[str, InlineKeyboardMarkup]:
     """The single bag card for page `i`: portfolio line, the position, its action buttons, then the pager."""
     home = [InlineKeyboardButton("📤 Send", callback_data="go:withdraw"), InlineKeyboardButton("↩️ Home", callback_data="go:home")]
     pages = d["pages"]
     n = len(pages)
     if n == 0:
-        return f"{d['head']}\n\nNo tokens yet. Paste a CA to buy.", InlineKeyboardMarkup([home])
+        return f"{d['head']}\n\nNo tokens yet. Paste a CA to buy.", InlineKeyboardMarkup([_bag_money_row(), home])
     i %= n
     pg = pages[i]
     text = f"{d['head']}\n\n<b>{i + 1} of {n}</b>\n{pg['text']}"
@@ -3505,6 +3586,7 @@ def _bag_render(d: dict, i: int, stamp: str = "") -> tuple[str, InlineKeyboardMa
         nav = [InlineKeyboardButton("◀️ Prev", callback_data=f"bagn:{(i - 1) % n}")] + nav + [
             InlineKeyboardButton("Next ▶️", callback_data=f"bagn:{(i + 1) % n}")]
     rows.append(nav)
+    rows.append(_bag_money_row())
     rows.append(home)
     return text, InlineKeyboardMarkup(rows)
 
@@ -3522,6 +3604,7 @@ def _bag_list(d: dict) -> tuple[str, InlineKeyboardMarkup]:
         label = f"{i + 1}. ${inf['sym']} · {inf['venue']} · {worth}{tag}"
         lines.append(html.escape(label))
         btns.append([InlineKeyboardButton(label[:60], callback_data=f"bagn:{i}")])
+    btns.append(_bag_money_row())
     btns.append([InlineKeyboardButton("📤 Send", callback_data="go:withdraw"), InlineKeyboardButton("↩️ Home", callback_data="go:home")])
     return "\n".join(lines), InlineKeyboardMarkup(btns)
 
@@ -6442,6 +6525,13 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     uid = update.effective_user.id
     data = query.data or ""
+    if data == "bal:r":
+        text, kb = await asyncio.to_thread(_balances_view, uid, True)
+        try:
+            await query.edit_message_text(text, parse_mode="HTML", reply_markup=kb)
+        except Exception:
+            pass  # unchanged text: Telegram refuses an identical edit
+        return
     if data.startswith("bagh:"):
         db.set_flag(uid, f"hide:{data[5:]}", True)
         _BAG_CACHE.pop(uid, None)
@@ -6759,6 +6849,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         elif kind == "launches":
             context.args = ["sol"]
             await launches_cmd(update, context)
+        elif kind == "balances":
+            await balances_cmd(update, context)
         elif kind == "chains":
             await chains_cmd(update, context)
         elif kind == "fees":
@@ -9897,6 +9989,7 @@ def main() -> None:
     app.add_handler(CommandHandler("cancelsnipe", cancelsnipe_cmd))
     app.add_handler(CommandHandler("launches", launches_cmd))
     app.add_handler(CommandHandler("unhide", unhide_cmd))
+    app.add_handler(CommandHandler("balances", balances_cmd))
     app.add_handler(CommandHandler("chains", chains_cmd))
     app.add_handler(CommandHandler("quote", quote_cmd))
     app.add_handler(CommandHandler("menu", start))

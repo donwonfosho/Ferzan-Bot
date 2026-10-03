@@ -68,6 +68,8 @@ class BagCard(unittest.TestCase):
         self.assertIn("bagn:1", cbs)
         self.assertIn("bagl", cbs)
         self.assertIn("slp:25:M0", cbs)  # the position's own sell buttons stay on the card
+        self.assertIn("go:balances", cbs)  # gas coins on every chain
+        self.assertIn("go:wallets", cbs)
         t2, k2 = bot._bag_render(d, 2)
         self.assertIn("3 of 3", t2)
         self.assertIn("bagn:0", [b.callback_data for row in k2.inline_keyboard for b in row])
@@ -86,6 +88,7 @@ class BagCard(unittest.TestCase):
         text, kb = bot._bag_list(d)
         cbs = [b.callback_data for row in kb.inline_keyboard for b in row]
         self.assertEqual([c for c in cbs if c.startswith("bagn:")], ["bagn:0", "bagn:1"])
+        self.assertIn("go:balances", cbs)
         self.assertIn("$S0", text)
 
     def test_empty_bag(self):
@@ -93,6 +96,7 @@ class BagCard(unittest.TestCase):
         d = _mk(bot, 0)
         text, kb = bot._bag_render(d, 0)
         self.assertIn("No tokens yet", text)
+        self.assertIn("go:balances", [b.callback_data for row in kb.inline_keyboard for b in row])
 
     def test_standalone_panel_is_not_a_card(self):
         bot = _bot()

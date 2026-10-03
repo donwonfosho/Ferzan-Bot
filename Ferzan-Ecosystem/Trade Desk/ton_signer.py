@@ -252,6 +252,13 @@ def address_and_balance(secret: str) -> tuple[str, float]:
     """(TON address, TON balance) for the wallet derived from `secret` —
     same ed25519 key as the user's Solana wallet, different derived address."""
     seed64 = _ton_keypair_bytes(secret)
+    # Fast path: the address comes from the key and the balance from the public HTTP APIs (about a
+    # second). The slow liteserver round trips below are only for when that does not answer.
+    _fast = _offline_address(seed64)
+    if _fast:
+        _nano = _http_balance_nano(_fast)
+        if _nano is not None:
+            return _fast, _nano / 1e9
     last: Exception | None = None
     for attempt in range(3):  # read-only lookup: public liteservers are often busy, so retry before giving up
         try:

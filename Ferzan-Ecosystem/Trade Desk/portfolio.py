@@ -134,6 +134,50 @@ def _ton_tron_positions(uid: int, evm_pub: str) -> tuple[list[dict], int]:
     return out, unread
 
 
+def _other_natives(uid: int, evm_pub: str) -> tuple[list[dict], int]:
+    """Gas coins on every main chain besides SOL and Base (those have their own tiles). Public reads only.
+    Returns ([{key, label, symbol, amount, usd}] for chains holding something, number of reads that failed)."""
+    import natives
+
+    readers: dict = {}
+    if evm_pub:
+        import evm_signer as ev
+
+        for key, _label, _sym, kind, _gid in natives.CHAINS:
+            if kind == "evm" and key != "base":
+                readers[key] = (evm_pub, (lambda k=key: ev.native_balance(k, evm_pub)[0]))
+
+        def _trx():
+            import tron_signer as t
+
+            return t._trx_balance(t._to_hex(evm_pub)) / 1e6
+
+        readers["trx"] = (evm_pub + ":trx", _trx)
+    ton_addr = db.get_ton_addr(uid)
+    if ton_addr:
+        def _ton():
+            import ton_signer
+
+            nano = ton_signer._http_balance_nano(ton_addr)
+            if nano is None:
+                raise RuntimeError("TON balance unreadable")
+            return nano / 1e9
+
+        readers["ton"] = (ton_addr, _ton)
+    natives.prime(readers)
+    vals = natives.collect(readers, wait=4.0)
+    held = [(k, v) for k, v in vals.items() if v and v > 0]
+    prices: dict = {}
+    for gid in {natives.BY_KEY[k][4] for k, _v in held}:
+        prices[gid] = _price(gid)
+    out = []
+    for k, v in held:
+        _k, label, sym, _kind, gid = natives.BY_KEY[k]
+        px = prices.get(gid)
+        out.append({"key": k, "label": label, "symbol": sym, "amount": v, "usd": (v * px) if px else None})
+    return out, sum(1 for v in vals.values() if v is None)
+
+
 def build_portfolio(uid: int) -> dict:
     # Public data only: this internet-facing process never decrypts a key
     # and never creates wallets (that happens in the bot).
@@ -204,7 +248,13 @@ def build_portfolio(uid: int) -> dict:
         unread += 1  # a slow TON/Tron lookup must never blank the whole Bags screen
     positions.sort(key=lambda p: p["value"], reverse=True)
 
+    try:
+        others, miss_n = _other_natives(uid, evm_pub)
+        unread += miss_n
+    except Exception:
+        others, unread = [], unread + 1
     native_usd = (sol_bal * sol_px if sol_px else 0) + (float(eth_bal) * eth_px if eth_px else 0)
+    native_usd += sum(o["usd"] or 0 for o in others)
     total = native_usd + sum(p["value"] for p in positions)
     costed = [p for p in positions if p["pnl"] is not None]
     return {
@@ -222,6 +272,7 @@ def build_portfolio(uid: int) -> dict:
             for s in slots
         ],
         "positions": positions,
+        "others": others,
         "unread": unread,
         "ts": int(time.time()),
     }

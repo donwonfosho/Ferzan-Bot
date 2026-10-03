@@ -60,6 +60,9 @@
   .pnl { display: inline-flex; gap: 4px; align-items: center; font-weight: 600; font-size: 14px; margin-top: 4px; }
   .up { color: var(--gain); } .down { color: var(--loss); } .flat { color: var(--muted); }
   .tiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 20px 0 24px; }
+  .others { display: flex; flex-wrap: wrap; gap: 6px; margin: -12px 0 20px; }
+  .others .chip { background: var(--card); border-radius: 999px; padding: 6px 10px; font-size: 12px; color: var(--muted); }
+  .others .chip b { color: var(--text, inherit); font-weight: 600; }
   .tile { background: var(--card); border-radius: 14px; padding: 12px; min-width: 0; }
   .tile .k { color: var(--muted); font-size: 12px; }
   .tile .v { font-weight: 700; font-size: 16px; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -304,6 +307,8 @@
   <div class="tile"><div class="k">📊 Positions</div><div class="v num" id="npos">–</div><div class="s">open bags</div></div>
 </div>
 
+<div class="others" id="others" hidden></div>
+
 <div class="tiles perf rise" id="perf" hidden>
   <div class="tile"><div class="k">🏆 Best</div><div class="v num" id="bestV">–</div><div class="s num" id="bestS"></div></div>
   <div class="tile"><div class="k">📉 Worst</div><div class="v num" id="worstV">–</div><div class="s num" id="worstS"></div></div>
@@ -470,6 +475,14 @@
     $("eth").textContent = d.balances.eth_base.toFixed(5);
     $("ethUsd").textContent = d.balances.eth_usd == null ? "" : usd(d.balances.eth_usd);
     $("npos").textContent = String(d.positions.length);
+    const oth = $("others");
+    const others = d.others || [];
+    oth.hidden = !others.length;
+    oth.innerHTML = others.map((o) => {
+      const amt = o.amount >= 1 ? o.amount.toFixed(3) : o.amount.toFixed(4);
+      const val = o.usd == null ? "" : ` · ${usd(o.usd)}`;
+      return `<span class="chip"><b>${o.symbol}</b> ${amt} ${o.label}${val}</span>`;
+    }).join("");
     paintPerf(d.positions);
     paintFirstRun(d);
 
