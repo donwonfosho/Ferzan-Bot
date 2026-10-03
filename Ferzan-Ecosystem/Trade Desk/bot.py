@@ -1004,6 +1004,33 @@ def _status_strip() -> str:
     return "  ".join(bits)
 
 
+_PF_REFRESHING: set = set()
+
+
+def _portfolio_line_fast(uid: int) -> str:
+    """Home card version: a line under a minute old is used as is; one up to five minutes old is
+    shown instantly while a background thread refreshes it; only a cold cache waits for the reads."""
+    hit = _HOME_CACHE.get(("pf", uid))
+    age = (time.time() - hit[0]) if hit else None
+    if hit and age < 60:
+        return hit[1]
+    if hit and age < 300:
+        if uid not in _PF_REFRESHING:
+            import threading
+
+            _PF_REFRESHING.add(uid)
+
+            def _go():
+                try:
+                    _safe_call(_portfolio_line, uid)
+                finally:
+                    _PF_REFRESHING.discard(uid)
+
+            threading.Thread(target=_go, daemon=True).start()
+        return hit[1]
+    return _portfolio_line(uid)
+
+
 def _portfolio_line(uid: int) -> str:
     """'👛 Positions $1,240 · 🟢 +$38 (+3.1%) · 3 open' or ''. Blocking, cached 60s."""
     hit = _HOME_CACHE.get(("pf", uid))
@@ -1105,7 +1132,8 @@ async def _home_parts(uid: int, first_time: bool) -> tuple[str, list]:
     chat = html.escape(os.getenv("FERZAN_CHAT_URL") or "https://t.me/Ferzan_Chat", quote=True)
     xurl = html.escape(os.getenv("FERZAN_X_URL") or "https://x.com/ferzaneco", quote=True)
     foot = f'<a href="{hub}">Hub</a> · <a href="{chat}">Chat</a> · <a href="{xurl}">X</a>'
-    hot = await limited(_hot_rows, default=[])
+    pf_task = None if first_time else asyncio.ensure_future(limited(_portfolio_line_fast, uid, secs=2.0, default=""))
+    hot = await limited(_hot_rows, secs=2.0, default=[])
     strip = _status_strip()
     if first_time:
         text = (
@@ -1118,7 +1146,7 @@ async def _home_parts(uid: int, first_time: bool) -> tuple[str, list]:
             + f"\n{foot}"
         )
         return text, hot
-    pf = await limited(_portfolio_line, uid, secs=5.0, default="")
+    pf = await pf_task
     blocks = ["⚡ <b>FERZAN DESK</b>" + ("  ·  😈 <b>DEGEN MODE</b>" if _safe_call(db.degen_on, uid) else "")]
     blocks.append(pf if pf else "No open positions yet. Paste a token CA below to make your first trade.")
     lv = _safe_call(_level_line, uid)
@@ -1143,6 +1171,9 @@ def _webapp_url() -> str:
     """Mini App URL (must be https). Empty = app buttons hidden."""
     url = (os.getenv("FERZAN_WEBAPP_URL") or "").strip()
     return url if url.startswith("https://") else ""
+
+
+_BANNER_FILE_IDS: dict = {}
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1231,13 +1262,22 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if banner is None:
             pass
         elif banner.exists():
-            with banner.open("rb") as photo:
-                await target.reply_photo(
-                    photo=photo,
-                    caption=text,
-                    parse_mode="HTML",
-                    reply_markup=home_keyboard(private=bool(update.effective_chat and update.effective_chat.type == "private"), hot=hot),
-                )
+            kb_home = home_keyboard(private=bool(update.effective_chat and update.effective_chat.type == "private"), hot=hot)
+            fid = _BANNER_FILE_IDS.get(str(banner))
+            sent = None
+            if fid:  # already uploaded once: Telegram keeps it, so no re-upload on every tap
+                try:
+                    sent = await target.reply_photo(photo=fid, caption=text, parse_mode="HTML", reply_markup=kb_home)
+                except Exception:
+                    _BANNER_FILE_IDS.pop(str(banner), None)
+                    sent = None
+            if sent is None:
+                with banner.open("rb") as photo:
+                    sent = await target.reply_photo(photo=photo, caption=text, parse_mode="HTML", reply_markup=kb_home)
+                try:
+                    _BANNER_FILE_IDS[str(banner)] = sent.photo[-1].file_id
+                except Exception:
+                    pass
         else:
             await target.reply_text(
                 text,
@@ -2272,7 +2312,26 @@ def _curve_token_meta(mint: str, out: dict) -> dict:
     return out
 
 
+_META_CACHE: dict = {}
+
+
 def _token_meta(mint: str) -> dict:
+    """Price/name lookup with a short memory. A priced token is reused for 15s; a token with no
+    price (dead pool, no market) is remembered for 2 minutes, because looking one up costs several
+    slow network calls and used to be repeated on every bag/home open."""
+    hit = _META_CACHE.get(mint)
+    if hit:
+        ttl = 15.0 if float(hit[1].get("px") or 0) > 0 else 120.0
+        if time.time() - hit[0] < ttl:
+            return dict(hit[1])
+    out = _token_meta_fetch(mint)
+    if len(_META_CACHE) > 500:
+        _META_CACHE.clear()
+    _META_CACHE[mint] = (time.time(), dict(out))
+    return out
+
+
+def _token_meta_fetch(mint: str) -> dict:
     out = {"px": 0.0, "symbol": "", "name": "", "chain": ""}
     try:
         r = requests.get(
