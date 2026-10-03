@@ -16,9 +16,9 @@ from eth_account import Account
 from web3 import Web3
 
 CHAINS = {
-    "base": {"rpc": "https://mainnet.base.org", "chain_id": 8453, "fee_wei": 3 * 10**15, "sym": "ETH",
+    "base": {"rpc": "https://mainnet.base.org", "chain_id": 8453, "fee_wei": 2 * 10**14, "sym": "ETH",
              "env": "FACTORY_BASE_PLAIN", "explorer": "https://basescan.org/address/"},
-    "bsc": {"rpc": "https://bsc-dataseed.binance.org", "chain_id": 56, "fee_wei": 15 * 10**15, "sym": "BNB",
+    "bsc": {"rpc": "https://bsc-dataseed.binance.org", "chain_id": 56, "fee_wei": 1 * 10**15, "sym": "BNB",
             "env": "FACTORY_BSC_PLAIN", "explorer": "https://bscscan.com/address/"},
 }
 TOOLS = Path("/opt/ferzan/evm-tools")

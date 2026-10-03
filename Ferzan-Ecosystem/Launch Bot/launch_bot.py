@@ -66,7 +66,7 @@ NATIVE = {"ethereum": "ETH", "bsc": "BNB", "base": "ETH", "robinhood": "ETH", "a
 # env-var prefix used by api.py for factory addresses
 FACTORY_KEY = {"ethereum": "ETH", "bsc": "BSC", "base": "BASE", "robinhood": "HOOD", "arc": "ARC"}
 # the plain factories' fixed launch fee (set in the contract at deploy time)
-PLAIN_FEE_TEXT = {"bsc": "0.015 BNB", "base": "0.003 ETH", "ethereum": "0.003 ETH", "robinhood": "0.003 ETH", "arc": "1 USDC"}
+PLAIN_FEE_TEXT = {"bsc": "0.001 BNB", "base": "0.0002 ETH", "ethereum": "0.0002 ETH", "robinhood": "0.0002 ETH", "arc": "1 USDC"}
 
 # quick-pick presets
 SUPPLY_PRESETS = [("1M", 10**6), ("100M", 10**8), ("1B", 10**9), ("10B", 10**10), ("100B", 10**11), ("1T", 10**12)]
