@@ -15,6 +15,8 @@ from dataclasses import dataclass
 
 import requests
 
+import apicache
+
 TIMEOUT = 8
 
 SOL_MINT = "So11111111111111111111111111111111111111112"
@@ -107,19 +109,26 @@ def _dexscreener():
 
 
 def _geckoterminal():
-    r = requests.get("https://api.geckoterminal.com/api/v2/networks/solana/new_pools", timeout=TIMEOUT)
-    rows = (r.json() or {}).get("data") or []
-    return (bool(rows), f"{len(rows)} new pools" if rows else f"HTTP {r.status_code}")
+    r = apicache.get("https://api.geckoterminal.com/api/v2/networks/solana/new_pools", timeout=TIMEOUT, ttl=120)
+    rows = (r.json() or {}).get("data") or [] if r.ok else []
+    if rows:
+        return (True, f"{len(rows)} new pools")
+    wait = apicache.cooling("api.geckoterminal.com")
+    return (False, f"rate limited, backing off {wait:.0f}s (normal, clears itself)" if wait else f"HTTP {r.status_code}")
 
 
 def _coingecko():
-    r = requests.get(
+    r = apicache.get(
         "https://api.coingecko.com/api/v3/simple/price",
         params={"ids": "solana", "vs_currencies": "usd"},
         timeout=TIMEOUT,
+        ttl=120,
     )
-    px = ((r.json() or {}).get("solana") or {}).get("usd")
-    return (bool(px), f"SOL ${px}" if px else f"HTTP {r.status_code} (rate limit?)")
+    px = (((r.json() or {}).get("solana") or {}).get("usd")) if r.ok else None
+    if px:
+        return (True, f"SOL ${px}")
+    wait = apicache.cooling("api.coingecko.com")
+    return (False, f"rate limited, backing off {wait:.0f}s (normal, clears itself)" if wait else f"HTTP {r.status_code} (rate limit?)")
 
 
 def _stonfi():

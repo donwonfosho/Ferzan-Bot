@@ -2074,6 +2074,16 @@ def _page_button(label: str, url: str, private: bool) -> InlineKeyboardButton:
     return InlineKeyboardButton(label, web_app=WebAppInfo(url=url)) if private else InlineKeyboardButton(label, url=url)
 
 
+async def launchday_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admins only, and silent for everyone else: one screen of what is ready for launch day."""
+    if not update.effective_user or update.effective_user.id not in _admin_ids():
+        return
+    import launch_day
+
+    text = await asyncio.to_thread(launch_day.report)
+    await update.effective_message.reply_text(text, parse_mode="HTML", disable_web_page_preview=True)
+
+
 async def claim_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     private = bool(chat and chat.type == "private")
@@ -2322,6 +2332,7 @@ def main():
     app.add_handler(CallbackQueryHandler(go_history, pattern="^go:history$"))
     app.add_handler(CommandHandler("drafts", drafts_cmd))
     app.add_handler(CommandHandler("claim", claim_cmd))
+    app.add_handler(CommandHandler("launchday", launchday_cmd))
     app.add_handler(CommandHandler("new", feed_cmd))
     app.add_handler(CommandHandler("top", top_cmd))
     app.add_handler(CommandHandler("revenue", revenue_cmd))

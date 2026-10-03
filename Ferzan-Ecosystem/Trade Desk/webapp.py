@@ -33,6 +33,7 @@ from fastapi.responses import FileResponse, JSONResponse
 HERE = Path(__file__).resolve().parent
 load_dotenv(HERE / ".env")
 
+import apicache  # noqa: E402
 import db  # noqa: E402
 import portfolio  # noqa: E402
 
@@ -720,13 +721,13 @@ def candles_for(mint: str) -> dict:
     if hit and time.time() - hit[0] < 45:
         return hit[1]
     h = {"accept": "application/json;version=20230302"}
-    pools = requests.get(f"https://api.geckoterminal.com/api/v2/networks/{net}/tokens/{mint}/pools?page=1",
-                         headers=h, timeout=6).json()
+    pools = apicache.get(f"https://api.geckoterminal.com/api/v2/networks/{net}/tokens/{mint}/pools?page=1",
+                         headers=h, timeout=6, ttl=600).json()
     pool = ((pools.get("data") or [{}])[0].get("attributes") or {}).get("address")
     if not pool:
         raise LookupError("no pool")
-    j = requests.get(f"https://api.geckoterminal.com/api/v2/networks/{net}/pools/{pool}/ohlcv/minute"
-                     "?aggregate=5&limit=96&currency=usd", headers=h, timeout=6).json()
+    j = apicache.get(f"https://api.geckoterminal.com/api/v2/networks/{net}/pools/{pool}/ohlcv/minute"
+                     "?aggregate=5&limit=96&currency=usd", headers=h, timeout=6, ttl=30).json()
     rows = ((j.get("data") or {}).get("attributes") or {}).get("ohlcv_list") or []
     rows = sorted(rows, key=lambda r: r[0])
     out = {"candles": [[int(r[0]), float(r[1]), float(r[2]), float(r[3]), float(r[4])] for r in rows if len(r) >= 5],

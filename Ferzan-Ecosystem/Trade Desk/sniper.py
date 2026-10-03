@@ -18,6 +18,7 @@ from typing import Any
 
 import requests
 
+import apicache
 import db
 import trading
 from chains import CHAINS, resolve_chain
@@ -81,7 +82,7 @@ def fetch_new_pools(chain: str | None = None, limit: int = 20) -> list[Launch]:
     out: list[Launch] = []
     for gid, url in urls:
         try:
-            r = requests.get(url, headers=_headers(), timeout=TIMEOUT)
+            r = apicache.get(url, headers=_headers(), timeout=TIMEOUT, ttl=45)
             r.raise_for_status()
             chunk = (r.json() or {}).get("data") or []
         except requests.RequestException:

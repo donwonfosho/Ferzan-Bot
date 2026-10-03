@@ -3,6 +3,7 @@ from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import requests
 import price_fetcher as pf
+import apicache
 
 
 class R:
@@ -25,6 +26,7 @@ def dex(addr, px, liq):
 class Fallback(unittest.TestCase):
     def setUp(self):
         pf._LAST.clear()
+        apicache.clear()
 
     def get(self, cg, dx):
         def fake(url, **kw):
@@ -49,6 +51,7 @@ class Fallback(unittest.TestCase):
     def test_last_good_used_then_expires(self):
         with self.get(R(200, {"ethereum": {"usd": 3000.0}}), R()):
             pf.get_price_usd("ethereum")
+        apicache.clear()  # the 20s answer cache would otherwise hide the outage this test simulates
         with self.get(R(403), R(500)):
             self.assertEqual(pf.get_price_usd("ethereum"), 3000.0)
             pf._LAST["ethereum"] = (pf._LAST["ethereum"][0] - 4000, 3000.0)

@@ -14,6 +14,8 @@ from typing import Any
 
 import requests
 
+import apicache
+
 COINGECKO = "https://api.coingecko.com/api/v3"
 DEX_SEARCH = "https://api.dexscreener.com/latest/dex/search"
 DEX_TOKEN = "https://api.dexscreener.com/latest/dex/tokens/{addr}"
@@ -100,10 +102,11 @@ def _last_good(coin_id: str) -> float:
 
 def get_price_usd(coin_id: str) -> float:
     try:
-        resp = requests.get(
+        resp = apicache.get(
             f"{COINGECKO}/simple/price",
             params={"ids": coin_id, "vs_currencies": "usd"},
             timeout=TIMEOUT,
+            ttl=20,
         )
         resp.raise_for_status()
         data = resp.json()
@@ -123,10 +126,11 @@ def get_prices_usd(coin_ids: list[str]) -> dict[str, float]:
         return {}
     out: dict[str, float] = {}
     try:
-        resp = requests.get(
+        resp = apicache.get(
             f"{COINGECKO}/simple/price",
             params={"ids": ",".join(sorted(set(coin_ids))), "vs_currencies": "usd"},
             timeout=TIMEOUT,
+            ttl=20,
         )
         resp.raise_for_status()
         out = {cid: _remember(cid, float(v["usd"])) for cid, v in resp.json().items() if "usd" in v}
@@ -307,10 +311,11 @@ def _gecko_snap(query: str) -> MarketSnapshot | None:
     )
     for net, chain in nets:
         try:
-            r = requests.get(
+            r = apicache.get(
                 f"https://api.geckoterminal.com/api/v2/networks/{net}/tokens/{q}",
                 headers={"Accept": "application/json"},
                 timeout=6,
+                ttl=20,
             )
         except requests.RequestException:
             continue
