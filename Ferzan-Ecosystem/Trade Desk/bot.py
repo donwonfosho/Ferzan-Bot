@@ -36,6 +36,7 @@ try:
     from telegram import CopyTextButton
 except ImportError:  # older PTB — tap the <code> CA instead
     CopyTextButton = None
+from telegram.request import HTTPXRequest
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -6308,6 +6309,26 @@ async def _safe_answer(query, text: str | None = None) -> None:
         pass
 
 
+def _timed_cb(fn):
+    """Log any button tap whose handler takes over 1.5s, with the button's
+    callback data, so slow buttons can be found instead of guessed."""
+    import functools
+    import time as _t
+
+    @functools.wraps(fn)
+    async def _w(update, context):
+        t0 = _t.monotonic()
+        try:
+            return await fn(update, context)
+        finally:
+            dt = _t.monotonic() - t0
+            if dt > 1.5:
+                q = getattr(update, "callback_query", None)
+                logger.warning("slow button %.1fs data=%s", dt, (getattr(q, "data", "") or "")[:40])
+
+    return _w
+
+
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
@@ -9588,7 +9609,19 @@ def main() -> None:
 
     db.init_db()
 
+    async def _loop_lag_watch() -> None:
+        # Logs when something blocks the event loop (every tap waits behind it).
+        import time as _t
+
+        while True:
+            t0 = _t.monotonic()
+            await asyncio.sleep(0.25)
+            lag = _t.monotonic() - t0 - 0.25
+            if lag > 0.4:
+                logger.warning("event loop blocked for %.2fs", lag)
+
     async def _post_init(application: Application) -> None:
+        application.create_task(_loop_lag_watch())
         # Network-bound trade/quote calls run in this pool (asyncio.to_thread).
         # The stdlib default is cpu_count+4 — ~5 threads on a small droplet.
         from concurrent.futures import ThreadPoolExecutor
@@ -9656,6 +9689,7 @@ def main() -> None:
     app = (
         Application.builder()
         .token(token)
+        .request(HTTPXRequest(connection_pool_size=64, pool_timeout=10.0))
         .post_init(_post_init)
         .concurrent_updates(int(os.getenv("FERZAN_CONCURRENT_UPDATES", "32")))
         .build()
@@ -9762,7 +9796,7 @@ def main() -> None:
     app.add_handler(CommandHandler("presets", presets_cmd))
     app.add_handler(CommandHandler("recap", recap_cmd))
     app.add_handler(CommandHandler("tracker", wallets_cmd))
-    app.add_handler(CallbackQueryHandler(on_callback))
+    app.add_handler(CallbackQueryHandler(_timed_cb(on_callback)))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
 
     jq = app.job_queue

@@ -29,6 +29,12 @@ def get_conn():
     conn = sqlite3.connect(str(DB_PATH), timeout=30)
     conn.row_factory = sqlite3.Row
     try:
+        # WAL (set once in init_db) + NORMAL sync: commits stop waiting on a
+        # full fsync each time, which is what made every tap feel slow.
+        conn.execute("PRAGMA synchronous=NORMAL")
+    except sqlite3.Error:
+        pass
+    try:
         yield conn
     finally:
         conn.close()
@@ -36,6 +42,10 @@ def get_conn():
 
 def init_db() -> None:
     with get_conn() as conn:
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+        except sqlite3.Error:
+            pass
         conn.executescript(
             """
             CREATE TABLE IF NOT EXISTS alerts (
