@@ -2334,6 +2334,17 @@ def _bag_panel(
         venue = "SOL"
     if venue_override:
         venue = venue_override
+        if mint.startswith("0x"):
+            _scan = {
+                "BASE": "https://basescan.org/token/",
+                "BSC": "https://bscscan.com/token/",
+                "BNB": "https://bscscan.com/token/",
+                "ARB": "https://arbiscan.io/token/",
+                "ETH": "https://etherscan.io/token/",
+                "AVAX": "https://snowtrace.io/token/",
+            }.get(venue_override.upper())
+            if _scan:
+                href = _scan + mint
     title = symbol or name or "TOKEN"
     if name and symbol and name.upper() != symbol:
         title = f"{html.escape(name)} (${html.escape(symbol)})"
@@ -3275,50 +3286,59 @@ def _bag_build(uid: int) -> tuple[str, list[tuple[str, InlineKeyboardMarkup]]]:
     ]
     unread = 0  # tokens whose balance could not be read right now (shown as a note, never hidden)
     evm_addr = (db.get_user_wallet(uid) or {}).get("evm_pub") or ""
-    if evm_addr:
-        for mint in db.live_mints(uid):
-            if not str(mint).startswith("0x"):
-                continue
+    all_mints = [str(m) for m in db.live_mints(uid)]
+    evm_mints = [m for m in all_mints if m.startswith("0x")] if evm_addr else []
+    ton_mints = [m for m in all_mints if m.startswith(("EQ", "UQ", "kQ"))]
+    tron_mints = [m for m in all_mints if m.startswith("T") and len(m) == 34]
+
+    def _evm_probe(mint: str, cid: str) -> tuple[int, bool]:
+        try:
+            return int(evm_signer._erc20_balance(CHAINS[cid]["rpc"], mint, evm_addr)), False
+        except Exception:
+            return 0, True
+
+    # Every balance read is an independent network call: run them together instead of one
+    # after another (this was most of the wait when opening the bag).
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=12) as pool:
+        evm_f = {(m, c): pool.submit(_evm_probe, m, c) for m in evm_mints for c in _EVM_SCAN}
+        ton_f = {m: pool.submit(_bag_position_amount, uid, m) for m in ton_mints}
+        tron_f = {m: pool.submit(_bag_position_amount, uid, m) for m in tron_mints}
+        for mint in evm_mints:
             failed = 0
-            for cid in _EVM_SCAN:
-                try:
-                    raw = evm_signer._erc20_balance(CHAINS[cid]["rpc"], mint, evm_addr)
-                except Exception:
-                    raw = 0
-                    failed += 1
+            found = False
+            for cid in _EVM_SCAN:  # first chain (in this order) that holds it, as before
+                raw, bad = evm_f[(mint, cid)].result()
+                failed += int(bad)
                 if raw > 0:
+                    found = True
                     try:
                         amt = raw / 10 ** _erc20_decimals(cid, mint)
                     except Exception:
                         break  # unknown decimals: skip rather than show a wrong value
                     positions.append((mint, amt, evm_addr, cid.upper()))
                     break
-            else:
-                if failed == len(_EVM_SCAN):  # every chain failed to answer: unknown, not zero
-                    unread += 1
-    for mint in db.live_mints(uid):
-        if not str(mint).startswith(("EQ", "UQ", "kQ")):
-            continue
-        try:
-            amount, owner, venue = _bag_position_amount(uid, mint)
-        except Exception:
-            logger.exception("TON bag lookup failed for %s", mint)
-            unread += 1
-            continue
-        if amount > 0:
-            positions.append((mint, amount, owner, venue))
-    for mint in db.live_mints(uid):
-        m = str(mint)
-        if not (m.startswith("T") and len(m) == 34):
-            continue
-        try:
-            amount, owner, venue = _bag_position_amount(uid, mint)
-        except Exception:
-            logger.exception("Tron bag lookup failed for %s", mint)
-            unread += 1
-            continue
-        if amount > 0 and venue == "TRX":
-            positions.append((mint, amount, owner, venue))
+            if not found and failed == len(_EVM_SCAN):  # every chain failed to answer: unknown, not zero
+                unread += 1
+        for mint in ton_mints:
+            try:
+                amount, owner, venue = ton_f[mint].result()
+            except Exception:
+                logger.exception("TON bag lookup failed for %s", mint)
+                unread += 1
+                continue
+            if amount > 0:
+                positions.append((mint, amount, owner, venue))
+        for mint in tron_mints:
+            try:
+                amount, owner, venue = tron_f[mint].result()
+            except Exception:
+                logger.exception("Tron bag lookup failed for %s", mint)
+                unread += 1
+                continue
+            if amount > 0 and venue == "TRX":
+                positions.append((mint, amount, owner, venue))
     total_worth = total_cost = 0.0
     priced = 0
     panels: list[tuple[str, InlineKeyboardMarkup]] = []
