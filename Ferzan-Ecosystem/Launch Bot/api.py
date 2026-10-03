@@ -255,6 +255,7 @@ def build_tx(request_id: str, body: BuildTxRequest):
                     name=req.name,
                     symbol=req.symbol,
                     metadata_uri=metadata_uri,
+                    telegram_user_id=int(req.telegram_user_id or 0),
                 )
                 unsigned_tx_hex = bytes(result.unsigned_transaction).hex()
                 response = {"chain": "solana", "unsigned_transaction": unsigned_tx_hex, "mint_address": result.mint_address}
@@ -282,6 +283,7 @@ def build_tx(request_id: str, body: BuildTxRequest):
                     name=req.name,
                     symbol=req.symbol,
                     metadata_uri=metadata_uri,
+                    telegram_user_id=int(req.telegram_user_id or 0),
                 )
                 unsigned_tx_hex = bytes(result.unsigned_transaction).hex()
                 response = {

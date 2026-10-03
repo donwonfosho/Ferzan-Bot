@@ -73,6 +73,7 @@ def build_unsigned_meteora_tx(
     symbol: str = "",
     metadata_uri: str = "",
     dev_buy=None,
+    telegram_user_id: int = 0,
 ) -> MeteoraLaunchResult:
     # decimals / supply / graduation come from the Ferzan partner config
     # (1B supply, 6 decimals, ~84 SOL graduation), so the args are ignored.
@@ -90,7 +91,7 @@ def build_unsigned_meteora_tx(
     _perk_note = ""
     try:  # FERZAN holders pay less (ferzan_perks.py); any problem there means the normal fee
         from ferzan_perks import launch_fee_lamports
-        _fee_lamports, _perk_note = launch_fee_lamports(creator_pubkey, _fee_lamports)
+        _fee_lamports, _perk_note = launch_fee_lamports(creator_pubkey, _fee_lamports, telegram_user_id)
     except Exception:
         pass
     payload = {

@@ -113,6 +113,7 @@ def build_unsigned_launch_tx(
     metadata_uri: str = "",
     revoke_mint_authority: bool = True,
     revoke_freeze_authority: bool = True,
+    telegram_user_id: int = 0,
 ) -> SolanaLaunchResult:
     creator = Pubkey.from_string(creator_pubkey)
 
@@ -176,7 +177,7 @@ def build_unsigned_launch_tx(
     fee_lamports = int(os.environ.get("LAUNCH_FEE_LAMPORTS") or "50000000")
     try:  # FERZAN holders pay less (ferzan_perks.py); any problem there means the normal fee
         from ferzan_perks import launch_fee_lamports
-        fee_lamports, _ = launch_fee_lamports(creator_pubkey, fee_lamports)
+        fee_lamports, _ = launch_fee_lamports(creator_pubkey, fee_lamports, telegram_user_id)
     except Exception:
         pass
     if treasury and fee_lamports > 0:

@@ -83,6 +83,13 @@ def fee_bps(uid: int) -> int:
     if base == 0:
         return 0
     try:
+        import feecollect
+
+        if feecollect.exempt(int(uid)):  # team members listed in FEE_EXEMPT_USER_IDS pay no bridge fee
+            return 0
+    except Exception:  # noqa: BLE001
+        pass
+    try:
         sol = wallet_addr(uid, "sol")
         if not sol:
             return base

@@ -40,6 +40,13 @@ def _flag(name: str) -> bool:
 def exempt(user_id: int) -> bool:
     """Operators listed in FEE_EXEMPT_USER_IDS (comma-separated Telegram ids) trade with no fee."""
     raw = os.getenv("FEE_EXEMPT_USER_IDS") or ""
+    if not raw.strip():  # the shared file is where the Launch Bot reads the same list from
+        try:
+            from dotenv import dotenv_values
+
+            raw = dotenv_values(os.getenv("FERZAN_SHARED_ENV") or "/opt/ferzan/.env").get("FEE_EXEMPT_USER_IDS") or ""
+        except Exception:  # noqa: BLE001
+            raw = ""
     return str(int(user_id)) in {x.strip() for x in raw.replace(";", ",").split(",") if x.strip()}
 
 

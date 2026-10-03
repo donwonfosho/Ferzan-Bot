@@ -143,8 +143,29 @@ def perks(owner: str) -> dict:
     return out
 
 
-def launch_fee_lamports(owner: str, base_fee: int) -> tuple[int, str]:
+def fee_exempt(uid) -> bool:
+    """Team members listed in FEE_EXEMPT_USER_IDS (comma-separated Telegram ids; same list the Trade Bot uses)."""
+    try:
+        uid = int(uid or 0)
+    except (TypeError, ValueError):
+        return False
+    if uid <= 0:
+        return False
+    raw = os.environ.get("FEE_EXEMPT_USER_IDS") or ""
+    if not raw.strip():
+        try:
+            from dotenv import dotenv_values
+
+            raw = dotenv_values(os.environ.get("FERZAN_SHARED_ENV") or "/opt/ferzan/.env").get("FEE_EXEMPT_USER_IDS") or ""
+        except Exception:  # noqa: BLE001
+            raw = ""
+    return str(uid) in {x.strip() for x in raw.replace(";", ",").split(",") if x.strip()}
+
+
+def launch_fee_lamports(owner: str, base_fee: int, uid=None) -> tuple[int, str]:
     """(fee to charge, note for the cost line). Never raises."""
+    if base_fee > 0 and fee_exempt(uid):
+        return 0, "Ferzan team: no launch fee"
     try:
         p = perks(owner)
     except Exception:
