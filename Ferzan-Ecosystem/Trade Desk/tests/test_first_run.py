@@ -84,3 +84,15 @@ class NoFloodForNewUsers(unittest.TestCase):
         job = body("async def _launch_feed_job", "async def _live_buy_followup") if "async def _live_buy_followup" in BOT else BOT[BOT.index("async def _launch_feed_job"):]
         self.assertIn("            if dms:\n                text, markup = await asyncio.to_thread(launch_card, ln)", job)
         self.assertIn('if not dms and not db.flag_on(uid, "auto_buy", 0):', job)  # auto-buy users still get scanned
+
+
+class HomeScreenPolish(unittest.TestCase):
+    def test_signals_button_shares_a_two_button_row(self):
+        kb = body("def home_keyboard", "# ---- home screen helpers")
+        row = kb[kb.index("# Opens the Launch Bot"):]
+        row = row[:row.index("],")]
+        self.assertIn("🚀 Launch", row)
+        self.assertIn("📡 Signals", row)
+
+    def test_hot_buttons_never_repeat_a_label(self):
+        self.assertIn("all(label != lbl for lbl, _cb in out)", BOT)

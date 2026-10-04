@@ -1004,7 +1004,6 @@ def home_keyboard(private: bool = True, hot: list | None = None) -> InlineKeyboa
             InlineKeyboardButton("📤 Send", callback_data="go:withdraw"),
         ],
         [
-            InlineKeyboardButton("📡 Signals", url=signals),
             InlineKeyboardButton("👯 Copy", callback_data="go:copy"),
             InlineKeyboardButton("🔔 Alerts", callback_data="go:alerts"),
         ],
@@ -1023,6 +1022,7 @@ def home_keyboard(private: bool = True, hot: list | None = None) -> InlineKeyboa
                 "🚀 Launch",
                 url="https://t.me/" + (os.getenv("LAUNCH_BOT_USERNAME") or "Ferzan_Launch_Bot").lstrip("@"),
             ),
+            InlineKeyboardButton("📡 Signals", url=signals),  # two to a row: a link button's arrow cuts a three-up label
         ],
         [
             # Telegram sizes a photo card's buttons to the photo, so a row of three needs short labels.
@@ -1136,8 +1136,9 @@ def _hot_rows() -> list:
             items = []
         for it in items:
             tok, sym = str(it.get("token") or ""), str(it.get("symbol") or "").lstrip("$")
-            if tok and sym and len(f"sig:{tok}") <= 64:
-                out.append((f"🔥 ${sym[:8].upper()}", f"sig:{tok}"))
+            label = f"🔥 ${sym[:8].upper()}"
+            if tok and sym and len(f"sig:{tok}") <= 64 and all(label != lbl for lbl, _cb in out):  # never two identical buttons
+                out.append((label, f"sig:{tok}"))
         if out:
             break
     out = out[:3]
