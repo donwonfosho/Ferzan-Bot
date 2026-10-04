@@ -1190,6 +1190,7 @@ async def _home_parts(uid: int, first_time: bool) -> tuple[str, list]:
             "The one-stop desk for 19 chains: trade, snipe, bridge and launch from one place. "
             "Your wallet is ready in a moment.\n\n"
             "⚡ <b>Paste any token address</b> and the card appears.\n"
+            "👇 New here? Take the 30-second tour, or jump straight in.\n"
             + (f"\n{strip}\n" if strip else "")
             + f"\n{foot}"
         )
@@ -1222,6 +1223,14 @@ def _webapp_url() -> str:
 
 
 _BANNER_FILE_IDS: dict = {}
+
+
+def _welcome_keyboard() -> InlineKeyboardMarkup:
+    """A brand-new user's first screen: two choices, not the whole menu."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("▶️ Take the 30-second tour", callback_data="tour:start")],
+        [InlineKeyboardButton("⏭ Skip to the desk", callback_data="tour:skip")],
+    ])
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1302,7 +1311,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 with PROMO_PATH.open("rb") as clip:
                     await target.reply_animation(
                         animation=clip, caption=text, parse_mode="HTML",
-                        reply_markup=home_keyboard(private=bool(update.effective_chat and update.effective_chat.type == "private"), hot=hot),
+                        reply_markup=_welcome_keyboard() if first_time else home_keyboard(private=bool(update.effective_chat and update.effective_chat.type == "private"), hot=hot),
                     )
                 banner = None
             except Exception:
@@ -1310,7 +1319,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if banner is None:
             pass
         elif banner.exists():
-            kb_home = home_keyboard(private=bool(update.effective_chat and update.effective_chat.type == "private"), hot=hot)
+            kb_home = _welcome_keyboard() if first_time else home_keyboard(private=bool(update.effective_chat and update.effective_chat.type == "private"), hot=hot)
             fid = _BANNER_FILE_IDS.get(str(banner))
             sent = None
             if fid:  # already uploaded once: Telegram keeps it, so no re-upload on every tap
@@ -1331,14 +1340,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 text,
                 parse_mode="HTML",
                 disable_web_page_preview=True,
-                reply_markup=home_keyboard(private=bool(update.effective_chat and update.effective_chat.type == "private"), hot=hot),
+                reply_markup=_welcome_keyboard() if first_time else home_keyboard(private=bool(update.effective_chat and update.effective_chat.type == "private"), hot=hot),
             )
         try:
             user_wallets.ensure(update.effective_user.id)
         except Exception:
             logger.exception("wallet ensure on start failed")
-        if first_time:
-            await _tour_step1(context.bot, update.effective_user.id)
+        # a new user now chooses: the tour (button) or the desk (button). Nothing else is sent until they do.
     except Exception:
         logger.exception("start failed")
         try:
@@ -1480,7 +1488,7 @@ async def _tour_step3(query, uid: int) -> None:
             [InlineKeyboardButton("🔍 Score a real token (BONK)", callback_data=f"sig:{TOUR_DEMO_MINT}")],
             [
                 InlineKeyboardButton("⚙️ Desk settings", callback_data="go:settings"),
-                InlineKeyboardButton("🏠 Home", callback_data="go:home"),
+                InlineKeyboardButton("🏠 Go to the desk", callback_data="go:home"),
             ],
         ]
     )
@@ -5812,7 +5820,8 @@ async def launches_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
     chain = resolve_chain(context.args[0]) if context.args else None
     launches = await asyncio.to_thread(sniper.fetch_new_pools, chain, 6)
-    launches = sniper.pick_launches(launches, 6)  # fetch_new_pools ignores its limit: this is what flooded the chat
+    n_cards = int(context.user_data.pop("launch_cards", 6) or 6)
+    launches = sniper.pick_launches(launches, n_cards)  # fetch_new_pools ignores its limit: this is what flooded the chat
     if not launches:
         await update.effective_message.reply_text(
             "No fresh pools right now. Try /launches sol"
@@ -6988,6 +6997,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await positions_cmd(update, context)
         elif kind == "launches":
             context.args = ["sol"]
+            context.user_data["launch_cards"] = 3  # from the home grid: a short list, not a wall of cards
             await launches_cmd(update, context)
         elif kind == "balances":
             await balances_cmd(update, context)
@@ -7310,7 +7320,14 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             parse_mode="HTML")
         return
     if data.startswith("tour:"):
-        if data == "tour:bal":
+        if data == "tour:start":
+            await _safe_answer(query, "")
+            await _tour_step1(context.bot, uid)
+        elif data == "tour:skip":
+            await _safe_answer(query, "")
+            db.set_flag(uid, "onboarded", True)
+            await start(update, context)  # now a returning user: the full desk
+        elif data == "tour:bal":
             await _tour_step2(query, uid)
         else:
             await _tour_step3(query, uid)
