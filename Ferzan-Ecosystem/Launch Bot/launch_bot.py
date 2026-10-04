@@ -1702,7 +1702,7 @@ async def _ton_tb_run(bot, req_id: str, uid: int, chat_id: int, mode: str = "pla
     say = lambda t: bot.send_message(chat_id=chat_id, text=t, parse_mode="HTML", disable_web_page_preview=True)  # noqa: E731
     helper = "ton_launch_exec.py"
     try:
-        info = await tron.run("info", {"uid": uid, "need_nano": _ton_need_nano(mode)}, timeout=60, script=helper)
+        info = await tron.run("info", {"uid": uid, "need_nano": _ton_need_nano(mode)}, timeout=100, script=helper)
         if not info.get("ok"):
             db.update_status(req_id, "failed", error_message=str(info.get("error"))[:200])
             await say("❌ Couldn't use your Trade Bot TON wallet. " + _ton_wallet_text(info) + "\nNothing was sent.")
@@ -1716,7 +1716,7 @@ async def _ton_tb_run(bot, req_id: str, uid: int, chat_id: int, mode: str = "pla
             await say("❌ Couldn't prepare the TON launch (" + _esc(built.get("error", "no messages")) + "). Nothing was sent.")
             return
         res = await tron.run("launch", {"uid": uid, "request_id": req_id, "messages": built["messages"]},
-                             timeout=260, script=helper)
+                             timeout=420, script=helper)
         txid = res.get("txid") or ""
         if res.get("ok") or res.get("pending"):
             if txid:

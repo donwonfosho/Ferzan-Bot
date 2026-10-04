@@ -164,10 +164,25 @@ def _num(v) -> int:
     return int(str(v), 16) if str(v).lower().lstrip("-").startswith("0x") else int(str(v))
 
 
+def _center_stack(args, boc: bool) -> list:
+    out = []
+    for a in args:
+        if isinstance(a, int):
+            out.append({"type": "num", "value": str(a)})
+        elif boc:  # the same address as a one-address slice cell, base64 BOC
+            from pytoniq_core import Address, begin_cell
+
+            out.append({"type": "slice", "value": base64.b64encode(
+                begin_cell().store_address(Address(a)).end_cell().to_boc()).decode()})
+        else:
+            out.append({"type": "slice", "value": a})
+    return out
+
+
 def _http_get_method(address: str, method: str, stack=None) -> list:
     """Runs a get-method through toncenter, then tonapi (free keys TONCENTER_API_KEY / TONAPI_KEY are used when set).
-    Returns the same shapes a liteserver gives: ints, and Slices for addresses/cells. Only integer arguments are supported;
-    anything else raises so the caller keeps the liteserver error."""
+    Returns the same shapes a liteserver gives: ints, and Slices for addresses/cells. Arguments are numbers or address
+    strings; anything else raises so the caller keeps the liteserver error."""
     import requests
 
     args = list(stack or [])
@@ -176,21 +191,21 @@ def _http_get_method(address: str, method: str, stack=None) -> list:
     center, tonapi = _http_urls()
     errs = []
     key = (os.environ.get("TONCENTER_API_KEY") or "").strip()
-    try:
-        r = requests.post(f"{center}/api/v3/runGetMethod", timeout=10, headers={"X-API-Key": key} if key else {},
-                          json={"address": address, "method": method,
-                                "stack": [({"type": "num", "value": str(a)} if isinstance(a, int) else {"type": "slice", "value": a})
-                                    for a in args]})
-        j = r.json() if r.status_code == 200 else {}
-        if r.status_code == 200 and int(j.get("exit_code", 1)) == 0:
-            out = []
-            for it in j.get("stack") or []:
-                t = it.get("type")
-                out.append(_num(it["value"]) if t == "num" else (None if t == "null" else _to_slice(str(it["value"]))))
-            return out
-        errs.append(f"toncenter {r.status_code} exit {j.get('exit_code')}")
-    except Exception as e:  # noqa: BLE001
-        errs.append(f"toncenter {type(e).__name__}")
+    has_addr = any(isinstance(a, str) for a in args)
+    for boc in ((False, True) if has_addr else (False,)):  # toncenter takes an address string or a BOC slice: try both
+        try:
+            r = requests.post(f"{center}/api/v3/runGetMethod", timeout=10, headers={"X-API-Key": key} if key else {},
+                              json={"address": address, "method": method, "stack": _center_stack(args, boc)})
+            j = r.json() if r.status_code == 200 else {}
+            if r.status_code == 200 and int(j.get("exit_code", 1)) == 0:
+                out = []
+                for it in j.get("stack") or []:
+                    t = it.get("type")
+                    out.append(_num(it["value"]) if t == "num" else (None if t == "null" else _to_slice(str(it["value"]))))
+                return out
+            errs.append(f"toncenter {r.status_code} exit {j.get('exit_code')}")
+        except Exception as e:  # noqa: BLE001
+            errs.append(f"toncenter {type(e).__name__}")
     tkey = (os.environ.get("TONAPI_KEY") or "").strip()
     try:
         r = requests.get(f"{tonapi}/v2/blockchain/accounts/{address}/methods/{method}", timeout=10,
@@ -214,12 +229,24 @@ def _http_get_method(address: str, method: str, stack=None) -> list:
     raise RuntimeError("backup TON read failed: " + "; ".join(errs))
 
 
+def _is_node_trouble(exc) -> bool:
+    """True when a liteserver read failed because of the NODE (lagging, unreachable, slow), not because of the contract."""
+    import asyncio
+
+    if isinstance(exc, (asyncio.TimeoutError, TimeoutError, ConnectionError, OSError)):
+        return True
+    low = str(exc).lower()
+    return any(k in low for k in ("651", "cannot load block", "liteserver", "lite server", "out of sync", "not in db",
+                                  "timeout", "timed out", "connection", "no alive", "unreachable"))
+
+
 _LITE_BAD_UNTIL = [0.0]
 
 
 def run_get_method(address: str, method: str, stack=None, tries: int = 2, http_args=None):
     """Get-method read: the liteserver first (two tries, 12s each; public liteservers sometimes answer 'cannot load block'
-    651), then the HTTP backup. Returns the same list either way."""
+    651), then the HTTP backup. Returns the same list either way. A failure that is the contract's own (not the node's)
+    is not retried and never switches the liteserver off."""
     import asyncio
 
     async def _lite():
@@ -230,17 +257,24 @@ def run_get_method(address: str, method: str, stack=None, tries: int = 2, http_a
         try:
             return await provider.run_get_method(address=_addr(address), method=method, stack=stack or [])
         finally:
-            await provider.close_all()
+            try:
+                await asyncio.wait_for(provider.close_all(), 3)  # a stuck node must not hold the read open
+            except Exception:  # noqa: BLE001
+                pass
 
     last = None
-    if time.time() >= _LITE_BAD_UNTIL[0]:  # a liteserver that just failed is skipped for a minute, so one slow node can't stall every read
+    if time.time() >= _LITE_BAD_UNTIL[0]:  # a node that just failed is skipped for a minute, so one slow node can't stall every read
         for i in range(tries):
             try:
                 return asyncio.run(asyncio.wait_for(_lite(), 12))
             except Exception as e:  # noqa: BLE001
                 last = e
-                time.sleep(1.0 + i)
-        _LITE_BAD_UNTIL[0] = time.time() + 60
+                if not _is_node_trouble(e):
+                    break  # the contract itself said no: asking another node will not change that
+                if i < tries - 1:
+                    time.sleep(1.0 + i)
+        else:
+            _LITE_BAD_UNTIL[0] = time.time() + 60
     else:
         last = RuntimeError("liteserver skipped after a recent failure")
     try:

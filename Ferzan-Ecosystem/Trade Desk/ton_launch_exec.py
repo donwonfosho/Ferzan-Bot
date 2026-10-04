@@ -149,7 +149,7 @@ def info(args: dict) -> None:
         if nano is not None:
             addr, bal = fast, nano
     if addr is None:  # the APIs did not answer: ask the TON nodes, retrying on fresh ones if one lags
-        addr, bal = ton_signer._run_retry(lambda: _info(seed64), tries=4)
+        addr, bal = ton_signer._run_retry(lambda: _info(seed64), tries=3)
     need = int(args.get("need_nano") or 600_000_000) + GAS_SPARE_NANO
     out(ok=True, address=addr, balance_ton=bal / 1e9, need_ton=need / 1e9, enough=bal >= need)
 
@@ -209,7 +209,7 @@ def launch(args: dict) -> None:
     prev = _log(lambda d: d.get(rid))
     if prev and time.time() - int(prev.get("at") or 0) < LAUNCH_TTL_S + 60:  # still in flight: never sign a second
         out(ok=False, pending=True, txid=prev.get("hash", ""), address=prev.get("address", ""), error="already sending")
-    out(**ton_signer._run_retry(lambda: _launch(seed64, rid, parsed, total), tries=3))
+    out(**ton_signer._run_retry(lambda: _launch(seed64, rid, parsed, total), tries=2))
 
 
 def check(args: dict) -> None:

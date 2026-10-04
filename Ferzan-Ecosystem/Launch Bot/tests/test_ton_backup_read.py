@@ -28,7 +28,16 @@ def _fake_core():
         def one_from_boc(raw):
             return types.SimpleNamespace(begin_parse=lambda: _Slice(raw))
 
+    class _B:
+        def store_address(self, a):
+            return self
+
+        def end_cell(self):
+            return types.SimpleNamespace(to_boc=lambda: b"\x0a\x0b")
+
     mod.Cell = Cell
+    mod.Address = lambda a: a
+    mod.begin_cell = lambda: _B()
     return mod
 
 
@@ -108,6 +117,38 @@ class BackupRead(unittest.TestCase):
             self.assertEqual(first, 2)  # two tries, then the backup
             self.assertEqual(tl.run_get_method("EQx", "get_curve"), [7])
             self.assertEqual(calls["lite"], first)  # skipped for a minute: no more slow liteserver tries
+
+    def test_toncenter_second_try_sends_the_address_as_a_boc_slice(self):
+        ok = {"exit_code": 0, "stack": [{"type": "num", "value": "0x1"}]}
+        with mock.patch("requests.post", side_effect=[_Resp(500, {}), _Resp(200, ok)]) as post:
+            out = tl._http_get_method("EQminter", "get_wallet_address", ["UQowner"])
+        self.assertEqual(out, [1])
+        first = post.call_args_list[0].kwargs["json"]["stack"][0]["value"]
+        second = post.call_args_list[1].kwargs["json"]["stack"][0]["value"]
+        self.assertEqual(first, "UQowner")
+        self.assertEqual(second, base64.b64encode(b"\x0a\x0b").decode())
+
+    def test_contract_error_is_not_retried_and_does_not_switch_the_node_off(self):
+        calls = {"lite": 0}
+
+        def boom(coro, *a, **k):
+            calls["lite"] += 1
+            coro.close()
+            raise RuntimeError("exit code -13: contract is not active")
+
+        with mock.patch("asyncio.run", side_effect=boom), mock.patch("time.sleep"), \
+                mock.patch("requests.post", return_value=_Resp(200, {"exit_code": -13, "stack": []})), \
+                mock.patch("requests.get", return_value=_Resp(404, {})):
+            with self.assertRaises(RuntimeError):
+                tl.run_get_method("EQx", "get_jetton_data")
+        self.assertEqual(calls["lite"], 1)  # no second try
+        self.assertEqual(tl._LITE_BAD_UNTIL[0], 0.0)  # and the node stays on
+
+    def test_node_trouble_classifier(self):
+        import asyncio
+        self.assertTrue(tl._is_node_trouble(asyncio.TimeoutError()))
+        self.assertTrue(tl._is_node_trouble(RuntimeError("Liteserver crashed with 651 code")))
+        self.assertFalse(tl._is_node_trouble(RuntimeError("exit code -13")))
 
     def test_both_fail_raises(self):
         def boom(coro, *a, **k):

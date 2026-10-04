@@ -678,8 +678,11 @@ def _in_thread(fn, *a):
     """ton_curve's chain reads use asyncio.run(); run them on a fresh thread so a running bot loop can't break them."""
     import concurrent.futures
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+    ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    try:
         return ex.submit(fn, *a).result(timeout=60)
+    finally:
+        ex.shutdown(wait=False)  # on a timeout the caller gets its error now instead of waiting for a stuck node
 
 
 def _tc():
