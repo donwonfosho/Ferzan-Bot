@@ -3586,7 +3586,10 @@ def _native_readers(uid: int) -> dict:
     def _ton():
         import ton_signer
 
-        return ton_signer.address_and_balance(sol_secret)[1]
+        q = ton_signer.balance_quick(sol_secret)  # HTTP, 4s cap: never the slow node path on a screen
+        if q is None:
+            raise RuntimeError("TON balance unavailable")  # natives keeps the last known value
+        return q
 
     def _trx():
         import tron_signer

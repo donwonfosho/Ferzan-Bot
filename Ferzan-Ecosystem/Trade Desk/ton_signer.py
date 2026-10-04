@@ -137,10 +137,10 @@ def _friendly_err(exc) -> str:
     return s[:200]
 
 
-def _http_balance_nano(addr: str) -> int | None:
+def _http_balance_nano(addr: str, timeout: float = 10) -> int | None:
     """Balance in nanoTON from the public HTTP APIs (tonapi, then toncenter). None when neither answers."""
     try:
-        r = requests.get(f"https://tonapi.io/v2/accounts/{addr}", headers=_headers(), timeout=10)
+        r = requests.get(f"https://tonapi.io/v2/accounts/{addr}", headers=_headers(), timeout=timeout)
         if r.status_code == 200:
             return int((r.json() or {}).get("balance") or 0)
         if r.status_code == 404:
@@ -149,7 +149,7 @@ def _http_balance_nano(addr: str) -> int | None:
         pass
     try:
         r = requests.get("https://toncenter.com/api/v2/getAddressBalance", params={"address": addr},
-                         headers=_toncenter_headers(), timeout=10)
+                         headers=_toncenter_headers(), timeout=timeout)
         j = r.json() or {}
         if r.status_code == 200 and j.get("ok"):
             return int(j.get("result") or 0)
@@ -259,6 +259,17 @@ async def _address_and_balance(seed64: bytes) -> tuple[str, int]:
         return addr, nano
     finally:
         await provider.close_all()
+
+
+def balance_quick(secret: str):
+    """TON balance (in TON) for the Bag / Balances screens: public HTTP APIs only, short timeouts, no liteserver
+    round trips (those took up to 20s when the nodes lagged). None when the APIs don't answer, so the caller keeps
+    its last known number instead of waiting."""
+    addr = _offline_address(_ton_keypair_bytes(secret))
+    if not addr:
+        return None
+    nano = _http_balance_nano(addr, timeout=4)
+    return None if nano is None else nano / 1e9
 
 
 def address_and_balance(secret: str) -> tuple[str, float]:
