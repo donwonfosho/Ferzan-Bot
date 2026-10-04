@@ -9,6 +9,8 @@ Limits (env, all optional):
   REFERRAL_AUTOPAY_MAX_USD     biggest single payout paid automatically   (default 50)
   REFERRAL_AUTOPAY_DAILY_USD   total paid automatically per 24 hours       (default 200)
   REFERRAL_AUTOPAY_RESERVE_SOL SOL always left in the payout wallet        (default 0.02)
+  REFERRAL_PAYOUT_LOW_USD      warn the admins when the spendable balance drops below this
+                               (default: the biggest single payout, REFERRAL_AUTOPAY_MAX_USD)
 """
 
 from __future__ import annotations
@@ -137,3 +139,50 @@ def try_pay(uid: int, usd: float, dest: str) -> tuple[str, str]:
         return "declined", "transfer did not go through"
     _finish(row, "unsure", info)
     return "unsure", info
+
+
+def payout_status() -> dict | None:
+    """What the payout wallet can still pay. None when auto-pay is off. Read-only: only the public key is used.
+
+    low is True when the spendable balance (balance minus the reserve) is under the alert level or under the
+    claims users are already waiting for; None when the SOL price is unavailable (never guess). 'error' is set
+    when the wallet could not be read."""
+    if not enabled():
+        return None
+    import signer
+    import withdraw
+    from price_fetcher import get_price_usd
+
+    secret = (os.getenv("REFERRAL_PAYOUT_SECRET") or "").strip()
+    try:
+        me = str(signer.keypair_from_secret(secret).pubkey())
+        bal = withdraw.sol_balance(me)
+    except Exception as exc:  # noqa: BLE001
+        return {"error": type(exc).__name__}
+    try:
+        px = float(get_price_usd("solana") or 0)
+    except Exception:  # noqa: BLE001
+        px = 0.0
+    spend_sol = max(0, bal - int(_num("REFERRAL_AUTOPAY_RESERVE_SOL", 0.02) * LAMPORTS)) / LAMPORTS
+    spend_usd = spend_sol * px if px > 0 else None
+    waiting = db.claimed_unpaid_usd()
+    level = _num("REFERRAL_PAYOUT_LOW_USD", _num("REFERRAL_AUTOPAY_MAX_USD", 50))
+    need = max(level, waiting)
+    return {
+        "address": me, "balance_sol": bal / LAMPORTS, "spend_sol": spend_sol, "spend_usd": spend_usd,
+        "waiting_usd": waiting, "level_usd": level, "need_usd": need, "price": px,
+        "low": None if spend_usd is None else spend_usd < need,
+    }
+
+
+def status_text(st: dict) -> str:
+    """Plain-text summary for the admins."""
+    if st.get("error"):
+        return f"Payout wallet could not be read ({st['error']}). Auto-pay will decline claims until it can."
+    usd = "price unavailable" if st["spend_usd"] is None else f"about ${st['spend_usd']:,.2f}"
+    return (
+        f"Spendable: {st['spend_sol']:.3f} SOL ({usd}); balance {st['balance_sol']:.3f} SOL, "
+        f"{_num('REFERRAL_AUTOPAY_RESERVE_SOL', 0.02):g} SOL stays as reserve\n"
+        f"Claims waiting to be paid: ${st['waiting_usd']:,.2f} | alert level: ${st['level_usd']:,.0f}\n"
+        f"Top up by sending SOL to: {st['address']}"
+    )

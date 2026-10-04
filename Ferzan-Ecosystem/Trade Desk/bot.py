@@ -165,6 +165,53 @@ async def ops_watch_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         await _notify_admins(context.bot, f"⚠️ {len(recent)} buys failed in the last 10 min for network reasons: {top}\nCheck /health and the RPCs.")
 
 
+_PAYOUT_ALERT_AT = 0.0
+
+
+async def payout_wallet_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Every 15 minutes: warn the admins when the referral payout wallet cannot cover payouts. Silent otherwise."""
+    global _PAYOUT_ALERT_AT
+    import referral_pay
+
+    if not referral_pay.enabled():
+        return
+    try:
+        st = await asyncio.to_thread(referral_pay.payout_status)
+    except Exception:
+        logger.exception("payout wallet watch failed")
+        return
+    if not st:
+        return
+    if not st.get("error") and st.get("low") is None:
+        return  # no SOL price right now: we cannot judge the balance, so say nothing and keep the last state
+    bad = bool(st.get("error")) or bool(st.get("low"))
+    was = db.flag_on(0, "payout_low", default=0)
+    now = time.time()
+    if bad and (not was or now - _PAYOUT_ALERT_AT > 6 * 3600):  # once, then a reminder every 6 hours
+        _PAYOUT_ALERT_AT = now
+        db.set_flag(0, "payout_low", True)
+        await _notify_admins(context.bot, "🟠 Referral payout wallet is low\n" + referral_pay.status_text(st)
+                             + "\nUntil it is topped up, claims it cannot cover fall back to the manual 'Mark paid' flow.")
+    elif not bad and was:
+        db.set_flag(0, "payout_low", False)
+        await _notify_admins(context.bot, "🟢 Referral payout wallet is topped up again\n" + referral_pay.status_text(st))
+
+
+async def payoutwallet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard(update):
+        return
+    if not _is_admin(update.effective_user.id):
+        return  # admin only, and silent for everyone else
+    import referral_pay
+
+    if not referral_pay.enabled():
+        await update.effective_message.reply_text("Referral auto-pay is off (REFERRAL_AUTOPAY / REFERRAL_PAYOUT_SECRET), so there is no payout wallet to watch.")
+        return
+    st = await asyncio.to_thread(referral_pay.payout_status)
+    flag = "🟠 LOW" if (st and (st.get("error") or st.get("low"))) else "🟢 OK"
+    await update.effective_message.reply_text(f"{flag}\n{referral_pay.status_text(st)}" if st else "No status available.")
+
+
 def _auto_trading_killed() -> bool:
     """Global kill switch for TP-ladder rung sells, auto-buy-on-feed, and DCA
     scheduled buys. Defaults OFF (auto trading enabled) until an admin flips
@@ -9973,6 +10020,7 @@ def main() -> None:
     app.add_handler(CommandHandler("livesellevm", livesellevm_cmd))
     app.add_handler(CommandHandler("treasury", treasury_cmd))
     app.add_handler(CommandHandler("health", health_cmd))
+    app.add_handler(CommandHandler("payoutwallet", payoutwallet_cmd))
     app.add_handler(CommandHandler("opstatus", opstatus_cmd))
     app.add_handler(CommandHandler("protect", protect_cmd))
     app.add_handler(CommandHandler("pin", pin_cmd))
@@ -10016,6 +10064,7 @@ def main() -> None:
         jq.run_repeating(snipe_job, interval=SNIPE_POLL_SECONDS, first=18)
         jq.run_repeating(live_exit_job, interval=45, first=50)
         jq.run_repeating(ops_watch_job, interval=300, first=20)
+        jq.run_repeating(payout_wallet_job, interval=900, first=75)
         jq.run_repeating(signal_followup_job, interval=300, first=120)
         jq.run_daily(digest_job, time=dt.time(hour=13, minute=0, tzinfo=dt.timezone.utc))
         jq.run_daily(signal_recap_job, time=dt.time(hour=1, minute=0, tzinfo=dt.timezone.utc))

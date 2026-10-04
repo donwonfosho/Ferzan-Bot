@@ -1902,6 +1902,14 @@ def referral_stats(user_id: int) -> dict:
     }
 
 
+def claimed_unpaid_usd() -> float:
+    """USD of referral earnings that users claimed and that nobody has marked paid yet."""
+    with get_conn() as conn:
+        return float(conn.execute(
+            "SELECT COALESCE(SUM(share_usd),0) FROM referral_ledger WHERE status = 'claimed'"
+        ).fetchone()[0])
+
+
 def request_referral_claim(user_id: int) -> float:
     stats = referral_stats(user_id)
     if stats["open"] <= 0:
