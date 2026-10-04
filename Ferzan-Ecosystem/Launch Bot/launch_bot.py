@@ -1721,11 +1721,14 @@ async def _ton_tb_run(bot, req_id: str, uid: int, chat_id: int, mode: str = "pla
         if res.get("ok") or res.get("pending"):
             if txid:
                 db.update_status(req_id, "submitted", tx_hash=txid)
-            for _ in range(6):  # the API proves the coin on-chain (supply + no admin), then posts the card
+            await say("✅ Your TON launch was sent. Confirming it on-chain now (up to a few minutes). "
+                      "Please don't launch it again.")
+            why, t0 = "", time.monotonic()
+            while time.monotonic() - t0 < 360:  # the API proves the coin on-chain (supply + no admin), then posts the card
                 ok, why = await asyncio.to_thread(_tron_complete, req_id, txid)
                 if ok:
                     return
-                await asyncio.sleep(30)
+                await asyncio.sleep(20)
             logger.warning("ton tb launch %s not recorded: %s", req_id, why)
             await say("⏳ Your TON launch was sent but isn't confirmed yet. Check your Trade Bot wallet on "
                       f"https://tonviewer.com/{_esc(info['address'])} and please don't launch it again.")

@@ -158,9 +158,8 @@ async def _run(address: str, method: str, stack=None):
 
 
 def _run_sync(address: str, method: str, stack=None):
-    import asyncio
-
-    return asyncio.run(_run(address, method, stack))
+    """Chain read: liteserver first, then the toncenter/tonapi backup (see ton_launch.run_get_method)."""
+    return tl.run_get_method(address, method, stack)
 
 
 def _same(a, b) -> bool:

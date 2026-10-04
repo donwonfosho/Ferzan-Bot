@@ -138,6 +138,116 @@ def build_unsigned_launch_tx(request_id: str, creator_address: str, supply_raw: 
     )
 
 
+# ------------------------------------------------------------ chain reads with a backup
+def _http_urls() -> tuple[str, str]:
+    if testnet():
+        return "https://testnet.toncenter.com", "https://testnet.tonapi.io"
+    return "https://toncenter.com", "https://tonapi.io"
+
+
+def _to_slice(data: str):
+    """A cell/slice returned over HTTP (base64 or hex BOC) -> a pytoniq Slice, so .load_address() works like on a liteserver."""
+    from pytoniq_core import Cell
+
+    raw = None
+    if len(data) % 2 == 0:
+        try:
+            raw = bytes.fromhex(data)
+        except ValueError:
+            raw = None
+    if raw is None:
+        raw = base64.b64decode(data)
+    return Cell.one_from_boc(raw).begin_parse()
+
+
+def _num(v) -> int:
+    return int(str(v), 16) if str(v).lower().lstrip("-").startswith("0x") else int(str(v))
+
+
+def _http_get_method(address: str, method: str, stack=None) -> list:
+    """Runs a get-method through toncenter, then tonapi (free keys TONCENTER_API_KEY / TONAPI_KEY are used when set).
+    Returns the same shapes a liteserver gives: ints, and Slices for addresses/cells. Only integer arguments are supported;
+    anything else raises so the caller keeps the liteserver error."""
+    import requests
+
+    args = list(stack or [])
+    if not all(isinstance(a, int) and not isinstance(a, bool) for a in args):
+        raise ValueError("backup read only supports number arguments")
+    center, tonapi = _http_urls()
+    errs = []
+    key = (os.environ.get("TONCENTER_API_KEY") or "").strip()
+    try:
+        r = requests.post(f"{center}/api/v3/runGetMethod", timeout=15, headers={"X-API-Key": key} if key else {},
+                          json={"address": address, "method": method,
+                                "stack": [{"type": "num", "value": str(a)} for a in args]})
+        j = r.json() if r.status_code == 200 else {}
+        if r.status_code == 200 and int(j.get("exit_code", 1)) == 0:
+            out = []
+            for it in j.get("stack") or []:
+                t = it.get("type")
+                out.append(_num(it["value"]) if t == "num" else (None if t == "null" else _to_slice(str(it["value"]))))
+            return out
+        errs.append(f"toncenter {r.status_code} exit {j.get('exit_code')}")
+    except Exception as e:  # noqa: BLE001
+        errs.append(f"toncenter {type(e).__name__}")
+    tkey = (os.environ.get("TONAPI_KEY") or "").strip()
+    try:
+        r = requests.get(f"{tonapi}/v2/blockchain/accounts/{address}/methods/{method}", timeout=15,
+                         params=[("args", str(a)) for a in args],
+                         headers={"Accept": "application/json", **({"Authorization": f"Bearer {tkey}"} if tkey else {})})
+        j = r.json() if r.status_code == 200 else {}
+        if r.status_code == 200 and j.get("success") and int(j.get("exit_code", 1)) == 0:
+            out = []
+            for it in j.get("stack") or []:
+                t = it.get("type")
+                if t == "num":
+                    out.append(_num(it["num"]))
+                elif t in ("cell", "slice"):
+                    out.append(_to_slice(str(it[t])))
+                else:
+                    out.append(None)
+            return out
+        errs.append(f"tonapi {r.status_code}")
+    except Exception as e:  # noqa: BLE001
+        errs.append(f"tonapi {type(e).__name__}")
+    raise RuntimeError("backup TON read failed: " + "; ".join(errs))
+
+
+_LITE_BAD_UNTIL = [0.0]
+
+
+def run_get_method(address: str, method: str, stack=None, tries: int = 2):
+    """Get-method read: the liteserver first (two tries, 15s each; public liteservers sometimes answer 'cannot load block'
+    651), then the HTTP backup. Returns the same list either way."""
+    import asyncio
+
+    async def _lite():
+        from pytoniq import LiteBalancer
+
+        provider = LiteBalancer.from_testnet_config(trust_level=2) if testnet() else LiteBalancer.from_mainnet_config(trust_level=2)
+        await provider.start_up()
+        try:
+            return await provider.run_get_method(address=_addr(address), method=method, stack=stack or [])
+        finally:
+            await provider.close_all()
+
+    last = None
+    if time.time() >= _LITE_BAD_UNTIL[0]:  # a liteserver that just failed is skipped for a minute, so one slow node can't stall every read
+        for i in range(tries):
+            try:
+                return asyncio.run(asyncio.wait_for(_lite(), 15))
+            except Exception as e:  # noqa: BLE001
+                last = e
+                time.sleep(1.0 + i)
+        _LITE_BAD_UNTIL[0] = time.time() + 60
+    else:
+        last = RuntimeError("liteserver skipped after a recent failure")
+    try:
+        return _http_get_method(address, method, stack)
+    except Exception as e2:  # noqa: BLE001
+        raise RuntimeError(f"{str(last)[:100]} | {str(e2)[:100]}") from last
+
+
 async def _jetton_data(minter: str):
     from pytoniq import LiteBalancer
 
@@ -151,13 +261,11 @@ async def _jetton_data(minter: str):
 
 def verify_launch(minter: str, supply_raw: int, wait_s: int = 90) -> dict:
     """Proves the coin exists: total supply matches and nobody can mint more (admin dropped)."""
-    import asyncio
-
     deadline = time.time() + wait_s
     last = "not deployed yet"
     while time.time() < deadline:
         try:
-            st = asyncio.run(_jetton_data(minter))
+            st = run_get_method(minter, "get_jetton_data")
             total = int(st[0])
             admin = None
             try:
