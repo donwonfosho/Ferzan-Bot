@@ -811,7 +811,7 @@ def _curve_buy(ci: dict, jetton: str, nano: int, usd: float, seed64: bytes, slip
         return False, "The curve would not quote this buy. Nothing sent."
     min_out = q["tokens_out"] * (10_000 - max(1, min(5000, slip_bps))) // 10_000
     msg = tc.build_buy_message(ci["curve"], nano, min_out)
-    r = _run_async(_curve_tx(seed64, jetton, msg, "up"))
+    r = _run_retry(lambda: _curve_tx(seed64, jetton, msg, "up"))
     if not r.get("sent"):
         return False, r.get("error", "not sent") + " Nothing sent."
     link = f"https://tonviewer.com/{r['addr']}"
@@ -830,7 +830,7 @@ def _curve_sell(ci: dict, jetton: str, pct: int, seed64: bytes, slip_bps: int) -
     st, why = _curve_open(tc, ci["curve"])
     if st is None:
         return False, why.replace("Try again", "Sell again")
-    owner, jw, bal = _run_async(_wallet_coin(seed64, jetton))
+    owner, jw, bal = _run_retry(lambda: _wallet_coin(seed64, jetton))
     if bal <= 0:
         return False, "Nothing to sell: this wallet holds 0 of that coin."
     amount = bal if pct >= 100 else bal * pct // 100
@@ -841,7 +841,7 @@ def _curve_sell(ci: dict, jetton: str, pct: int, seed64: bytes, slip_bps: int) -
         return False, "The curve would not quote this sell. Nothing sent."
     min_out = q["ton_out"] * (10_000 - max(1, min(5000, slip_bps))) // 10_000
     msg = tc.build_sell_message(ci["curve"], owner, jw, amount, min_out)
-    r = _run_async(_curve_tx(seed64, jetton, msg, "down"))
+    r = _run_retry(lambda: _curve_tx(seed64, jetton, msg, "down"))
     if not r.get("sent"):
         return False, r.get("error", "not sent") + " Nothing sent."
     link = f"https://tonviewer.com/{r['addr']}"
@@ -1009,8 +1009,7 @@ async def _send_ton_native(seed64: bytes, dest: str, nano: int | None, reserve_n
         wallet = await WalletV4R2.from_private_key(provider, seed64)
         if to.to_str() == wallet.address.to_str():
             return False, "That's this wallet's own address."
-        state = await provider.get_account_state(wallet.address)
-        bal = int(getattr(state, "balance", 0) or 0)
+        bal = await _ton_balance(provider, wallet.address)
         value = bal - int(reserve_nano) if nano is None else int(nano)
         if value <= 0 or value + int(reserve_nano) > bal:
             return False, f"Not enough TON (balance {bal / 1e9:.4f}; ~{reserve_nano / 1e9:.2f} stays for fees)."
@@ -1051,6 +1050,6 @@ def send_ton_native(secret: str, dest: str, nano: int | None, reserve_nano: int 
     except Exception as exc:
         return False, f"TON key problem, nothing sent: {exc}"
     try:
-        return _run_async(_send_ton_native(seed64, dest, nano, reserve_nano))
+        return _run_retry(lambda: _send_ton_native(seed64, dest, nano, reserve_nano))
     except Exception as exc:
         return None, f"TON send ended with an error ({str(exc)[:100]}). Check your TON wallet before retrying."

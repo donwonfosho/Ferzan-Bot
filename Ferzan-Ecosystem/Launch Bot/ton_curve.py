@@ -157,9 +157,9 @@ async def _run(address: str, method: str, stack=None):
         await provider.close_all()
 
 
-def _run_sync(address: str, method: str, stack=None):
+def _run_sync(address: str, method: str, stack=None, http_args=None):
     """Chain read: liteserver first, then the toncenter/tonapi backup (see ton_launch.run_get_method)."""
-    return tl.run_get_method(address, method, stack)
+    return tl.run_get_method(address, method, stack, http_args=http_args)
 
 
 def _same(a, b) -> bool:
@@ -231,7 +231,7 @@ def coin_wallet(minter: str, owner: str) -> str:
     from pytoniq_core import begin_cell
 
     sl = begin_cell().store_address(_addr(owner)).end_cell().begin_parse()
-    return _run_sync(minter, "get_wallet_address", [sl])[0].load_address().to_str(is_user_friendly=True)
+    return _run_sync(minter, "get_wallet_address", [sl], http_args=[_addr(owner).to_str(is_user_friendly=True)])[0].load_address().to_str(is_user_friendly=True)
 
 
 def coin_balance(wallet: str) -> int:

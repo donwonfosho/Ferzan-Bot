@@ -79,9 +79,18 @@ class BackupRead(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 tl._http_get_method("EQx", "get_curve")
 
-    def test_only_number_arguments(self):
+    def test_only_number_and_address_arguments(self):
         with self.assertRaises(ValueError):
             tl._http_get_method("EQx", "get_wallet_address", [object()])
+
+    def test_address_argument_is_sent_as_a_slice(self):
+        body = {"exit_code": 0, "stack": [{"type": "cell", "value": B64}]}
+        with mock.patch("requests.post", return_value=_Resp(200, body)) as post:
+            tl.run_get_method.__globals__["_LITE_BAD_UNTIL"][0] = 9e12  # skip the liteserver
+            out = tl.run_get_method("EQminter", "get_wallet_address", ["lite-slice-stand-in"], http_args=["UQowner"])
+        sent = post.call_args.kwargs["json"]["stack"]
+        self.assertEqual(sent, [{"type": "slice", "value": "UQowner"}])
+        self.assertEqual(out[0].raw, b"\x01\x02\x03\x04")
 
     def test_liteserver_failure_uses_backup_then_skips_liteserver(self):
         calls = {"lite": 0}

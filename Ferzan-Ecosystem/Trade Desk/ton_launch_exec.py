@@ -96,6 +96,35 @@ async def _state(provider, addr):
     return kind == "active", int(getattr(st, "balance", 0) or 0)
 
 
+async def _deployed(provider, addr) -> bool:
+    """Is a contract already live at `addr`? Retried on other nodes, then asked of tonapi. Raises if nobody answers, so a
+    launch is never signed on a guess (the check that stops a second launch of the same coin)."""
+    import asyncio
+
+    import requests
+
+    import ton_signer as tsg
+
+    last: Exception | None = None
+    for i in range(3):
+        try:
+            active, _ = await _state(provider, addr)
+            return active
+        except Exception as exc:  # noqa: BLE001
+            last = exc
+            await asyncio.sleep(1.0 * (i + 1))
+    try:
+        r = await asyncio.to_thread(requests.get, f"https://tonapi.io/v2/accounts/{addr.to_str(is_user_friendly=True)}",
+                                    headers=tsg._headers(), timeout=10)
+        if r.status_code == 404:
+            return False
+        if r.status_code == 200:
+            return str((r.json() or {}).get("status") or "").lower() == "active"
+    except Exception:  # noqa: BLE001
+        pass
+    raise last if last else RuntimeError("couldn't tell whether the coin already exists")
+
+
 async def _info(seed64: bytes):
     from pytoniq import LiteBalancer, WalletV4R2
 
@@ -113,7 +142,14 @@ def info(args: dict) -> None:
     import ton_signer
 
     seed64 = ton_signer._ton_keypair_bytes(_secret(int(args["uid"])))
-    addr, bal = ton_signer._run_async(_info(seed64))
+    addr, bal = None, None
+    fast = ton_signer._offline_address(seed64)  # the address comes from the key; the balance from the public HTTP APIs
+    if fast:
+        nano = ton_signer._http_balance_nano(fast)
+        if nano is not None:
+            addr, bal = fast, nano
+    if addr is None:  # the APIs did not answer: ask the TON nodes, retrying on fresh ones if one lags
+        addr, bal = ton_signer._run_retry(lambda: _info(seed64), tries=4)
     need = int(args.get("need_nano") or 600_000_000) + GAS_SPARE_NANO
     out(ok=True, address=addr, balance_ton=bal / 1e9, need_ton=need / 1e9, enough=bal >= need)
 
@@ -129,10 +165,10 @@ async def _launch(seed64: bytes, rid: str, parsed, total: int):
         w = await WalletV4R2.from_private_key(provider, seed64)
         addr = w.address.to_str(is_user_friendly=True, is_bounceable=False)
         minter = parsed[0][0]
-        deployed, _ = await _state(provider, minter)
+        deployed = await _deployed(provider, minter)
         if deployed:  # the coin already exists: report it, never send a second launch
             return {"ok": True, "already": True, "address": addr, "minter": minter.to_str()}
-        _, bal = await _state(provider, w.address)
+        bal = await tsg._ton_balance(provider, w.address)
         if bal < total + GAS_SPARE_NANO:
             return {"ok": False, "error": "low_balance", "address": addr, "balance_ton": bal / 1e9,
                     "need_ton": (total + GAS_SPARE_NANO) / 1e9}
@@ -173,7 +209,7 @@ def launch(args: dict) -> None:
     prev = _log(lambda d: d.get(rid))
     if prev and time.time() - int(prev.get("at") or 0) < LAUNCH_TTL_S + 60:  # still in flight: never sign a second
         out(ok=False, pending=True, txid=prev.get("hash", ""), address=prev.get("address", ""), error="already sending")
-    out(**ton_signer._run_async(_launch(seed64, rid, parsed, total)))
+    out(**ton_signer._run_retry(lambda: _launch(seed64, rid, parsed, total), tries=3))
 
 
 def check(args: dict) -> None:

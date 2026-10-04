@@ -171,15 +171,16 @@ def _http_get_method(address: str, method: str, stack=None) -> list:
     import requests
 
     args = list(stack or [])
-    if not all(isinstance(a, int) and not isinstance(a, bool) for a in args):
-        raise ValueError("backup read only supports number arguments")
+    if not all((isinstance(a, int) and not isinstance(a, bool)) or isinstance(a, str) for a in args):
+        raise ValueError("backup read only supports number and address arguments")
     center, tonapi = _http_urls()
     errs = []
     key = (os.environ.get("TONCENTER_API_KEY") or "").strip()
     try:
-        r = requests.post(f"{center}/api/v3/runGetMethod", timeout=15, headers={"X-API-Key": key} if key else {},
+        r = requests.post(f"{center}/api/v3/runGetMethod", timeout=10, headers={"X-API-Key": key} if key else {},
                           json={"address": address, "method": method,
-                                "stack": [{"type": "num", "value": str(a)} for a in args]})
+                                "stack": [({"type": "num", "value": str(a)} if isinstance(a, int) else {"type": "slice", "value": a})
+                                    for a in args]})
         j = r.json() if r.status_code == 200 else {}
         if r.status_code == 200 and int(j.get("exit_code", 1)) == 0:
             out = []
@@ -192,7 +193,7 @@ def _http_get_method(address: str, method: str, stack=None) -> list:
         errs.append(f"toncenter {type(e).__name__}")
     tkey = (os.environ.get("TONAPI_KEY") or "").strip()
     try:
-        r = requests.get(f"{tonapi}/v2/blockchain/accounts/{address}/methods/{method}", timeout=15,
+        r = requests.get(f"{tonapi}/v2/blockchain/accounts/{address}/methods/{method}", timeout=10,
                          params=[("args", str(a)) for a in args],
                          headers={"Accept": "application/json", **({"Authorization": f"Bearer {tkey}"} if tkey else {})})
         j = r.json() if r.status_code == 200 else {}
@@ -216,8 +217,8 @@ def _http_get_method(address: str, method: str, stack=None) -> list:
 _LITE_BAD_UNTIL = [0.0]
 
 
-def run_get_method(address: str, method: str, stack=None, tries: int = 2):
-    """Get-method read: the liteserver first (two tries, 15s each; public liteservers sometimes answer 'cannot load block'
+def run_get_method(address: str, method: str, stack=None, tries: int = 2, http_args=None):
+    """Get-method read: the liteserver first (two tries, 12s each; public liteservers sometimes answer 'cannot load block'
     651), then the HTTP backup. Returns the same list either way."""
     import asyncio
 
@@ -235,7 +236,7 @@ def run_get_method(address: str, method: str, stack=None, tries: int = 2):
     if time.time() >= _LITE_BAD_UNTIL[0]:  # a liteserver that just failed is skipped for a minute, so one slow node can't stall every read
         for i in range(tries):
             try:
-                return asyncio.run(asyncio.wait_for(_lite(), 15))
+                return asyncio.run(asyncio.wait_for(_lite(), 12))
             except Exception as e:  # noqa: BLE001
                 last = e
                 time.sleep(1.0 + i)
@@ -243,7 +244,7 @@ def run_get_method(address: str, method: str, stack=None, tries: int = 2):
     else:
         last = RuntimeError("liteserver skipped after a recent failure")
     try:
-        return _http_get_method(address, method, stack)
+        return _http_get_method(address, method, stack if http_args is None else http_args)
     except Exception as e2:  # noqa: BLE001
         raise RuntimeError(f"{str(last)[:100]} | {str(e2)[:100]}") from last
 
