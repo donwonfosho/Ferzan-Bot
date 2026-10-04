@@ -1790,7 +1790,7 @@ def _rug_block(uid: int, card, mint: str) -> str:
             return "🛡 Honeypot guard ON: live buy blocked."
         if "cannot sell all" in sec or "owner can change" in sec:
             return "🛡 Honeypot guard ON: sell looks trapped. Live buy blocked."
-    if db.flag_on(uid, "honeypot", 1) and _is_sol_mint(mint):
+    if db.flag_on(uid, "honeypot", 1) and _is_sol_mint(mint) and str(s.dex or "").lower() != "ferzan-curve":
         try:
             why = rugcheck.block_reason(rugcheck.sol_report(mint))
         except Exception:

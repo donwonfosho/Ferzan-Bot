@@ -8,6 +8,7 @@ CoinGecko does not expose well for new DEX pairs.
 
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -398,6 +399,39 @@ def _jup_snap(query: str) -> MarketSnapshot | None:
     )
 
 
+def _ferzan_sol_curve_snap(mint: str) -> MarketSnapshot | None:
+    """Ferzan Solana coin still on its Meteora curve, read from the Launch API's curve index.
+    None when the coin is not indexed (yet), has graduated, or has no price: a price is never invented."""
+    import os
+
+    base = (os.getenv("LAUNCH_API_URL") or "http://127.0.0.1:8000").rstrip("/")
+    d: dict = {}
+    for attempt in range(2):  # a coin launched seconds ago may take a moment to reach the index
+        try:
+            r = requests.get(f"{base}/api/sol-coin/{mint}", params={"tf": 300}, timeout=6)
+            d = r.json() if r.ok and r.content else {}
+        except (requests.RequestException, ValueError):
+            d = {}
+        if isinstance(d, dict) and d.get("indexed"):
+            break
+        if attempt == 0:
+            time.sleep(1.5)
+    if not isinstance(d, dict) or not d.get("indexed") or d.get("graduated"):
+        return None
+    price_sol, usd = _num(d.get("price")), _num(d.get("native_usd"))
+    if price_sol <= 0 or usd <= 0:
+        return None
+    return MarketSnapshot(
+        query=mint, symbol=str(d.get("symbol") or "?"), name=str(d.get("name") or d.get("symbol") or "Ferzan launch"),
+        chain="solana", dex="ferzan-curve", pair_address=str(d.get("pool") or ""), token_address=mint,
+        price_usd=price_sol * usd, liquidity_usd=_num(d.get("raised_sol")) * usd, volume_24h=0.0,
+        change_5m=0.0, change_1h=0.0, change_6h=0.0, change_24h=0.0, fdv=_num(d.get("mcap_usd")),
+        buys_h1=0, sells_h1=0, pair_created_ms=None,
+        url=f"https://launch.ferzaneco.com/miniapp/curve.html?chain=solana&curve={d.get('pool') or ''}",
+        source="ferzan", extras={"ferzan_curve": str(d.get("pool") or ""), "progress": _num(d.get("progress"))},
+    )
+
+
 def _ferzan_curve_snap(query: str) -> MarketSnapshot | None:
     """Ferzan launchpad token still on its bonding curve (no DEX pool until graduation)."""
     ca = (query or "").strip()
@@ -405,6 +439,8 @@ def _ferzan_curve_snap(query: str) -> MarketSnapshot | None:
         return _ferzan_tron_curve_snap(ca)
     if ca.startswith(("EQ", "UQ", "kQ")) and len(ca) == 48:
         return _ferzan_ton_curve_snap(ca)
+    if re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{32,44}", ca):
+        return _ferzan_sol_curve_snap(ca)
     if not (ca.lower().startswith("0x") and len(ca) == 42):
         return None
     try:
