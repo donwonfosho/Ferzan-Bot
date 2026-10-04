@@ -581,6 +581,13 @@ async def _holding(seed64: bytes, jetton: str) -> tuple[int, str]:
 def jetton_holding(secret: str, jetton: str) -> tuple[float, str]:
     """(token amount in whole units, TON wallet address). Blocking, read-only."""
     seed64 = _ton_keypair_bytes(secret)
+    # Fast path: the address comes from the key and the balance from the public API (about a second). A positive answer is
+    # enough; zero or unreadable is double-checked on the TON nodes below, so a lagging index can never hide a holding.
+    _fast = _offline_address(seed64)
+    if _fast:
+        _amt = jetton_amount_pub(_fast, jetton)
+        if _amt is not None and _amt > 0:
+            return _amt, _fast
     last: Exception | None = None
     for attempt in range(3):  # public liteservers are sometimes behind: a retry usually lands on a good one
         try:

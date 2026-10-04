@@ -41,6 +41,32 @@ class JettonAmount(unittest.TestCase):
                 self.get(R(200, {"balance": "4000000000", "jetton": {"decimals": 9}})):
             self.assertEqual(t.jetton_holding("secret", "EQj"), (4.0, "UQowner"))
 
+    def test_positive_api_answer_skips_the_slow_nodes(self):
+        calls = []
+        with mock.patch.object(t, "_ton_keypair_bytes", return_value=b"k" * 64), \
+                mock.patch.object(t, "_run_async", side_effect=lambda *a: calls.append(1)), \
+                mock.patch.object(t, "_offline_address", return_value="UQowner"), \
+                self.get(R(200, {"balance": "3000000000", "jetton": {"decimals": 9}})):
+            self.assertEqual(t.jetton_holding("secret", "EQj"), (3.0, "UQowner"))
+        self.assertEqual(calls, [])
+
+    def test_zero_from_the_api_is_double_checked_on_the_nodes(self):
+        async def fake():
+            return 5_000_000_000, "UQowner"
+
+        def run(coro):
+            coro.close()
+            return 5_000_000_000, "UQowner"
+
+        with mock.patch.object(t, "_ton_keypair_bytes", return_value=b"k" * 64), \
+                mock.patch.object(t, "_run_async", side_effect=run), \
+                mock.patch.object(t, "_holding", side_effect=lambda *a: fake()), \
+                mock.patch.object(t, "_jetton_decimals", return_value=9), \
+                mock.patch.object(t, "_remember_addr"), \
+                mock.patch.object(t, "_offline_address", return_value="UQowner"), \
+                self.get(R(404)):
+            self.assertEqual(t.jetton_holding("secret", "EQj"), (5.0, "UQowner"))
+
     def test_holding_raises_when_nothing_answers(self):
         with mock.patch.object(t, "_ton_keypair_bytes", return_value=b"k" * 64), \
                 mock.patch.object(t, "_run_async", side_effect=RuntimeError("cannot load block")), \
