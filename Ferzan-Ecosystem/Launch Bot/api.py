@@ -229,6 +229,11 @@ def build_tx(request_id: str, body: BuildTxRequest):
     if _site_wallet and _site_wallet.lower() != (body.wallet_address or "").strip().lower():
         raise HTTPException(400, "This launch belongs to another wallet")
 
+    _ex0 = req.extra_params or {}
+    if _ex0.get("source") == "tradebot_wallet" and (req.wallet_address or "").strip() \
+            and req.wallet_address.strip().lower() != (body.wallet_address or "").strip().lower():
+        raise HTTPException(400, "This launch belongs to another wallet")  # a Trade Bot launch is tied to its wallet once built
+
     total_supply = int(req.total_supply)
 
     try:
@@ -295,6 +300,8 @@ def build_tx(request_id: str, body: BuildTxRequest):
                     "note": result.note,
                     "cost_text": getattr(result, "cost_text", ""),
                 }
+                if _ex0.get("source") == "tradebot_wallet":  # /complete only accepts THIS coin for a Trade Bot launch
+                    _set_extra(request_id, {**_ex0, "sol_mint": result.mint_address})
             else:
                 raise HTTPException(400, f"Unknown Solana mode: {req.mode}")
 
@@ -726,6 +733,9 @@ def _verify_site_launch(req, body) -> dict:
             raise HTTPException(400, "The launch is not confirmed on Solana")
         if (res.get("meta") or {}).get("err") is not None:
             raise HTTPException(400, "The launch transaction failed on Solana")
+        _ex = req.extra_params or {}
+        if _ex.get("source") == "tradebot_wallet" and (not _ex.get("sol_mint") or _ex.get("sol_mint") != mint):
+            raise HTTPException(400, "That is not the coin this launch built")
         keys = [k.get("pubkey") if isinstance(k, dict) else k for k in (res.get("transaction") or {}).get("message", {}).get("accountKeys") or []]
         if not keys or keys[0] != wallet or mint not in keys:
             raise HTTPException(400, "That launch was not made by this wallet")

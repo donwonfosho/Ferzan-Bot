@@ -45,6 +45,8 @@ def _log(fn):
 def _clean(msg) -> str:
     m = re.sub(r"https?://\S+", "<url>", str(msg))
     m = re.sub(r"(?i)\burl:?\s*\S+", "url <hidden>", m)
+    m = re.sub(r"(?i)host=\S+", "host=<hidden>", m)
+    m = re.sub(r"\b[\w-]+(?:\.[\w-]+)+\.[a-z]{2,}\b", "<host>", m)
     return m[:160]
 
 
@@ -74,7 +76,8 @@ def _rpc(method: str, params: list, timeout: int = 25) -> dict:
 
 
 def _status(sig: str) -> tuple[str, str]:
-    """("confirmed" | "failed" | "pending" | "unknown", reason). unknown = the network has not seen it."""
+    """("confirmed" | "failed" | "pending" | "unknown", reason). unknown = the network ANSWERED that it has not seen it.
+    A query that itself fails raises, so callers can tell "not seen" from "couldn't ask"."""
     body = _rpc("getSignatureStatuses", [[sig], {"searchTransactionHistory": True}])
     st = (((body.get("result") or {}).get("value")) or [None])[0]
     if not st:
@@ -86,13 +89,25 @@ def _status(sig: str) -> tuple[str, str]:
     return "pending", ""
 
 
+def _blockhash_dead(bh: str) -> bool:
+    """True only when the network explicitly says this blockhash can no longer be used (so an unseen tx can never land)."""
+    if not bh:
+        return False
+    try:
+        body = _rpc("isBlockhashValid", [bh, {"commitment": "processed"}])
+    except Exception:  # noqa: BLE001
+        return False
+    val = (body.get("result") or {}).get("value")
+    return val is False
+
+
 def _wait(sig: str, wait_s: int) -> tuple[str, str]:
     deadline = time.time() + wait_s
     while True:
         try:
             s, why = _status(sig)
-        except Exception:  # noqa: BLE001 - a busy node is not a failed launch
-            s, why = "unknown", ""
+        except Exception:  # noqa: BLE001 - a busy node is not a failed launch, and not proof it never landed
+            s, why = "error", ""
         if s in ("confirmed", "failed") or time.time() >= deadline:
             return s, why
         time.sleep(2)
@@ -135,7 +150,7 @@ def _decode(tx_hex: str, addr: str, mint: str):
 
 def _outflow(tx, addr: str) -> tuple[int, str]:
     """(lamports this transaction would take out of the wallet, "" ) from a simulation; exits if it would fail."""
-    pre = _rpc("getBalance", [addr])
+    pre = _rpc("getBalance", [addr, {"commitment": "processed"}])
     pre_l = ((pre.get("result") or {}).get("value"))
     if pre_l is None:
         out(ok=False, error="couldn't read the wallet balance")
@@ -165,15 +180,21 @@ def launch(args: dict) -> None:
     prev = _log(lambda d: d.get(rid))
     if prev and prev.get("signature"):  # already tried once: report that, never send a second launch
         sig = prev["signature"]
+        if prev.get("expired"):  # already proven dead earlier: report it again, never send under this request id
+            out(ok=False, expired=True, signature=sig, address=addr, error="the launch expired before Solana took it (nothing happened)")
         state, why = _wait(sig, 15)
         age = time.time() - int(prev.get("at") or 0)
-        if state == "unknown" and age > EXPIRE_S:  # never landed and its blockhash is long dead: it can never land now
-            _log(lambda d: d.pop(rid, None))
+        # expired only when Solana ANSWERED "never seen it" AND said the blockhash is dead; a failed query proves nothing
+        if state == "unknown" and age > EXPIRE_S and _blockhash_dead(prev.get("blockhash") or ""):
+            _log(lambda d: d[rid].update(expired=True))
             out(ok=False, expired=True, signature=sig, address=addr, error="the launch expired before Solana took it (nothing happened)")
-        out(**_verdict("pending" if state == "unknown" else state, why, sig, prev.get("mint") or mint, addr, repeat=True))
+        out(**_verdict("pending" if state in ("unknown", "error") else state, why, sig, prev.get("mint") or mint, addr, repeat=True))
 
     tx = _decode(str(args.get("tx_hex") or ""), addr, mint)
     tx.partial_sign([kp], tx.message.recent_blockhash)
+    from solders.signature import Signature as _Sig
+    if any(sg == _Sig.default() for sg in tx.signatures):  # both signatures (this wallet + the new coin) must now be present
+        out(ok=False, error="couldn't sign the launch transaction, so nothing was sent", address=addr)
     spend, _ = _outflow(tx, addr)
     if spend > cap:
         out(ok=False, error=f"the launch would spend {spend / 1e9:.4f} SOL, more than the {cap / 1e9:.4f} SOL it should, so nothing was sent", address=addr)
@@ -181,7 +202,8 @@ def launch(args: dict) -> None:
     if args.get("dry"):
         out(ok=True, dry=True, address=addr, mint=mint, would_spend=spend / 1e9, cap=cap / 1e9, signature=sig)
 
-    _log(lambda d: d.__setitem__(rid, {"signature": sig, "mint": mint, "uid": uid, "address": addr, "at": int(time.time()), "broadcast": False}))
+    _log(lambda d: d.__setitem__(rid, {"signature": sig, "mint": mint, "uid": uid, "address": addr, "at": int(time.time()), "broadcast": False,
+                                       "blockhash": str(tx.message.recent_blockhash)}))
     wire = base64.b64encode(bytes(tx)).decode()
     try:
         body = _rpc("sendTransaction", [wire, {"encoding": "base64", "skipPreflight": False, "maxRetries": 5}], timeout=30)
@@ -198,8 +220,13 @@ def launch(args: dict) -> None:
         if state in ("confirmed", "failed", "pending"):  # it landed anyway
             _log(lambda d: d[rid].update(broadcast=True))
             out(**_verdict(state, why, sig, mint, addr))
-        _log(lambda d: d.pop(rid, None))  # the network refused it outright: a retry may send again
-        out(ok=False, error="Solana rejected the launch: " + msg, address=addr)
+        code = err.get("code") if isinstance(err, dict) else None
+        low = msg.lower()
+        if code in (-32002, -32003) or "blockhash not found" in low or "signature verification" in low:
+            _log(lambda d: d.pop(rid, None))  # refused before it could enter a block: a retry may send again
+            out(ok=False, error="Solana rejected the launch: " + msg, address=addr)
+        # any other error (internal error, node behind, ...) may have come after the node took it: keep the record
+        out(ok=False, maybe_sent=True, signature=sig, address=addr, error="not sure it was sent: " + msg)
     _log(lambda d: d[rid].update(broadcast=True))
     state, why = _wait(sig, SEND_WAIT_S)
     out(**_verdict("pending" if state == "unknown" else state, why, sig, mint, addr))

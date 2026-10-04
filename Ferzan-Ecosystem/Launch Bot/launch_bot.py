@@ -1548,6 +1548,10 @@ async def _show_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text += ("\n\n<b>Two ways to pay:</b> connect your own wallet and sign it yourself (Ferzan never holds your "
                  f"keys), or launch straight from your Ferzan Trade Bot wallet (open @{_esc(TRADE)} → /wallet to see "
                  "its address and top it up). Nothing is sent until you tap one of the launch buttons.")
+    elif chain == "solana" and mode == "meteora":
+        text += ("\n\n<b>Two ways to pay:</b> connect your own wallet and sign it yourself (Ferzan never holds your "
+                 f"keys), or launch straight from your Ferzan Trade Bot wallet (open @{_esc(TRADE)} → /wallet to see "
+                 "its Solana address and top it up). Nothing is sent until you tap one of the launch buttons.")
     else:
         text += ("\n\nNext you'll connect your wallet and see the exact cost before signing. "
                  "Ferzan never holds your keys.")
@@ -1572,7 +1576,7 @@ async def _show_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if chain == "ton":
         first[0] = InlineKeyboardButton("🔗 Connect a wallet", callback_data="confirm:yes")
         kb.append([InlineKeyboardButton("💼 Launch from my Trade Bot wallet", callback_data="confirm:tb")])
-    if chain in EVM_TB_CHAINS and mode in ("plain", "bonding_curve"):
+    if (chain in EVM_TB_CHAINS and mode in ("plain", "bonding_curve")) or (chain == "solana" and mode == "meteora"):
         first[0] = InlineKeyboardButton("🔗 Connect a wallet", callback_data="confirm:yes")
         kb.append([InlineKeyboardButton("💼 Launch from my Trade Bot wallet", callback_data="confirm:tb")])
     await update.effective_message.reply_text(
@@ -1650,6 +1654,8 @@ async def confirmed(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await _ton_tb_go(update, context, launch)
     if query.data == "confirm:tb" and launch["chain"] in EVM_TB_CHAINS and launch.get("mode") in ("plain", "bonding_curve"):
         return await _evm_tb_go(update, context, launch)
+    if query.data == "confirm:tb" and launch["chain"] == "solana" and launch.get("mode") == "meteora":
+        return await _sol_tb_go(update, context, launch)
 
     text, markup = _make_request(update.effective_user.id, update.effective_chat.id, launch)
     await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
@@ -1858,6 +1864,163 @@ async def _evm_tb_run(bot, req_id: str, uid: int, chat_id: int, chain: str):
                       f"{_esc(scan)}/address/{_esc(addr)} before trying again.")
     except Exception:
         logger.exception("evm tb launch %s crashed", req_id)
+        await say("❌ Something went wrong with the launch. Check /history and your Trade Bot wallet before trying again.")
+
+
+# ------------------------------------------------ Solana: launch from the Trade Bot wallet --
+SOL_TB_DRY = (os.environ.get("SOL_TB_DRY_RUN") or "").strip() == "1"  # do every check + signing, send nothing
+SOL_TB_MARGIN_LAMPORTS = 80_000_000  # Solana rent for the pool/coin accounts + network fees, above dev buy + launch fee
+
+
+def _sol_tb_cap(extra: dict) -> int:
+    """Most SOL (lamports) this launch may take out of the wallet: dev buy + the full launch fee + a margin."""
+    try:
+        fee = int(os.environ.get("LAUNCH_FEE_LAMPORTS") or "50000000")
+    except ValueError:
+        fee = 50_000_000
+    m = re.search(r"\d*\.\d+|\d+", str(extra.get("dev_buy") or "0").replace(",", ""))  # same reading as the API's builder
+    try:
+        dev = int(round(float(m.group(0)) * 1e9)) if m else 0
+    except (ValueError, OverflowError):
+        dev = 0
+    return dev + fee + SOL_TB_MARGIN_LAMPORTS
+
+
+async def _sol_tb_go(update: Update, context: ContextTypes.DEFAULT_TYPE, launch: dict):
+    q = update.callback_query
+    uid, chat_id = update.effective_user.id, update.effective_chat.id
+    extra = dict(launch.get("extra_params") or {}, source="tradebot_wallet")
+    req = db.create_launch_request(
+        telegram_user_id=uid, chat_id=chat_id, chain="solana", mode=launch.get("mode") or "meteora", name=launch["name"],
+        symbol=launch["symbol"], total_supply=launch["total_supply_raw"], decimals=launch["decimals"],
+        description=launch.get("description") or "", image_url=launch.get("image_url") or "", extra_params=extra,
+    )
+    cap = _sol_tb_cap(extra)
+    context.user_data.pop("launch", None)
+    await q.edit_message_text(
+        f"⏳ Launching <b>{_esc(launch['name'])} (${_esc(launch['symbol'])})</b> on Solana from your Trade Bot wallet. "
+        "This takes about a minute. Please don't launch it again.", parse_mode="HTML")
+    context.application.create_task(_sol_tb_run(context.bot, req.id, uid, chat_id, cap))
+    return ConversationHandler.END
+
+
+def _sol_complete(req_id: str, sig: str, mint: str) -> tuple[bool, str]:
+    import requests
+
+    try:
+        r = requests.post(f"{LAUNCH_API}/api/launch-requests/{req_id}/complete",
+                          json={"tx_hash": sig, "result_token_address": mint}, timeout=120)
+        if r.status_code == 200:
+            return True, ""
+        return False, str((r.json() or {}).get("detail") or r.status_code)[:200]
+    except Exception as e:  # noqa: BLE001
+        return False, type(e).__name__
+
+
+async def _sol_tb_run(bot, req_id: str, uid: int, chat_id: int, cap: int):
+    say = lambda t: bot.send_message(chat_id=chat_id, text=t, parse_mode="HTML", disable_web_page_preview=True)  # noqa: E731
+    helper = "sol_launch_exec.py"
+    addr, sig, mint = "", "", ""
+    try:
+        info = await tron.run("info", {"uid": uid, "need_lamports": cap}, timeout=60, script=helper)
+        addr = info.get("address") or ""
+        if not info.get("ok"):
+            db.update_status(req_id, "failed", error_message=str(info.get("error"))[:200])
+            if info.get("error") == "no_wallet":
+                await say(f"❌ You don't have a Ferzan Trade Bot wallet yet. Open @{_esc(TRADE)}, tap /wallet, then try again. Nothing was sent.")
+            else:
+                await say(f"❌ Couldn't use your Trade Bot wallet ({_esc(str(info.get('error'))[:120])}). Nothing was sent.")
+            return
+        if not info.get("enough"):
+            db.update_status(req_id, "failed", error_message="low balance")
+            await say(f"❌ Not launched: your Trade Bot Solana wallet has {float(info.get('balance') or 0):.4g} SOL and this "
+                      f"launch can take up to {float(info.get('need') or 0):.4g} SOL (dev buy + launch fee + Solana rent and "
+                      f"fees; any unused rent stays with you). Send SOL to <code>{_esc(addr)}</code>, then try again. "
+                      "Nothing was sent.")
+            return
+        built = await asyncio.to_thread(_build_tx, req_id, addr)
+        tx_hex, mint = built.get("unsigned_transaction"), str(built.get("mint_address") or "")
+        if not isinstance(tx_hex, str) or not tx_hex or not mint:
+            db.update_status(req_id, "failed", error_message=str(built.get("error") or "no transaction")[:200])
+            await say("❌ Couldn't prepare the launch (" + _esc(str(built.get("error") or "no transaction")[:200]) +
+                      "). Nothing was sent.")
+            return
+        largs = {"uid": uid, "request_id": req_id, "tx_hex": tx_hex, "mint": mint, "cap_lamports": cap, "dry": SOL_TB_DRY}
+        res = await tron.run("launch", largs, timeout=200, script=helper)
+        sig = res.get("signature") or ""
+        for _ in range(2):
+            if not (res.get("pending") and not sig):
+                break
+            # the helper outlived our wait without a signature: it may have sent. The same request gives the same signed
+            # bytes (so asking again can never launch twice), so ask again instead of guessing.
+            await asyncio.sleep(5)
+            res = await tron.run("launch", largs, timeout=200, script=helper)
+            sig = res.get("signature") or ""
+        if res.get("pending") and not sig:
+            db.update_status(req_id, "submitted")
+            await say("⏳ The launch is still being sent and I can't tell yet whether it went through. Check your Trade Bot "
+                      f"wallet on https://solscan.io/account/{_esc(addr)} and please don't launch it again.")
+            return
+        if res.get("dry"):
+            db.update_status(req_id, "failed", error_message="dry run")
+            await say(f"🧪 Dry run OK: the launch is built and signed and would spend {float(res.get('would_spend') or 0):.4f} SOL "
+                      f"(limit {float(res.get('cap') or 0):.4f}). Nothing was sent.")
+            return
+        t1, warned = time.monotonic(), False
+        while res.get("pending") and sig and time.monotonic() - t1 < 600:
+            # sent, not confirmed yet: ask the helper again (it never re-sends; it only re-reads the signature)
+            if not warned and time.monotonic() - t1 > 90:
+                warned = True
+                await say("⏳ Solana is slow right now. Your launch is still waiting to be confirmed. I'll keep watching it; "
+                          "please don't launch it again.")
+            await asyncio.sleep(10)
+            res = await tron.run("launch", largs, timeout=60, script=helper)
+            sig = res.get("signature") or sig
+        if res.get("ok"):
+            mint = res.get("mint") or mint
+            db.update_status(req_id, "submitted", tx_hash=sig)
+            await say("✅ Your launch was sent. Confirming it now (up to a few minutes). Please don't launch it again.")
+            why, t0 = "", time.monotonic()
+            while time.monotonic() - t0 < 360:  # the API proves the launch on-chain, then posts the launch card
+                ok, why = await asyncio.to_thread(_sol_complete, req_id, sig, mint)
+                if ok:
+                    return
+                await asyncio.sleep(20)
+            logger.warning("sol tb launch %s not recorded: %s", req_id, why)
+            await say(f"⏳ Your launch was sent but isn't recorded yet. See https://solscan.io/tx/{_esc(sig)} and please "
+                      "don't launch it again.")
+            return
+        if res.get("expired"):  # never reached Solana and its time ran out: nothing happened, a retry is safe
+            db.update_status(req_id, "failed", error_message="expired")
+            await say("❌ Not launched: the launch expired before Solana took it. Nothing happened; you can try again.")
+            return
+        if res.get("maybe_sent"):
+            db.update_status(req_id, "submitted", tx_hash=sig)
+            await say(f"⚠️ I'm not sure whether your launch went out. Check your Trade Bot wallet on "
+                      f"https://solscan.io/account/{_esc(addr)} and please don't launch it again until you've looked.")
+            return
+        if sig and not res.get("ok") and not (res.get("error") or "").startswith("the launch failed on Solana"):
+            # a signature exists and Solana has not said it failed: it may still land, never call it a failure
+            db.update_status(req_id, "submitted", tx_hash=sig)
+            await say(f"⏳ Your launch was sent but Solana hasn't confirmed it yet. See https://solscan.io/tx/{_esc(sig)} "
+                      "and please don't launch it again.")
+            return
+        db.update_status(req_id, "failed", error_message=str(res.get("error"))[:200])
+        if res.get("error") == "low_balance":
+            await say(f"❌ Not launched: your Trade Bot Solana wallet has {float(res.get('balance') or 0):.4g} SOL, which isn't "
+                      "enough for this launch. Top it up and try again. Nothing was sent.")
+        elif sig:
+            await say(f"❌ The launch didn't go through ({_esc(str(res.get('error'))[:150])}). See "
+                      f"https://solscan.io/tx/{_esc(sig)} before trying again.")
+        else:
+            await say(f"❌ Not launched ({_esc(str(res.get('error'))[:150])}). Nothing was sent.")
+    except Exception:
+        logger.exception("sol tb launch %s crashed", req_id)
+        if sig:
+            try:
+                db.update_status(req_id, "submitted", tx_hash=sig)
+            except Exception:  # noqa: BLE001
+                logger.exception("sol tb launch %s: couldn't record the signature", req_id)
         await say("❌ Something went wrong with the launch. Check /history and your Trade Bot wallet before trying again.")
 
 
