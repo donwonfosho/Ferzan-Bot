@@ -150,6 +150,14 @@ class BackupRead(unittest.TestCase):
         self.assertTrue(tl._is_node_trouble(RuntimeError("Liteserver crashed with 651 code")))
         self.assertFalse(tl._is_node_trouble(RuntimeError("exit code -13")))
 
+    def test_too_many_requests_waits_and_asks_again(self):
+        ok = {"exit_code": 0, "stack": [{"type": "num", "value": "0x9"}]}
+        with mock.patch("requests.post", side_effect=[_Resp(429, {}), _Resp(200, ok)]) as post, \
+                mock.patch("time.sleep") as sl:
+            self.assertEqual(tl._http_get_method("EQx", "get_curve"), [9])
+        self.assertEqual(post.call_count, 2)
+        sl.assert_called_once()
+
     def test_both_fail_raises(self):
         def boom(coro, *a, **k):
             coro.close()

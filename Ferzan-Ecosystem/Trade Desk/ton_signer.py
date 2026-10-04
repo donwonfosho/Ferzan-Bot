@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import time
 
 import requests
 
 from evm_signer import live_enabled, max_usd
+
+_log = logging.getLogger("ton_signer")
 
 STON = "https://api.ston.fi"
 # Official TON asset id used by STON.fi
@@ -112,6 +115,16 @@ def _run_retry(make_coro, tries: int = 3):
                 raise
             _t.sleep(1.5 * (i + 1))
     raise last  # pragma: no cover
+
+
+def _trade_failed(kind: str, exc, bcast_before: int) -> str:
+    """Message for a failed curve trade. The real error goes to the log; the user is told truthfully whether a transaction
+    could have gone out (it never says 'nothing was sent' once a message was handed to the network)."""
+    _log.warning("TON curve %s failed: %s: %s", kind, type(exc).__name__, str(exc)[:300])
+    if _BCAST["n"] != bcast_before:
+        return (f"TON curve {kind} was sent, but I could not confirm it ({str(exc)[:80]}). "
+                "It MAY have gone through: check your wallet before retrying.")
+    return f"TON curve {kind} failed: {_friendly_err(exc)} Check your wallet before retrying."
 
 
 def _friendly_err(exc) -> str:
@@ -900,10 +913,11 @@ def buy_ton(jetton: str, usd: float, secret: str | None = None, slip_bps: int = 
             seed64 = _ton_keypair_bytes(secret)
         except Exception as exc:
             return False, f"TON key: {exc}"
+        before = _BCAST["n"]
         try:
             return _curve_buy(ci, jetton, nano, usd, seed64, slip_bps or CURVE_SLIP_BPS)
         except Exception as exc:
-            return False, f"TON curve buy failed: {_friendly_err(exc)} Check your wallet before retrying."
+            return False, _trade_failed("buy", exc, before)
 
     sim = simulate(jetton, str(nano))
     if sim.get("error"):
@@ -981,10 +995,11 @@ def sell_ton(jetton: str, secret: str | None = None, pct: int = 100, slip: str =
         return False, f"TON key: {exc}"
     ci = curve_info(jetton)
     if ci and not ci.get("graduated"):
+        before = _BCAST["n"]
         try:
             return _curve_sell(ci, jetton, pct, seed64, int(float(slip) * 10_000) or CURVE_SLIP_BPS)
         except Exception as exc:
-            return False, f"TON curve sell failed: {_friendly_err(exc)} Check your wallet before retrying."
+            return False, _trade_failed("sell", exc, before)
     try:
         return _run_retry(lambda: _swap_jetton_to_ton(seed64, jetton, pct, slip))
     except Exception as exc:

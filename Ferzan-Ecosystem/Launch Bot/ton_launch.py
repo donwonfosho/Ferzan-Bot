@@ -164,6 +164,15 @@ def _num(v) -> int:
     return int(str(v), 16) if str(v).lower().lstrip("-").startswith("0x") else int(str(v))
 
 
+def _once_more_on_429(call):
+    """The free API tiers allow about one request a second; on 'too many requests' wait a moment and ask once more."""
+    r = call()
+    if getattr(r, "status_code", 0) == 429:
+        time.sleep(1.3)
+        r = call()
+    return r
+
+
 def _center_stack(args, boc: bool) -> list:
     out = []
     for a in args:
@@ -194,8 +203,9 @@ def _http_get_method(address: str, method: str, stack=None) -> list:
     has_addr = any(isinstance(a, str) for a in args)
     for boc in ((False, True) if has_addr else (False,)):  # toncenter takes an address string or a BOC slice: try both
         try:
-            r = requests.post(f"{center}/api/v3/runGetMethod", timeout=10, headers={"X-API-Key": key} if key else {},
-                              json={"address": address, "method": method, "stack": _center_stack(args, boc)})
+            r = _once_more_on_429(lambda: requests.post(
+                f"{center}/api/v3/runGetMethod", timeout=10, headers={"X-API-Key": key} if key else {},
+                json={"address": address, "method": method, "stack": _center_stack(args, boc)}))
             j = r.json() if r.status_code == 200 else {}
             if r.status_code == 200 and int(j.get("exit_code", 1)) == 0:
                 out = []
@@ -208,9 +218,10 @@ def _http_get_method(address: str, method: str, stack=None) -> list:
             errs.append(f"toncenter {type(e).__name__}")
     tkey = (os.environ.get("TONAPI_KEY") or "").strip()
     try:
-        r = requests.get(f"{tonapi}/v2/blockchain/accounts/{address}/methods/{method}", timeout=10,
-                         params=[("args", str(a)) for a in args],
-                         headers={"Accept": "application/json", **({"Authorization": f"Bearer {tkey}"} if tkey else {})})
+        r = _once_more_on_429(lambda: requests.get(
+            f"{tonapi}/v2/blockchain/accounts/{address}/methods/{method}", timeout=10,
+            params=[("args", str(a)) for a in args],
+            headers={"Accept": "application/json", **({"Authorization": f"Bearer {tkey}"} if tkey else {})}))
         j = r.json() if r.status_code == 200 else {}
         if r.status_code == 200 and j.get("success") and int(j.get("exit_code", 1)) == 0:
             out = []

@@ -100,3 +100,21 @@ class TonBalanceRead(unittest.TestCase):
         with mock.patch("asyncio.sleep", nosleep), mock.patch.object(t, "_http_balance_nano", return_value=None):
             with self.assertRaises(RuntimeError):
                 asyncio.run(t._ton_balance(P(), self._Addr()))
+
+
+class TradeFailedMessage(unittest.TestCase):
+    def test_nothing_sent_when_no_broadcast(self):
+        msg = t._trade_failed("buy", RuntimeError("Liteserver crashed with 651 code"), t._BCAST["n"])
+        self.assertIn("Nothing was sent", msg)
+
+    def test_never_says_nothing_sent_after_a_broadcast(self):
+        before = t._BCAST["n"]
+        t._BCAST["n"] += 1
+        msg = t._trade_failed("sell", RuntimeError("cannot load block 651"), before)
+        self.assertNotIn("Nothing was sent", msg)
+        self.assertIn("MAY have gone through", msg)
+
+    def test_real_error_is_logged(self):
+        with self.assertLogs("ton_signer", level="WARNING") as cm:
+            t._trade_failed("buy", RuntimeError("toncenter 429"), t._BCAST["n"])
+        self.assertTrue(any("toncenter 429" in m for m in cm.output))
