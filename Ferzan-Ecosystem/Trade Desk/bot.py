@@ -2508,13 +2508,22 @@ def _bag_panel(
     if bits:
         text += "Armed: " + " · ".join(bits) + "\n"
     text += "<i>Tap CA to copy</i>"
-    sell_row = [
-        InlineKeyboardButton(f"{v}%", callback_data=f"slp:{v}:{short}") for v in db.sell_presets(uid) if v < 100
-    ]
+    _pre = sorted({int(v) for v in db.sell_presets(uid) if v < 100} | {25, 50, 75})[:4]
+    sell_row = [InlineKeyboardButton(f"{v}%", callback_data=f"slp:{v}:{short}") for v in _pre]
     sell_row.append(InlineKeyboardButton("☢️ 100%", callback_data=f"slp:100:{short}"))
+    _cid = resolve_chain(chain) or {"BASE": "base", "BNB": "bsc", "ARB": "arb", "TON": "ton", "TRX": "trx", "SOL": "sol", "AVAX": "avax"}.get(venue.upper(), "eth" if mint.startswith("0x") else "sol")
+    _unit = _NATIVE_UNIT.get(_cid, "ETH")
+    _ct = db.get_chain_trade(uid, _cid)
     rows = [sell_row]
-    if cost > 0 and worth > cost:
-        rows.append([InlineKeyboardButton("💰 Sell initials (take my money out)", callback_data=f"sli:{short}")])
+    rows.append([
+        InlineKeyboardButton("💰 Sell initials", callback_data=f"sli:{short}"),
+        InlineKeyboardButton("☢️ Sell all", callback_data=f"slp:100:{short}"),
+        InlineKeyboardButton("✏️ Sell X %", callback_data=f"sxa:pct:{short}"),
+    ])
+    rows.append([
+        InlineKeyboardButton(f"✏️ Sell X {_unit}", callback_data=f"sxa:nat:{short}"),
+        InlineKeyboardButton("✏️ Sell X tokens", callback_data=f"sxa:tok:{short}"),
+    ])
     rows += [
         [
             InlineKeyboardButton("🎯 TP +50%", callback_data=f"tpx:50:{short}"),
@@ -2527,8 +2536,22 @@ def _bag_panel(
     else:
         _ap_on, _ap_tp, _ap_sl = db.get_auto_protect(uid)
         rows.append([InlineKeyboardButton(f"🛡 Protect me · TP +{_ap_tp:g}% / SL -{_ap_sl:g}%", callback_data=f"prt:{short}")])
-    if worth <= 0:  # no market: offer to tuck it away (it comes back by itself if it ever gets a price)
-        rows.append([InlineKeyboardButton("🙈 Hide this token (no market)", callback_data=f"bagh:{short}")])
+    rows.append([
+        InlineKeyboardButton(f"🎚 Slippage | {int(_ct['sell_slip'])}%", callback_data=f"xslip:{_cid}"),
+        InlineKeyboardButton(f"⛽ Gas | {float(_ct.get('gas') or 0):.3f} {_unit}", callback_data=f"xgas:{_cid}"),
+    ])
+    rows.append([
+        InlineKeyboardButton("⚙️ Sell limit", callback_data=f"sxa:lim:{short}"),
+        InlineKeyboardButton("🙈 Hide token", callback_data=f"bagh:{short}"),
+    ])
+    try:
+        _nw = len(user_wallets.all_secrets(uid))
+    except Exception:
+        _nw = 1
+    rows.append([
+        InlineKeyboardButton(f"💳 Multi sell | {_nw}", callback_data="go:wallets"),
+        InlineKeyboardButton("🟢 Multi", callback_data="go:wallets"),
+    ])
     rows += [
         [
             InlineKeyboardButton("📡 Score", callback_data=f"sig:{short}"),
@@ -6145,6 +6168,45 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         context.user_data["talert"] = None
         await _create_token_alert(update, update.effective_user.id, talert, text)
         return
+    sx = (context.user_data or {}).get("sellx")
+    if sx:
+        context.user_data["sellx"] = None
+        uid = update.effective_user.id
+        if time.time() - float(sx.get("t") or 0) > 120:
+            sx = None  # stale: an old prompt must never turn a later number into a sale
+    if sx:
+        try:
+            val = float(text.replace(",", "").strip())
+        except ValueError:
+            if len(text) < 20:
+                await update.effective_message.reply_text("That wasn't a number, so nothing was sold. Tap the button again to retry.")
+                return
+            sx = None  # looks like a token address: let the normal flow handle it
+    if sx:
+        if val <= 0:
+            await update.effective_message.reply_text("Send a number above zero. Nothing was sold.")
+            return
+        mint, kind = sx["mint"], sx["kind"]
+        if kind == "lim":
+            db.set_live_exit(uid, mint, tp_pct=val)
+            await update.effective_message.reply_text(f"⚙️ Sell limit set: it sells all of it when it is up {val:g}%. Tap 🧹 Clear exit rules on the position to remove it.")
+            return
+        status = await _progress(context.bot, uid, "⏳ Working out how much to sell…")
+        try:
+            amount, _o, _v = await asyncio.to_thread(_bag_position_amount, uid, mint)
+            px = await asyncio.to_thread(_token_mark_usd, mint)
+            _sc, _se, _wl, cid = await asyncio.to_thread(_holder_wallet, uid, mint)
+            npx = await asyncio.to_thread(_native_usd, cid) if kind == "nat" else 0.0
+        except Exception as exc:
+            await _done(context.bot, uid, status, f"Couldn't read the bag, so nothing was sold: {exc}")
+            return
+        pct, why = _sellx_pct(kind, val, float(amount or 0), float(px or 0), float(npx or 0))
+        if pct is None:
+            await _done(context.bot, uid, status, why)
+            return
+        ok, msg, label = await _off(uid, _sell_any, uid, mint, pct, _busy=(False, BUSY_MSG, ""))
+        await _done(context.bot, uid, status, f"{why}\n" + _trade_result("sell", ok, label, msg, pct=pct))
+        return
     pending = (context.user_data or {}).get("buyx")
     if pending:
         context.user_data["buyx"] = None
@@ -7137,6 +7199,18 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             db.set_live_exit(uid, mint, sl_pct=pct)
             await context.bot.send_message(uid, f"🛑 Live SL -{pct:.0f}% armed on that mint.")
         return
+    if data.startswith("sxa:"):  # Sell X % / X native / X tokens / Sell limit: ask for the number, then act in on_text
+        _t, kind, mint = data.split(":", 2)
+        context.user_data["sellx"] = {"kind": kind, "mint": mint, "t": time.time()}
+        ask = {
+            "pct": "How much do you want to sell, in percent? Send a number from 1 to 100. Example: 40",
+            "nat": "How much do you want to sell, counted in the chain's coin (what you get back)? Example: 0.05",
+            "tok": "How many tokens do you want to sell? Send the number. Example: 250000",
+            "lim": "Sell limit: send the % gain at which it should sell all of it automatically. Example: 100 (sells when it is up 100%)",
+        }.get(kind, "Send a number.")
+        await _safe_answer(query, "")
+        await context.bot.send_message(uid, f"✏️ {ask}\n(Waits 2 minutes. Ignore this and nothing happens.)")
+        return
     if data.startswith("slp:"):
         _tag, pct_s, mint = data.split(":", 2)
         try:
@@ -7559,6 +7633,34 @@ def _native_usd(cid: str) -> float:
         return float(get_price_usd(_NATIVE_GECKO.get(cid, "ethereum")) or 0)
     except Exception:
         return 0.0
+
+
+def _sellx_pct(kind: str, val: float, amount: float, px_usd: float, native_usd: float) -> tuple[int | None, str]:
+    """Turns "sell X %" / "X tokens" / "X of the chain's coin" into a whole-number percent of the bag.
+    (None, reason) when it can't be done safely: nothing is sold on a guess."""
+    import math
+
+    if kind == "pct":
+        if val > 100:
+            return None, "That's more than 100%, so nothing was sold. Send 1 to 100."
+        return max(1, int(round(val))), f"Selling {max(1, int(round(val)))}%."
+    if amount <= 0:
+        return None, "No balance found for that token, so nothing was sold."
+    if kind == "tok":
+        if val > amount * 1.0000001:
+            return None, f"You hold {_fmt_amt(amount)} tokens, so {_fmt_amt(val)} is too many. Nothing was sold."
+        pct = max(1, min(100, int(round(val / amount * 100))))
+        return pct, f"{_fmt_amt(val)} tokens ≈ {pct}% of your bag (whole percents)."
+    if kind == "nat":
+        if px_usd <= 0 or native_usd <= 0:
+            return None, "Couldn't read live prices, so nothing was sold. Try again in a minute."
+        worth = amount * px_usd
+        want = val * native_usd
+        if want > worth * 1.0000001:
+            return None, f"Your bag is worth about {worth / native_usd:.4g} in that coin, so {val:g} is too much. Nothing was sold."
+        pct = max(1, min(100, int(math.ceil(want / worth * 100))))
+        return pct, f"{val:g} ≈ {pct}% of your bag (whole percents)."
+    return None, "Unknown option, nothing was sold."
 
 
 def _initials_pct(cost: float, worth: float) -> int | None:
