@@ -827,7 +827,7 @@ def card_keyboard(
             InlineKeyboardButton("🔔 Alert", callback_data=f"talt:{q}"),
         ],
         [
-            InlineKeyboardButton("💰 Go to sell", callback_data=f"slc:{q}"),
+            InlineKeyboardButton("💰 Go to sell", callback_data=f"slf:{q}"),
             InlineKeyboardButton("📍 Track", callback_data=f"watch:{q}"),
             InlineKeyboardButton("🔄 Refresh", callback_data=f"sig:{q}"),
         ],
@@ -1725,6 +1725,13 @@ LIVE_CARD_EVERY = int(os.getenv("LIVE_CARD_EVERY", "20"))     # ... this many se
 LIVE_CARD_MAX = int(os.getenv("LIVE_CARD_MAX", "40"))         # cards being kept live at once, whole desk
 
 
+def _stop_live_card(chat_id, message_id) -> None:
+    """Stop the card's auto-refresh (it would paint the buy card back over a sell panel we flipped this message to)."""
+    task = _LIVE_CARDS.get((chat_id, message_id))
+    if task is not None:
+        task.cancel()
+
+
 def _start_live_card(msg, query: str, uid: int, first_text: str, markup) -> None:
     """Keep the card's numbers fresh for about a minute after it opens, editing in place. Stops on any error."""
     old = _LIVE_BY_USER.get(uid)
@@ -2525,7 +2532,7 @@ def _bag_panel(
     rows += [
         [
             InlineKeyboardButton("📡 Score", callback_data=f"sig:{short}"),
-            InlineKeyboardButton("💵 Buy more", callback_data=f"buy:{short}"),
+            InlineKeyboardButton("↔️ Go to buy", callback_data=f"sig:{short}"),  # opens the buy card; never buys by itself
             InlineKeyboardButton("🔔 Alert", callback_data=f"talt:{short}"),
         ],
         [
@@ -7458,6 +7465,23 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await context.bot.send_message(
                 uid, f"⛽ {cid.upper()} tip → {nxt}. (Applies to Solana trades; EVM gas is priced automatically.)"
             )
+        return
+    if data.startswith("slf:"):  # buy card -> sell panel, in the same message, so Go to buy / Go to sell flip back and forth
+        mint = data[4:].strip()
+        try:
+            amount, owner, venue = await asyncio.to_thread(_bag_position_amount, uid, mint)
+            text, kb = await asyncio.to_thread(_bag_panel, mint, amount, owner, uid, None, venue)
+        except Exception as exc:
+            await context.bot.send_message(uid, f"Could not open the sell panel right now: {exc}")
+            return
+        msg = query.message
+        if msg is not None:
+            _stop_live_card(msg.chat_id, msg.message_id)
+        try:
+            await query.edit_message_text(text, reply_markup=kb, parse_mode="HTML", disable_web_page_preview=True)
+        except Exception:  # too old to edit, or not a text message: open it as a new message instead
+            await context.bot.send_message(uid, text, reply_markup=kb, parse_mode="HTML",
+                                           disable_web_page_preview=True)
         return
     if data.startswith("slc:"):
         mint = data[4:].strip()
