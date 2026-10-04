@@ -1974,19 +1974,51 @@ def _sol_rpc_sync(method: str, params: list, timeout: int = 15) -> dict:
         return {}
 
 
+def _sol_fresh_response(name: str, symbol: str, pool: dict, usd: float, mint: str) -> dict:
+    """Price/progress of a just-launched Ferzan curve read straight from the chain (the index lags up to ~45s)."""
+    price = float(pool.get("price_sol") or 0)
+    quote, thr = int(pool.get("quote_reserve") or 0), int(pool.get("threshold") or 0)
+    raised, grad = quote / 1e9, thr / 1e9
+    return {"indexed": True, "provisional": True, "chain": "solana", "native": "SOL", "native_usd": usd, "mint": mint,
+            "pool": pool.get("pool") or "", "name": name, "symbol": symbol, "decimals": 6, "supply": 1_000_000_000,
+            "price": price, "mcap_native": price * 1_000_000_000, "mcap_usd": price * 1_000_000_000 * usd,
+            "raised_sol": raised, "grad_sol": grad, "progress": min(100.0, raised * 100.0 / grad) if grad else 0.0,
+            "graduated": bool(pool.get("migrated")) or (thr > 0 and quote >= thr)}
+
+
+def _sol_fresh(mint: str) -> dict:
+    """For the Trade Bot (?fresh=1): a confirmed Ferzan launch the curve index has not picked up yet."""
+    try:
+        with db._get_conn() as conn:
+            row = conn.execute(
+                "SELECT name, symbol FROM launch_requests WHERE chain = 'solana' AND mode = 'meteora' AND status = 'confirmed' "
+                "AND result_token_address = ? ORDER BY created_at DESC LIMIT 1", (mint,)).fetchone()
+        if not row:
+            return {"indexed": False}
+        import sol_indexer
+        pools = [p for p in sol_indexer._read_pools([{"mint": mint, "last_sig": ""}]) if p.get("mint") == mint and p.get("found")]
+        if not pools:
+            return {"indexed": False}
+        return _sol_fresh_response(row[0], row[1], pools[0], _native_usd("solana"), mint)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("fresh sol-coin read failed for %s: %s", mint[:8], exc)
+        return {"indexed": False}
+
+
 @app.get("/api/sol-coin/{mint}")
-def sol_coin(mint: str, tf: int = 300, wallet: str = ""):
+def sol_coin(mint: str, tf: int = 300, wallet: str = "", fresh: int = 0):
     """Chart, stats and project info for a Ferzan Meteora curve, like /api/curve-chart for EVM."""
     if not _re.fullmatch(_B58_RE, mint or ""):
         raise HTTPException(404, "not found")
     tf = tf if tf in (60, 300, 900, 3600, 14400) else 300
     c = _idx_db()
     if c is None:
-        return {"indexed": False}
+        return _sol_fresh(mint) if fresh else {"indexed": False}
     try:
         cv = c.execute("SELECT * FROM curves WHERE chain = 'solana' AND token = ?", (mint,)).fetchone()
         if not cv:
-            return {"indexed": False}
+            c.close()
+            return _sol_fresh(mint) if fresh else {"indexed": False}
         px = c.execute("SELECT ts, price FROM sol_px WHERE pool = ? ORDER BY ts", (cv["curve"],)).fetchall()
         stats = _creator_stats(c, [cv["creator"]])
     finally:

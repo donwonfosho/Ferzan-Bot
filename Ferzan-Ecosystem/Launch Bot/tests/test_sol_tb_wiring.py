@@ -30,6 +30,21 @@ class Wiring(unittest.TestCase):
         self.assertIn('"sol_mint": result.mint_address', api)
         self.assertIn('_ex.get("sol_mint") != mint', api)
 
+    def test_fresh_sol_coin_read(self):
+        api = (HERE / "api.py").read_text()
+        src = api[api.index("def _sol_fresh_response"):api.index("def _sol_fresh(mint")]
+        ns = {}
+        exec(src, ns)
+        pool = {"pool": "P", "price_sol": 2e-8, "quote_reserve": 2_000_000_000, "threshold": 80_000_000_000, "migrated": False}
+        r = ns["_sol_fresh_response"]("SOL Yeah", "SOL", pool, 150.0, "M")
+        self.assertTrue(r["indexed"] and r["provisional"] and not r["graduated"])
+        self.assertAlmostEqual(r["raised_sol"], 2.0)
+        self.assertAlmostEqual(r["progress"], 2.5)
+        self.assertAlmostEqual(r["mcap_usd"], 2e-8 * 1e9 * 150.0)
+        # only the Trade Bot's ?fresh=1 triggers the on-chain read; the website's lookup is unchanged
+        self.assertIn("fresh: int = 0", api)
+        self.assertEqual(api.count("if fresh else"), 2)
+
     def test_cap(self):
         src = BOT[BOT.index("SOL_TB_MARGIN_LAMPORTS ="):BOT.index("async def _sol_tb_go")]
         ns = {"os": os, "re": __import__("re")}

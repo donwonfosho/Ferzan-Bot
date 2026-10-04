@@ -21,6 +21,7 @@ def _patch(monkeypatch, replies):
     calls = []
 
     def fake_get(url, params=None, timeout=None):
+        assert (params or {}).get("fresh") == 1  # the Trade Bot asks the API to read brand-new coins from the chain
         calls.append(url)
         r = replies[min(len(calls) - 1, len(replies) - 1)]
         if isinstance(r, Exception):

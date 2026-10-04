@@ -406,9 +406,9 @@ def _ferzan_sol_curve_snap(mint: str) -> MarketSnapshot | None:
 
     base = (os.getenv("LAUNCH_API_URL") or "http://127.0.0.1:8000").rstrip("/")
     d: dict = {}
-    for attempt in range(2):  # a coin launched seconds ago may take a moment to reach the index
+    for attempt in range(2):  # fresh=1 makes the API read a just-launched coin straight from the chain
         try:
-            r = requests.get(f"{base}/api/sol-coin/{mint}", params={"tf": 300}, timeout=6)
+            r = requests.get(f"{base}/api/sol-coin/{mint}", params={"tf": 300, "fresh": 1}, timeout=25)
             d = r.json() if r.ok and r.content else {}
         except (requests.RequestException, ValueError):
             d = {}
