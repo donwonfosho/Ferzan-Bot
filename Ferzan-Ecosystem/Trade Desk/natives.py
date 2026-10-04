@@ -6,6 +6,7 @@ so the bag header and the Balances screen do not each pay for the same lookups.
 """
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -30,11 +31,18 @@ _LOCK = threading.Lock()
 _POOL = ThreadPoolExecutor(max_workers=10, thread_name_prefix="natives")
 
 
+_log = logging.getLogger("natives")
+
+
 def _run(ck, fn):
+    t0 = time.monotonic()
     try:
         v = float(fn())
     except Exception:  # noqa: BLE001 - unknown, not zero
         v = None
+    dt = time.monotonic() - t0
+    if dt > 1.5:  # which chain makes Bag and Balances wait: measured, not guessed
+        _log.warning("slow gas-coin read %s %.1fs%s", ck[0], dt, "" if v is not None else " (failed)")
     if v is not None:
         with _LOCK:
             _CACHE[ck] = (time.time(), v)
