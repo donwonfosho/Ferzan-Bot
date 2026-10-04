@@ -1480,7 +1480,8 @@ async def _tour_step3(query, uid: int) -> None:
         "• Every card shows a 🟢/🟡/🔴 safety call before you buy\n\n"
         "💡 <b>Funds on a different chain?</b> Ferzan offers to bridge and buy in one tap.\n"
         "🛡 /protect arms take-profit and stop-loss on every buy · 🔐 /pin adds a withdrawal PIN.\n\n"
-        f"💵 Default buy size: <b>${size:.0f}</b> — change it in ⚙️ Settings.\n\n"
+        f"💵 Default buy size: <b>${size:.0f}</b> — change it in ⚙️ Settings.\n"
+        "🔔 Want live new-launch alerts in this chat? ⚙️ Settings → <b>DM launch alerts</b> (they're off until you turn them on).\n\n"
         "Try it now 👇"
     )
     kb = InlineKeyboardMarkup(
@@ -9640,6 +9641,14 @@ async def launch_feed_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         )
 
 
+def _dm_max() -> int:
+    """Most new-launch cards one user gets per feed cycle (they opted in; still never a wall of cards)."""
+    try:
+        return max(1, min(8, int(os.getenv("FERZAN_DM_MAX", "3"))))
+    except ValueError:
+        return 3
+
+
 async def _launch_feed_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     binds = db.list_feed_binds()
     logger.info("launch feed binds=%s", len(binds))
@@ -9698,7 +9707,7 @@ async def _launch_feed_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                     continue
                 dm_pool.append(cand)
         diverse = dm_pool
-        for ln in diverse[:8]:
+        for ln in diverse[:_dm_max()]:
             cid = resolve_chain(ln.chain) or (ln.chain or "").lower()
             if cid and not db.flag_on(uid, f"feed_{cid}", 1):
                 continue

@@ -37,3 +37,35 @@ class FirstRun(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NoFloodForNewUsers(unittest.TestCase):
+    """A new account used to get 100+ launch cards in a few hours (alerts defaulted ON)."""
+
+    def test_new_users_start_with_dm_launch_alerts_off(self):
+        import tempfile
+
+        import db
+
+        db.DB_PATH = pathlib.Path(tempfile.mkdtemp()) / "t.db"
+        db.init_db()
+        user = db.ensure_user(501, "newbie")
+        self.assertEqual(int(user["alerts_on"]), 0)
+        self.assertEqual(db.list_alert_users(), [])  # the scanner skips them too until they opt in
+        db.update_user(501, alerts_on=1)  # turning it on in Settings still works
+        self.assertEqual(db.list_alert_users(), [501])
+
+    def test_opted_in_users_get_a_short_batch(self):
+        self.assertIn("for ln in diverse[:_dm_max()]:", BOT)
+        ns = {"os": os}
+        exec(BOT[BOT.index("def _dm_max"):BOT.index("async def _launch_feed_job")], ns)
+        os.environ.pop("FERZAN_DM_MAX", None)
+        self.assertEqual(ns["_dm_max"](), 3)
+        os.environ["FERZAN_DM_MAX"] = "50"
+        self.assertEqual(ns["_dm_max"](), 8)
+        os.environ["FERZAN_DM_MAX"] = "junk"
+        self.assertEqual(ns["_dm_max"](), 3)
+        os.environ.pop("FERZAN_DM_MAX", None)
+
+    def test_tour_tells_users_how_to_turn_alerts_on(self):
+        self.assertIn("DM launch alerts</b> (they're off until you turn them on)", BOT)

@@ -534,7 +534,7 @@ def ensure_user(user_id: int, username: str | None) -> dict[str, Any]:
                 user_id, username, paper_cash, starting_equity, size_pct,
                 min_confluence, max_daily_loss_pct, alerts_on, created_at,
                 peak_equity, drawdown_alert_pct
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, 12)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, 12)  -- new users start with DM launch alerts OFF: opt-in, never a flood
             """,
             (
                 user_id,
