@@ -720,6 +720,25 @@ def curve_info(jetton: str) -> dict:
         return {}
 
 
+async def _ton_balance(provider, addr) -> int:
+    """Wallet TON balance before a curve trade: retried on other nodes, then the public HTTP APIs. Raises only if nobody answers
+    (never a fake 0 that would block the trade or let it through)."""
+    import asyncio
+
+    last: Exception | None = None
+    for i in range(3):
+        try:
+            st = await provider.get_account_state(addr)
+            return int(getattr(st, "balance", 0) or 0)
+        except Exception as exc:  # noqa: BLE001
+            last = exc
+            await asyncio.sleep(1.0 * (i + 1))
+    nano = await asyncio.to_thread(_http_balance_nano, addr.to_str(is_user_friendly=True, is_bounceable=False))
+    if nano is not None:
+        return nano
+    raise last if last else RuntimeError("couldn't read the wallet balance")
+
+
 async def _curve_tx(seed64: bytes, jetton: str, msg: dict, expect: str) -> dict:
     """Signs one message from the user's wallet and watches their coin balance to see whether the curve filled it.
     expect: 'up' (a buy adds coins) or 'down' (a sell removes them)."""
@@ -734,8 +753,7 @@ async def _curve_tx(seed64: bytes, jetton: str, msg: dict, expect: str) -> dict:
     try:
         wallet = await WalletV4R2.from_private_key(provider, seed64)
         jw, before = await _jetton_wallet_and_balance(provider, jetton, wallet.address)
-        state = await provider.get_account_state(wallet.address)
-        have = int(getattr(state, "balance", 0) or 0)
+        have = await _ton_balance(provider, wallet.address)
         need = int(msg["amount"]) + 60_000_000
         if have < need:
             return {"sent": False, "error": f"Not enough TON: need about {need / 1e9:.3f} (incl. gas), you have {have / 1e9:.3f}."}

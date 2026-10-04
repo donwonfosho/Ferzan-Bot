@@ -47,3 +47,56 @@ class Retry(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TonBalanceRead(unittest.TestCase):
+    """The wallet balance check before a curve trade survives bad nodes and falls back to HTTP."""
+
+    class _Addr:
+        def to_str(self, **k):
+            return "UQtest"
+
+    def test_retries_then_succeeds(self):
+        import asyncio
+        n = {"c": 0}
+
+        class P:
+            async def get_account_state(self, a):
+                n["c"] += 1
+                if n["c"] < 3:
+                    raise RuntimeError("cannot load block")
+                import types
+                return types.SimpleNamespace(balance=5_000_000_000)
+
+        async def nosleep(*a, **k):
+            return None
+
+        with mock.patch("asyncio.sleep", nosleep):
+            self.assertEqual(asyncio.run(t._ton_balance(P(), self._Addr())), 5_000_000_000)
+
+    def test_http_backup_when_all_nodes_fail(self):
+        import asyncio
+
+        class P:
+            async def get_account_state(self, a):
+                raise RuntimeError("651")
+
+        async def nosleep(*a, **k):
+            return None
+
+        with mock.patch("asyncio.sleep", nosleep), mock.patch.object(t, "_http_balance_nano", return_value=7_000_000_000):
+            self.assertEqual(asyncio.run(t._ton_balance(P(), self._Addr())), 7_000_000_000)
+
+    def test_raises_when_nobody_answers(self):
+        import asyncio
+
+        class P:
+            async def get_account_state(self, a):
+                raise RuntimeError("651")
+
+        async def nosleep(*a, **k):
+            return None
+
+        with mock.patch("asyncio.sleep", nosleep), mock.patch.object(t, "_http_balance_nano", return_value=None):
+            with self.assertRaises(RuntimeError):
+                asyncio.run(t._ton_balance(P(), self._Addr()))
