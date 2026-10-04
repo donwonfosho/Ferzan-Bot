@@ -1948,6 +1948,7 @@ async def _sol_tb_run(bot, req_id: str, uid: int, chat_id: int, cap: int):
         largs = {"uid": uid, "request_id": req_id, "tx_hex": tx_hex, "mint": mint, "cap_lamports": cap, "dry": SOL_TB_DRY}
         res = await tron.run("launch", largs, timeout=200, script=helper)
         sig = res.get("signature") or ""
+        timed_out = bool(res.get("pending") and not sig)
         for _ in range(2):
             if not (res.get("pending") and not sig):
                 break
@@ -2004,6 +2005,12 @@ async def _sol_tb_run(bot, req_id: str, uid: int, chat_id: int, cap: int):
             db.update_status(req_id, "submitted", tx_hash=sig)
             await say(f"⏳ Your launch was sent but Solana hasn't confirmed it yet. See https://solscan.io/tx/{_esc(sig)} "
                       "and please don't launch it again.")
+            return
+        if timed_out and not sig and res.get("error") != "low_balance":
+            # an earlier attempt timed out without an answer, so it may have gone through: never say "nothing was sent"
+            db.update_status(req_id, "submitted")
+            await say("⚠️ I couldn't confirm what happened to your launch. Check your Trade Bot wallet on "
+                      f"https://solscan.io/account/{_esc(addr)} and please don't launch it again until you've looked.")
             return
         db.update_status(req_id, "failed", error_message=str(res.get("error"))[:200])
         if res.get("error") == "low_balance":

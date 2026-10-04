@@ -230,6 +230,8 @@ def build_tx(request_id: str, body: BuildTxRequest):
         raise HTTPException(400, "This launch belongs to another wallet")
 
     _ex0 = req.extra_params or {}
+    if _ex0.get("source") == "tradebot_wallet" and _ex0.get("sol_mint"):
+        raise HTTPException(400, "This launch was already built; start a new one")  # its coin is fixed once built
     if _ex0.get("source") == "tradebot_wallet" and (req.wallet_address or "").strip() \
             and req.wallet_address.strip().lower() != (body.wallet_address or "").strip().lower():
         raise HTTPException(400, "This launch belongs to another wallet")  # a Trade Bot launch is tied to its wallet once built

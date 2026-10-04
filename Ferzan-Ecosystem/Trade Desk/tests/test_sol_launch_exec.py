@@ -205,6 +205,16 @@ class Launch(unittest.TestCase):
         self.assertFalse(r["ok"])
         self.assertIn("failed on Solana", r["error"])
 
+    def test_rate_limit_reply_is_not_never_seen(self):
+        real = ex._status.__wrapped__ if hasattr(ex._status, "__wrapped__") else None
+        mock.patch.stopall()  # use the real _status against fake replies
+        for reply in ({"error": {"code": -32005, "message": "rate limited"}}, {}, {"result": None}):
+            with mock.patch.object(ex, "_rpc", lambda m, p, timeout=25, r=reply: r):
+                with self.assertRaises(RuntimeError):
+                    ex._status("sig")
+        with mock.patch.object(ex, "_rpc", lambda m, p, timeout=25: {"result": {"value": [None]}}):
+            self.assertEqual(ex._status("sig"), ("unknown", ""))
+
     def test_error_text_hides_hosts(self):
         self.assertNotIn("quiknode", ex._clean("HTTPSConnectionPool(host='abc.solana-mainnet.quiknode.pro', port=443)"))
 

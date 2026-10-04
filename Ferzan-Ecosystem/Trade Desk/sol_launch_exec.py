@@ -79,6 +79,9 @@ def _status(sig: str) -> tuple[str, str]:
     """("confirmed" | "failed" | "pending" | "unknown", reason). unknown = the network ANSWERED that it has not seen it.
     A query that itself fails raises, so callers can tell "not seen" from "couldn't ask"."""
     body = _rpc("getSignatureStatuses", [[sig], {"searchTransactionHistory": True}])
+    res = body.get("result")
+    if body.get("error") or not isinstance(res, dict) or not isinstance(res.get("value"), list):
+        raise RuntimeError("status query not answered")  # a rate-limit / error reply is not "never seen it"
     st = (((body.get("result") or {}).get("value")) or [None])[0]
     if not st:
         return "unknown", ""
@@ -241,4 +244,12 @@ if __name__ == "__main__":
     except SystemExit:
         raise
     except Exception as e:  # noqa: BLE001 - always answer with one JSON line, never a traceback with secrets
-        out(ok=False, error=f"{type(e).__name__}: {_clean(e)}")
+        extra = {}
+        try:  # if a launch for this request was already recorded, it may have been sent: say so, with its signature
+            rid = str(json.loads(sys.argv[2]).get("request_id") or "")
+            rec = _log(lambda d: d.get(rid)) if rid else None
+            if rec and rec.get("signature"):
+                extra = {"maybe_sent": True, "signature": rec["signature"]}
+        except Exception:  # noqa: BLE001
+            pass
+        out(ok=False, error=f"{type(e).__name__}: {_clean(e)}", **extra)
