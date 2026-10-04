@@ -3467,6 +3467,18 @@ def _bag_build(uid: int) -> tuple[str, list[tuple[str, InlineKeyboardMarkup]]]:
             if amount > 0 and venue == "TRX":
                 positions.append((mint, amount, owner, venue))
     _tm.append(("token_scan", time.monotonic()))
+
+    def _prefetch_meta(mint):
+        try:
+            _token_meta(mint)  # fills the short-lived cache the loops below read from
+        except Exception:  # noqa: BLE001
+            pass
+
+    if len(positions) > 1:  # price every token at the same time instead of one after another (several slow lookups each)
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=min(6, len(positions))) as _ex:
+            list(_ex.map(_prefetch_meta, [p[0] for p in positions]))
     hidden = 0  # tokens the user tucked away AND that still have no market (they return if priced)
     shown = []
     for p in positions:
