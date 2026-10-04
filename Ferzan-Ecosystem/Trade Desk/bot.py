@@ -3398,13 +3398,16 @@ def _bag_build(uid: int) -> tuple[str, list[tuple[str, InlineKeyboardMarkup]]]:
     """Everything /bag needs, fetched in one blocking pass (run via to_thread).
     Each token is priced once and the same mark feeds both the portfolio total
     and its panel."""
+    _tm = [("start", time.monotonic())]  # step timings: logged when the whole build is slow, so the slow step is known
     sol_secret, _evm = user_wallets.secrets(uid)
     kp = signer.keypair_from_secret(sol_secret)
     addr = str(kp.pubkey())
     _nat = _native_readers(uid)
     natives.prime(_nat)  # every chain's gas coin is read alongside the token reads below
     rows = signer.holdings(sol_secret, strict=True)  # raises on an RPC error: an empty bag must mean empty
+    _tm.append(("sol_rpc", time.monotonic()))
     lamports = signer.sol_balance_lamports(addr)
+    _tm.append(("sol_balance", time.monotonic()))
     positions: list[tuple[str, float, str, str]] = [
         (r["mint"], float(r["amount"] or 0), addr, "") for r in rows[:6]
     ]
@@ -3463,6 +3466,7 @@ def _bag_build(uid: int) -> tuple[str, list[tuple[str, InlineKeyboardMarkup]]]:
                 continue
             if amount > 0 and venue == "TRX":
                 positions.append((mint, amount, owner, venue))
+    _tm.append(("token_scan", time.monotonic()))
     hidden = 0  # tokens the user tucked away AND that still have no market (they return if priced)
     shown = []
     for p in positions:
@@ -3503,7 +3507,9 @@ def _bag_build(uid: int) -> tuple[str, list[tuple[str, InlineKeyboardMarkup]]]:
         summary += f"\n\n⚠️ Couldn't read {unread} TON/Tron token balance{'s' if unread != 1 else ''} just now. Open /bag again in a few seconds."
     if not positions and not unread:
         summary += "\n\nNo tokens yet. Paste a CA to buy."
+    _tm.append(("panels", time.monotonic()))
     _vals = natives.collect(_nat, wait=2.5)
+    _tm.append(("gas_coins", time.monotonic()))
     _vals["sol"] = lamports / 1e9  # already read above and known good
     head = f"🎒 <b>Your bag</b> · {len(positions)} position{'s' if len(positions) != 1 else ''}\n" + natives.header_line(_vals)
     if priced > 0:
@@ -3513,6 +3519,9 @@ def _bag_build(uid: int) -> tuple[str, list[tuple[str, InlineKeyboardMarkup]]]:
         head += f"\n🙈 {hidden} hidden (no market) · /unhide"
     if unread:
         head += f"\n⚠️ {unread} balance{'s' if unread != 1 else ''} couldn't be read just now. Tap Refresh."
+    if _tm[-1][1] - _tm[0][1] > 1.5:
+        logger.warning("slow bag build %.1fs: %s", _tm[-1][1] - _tm[0][1],
+                       " | ".join(f"{n} {t - p:.1f}s" for (_pn, p), (n, t) in zip(_tm, _tm[1:])))
     return summary, panels, infos, head
 
 
