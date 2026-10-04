@@ -209,7 +209,7 @@ def launch(args: dict) -> None:
                                        "blockhash": str(tx.message.recent_blockhash)}))
     wire = base64.b64encode(bytes(tx)).decode()
     try:
-        body = _rpc("sendTransaction", [wire, {"encoding": "base64", "skipPreflight": False, "maxRetries": 5}], timeout=30)
+        body = _rpc("sendTransaction", [wire, {"encoding": "base64", "skipPreflight": False, "preflightCommitment": "processed", "maxRetries": 5}], timeout=30)
     except Exception as e:  # noqa: BLE001 - the node may have taken it before the reply was lost
         state, why = _wait(sig, 20)
         if state in ("confirmed", "failed", "pending"):

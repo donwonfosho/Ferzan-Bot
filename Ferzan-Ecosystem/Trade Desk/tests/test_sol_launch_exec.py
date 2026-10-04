@@ -115,6 +115,8 @@ class Launch(unittest.TestCase):
         r = call(ex.launch, self.args())
         self.assertTrue(r["ok"] and r["mint"] == MINT)
         self.assertEqual(len(self.sent), 1)
+        # the pre-send check must use the same (fresh) level the blockhash came from, or Solana says "Blockhash not found"
+        self.assertEqual(self.sent[0][1]["preflightCommitment"], "processed")
 
     def test_over_cap_sends_nothing(self):
         self.spend = 300_000_000
