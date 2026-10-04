@@ -67,5 +67,20 @@ class NoFloodForNewUsers(unittest.TestCase):
         self.assertEqual(ns["_dm_max"](), 3)
         os.environ.pop("FERZAN_DM_MAX", None)
 
-    def test_tour_tells_users_how_to_turn_alerts_on(self):
-        self.assertIn("DM launch alerts</b> (they're off until you turn them on)", BOT)
+    def test_home_menu_has_no_signal_buttons_in_chat(self):
+        kb = body("def home_keyboard", "# ---- home screen helpers")
+        self.assertNotIn("go:feeds", kb)
+        self.assertNotIn("go:launches", kb)
+        self.assertIn('InlineKeyboardButton("📡 Signals", url=signals)', kb)  # opens the signal channels instead
+
+    def test_launch_cards_are_not_pushed_into_private_chats_by_default(self):
+        ns = {"os": os}
+        exec(BOT[BOT.index("def _launch_dms_on"):BOT.index("def _dm_max")], ns)
+        os.environ.pop("FERZAN_LAUNCH_DMS", None)
+        self.assertFalse(ns["_launch_dms_on"]())
+        os.environ["FERZAN_LAUNCH_DMS"] = "1"
+        self.assertTrue(ns["_launch_dms_on"]())
+        os.environ.pop("FERZAN_LAUNCH_DMS", None)
+        job = body("async def _launch_feed_job", "async def _live_buy_followup") if "async def _live_buy_followup" in BOT else BOT[BOT.index("async def _launch_feed_job"):]
+        self.assertIn("            if dms:\n                text, markup = await asyncio.to_thread(launch_card, ln)", job)
+        self.assertIn('if not dms and not db.flag_on(uid, "auto_buy", 0):', job)  # auto-buy users still get scanned

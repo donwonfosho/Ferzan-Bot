@@ -984,6 +984,8 @@ async def resolve_symbol_or_reply(update: Update, symbol: str):
 def home_keyboard(private: bool = True, hot: list | None = None) -> InlineKeyboardMarkup:
     chat = (os.getenv("FERZAN_CHAT_URL") or "https://t.me/Ferzan_Chat").strip()
     xurl = (os.getenv("FERZAN_X_URL") or "https://x.com/ferzaneco").strip()
+    # Signals live in the Ferzan signal channels, not in this chat: the button opens them.
+    signals = (os.getenv("FERZAN_SIGNALS_URL") or os.getenv("FERZAN_HUB_URL") or "https://t.me/Ferzan_Trade_Ecosystem").strip()
     # Telegram sizes a photo card's buttons to the photo, so rows stay at three short labels.
     # Grouped by purpose: Trade, Money, Tools, Grow.
     rows = []
@@ -1002,7 +1004,7 @@ def home_keyboard(private: bool = True, hot: list | None = None) -> InlineKeyboa
             InlineKeyboardButton("📤 Send", callback_data="go:withdraw"),
         ],
         [
-            InlineKeyboardButton("📡 Signals", callback_data="go:feeds"),
+            InlineKeyboardButton("📡 Signals", url=signals),
             InlineKeyboardButton("👯 Copy", callback_data="go:copy"),
             InlineKeyboardButton("🔔 Alerts", callback_data="go:alerts"),
         ],
@@ -1021,7 +1023,6 @@ def home_keyboard(private: bool = True, hot: list | None = None) -> InlineKeyboa
                 "🚀 Launch",
                 url="https://t.me/" + (os.getenv("LAUNCH_BOT_USERNAME") or "Ferzan_Launch_Bot").lstrip("@"),
             ),
-            InlineKeyboardButton("🆕 New pools", callback_data="go:launches"),
         ],
         [
             # Telegram sizes a photo card's buttons to the photo, so a row of three needs short labels.
@@ -1481,7 +1482,7 @@ async def _tour_step3(query, uid: int) -> None:
         "💡 <b>Funds on a different chain?</b> Ferzan offers to bridge and buy in one tap.\n"
         "🛡 /protect arms take-profit and stop-loss on every buy · 🔐 /pin adds a withdrawal PIN.\n\n"
         f"💵 Default buy size: <b>${size:.0f}</b> — change it in ⚙️ Settings.\n"
-        "🔔 Want live new-launch alerts in this chat? ⚙️ Settings → <b>DM launch alerts</b> (they're off until you turn them on).\n\n"
+        "📡 Live signals and new launches live in the Ferzan signal channels: tap <b>Signals</b> on the desk.\n\n"
         "Try it now 👇"
     )
     kb = InlineKeyboardMarkup(
@@ -4064,7 +4065,7 @@ def _settings_panel(uid: int):
         f"{'🟢' if rug else '🔴'} Block buys if liq is thin / gone\n"
         f"{'🟢' if honey else '🔴'} Block buys if honeypot / unsellable\n"
         f"{'🟢' if lpw else '🔴'} Rug Guard: auto-sell if LP is pulled, the dev dumps or top holders dump\n"
-        f"DM alerts {'on' if user.get('alerts_on') else 'off'}"
+        f"Watchlist alerts {'on' if user.get('alerts_on') else 'off'}"
     )
     kb = InlineKeyboardMarkup(
             [
@@ -4074,7 +4075,7 @@ def _settings_panel(uid: int):
                 _qrow(uid, "Auto-buy", "stg:ab", (10, 25, 50, 100), abuy if auto else 0, "$"),
                 _qrow(uid, "Score floor", "stg:fl", (0, 20, 40, 60), float(user["min_confluence"]), ""),
                 [InlineKeyboardButton(
-                    f"{'🟢' if user.get('alerts_on') else '🔴'} DM launch alerts",
+                    f"{'🟢' if user.get('alerts_on') else '🔴'} Watchlist alerts",
                     callback_data="flg:alerts",
                 )],
                 [InlineKeyboardButton(
@@ -4113,7 +4114,6 @@ def _settings_panel(uid: int):
                     InlineKeyboardButton("⚙️ Buy/sell presets", callback_data="pst:sol"),
                     InlineKeyboardButton("🎓 Migration sniper", callback_data="mig:x:panel"),
                 ],
-                [InlineKeyboardButton("📡 Per-chain feeds", callback_data="go:feeds")],
                 [InlineKeyboardButton(_degen_btn(uid), callback_data="dgn:t")],
                 [InlineKeyboardButton("↩️ Home", callback_data="go:home")],
             ]
@@ -7362,7 +7362,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     return
                 except Exception:
                     pass
-            await context.bot.send_message(uid, f"{'🟢' if on else '🔴'} DM launch alerts")
+            await context.bot.send_message(uid, f"{'🟢' if on else '🔴'} Watchlist alerts")
             return
         if flag not in {
             "rug_buy",
@@ -9641,6 +9641,12 @@ async def launch_feed_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         )
 
 
+def _launch_dms_on() -> bool:
+    """New-launch cards are NOT pushed into the Trade Bot chat (they live in the signal channels).
+    FERZAN_LAUNCH_DMS=1 brings the old per-user DMs back."""
+    return (os.getenv("FERZAN_LAUNCH_DMS") or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _dm_max() -> int:
     """Most new-launch cards one user gets per feed cycle (they opted in; still never a wall of cards)."""
     try:
@@ -9693,10 +9699,13 @@ async def _launch_feed_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         dm_floor = max(0.0, float(os.getenv("FERZAN_FEED_MIN_LIQ", "1000") or 0))
     except ValueError:
         dm_floor = 1000.0
+    dms = _launch_dms_on()
     for user in db.list_users():
         if not user.get("alerts_on"):
             continue
         uid = int(user["user_id"])
+        if not dms and not db.flag_on(uid, "auto_buy", 0):
+            continue  # no signal DMs in the Trade Bot chat; only users who armed auto-buy still need the scan
         if dm_pool is None:
             dm_pool = []
             for cand in _interesting(await asyncio.to_thread(_pool_for, "*"), False)[:8]:
@@ -9714,17 +9723,18 @@ async def _launch_feed_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             key = f"launch:{ln.chain}:{(ln.token or '')[:24]}"
             if not db.should_resend_signal(uid, key, 1, cooldown_s=45 * 60):
                 continue
-            text, markup = await asyncio.to_thread(launch_card, ln)
-            try:
-                await send_launch(context.bot, uid, text, markup, promo=False)
-            except DeadChat as exc:
-                # User blocked the bot / deleted their account: stop DMing them.
-                # They get alerts back the moment they toggle them on again.
-                logger.warning("launch DM to %s unreachable, turning alerts off: %s", uid, exc)
-                db.update_user(uid, alerts_on=0)
-                break
-            except Exception:
-                logger.exception("launch feed failed for %s", uid)
+            if dms:
+                text, markup = await asyncio.to_thread(launch_card, ln)
+                try:
+                    await send_launch(context.bot, uid, text, markup, promo=False)
+                except DeadChat as exc:
+                    # User blocked the bot / deleted their account: stop DMing them.
+                    # They get alerts back the moment they toggle them on again.
+                    logger.warning("launch DM to %s unreachable, turning alerts off: %s", uid, exc)
+                    db.update_user(uid, alerts_on=0)
+                    break
+                except Exception:
+                    logger.exception("launch feed failed for %s", uid)
             if db.flag_on(uid, "auto_buy", 0) and not _auto_trading_killed():
                 auto_usd = float(user.get("auto_buy_usd") or 0)
                 if auto_usd > 0 and (ln.token or "").strip():
