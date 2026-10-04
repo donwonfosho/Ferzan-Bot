@@ -408,6 +408,7 @@ def build_tx(request_id: str, body: BuildTxRequest):
                 "chain": req.chain,
                 "unsigned_transaction": tx,
                 "rpc_url": rpc or RPC_URLS.get(req.chain) or "",
+                "factory": factory_addr,
             }
 
         else:

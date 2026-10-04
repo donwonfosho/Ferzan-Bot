@@ -1544,6 +1544,10 @@ async def _show_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text += "\n\n" + _tron_wallet_text(tinfo)
         text += ("\n\n<b>Two ways to launch:</b> straight from your Trade Bot wallet (button above), or use your own "
                  "TronLink wallet on the website (button below; you'll re-enter the coin details there).")
+    elif chain in EVM_TB_CHAINS and mode in ("plain", "bonding_curve"):
+        text += ("\n\n<b>Two ways to pay:</b> connect your own wallet and sign it yourself (Ferzan never holds your "
+                 f"keys), or launch straight from your Ferzan Trade Bot wallet (open @{_esc(TRADE)} → /wallet to see "
+                 "its address and top it up). Nothing is sent until you tap one of the launch buttons.")
     else:
         text += ("\n\nNext you'll connect your wallet and see the exact cost before signing. "
                  "Ferzan never holds your keys.")
@@ -1566,6 +1570,9 @@ async def _show_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         kind = "curve" if mode == "bonding_curve" else "pool"
         kb.append([InlineKeyboardButton("🔗 Launch with TronLink (website)", url=f"{site}/launch?chain=tron&kind={kind}")])
     if chain == "ton":
+        first[0] = InlineKeyboardButton("🔗 Connect a wallet", callback_data="confirm:yes")
+        kb.append([InlineKeyboardButton("💼 Launch from my Trade Bot wallet", callback_data="confirm:tb")])
+    if chain in EVM_TB_CHAINS and mode in ("plain", "bonding_curve"):
         first[0] = InlineKeyboardButton("🔗 Connect a wallet", callback_data="confirm:yes")
         kb.append([InlineKeyboardButton("💼 Launch from my Trade Bot wallet", callback_data="confirm:tb")])
     await update.effective_message.reply_text(
@@ -1641,6 +1648,8 @@ async def confirmed(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await _tron_go(update, context, launch)
     if query.data == "confirm:tb" and launch["chain"] == "ton":
         return await _ton_tb_go(update, context, launch)
+    if query.data == "confirm:tb" and launch["chain"] in EVM_TB_CHAINS and launch.get("mode") in ("plain", "bonding_curve"):
+        return await _evm_tb_go(update, context, launch)
 
     text, markup = _make_request(update.effective_user.id, update.effective_chat.id, launch)
     await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
@@ -1742,6 +1751,114 @@ async def _ton_tb_run(bot, req_id: str, uid: int, chat_id: int, mode: str = "pla
     except Exception:
         logger.exception("ton tb launch %s crashed", req_id)
         await say("❌ Something went wrong with the TON launch. Check /history before trying again.")
+
+
+# ------------------------------------------------ EVM: launch from the Trade Bot wallet --
+EVM_TB_CHAINS = {"base", "bsc", "ethereum", "robinhood"}  # Arc is not wired to the Trade Bot wallet yet
+_EVM_EXPLORER = {"base": "https://basescan.org", "bsc": "https://bscscan.com", "ethereum": "https://etherscan.io",
+                 "robinhood": "https://explorer.robinhood.com"}
+_EVM_NAME = {"base": "Base", "bsc": "BNB Chain", "ethereum": "Ethereum", "robinhood": "Robinhood Chain"}
+
+
+async def _evm_tb_go(update: Update, context: ContextTypes.DEFAULT_TYPE, launch: dict):
+    q = update.callback_query
+    uid, chat_id = update.effective_user.id, update.effective_chat.id
+    chain = launch["chain"]
+    req = db.create_launch_request(
+        telegram_user_id=uid, chat_id=chat_id, chain=chain, mode=launch.get("mode") or "plain", name=launch["name"],
+        symbol=launch["symbol"], total_supply=launch["total_supply_raw"], decimals=launch["decimals"],
+        description=launch.get("description") or "", image_url=launch.get("image_url") or "",
+        extra_params=dict(launch.get("extra_params") or {}, source="tradebot_wallet"),
+    )
+    context.user_data.pop("launch", None)
+    await q.edit_message_text(
+        f"⏳ Launching <b>{_esc(launch['name'])} (${_esc(launch['symbol'])})</b> on {_esc(_EVM_NAME.get(chain, chain))} "
+        "from your Trade Bot wallet. This takes about a minute. Please don't launch it again.", parse_mode="HTML")
+    context.application.create_task(_evm_tb_run(context.bot, req.id, uid, chat_id, chain))
+    return ConversationHandler.END
+
+
+async def _evm_tb_run(bot, req_id: str, uid: int, chat_id: int, chain: str):
+    say = lambda t: bot.send_message(chat_id=chat_id, text=t, parse_mode="HTML", disable_web_page_preview=True)  # noqa: E731
+    helper, scan = "evm_launch_exec.py", _EVM_EXPLORER.get(chain, "")
+    addr = ""
+    try:
+        info = await tron.run("info", {"uid": uid, "chain": chain}, timeout=60, script=helper)
+        addr = info.get("address") or ""
+        if not info.get("ok"):
+            db.update_status(req_id, "failed", error_message=str(info.get("error"))[:200])
+            if info.get("error") == "no_wallet":
+                await say(f"❌ You don't have a Ferzan Trade Bot wallet yet. Open @{_esc(TRADE)}, tap /wallet, then try again. Nothing was sent.")
+            else:
+                await say(f"❌ Couldn't use your Trade Bot wallet ({_esc(str(info.get('error'))[:120])}). Nothing was sent.")
+            return
+        built = await asyncio.to_thread(_build_tx, req_id, addr)
+        tx = built.get("unsigned_transaction")
+        if not isinstance(tx, dict) or not built.get("factory"):
+            db.update_status(req_id, "failed", error_message=str(built.get("error") or "no transaction")[:200])
+            await say("❌ Couldn't prepare the launch (" + _esc(str(built.get("error") or "no transaction")[:200]) +
+                      "). Nothing was sent.")
+            return
+        short = {"ethereum": "ETH", "bsc": "BSC", "base": "BASE", "robinhood": "HOOD"}[chain]
+        allowed = [v for v in ((os.environ.get(f"FACTORY_{short}_PLAIN") or "").strip(),
+                               (os.environ.get(f"FACTORY_{short}_CURVE") or "").strip()) if v]
+        largs = {"uid": uid, "chain": chain, "request_id": req_id, "factory": built["factory"], "tx": tx,
+                 "allowed_factories": allowed}  # pinned from the Launch Bot's own settings, not just the build reply
+        res = await tron.run("launch", largs, timeout=240, script=helper)
+        txh = res.get("txhash") or ""
+        t1 = time.monotonic()
+        warned = False
+        while res.get("pending") and txh and time.monotonic() - t1 < 1800:
+            # sent but not mined yet: ask the helper again (it never re-sends; it only re-reads the receipt)
+            if not warned and time.monotonic() - t1 > 240:
+                warned = True
+                await say("⏳ The network is slow. Your launch is still waiting to be confirmed. I'll keep watching it; "
+                          "please don't launch it again.")
+            await asyncio.sleep(10)
+            res = await tron.run("launch", largs, timeout=60, script=helper)
+            txh = res.get("txhash") or txh
+        if res.get("ok"):
+            db.update_status(req_id, "submitted", tx_hash=txh)
+            await say("✅ Your launch was sent. Confirming it on-chain now (up to a few minutes). Please don't launch it again.")
+            why, t0 = "", time.monotonic()
+            while time.monotonic() - t0 < 360:  # the API proves the launch on-chain, then posts the card
+                ok, why = await asyncio.to_thread(_tron_complete, req_id, txh)
+                if ok:
+                    return
+                await asyncio.sleep(20)
+            logger.warning("evm tb launch %s not recorded: %s", req_id, why)
+            await say("⏳ Your launch was sent but isn't confirmed yet. Check your Trade Bot wallet on "
+                      f"{_esc(scan)}/address/{_esc(addr)} and please don't launch it again.")
+            return
+        if txh and not res.get("ok") and "reverted" not in str(res.get("error") or ""):
+            # a tx hash exists and the chain has not said it failed: it may still mine, so never call it a failure
+            db.update_status(req_id, "submitted", tx_hash=txh)
+            await say("⏳ Your launch was sent but the network hasn't confirmed it yet. See "
+                      f"{_esc(scan)}/tx/{_esc(txh)} and please don't launch it again.")
+            return
+        if res.get("pending"):  # the helper outlived its timeout: it may have sent, so never call it a clean failure
+            await say("⏳ The launch is still being sent and I can't tell yet whether it went through. Check your Trade Bot "
+                      f"wallet on {_esc(scan)}/address/{_esc(addr)} and please don't launch it again.")
+            return
+        if res.get("maybe_sent"):  # the network's answer was unclear: never say "nothing was sent"
+            db.update_status(req_id, "submitted", tx_hash=txh)
+            await say("⚠️ I'm not sure whether your launch went out. Check your Trade Bot wallet on "
+                      f"{_esc(scan)}/address/{_esc(addr)} and please don't launch it again until you've looked.")
+            return
+        db.update_status(req_id, "failed", error_message=str(res.get("error"))[:200])
+        if res.get("error") == "low_balance":
+            sym = res.get("symbol") or "ETH"
+            await say(f"❌ Not launched: your Trade Bot wallet has {float(res.get('balance') or 0):.5g} {_esc(sym)} but this "
+                      f"launch needs about {float(res.get('need') or 0):.5g} {_esc(sym)}. Top it up and try again. Nothing was sent.")
+        elif txh:
+            await say(f"❌ The launch didn't go through ({_esc(str(res.get('error'))[:150])}). See "
+                      f"{_esc(scan)}/tx/{_esc(txh)} before trying again.")
+        else:
+            await say(f"❌ Not launched ({_esc(str(res.get('error'))[:150])}). Check "
+                      f"{_esc(scan)}/address/{_esc(addr)} before trying again.")
+    except Exception:
+        logger.exception("evm tb launch %s crashed", req_id)
+        await say("❌ Something went wrong with the launch. Check /history and your Trade Bot wallet before trying again.")
 
 
 def _tron_complete(req_id: str, txid: str) -> tuple[bool, str]:
