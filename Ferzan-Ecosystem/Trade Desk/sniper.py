@@ -362,6 +362,11 @@ def arm(
     )
 
 
+# Set by bot.py to its full buy path (chain routing, fees, cost basis, trade log, the user's safety flags), so an armed
+# snipe is bought exactly like a manual buy. Without it (tests) the old direct Solana/EVM call is used.
+LIVE_BUY = None
+
+
 def try_fill(order: dict[str, Any]) -> tuple[str, str]:
     """Returns (status, message). status is armed|filled|miss|error."""
     try:
@@ -395,7 +400,10 @@ def try_fill(order: dict[str, Any]) -> tuple[str, str]:
         # Same per-user lock as bot._off(): a snipe waits for any manual
         # trade from this wallet to land instead of racing it.
         with user_lock(uid):
-            if mint.startswith("0x"):
+            if LIVE_BUY is not None and mint:
+                attempted = True
+                _ok, live_line = LIVE_BUY(uid, card, mint, usd)
+            elif mint.startswith("0x"):
                 attempted = True
                 _ok, live_line = evm_signer.buy_evm(
                     order.get("chain") or "base", mint, usd, key_hex=evm_secret, slip_bps=slip

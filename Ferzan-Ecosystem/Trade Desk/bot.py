@@ -9454,6 +9454,14 @@ async def _live_exit_one(context: ContextTypes.DEFAULT_TYPE, row, uid: int, mint
         logger.exception("live exit notify failed")
 
 
+def _snipe_buy(uid: int, card, mint: str, usd: float) -> tuple[bool, str]:
+    # The sniper already ran its own gates; the user's own protections (honeypot, thin liquidity) still apply.
+    return _live_buy(uid, card, mint, False, usd, gates_checked=True, fee_kind="snipe")
+
+
+sniper.LIVE_BUY = _snipe_buy
+
+
 async def snipe_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     for user_id, sid, status, msg in await asyncio.to_thread(sniper.scan_armed):
         if status not in ("filled", "unconfirmed"):
