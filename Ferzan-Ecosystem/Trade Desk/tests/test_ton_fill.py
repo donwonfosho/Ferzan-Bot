@@ -34,6 +34,24 @@ class TonFill(unittest.TestCase):
                 mock.patch.object(self.t.time, "monotonic", side_effect=lambda: next(clock)):
             self.assertEqual(self.t._bought_tokens("k", "EQx", 10.0, wait_s=90), 0.0)
 
+    def test_sell_that_bounced_is_not_reported_sold(self):
+        clock = iter([0, 1, 2, 200, 300])
+        with mock.patch.object(self.t, "jetton_holding", return_value=(100.0, "a")), \
+                mock.patch.object(self.t.time, "monotonic", side_effect=lambda: next(clock)):
+            self.assertIs(self.t._sold_tokens("k", "EQx", 100.0, 100, wait_s=90), False)
+
+    def test_sell_that_landed_is_confirmed(self):
+        seq = iter([100.0, 0.0])
+        with mock.patch.object(self.t, "jetton_holding", side_effect=lambda *_: (next(seq), "a")):
+            self.assertIs(self.t._sold_tokens("k", "EQx", 100.0, 100, wait_s=999), True)
+
+    def test_sell_unknown_balance_is_not_second_guessed(self):
+        self.assertIsNone(self.t._sold_tokens("k", "EQx", None, 100))
+
+    def test_still_holding_pauses_automation(self):
+        import sendstate
+        self.assertTrue(sendstate.is_unclear(self.t._still_holding_msg("EQabc")))
+
     def test_message_pauses_automation(self):
         import sendstate
         self.assertTrue(sendstate.is_unclear(self.t._no_tokens_msg(1.0, "EQabc")))

@@ -937,6 +937,28 @@ def _bought_tokens(secret: str, jetton: str, before: float | None, wait_s: int =
         time.sleep(6)
 
 
+def _sold_tokens(secret: str, jetton: str, before: float | None, pct: int, wait_s: int = FILL_WAIT_S) -> bool | None:
+    """True once the wallet's balance has dropped by most of what we meant to sell. False = still holding it after
+    the wait (a slippage bounce sends the jettons back). None = can't tell, so the sell is not second-guessed."""
+    if before is None or before <= 0:
+        return None
+    want = before * max(1, min(100, int(pct))) / 100.0
+    deadline = time.monotonic() + wait_s
+    while True:
+        now = _held_amount(secret, jetton)
+        if now is not None and before - now >= want * 0.5:
+            return True
+        if time.monotonic() >= deadline:
+            return False if now is not None else None
+        time.sleep(6)
+
+
+def _still_holding_msg(addr: str) -> str:
+    return ("TON sell was accepted by your wallet but the tokens are still there after "
+            f"{FILL_WAIT_S}s. A price bounce sends them back, and a slow swap may still land: check your wallet before retrying: "
+            f"https://tonviewer.com/{addr}")
+
+
 def buy_ton(jetton: str, usd: float, secret: str | None = None, slip_bps: int = 0) -> tuple[bool, str]:
     if not live_enabled():
         return False, "Live buys OFF."
@@ -1059,10 +1081,14 @@ def sell_ton(jetton: str, secret: str | None = None, pct: int = 100, slip: str =
             return _curve_sell(ci, jetton, pct, seed64, int(float(slip) * 10_000) or CURVE_SLIP_BPS)
         except Exception as exc:
             return False, _trade_failed("sell", exc, before)
+    held_before = _held_amount(secret or "", jetton)
     try:
-        return _run_retry(lambda: _swap_jetton_to_ton(seed64, jetton, pct, slip))
+        ok, msg = _run_retry(lambda: _swap_jetton_to_ton(seed64, jetton, pct, slip))
     except Exception as exc:
         return False, f"TON sell failed: {_friendly_err(exc)}"
+    if ok and _sold_tokens(secret or "", jetton, held_before, pct) is False:
+        return False, _still_holding_msg(_offline_address(seed64) or "")
+    return ok, msg
 
 
 def status_text() -> str:
