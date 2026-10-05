@@ -4276,6 +4276,30 @@ def _feeds_keyboard(uid: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
+async def _feed_admin_ok(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Channel posts only come from the channel's admins. In a group the sender has to be a group admin (or an operator),
+    otherwise any member could rebind or switch off the feed. Replies with the reason when it says no."""
+    chat = update.effective_chat
+    if update.channel_post or (chat and chat.type == "channel"):
+        return True
+    user = update.effective_user
+    if not chat or not user:
+        return False
+    if chat.type == "private" or _is_operator(user.id):
+        return True
+    try:
+        member = await context.bot.get_chat_member(chat.id, user.id)
+        if member.status in ("administrator", "creator"):
+            return True
+    except Exception:
+        logger.exception("feed admin check failed in %s", chat.id)
+    try:
+        await update.effective_message.reply_text("Only a group admin can change this chat's feed.")
+    except Exception:
+        pass
+    return False
+
+
 async def setfeed_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat = update.effective_chat
     is_chan = bool(update.channel_post) or (chat and chat.type == "channel")
@@ -4286,6 +4310,8 @@ async def setfeed_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             "Add Ferzan as admin in a channel, then send /setfeed in that channel.\n"
             "Or FERZAN_FEED_CHAT=-100xxxxxxxxxx on the droplet."
         )
+        return
+    if not await _feed_admin_ok(update, context):
         return
     raw = (context.args[0] if context.args else "*").lower()
     chain = "*" if raw in {"*", "all", "any"} else (resolve_chain(raw) or raw)
@@ -4305,6 +4331,8 @@ async def feedmin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     if not chat or chat.type not in {"channel", "group", "supergroup"}:
         await update.effective_message.reply_text("Send /feedmin 10000 inside the signals channel.")
+        return
+    if not await _feed_admin_ok(update, context):
         return
     if not context.args:
         cur = db.feed_min_liq_get(chat.id)
@@ -4356,11 +4384,13 @@ async def sponsor_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 async def unsetfeed_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await guard(update):
-        return
     chat = update.effective_chat
-    if chat:
-        db.drop_feed_chat(chat.id)
+    is_chan = bool(update.channel_post) or (chat and chat.type == "channel")
+    if not is_chan and not await guard(update):  # a channel post has no sender, so only channels skip the user check
+        return
+    if not chat or not await _feed_admin_ok(update, context):
+        return
+    db.drop_feed_chat(chat.id)
     await update.effective_message.reply_text("Feed off in this chat.")
 
 
