@@ -126,8 +126,13 @@ def skim_buy(
         log.warning("fee transfer errored for %s: %s", uid, str(exc)[:160])
         ok = False
     try:
-        db.add_fee(uid, f"live_{side}" if ok else f"live_{side}_failed", float(usd), bps, fee_usd if ok else 0.0,
-                   note=(f"{kind} {note}".strip())[:80])
+        if ok is True:
+            led_kind, led_fee, led_note = f"live_{side}", fee_usd, f"{kind} {note}".strip()
+        elif ok is None:  # sent but not proven: it may have landed, so it is not logged as a plain failure
+            led_kind, led_fee, led_note = f"live_{side}_unconfirmed", 0.0, f"{kind} ${fee_usd:.4f} unconfirmed {note}".strip()
+        else:
+            led_kind, led_fee, led_note = f"live_{side}_failed", 0.0, f"{kind} {note}".strip()
+        db.add_fee(uid, led_kind, float(usd), bps, led_fee, note=led_note[:80])
     except Exception:
         log.exception("fee ledger write failed")
     if ok is True:

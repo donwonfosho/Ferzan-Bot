@@ -69,8 +69,9 @@ def deployer():
     if f.exists():
         return Account.from_key(json.loads(f.read_text())["key"])
     acct = Account.create()
-    f.write_text(json.dumps({"key": acct.key.hex(), "address": acct.address}))
-    os.chmod(f, 0o600)
+    fd = os.open(str(f), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)  # never readable by others, not even for a moment
+    with os.fdopen(fd, "w") as fh:
+        fh.write(json.dumps({"key": acct.key.hex(), "address": acct.address}))
     return acct
 
 
@@ -91,6 +92,23 @@ def main():
     if chain in record and w3.eth.get_code(record[chain]) not in (b"", b"\x00"):
         print(f"Already deployed on {chain}: {record[chain]}\n{c['env']}={record[chain]}")
         return
+
+    pend = record.get(chain + "_pending")
+    if pend:  # an earlier run sent a deploy and never recorded the result: settle that one, never send a second
+        try:
+            r0 = w3.eth.get_transaction_receipt(pend)
+        except Exception:
+            r0 = None
+        if r0 is not None and r0.status == 1:
+            record[chain] = r0.contractAddress
+            record.pop(chain + "_pending", None)
+            RECORD.write_text(json.dumps(record, indent=1))
+            print(f"Earlier deploy landed: {c['explorer']}{r0.contractAddress}\n{c['env']}={r0.contractAddress}")
+            return
+        if r0 is None:
+            sys.exit(f"ABORT: an earlier deploy ({pend}) has no receipt yet. Check it on the explorer; "
+                     f"if it is gone for good, delete the '{chain}_pending' line from {RECORD} and run again.")
+        record.pop(chain + "_pending", None)  # it reverted on-chain: safe to deploy again
 
     abi, bytecode = compile_factory()
     acct = deployer()
@@ -120,6 +138,8 @@ def main():
     signed = acct.sign_transaction(tx)
     raw = getattr(signed, "raw_transaction", None) or signed.rawTransaction
     txh = w3.eth.send_raw_transaction(raw)
+    record[chain + "_pending"] = txh.hex()  # written before waiting, so a crash or timeout cannot lead to a second deploy
+    RECORD.write_text(json.dumps(record, indent=1))
     print("Sent:", txh.hex())
     rcpt = w3.eth.wait_for_transaction_receipt(txh, timeout=180)
     if rcpt.status != 1:
@@ -128,6 +148,7 @@ def main():
     f = w3.eth.contract(address=addr, abi=abi)
     ok = f.functions.platformTreasury().call() == treasury and f.functions.launchFeeWei().call() == c["fee_wei"]
     record[chain] = addr
+    record.pop(chain + "_pending", None)
     RECORD.write_text(json.dumps(record, indent=1))
     print(f"DEPLOYED: {c['explorer']}{addr}")
     print(f"On-chain check (treasury + fee): {'OK' if ok else 'MISMATCH!'}")
