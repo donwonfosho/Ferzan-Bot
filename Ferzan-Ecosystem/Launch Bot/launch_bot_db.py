@@ -191,6 +191,36 @@ def fail_if_open(request_id: str, message: str = "") -> bool:
         return cur.rowcount > 0
 
 
+def confirm_once(request_id: str, tx_hash: str, token: str) -> str:
+    """Atomically confirm a request. Returns 'ok', 'already' (someone else confirmed it first, so do
+    not announce again), 'duplicate' (that transaction or token already confirmed ANOTHER request) or
+    'missing'. One BEGIN IMMEDIATE transaction, so two simultaneous /complete calls can not both win."""
+    now = datetime.now(timezone.utc).isoformat()
+    tx = (tx_hash or "").strip().lower()
+    tok = (token or "").strip().lower()
+    with _get_conn() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT status FROM launch_requests WHERE id = ?", (request_id,)).fetchone()
+        if not row:
+            return "missing"
+        if row["status"] == "confirmed":
+            return "already"
+        if tx or tok:
+            dup = conn.execute(
+                "SELECT 1 FROM launch_requests WHERE id != ? AND status = 'confirmed' AND "
+                "((? != '' AND LOWER(COALESCE(tx_hash,'')) = ?) OR "
+                " (? != '' AND LOWER(COALESCE(result_token_address,'')) = ?)) LIMIT 1",
+                (request_id, tx, tx, tok, tok),
+            ).fetchone()
+            if dup:
+                return "duplicate"
+        conn.execute(
+            "UPDATE launch_requests SET status = 'confirmed', tx_hash = ?, result_token_address = ?, updated_at = ? WHERE id = ?",
+            (tx_hash or "", token or "", now, request_id),
+        )
+        return "ok"
+
+
 def get_user_launch_history(telegram_user_id: int, limit: int = 20) -> List[LaunchRequest]:
     with _get_conn() as conn:
         rows = conn.execute(

@@ -373,13 +373,20 @@ def try_fill(order: dict[str, Any]) -> tuple[str, str]:
         return "armed", reason
     live_line = ""
     _ok = False
+    if not db.claim_snipe(int(order["id"])):
+        return "armed", "Another check is already working on this snipe."
+    attempted = False  # becomes True just before anything is signed or sent
     try:
         import evm_signer
+        import sendstate
         import signer
         import user_wallets
 
         uid = int(order["user_id"])
         mint = (card.snapshot.token_address or order.get("query") or "").strip()
+        if mint and sendstate.held(uid, mint, "buy"):
+            db.release_snipe(int(order["id"]))
+            return "armed", "Paused: the last buy of this token may have gone through. Check your wallet."
         usd = min(signer.max_usd(), float(order.get("usd") or signer.max_usd()))
         sol_secret, evm_secret = user_wallets.secrets(uid)
         slip = int(max(10, min(9900, float(order.get("slip") or 15) * 100)))
@@ -389,19 +396,31 @@ def try_fill(order: dict[str, Any]) -> tuple[str, str]:
         # trade from this wallet to land instead of racing it.
         with user_lock(uid):
             if mint.startswith("0x"):
+                attempted = True
                 _ok, live_line = evm_signer.buy_evm(
                     order.get("chain") or "base", mint, usd, key_hex=evm_secret, slip_bps=slip
                 )
             elif mint:
+                attempted = True
                 _ok, live_line = signer.buy_sol(mint, usd, secret=sol_secret, slip_bps=slip, user_id=uid)
             else:
                 live_line = "Snipe: no mint"
     except Exception as exc:
         live_line = f"Live snipe failed: {exc}"
-    if not _ok:
-        return "armed", live_line or "snipe waiting"
-    db.finish_snipe(int(order["id"]), "filled", live_line)
-    return "filled", live_line
+        if attempted:  # it broke after the buy started: we do not know that nothing was sent
+            db.finish_snipe(int(order["id"]), "unconfirmed", live_line + " - check your wallet; this snipe will not retry.")
+            return "unconfirmed", live_line
+    if _ok:
+        db.finish_snipe(int(order["id"]), "filled", live_line)
+        return "filled", live_line
+    import sendstate as _ss
+
+    if attempted and _ss.is_unclear(live_line):  # sent but not proven: never buy again automatically
+        _ss.mark(int(order["user_id"]), (card.snapshot.token_address or order.get("query") or ""), "buy")
+        db.finish_snipe(int(order["id"]), "unconfirmed", live_line)
+        return "unconfirmed", live_line
+    db.release_snipe(int(order["id"]))  # clean refusal / nothing sent: safe to try again next scan
+    return "armed", live_line or "snipe waiting"
 
 
 def scan_armed() -> list[tuple[int, int, str, str]]:

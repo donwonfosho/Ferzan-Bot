@@ -65,6 +65,7 @@ import trading
 import user_wallets
 import natives
 import crossbuy
+import sendstate
 import withdraw
 from chains import ACTIVE, CHAINS, chain_list, resolve_chain
 
@@ -1883,6 +1884,9 @@ def _live_buy(
     blocked = "" if gates_checked else _rug_block(uid, card, mint)
     if blocked:
         return False, blocked
+    if not crossbuy.allowed() and sendstate.held(uid, mint, "buy"):  # only automated callers wait; a manual tap decides for itself
+        return False, ("Paused: your last buy of this token was sent but never confirmed, so it may have gone through. "
+                       "Check your wallet first. Automatic buys of this token resume in 15 minutes.")
     usd = _default_buy_usd(uid)
     if usd_override is not None:
         usd = min(signer.max_usd(), max(1.0, float(usd_override)))
@@ -1917,6 +1921,8 @@ def _live_buy(
             return False, f"Live: {chain or 'unknown'} is not Solana."
         label = "SOL"
         ok, msg = signer.buy_sol(mint, usd, secret=sol_secret, slip_bps=_slip_bps(uid, "buy"), user_id=uid)
+    if not ok and sendstate.is_unclear(msg):
+        sendstate.mark(uid, mint, "buy")
     if ok:
         # Cost basis (PnL, TP/SL/trail) tracks ONE bag per token: only the
         # active wallet's buy counts toward it. A multi-wallet buy's extra
@@ -5190,6 +5196,8 @@ async def snipe_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     status, msg = await asyncio.to_thread(sniper.try_fill, armed) if armed else ("armed", "")
     if status == "filled":
         await update.effective_message.reply_text("Immediate fill\n" + msg)
+    elif status == "unconfirmed":
+        await update.effective_message.reply_text("Buy sent but not confirmed. It will not retry on its own. Check your wallet.\n" + msg)
     elif status == "miss":
         await update.effective_message.reply_text("Armed but not filled yet:\n" + msg)
 
@@ -9275,10 +9283,16 @@ async def _live_exit_one(context: ContextTypes.DEFAULT_TYPE, row, uid: int, mint
 
 async def snipe_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     for user_id, sid, status, msg in await asyncio.to_thread(sniper.scan_armed):
-        if status != "filled":
+        if status not in ("filled", "unconfirmed"):
             continue
         try:
-            await context.bot.send_message(user_id, f"Snipe #{sid} filled\n{msg}")
+            if status == "filled":
+                await context.bot.send_message(user_id, f"Snipe #{sid} filled\n{msg}")
+            else:
+                await context.bot.send_message(
+                    user_id,
+                    f"Snipe #{sid}: the buy was sent but not confirmed. It will NOT retry on its own.\n"
+                    f"Check your wallet before doing anything else.\n{msg}")
         except Exception:
             logger.exception("snipe notify failed for %s", user_id)
 

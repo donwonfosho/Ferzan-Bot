@@ -54,5 +54,47 @@ class Units(unittest.TestCase):
         self.assertIn('"solana") and _re.fullmatch(r"0x[0-9a-fA-F]{40}"', API)
 
 
+class ConfirmOnce(unittest.TestCase):
+    def setUp(self):
+        ldb.init_db()
+        with ldb._get_conn() as c:
+            c.execute("DELETE FROM launch_requests")
+            for rid in ("r1", "r2", "r3"):
+                c.execute("INSERT INTO launch_requests (id, telegram_user_id, chat_id, chain, mode, name, symbol, total_supply, status, created_at, updated_at) "
+                          "VALUES (?,1,1,'base','bonding_curve','n','S','1','built','2026-01-01','2026-01-01')", (rid,))
+
+    def test_first_wins_second_is_already(self):
+        self.assertEqual(ldb.confirm_once("r1", "0xAB", "0xTok"), "ok")
+        self.assertEqual(ldb.confirm_once("r1", "0xAB", "0xTok"), "already")
+
+    def test_same_tx_or_token_cannot_confirm_another_request(self):
+        self.assertEqual(ldb.confirm_once("r1", "0xAB", "0xTok"), "ok")
+        self.assertEqual(ldb.confirm_once("r2", "0xab", ""), "duplicate")      # same tx, different case
+        self.assertEqual(ldb.confirm_once("r3", "0xzz", "0xTOK"), "duplicate")  # same token
+        self.assertEqual(ldb.confirm_once("r3", "0xzz", "0xOther"), "ok")
+
+    def test_empty_values_never_collide(self):
+        self.assertEqual(ldb.confirm_once("r1", "", ""), "ok")
+        self.assertEqual(ldb.confirm_once("r2", "", ""), "ok")
+
+    def test_unknown_request(self):
+        self.assertEqual(ldb.confirm_once("nope", "0x1", "0x2"), "missing")
+
+
+class CompleteWiring(unittest.TestCase):
+    def test_complete_uses_atomic_confirm_and_never_trusts_caller_token(self):
+        blk = API.split("def complete_request")[1].split("\n# ---- SITE_LAUNCH")[0]
+        self.assertIn("db.confirm_once(", blk)
+        self.assertNotIn('db.update_status(\n        request_id, "confirmed"', blk)
+        self.assertIn("_checked", blk)
+
+    def test_evm_launch_bound_to_request_name_and_symbol(self):
+        self.assertIn("eth_getTransactionByHash", API.split("def _verify_site_launch")[1].split("class SolBroadcastBody")[0])
+
+    def test_solana_mint_pinned_for_every_source(self):
+        self.assertIn('"sol_mints"', API)
+        self.assertNotIn('if _ex0.get("source") == "tradebot_wallet":  # /complete only accepts THIS coin', API)
+
+
 if __name__ == "__main__":
     unittest.main()

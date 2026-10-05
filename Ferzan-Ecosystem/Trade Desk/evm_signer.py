@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 
 import requests
 
@@ -287,6 +288,10 @@ def sell_curve(cid: str, meta: dict, acct, token: str, curve: str, amount: int, 
     ok, msg = _broadcast(acct, meta, curve, data, 0)
     if not ok:
         return False, note + f"Curve sell failed: {msg}"
+    _m = _TXH_RE.search(msg or "")
+    if _m:
+        _ok2, _t2 = _await_fill(meta, _m.group(0), note + f"Live {cid.upper()} curve sell\n{msg}", "Curve sell")
+        return _ok2, (_t2 if _ok2 else note + _t2)
     return True, note + f"Live {cid.upper()} curve sell\n{msg}"
 
 
@@ -377,7 +382,7 @@ def buy_curve(
         return False, "Curve RPC accepted nothing."
     exp = (meta.get("explorer_tx") or "https://basescan.org/tx/{txid}").format(txid=txh)
     tag = f" ref {referrer[:8]}…" if referrer else ""
-    return True, f"Live curve buy ~${usd:.2f}{tag}\n{exp}"
+    return _await_fill(meta, txh, f"Live curve buy ~${usd:.2f}{tag}\n{exp}", "Curve buy")
 
 
 def buy_evm(
@@ -491,7 +496,7 @@ def buy_evm(
     if not txh:
         return False, "RPC accepted nothing."
     exp = (meta.get("explorer_tx") or "https://basescan.org/tx/{txid}").format(txid=txh)
-    return True, f"Live {cid.upper()} buy ~${usd:.2f}\n{exp}"
+    return _await_fill(meta, txh, f"Live {cid.upper()} buy ~${usd:.2f}\n{exp}", f"{cid.upper()} buy")
 
 
 def _nonce(rpc: str, addr: str) -> int:
@@ -535,7 +540,88 @@ def _nonce_guarded(meta: dict, addr: str) -> int:
     return n
 
 
+_DUP_HINTS = ("already known", "known transaction", "already imported", "already exists", "nonce too low", "already in")
+
+
+def _local_tx_hash(raw_hex: str) -> str:
+    """The hash this exact signed tx will have, computed here, so we can ask any node whether it saw it."""
+    try:
+        from eth_utils import keccak
+
+        return "0x" + keccak(hexstr=raw_hex).hex()
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _tx_seen(meta: dict, txh: str) -> bool:
+    try:
+        return bool((_rpc(meta["rpc"], "eth_getTransactionByHash", [txh]) or {}).get("result"))
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _send_raw(meta: dict, raw_hex: str, addr: str = "", nonce=None) -> dict:
+    """Broadcast. If a node already has this exact tx (first endpoint timed out after accepting it, then the
+    next said 'already known' / 'nonce too low'), that is a SUCCESS for our hash, never a failed trade."""
+    try:
+        body = _send_raw_once(meta, raw_hex, addr, nonce)
+    except Exception:
+        h = _local_tx_hash(raw_hex)
+        if h and _tx_seen(meta, h):
+            log.info("evm broadcast errored but the node has %s - treating as sent", h)
+            return {"result": h}
+        raise
+    err = body.get("error") if isinstance(body, dict) else None
+    if err and not body.get("result"):
+        msg = str(err.get("message") if isinstance(err, dict) else err).lower()
+        if any(h in msg for h in _DUP_HINTS):
+            h = _local_tx_hash(raw_hex)
+            if h and _tx_seen(meta, h):
+                log.info("evm node reports %r but has our tx %s - treating as sent", msg[:60], h)
+                return {"result": h}
+    return body
+
+
+_TXH_RE = re.compile(r"0x[0-9a-fA-F]{64}")
+
+
+def _confirm_tx(meta: dict, txh: str):
+    """True = mined OK, False = mined and reverted, None = not mined in time (unknown)."""
+    import time as _time
+
+    if (os.getenv("EVM_WAIT_RECEIPT", "1").strip().lower()) in {"0", "false", "off", "no"}:
+        return True
+    try:
+        wait = max(5.0, float(os.getenv("EVM_RECEIPT_WAIT_S") or 45))
+    except ValueError:
+        wait = 45.0
+    deadline = _time.monotonic() + wait
+    while True:
+        try:
+            rec = (_rpc(meta["rpc"], "eth_getTransactionReceipt", [txh]) or {}).get("result")
+        except Exception:  # noqa: BLE001
+            rec = None
+        if rec:
+            return int(rec.get("status") or "0x0", 16) == 1
+        if _time.monotonic() >= deadline:
+            return None
+        _time.sleep(1.5)
+
+
+def _await_fill(meta: dict, txh: str, ok_text: str, what: str) -> tuple[bool, str]:
+    """A trade counts as filled only once its receipt says success. A revert reports failure (so no fee,
+    no cost basis); not mined yet says 'may still land' so nothing retries it automatically."""
+    st = _confirm_tx(meta, txh)
+    if st is True:
+        return True, ok_text
+    link = (meta.get("explorer_tx") or "https://basescan.org/tx/{txid}").format(txid=txh)
+    if st is False:
+        return False, f"{what} reverted on chain - nothing changed hands and no fee was taken.\n{link}"
+    return False, (f"{what} was sent but not confirmed yet - it MAY still land. "
+                   f"Check the link before retrying:\n{link}")
+
+
+def _send_raw_once(meta: dict, raw_hex: str, addr: str = "", nonce=None) -> dict:
     import time as _time
 
     priv = _mev_rpc(meta)
@@ -875,4 +961,8 @@ def sell_evm(chain: str, sell_token: str, key_hex: str | None = None, pct: int =
     ok, msg = _broadcast(acct, meta, tx["to"], tx["data"], _as_int(tx.get("value"), 0))
     if not ok:
         return False, approve_note + f"Sell failed: {msg}"
+    _m = _TXH_RE.search(msg or "")
+    if _m:
+        _ok2, _t2 = _await_fill(meta, _m.group(0), approve_note + f"Live {cid.upper()} sell (full bag)\n{msg}", f"{cid.upper()} sell")
+        return _ok2, (_t2 if _ok2 else approve_note + _t2)
     return True, approve_note + f"Live {cid.upper()} sell (full bag)\n{msg}"

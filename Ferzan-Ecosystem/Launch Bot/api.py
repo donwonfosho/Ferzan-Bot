@@ -302,8 +302,10 @@ def build_tx(request_id: str, body: BuildTxRequest):
                     "note": result.note,
                     "cost_text": getattr(result, "cost_text", ""),
                 }
-                if _ex0.get("source") == "tradebot_wallet":  # /complete only accepts THIS coin for a Trade Bot launch
-                    _set_extra(request_id, {**_ex0, "sol_mint": result.mint_address})
+                # /complete only accepts a coin THIS request built (a rebuild keeps the earlier mints, last 5)
+                _prev = [m for m in (_ex0.get("sol_mints") or []) if isinstance(m, str)]
+                _set_extra(request_id, {**_ex0, "sol_mint": result.mint_address,
+                                        "sol_mints": (_prev + [result.mint_address])[-5:]})
             else:
                 raise HTTPException(400, f"Unknown Solana mode: {req.mode}")
 
@@ -500,14 +502,28 @@ def complete_request(request_id: str, body: CompleteRequest):
 
     token_addr = (body.result_token_address or "").strip()
     curve_addr = (body.curve_address or "").strip()
-    if body.tx_hash and (not token_addr or not curve_addr) and req.chain != "tron":
+    _checked = req.chain in ("ton", "tron") or _verifiable_launch(req)
+    if req.chain not in ("tron", "ton", "solana") and body.tx_hash and not _checked:
+        # nothing above proved this launch, so the caller's token/curve are never trusted: read the receipt
+        parsed = _parse_launch_receipt(req.chain, body.tx_hash)
+        if not (parsed.get("token") or parsed.get("curve")):
+            raise HTTPException(400, "The chain has not shown this launch yet. Wait a minute and check your wallet; do not launch again.")
+        _w = (req.wallet_address or "").strip().lower()
+        if _w and parsed.get("from") and parsed["from"] != _w:
+            raise HTTPException(400, "That launch was not made by this wallet")
+        token_addr, curve_addr = parsed.get("token") or "", parsed.get("curve") or ""
+    elif body.tx_hash and (not token_addr or not curve_addr) and req.chain not in ("tron", "ton", "solana"):
         parsed = _parse_launch_receipt(req.chain, body.tx_hash)
         token_addr = token_addr or parsed.get("token") or ""
         curve_addr = curve_addr or parsed.get("curve") or ""
 
-    db.update_status(
-        request_id, "confirmed", tx_hash=body.tx_hash, result_token_address=token_addr
-    )
+    verdict = db.confirm_once(request_id, body.tx_hash or "", token_addr)
+    if verdict == "already":  # another call confirmed it a moment ago: do not announce twice
+        return {"status": "ok", "already": True, "token": token_addr, "curve": curve_addr}
+    if verdict == "duplicate":
+        raise HTTPException(409, "That transaction or coin is already recorded for another launch.")
+    if verdict == "missing":
+        raise HTTPException(404, "Launch request not found")
     if curve_addr:
         try:
             db.set_curve_address(request_id, curve_addr)
@@ -736,7 +752,10 @@ def _verify_site_launch(req, body) -> dict:
         if (res.get("meta") or {}).get("err") is not None:
             raise HTTPException(400, "The launch transaction failed on Solana")
         _ex = req.extra_params or {}
-        if _ex.get("source") == "tradebot_wallet" and (not _ex.get("sol_mint") or _ex.get("sol_mint") != mint):
+        _built = {m for m in (_ex.get("sol_mints") or []) if isinstance(m, str)} | ({_ex["sol_mint"]} if _ex.get("sol_mint") else set())
+        if _ex.get("source") == "tradebot_wallet" and mint not in _built:
+            raise HTTPException(400, "That is not the coin this launch built")
+        if _built and mint not in _built:
             raise HTTPException(400, "That is not the coin this launch built")
         keys = [k.get("pubkey") if isinstance(k, dict) else k for k in (res.get("transaction") or {}).get("message", {}).get("accountKeys") or []]
         if not keys or keys[0] != wallet or mint not in keys:
@@ -757,6 +776,14 @@ def _verify_site_launch(req, body) -> dict:
         time.sleep(2)
     if not rcpt or str(rcpt.get("status")) != "0x1":
         raise HTTPException(400, "The launch is not confirmed on chain")
+    try:  # bind the tx to this request: its calldata must contain this request's name and symbol
+        _t = requests.post(RPC_URLS.get(req.chain) or "", json={"jsonrpc": "2.0", "id": 1,
+            "method": "eth_getTransactionByHash", "params": [tx]}, timeout=20).json().get("result") or {}
+        _inp = str(_t.get("input") or "").lower()
+    except Exception:
+        _inp = ""
+    if not _inp or (req.name or "").encode().hex() not in _inp or (req.symbol or "").encode().hex() not in _inp:
+        raise HTTPException(400, "That transaction is not the launch you built here")
     if str(rcpt.get("from") or "").lower() != wallet.lower() or str(rcpt.get("to") or "").lower() != factory:
         raise HTTPException(400, "That launch was not made by this wallet through the Ferzan factory")
     for log in rcpt.get("logs") or []:
@@ -883,6 +910,10 @@ def _parse_launch_receipt(chain: str, tx_hash: str, tries: int = 12) -> dict:
         except Exception as exc:
             logger.warning("receipt fetch failed: %s", exc)
             receipt = {}
+        if receipt and str(receipt.get("status")) not in ("0x1", "1", "None", ""):
+            return {}  # reverted: never read a token out of a failed launch
+        if receipt.get("from"):
+            out["from"] = str(receipt.get("from")).lower()
         for log in receipt.get("logs") or []:
             topics = log.get("topics") or []
             if not topics:
@@ -894,7 +925,7 @@ def _parse_launch_receipt(chain: str, tx_hash: str, tries: int = 12) -> dict:
             elif sig == TOKEN_LAUNCHED_TOPIC and len(topics) >= 2:
                 out.setdefault("token", _topic_addr(topics[1]))
         if out.get("token") or out.get("curve") or receipt.get("status"):
-            return out
+            return {k: v for k, v in out.items()}
         time.sleep(2)
     return out
 

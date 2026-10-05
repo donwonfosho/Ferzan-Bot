@@ -28,7 +28,7 @@ class Wiring(unittest.TestCase):
     def test_api_pins_the_mint_for_tradebot_launches(self):
         api = (HERE / "api.py").read_text()
         self.assertIn('"sol_mint": result.mint_address', api)
-        self.assertIn('_ex.get("sol_mint") != mint', api)
+        self.assertIn('mint not in _built', api)
 
     def test_fresh_sol_coin_read(self):
         api = (HERE / "api.py").read_text()

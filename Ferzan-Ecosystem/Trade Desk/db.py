@@ -995,6 +995,22 @@ def finish_snipe(snipe_id: int, status: str, result: str) -> None:
         conn.commit()
 
 
+def claim_snipe(snipe_id: int) -> bool:
+    """armed -> sending, atomically. Only the caller that wins may attempt the buy, so the scan job and an
+    immediate /snipe fill can never both buy the same order."""
+    with get_conn() as conn:
+        cur = conn.execute("UPDATE snipes SET status = 'sending' WHERE id = ? AND status = 'armed'", (int(snipe_id),))
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def release_snipe(snipe_id: int) -> None:
+    """sending -> armed, only when we can PROVE nothing was sent."""
+    with get_conn() as conn:
+        conn.execute("UPDATE snipes SET status = 'armed' WHERE id = ? AND status = 'sending'", (int(snipe_id),))
+        conn.commit()
+
+
 def cancel_snipe(snipe_id: int, user_id: int) -> bool:
     with get_conn() as conn:
         cur = conn.execute(
