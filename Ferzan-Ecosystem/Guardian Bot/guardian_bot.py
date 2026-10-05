@@ -10,6 +10,7 @@ import random
 import re
 import sqlite3
 import time
+import urllib.error
 import urllib.request
 from collections import defaultdict, deque
 from datetime import datetime as _dt, timedelta, timezone
@@ -214,9 +215,25 @@ _pending_welcome_media: dict[int, tuple[int, float]] = {}
 _pending_note_media: dict[int, tuple[int, str, float]] = {}
 
 
+_SCHEMA_READY: set = set()
+
+
 def _db() -> sqlite3.Connection:
+    """A connection with the schema in place. The CREATE/ALTER statements run once per database file (or again if the
+    file was removed), not on every call, so a busy group does not repeat dozens of write statements per message."""
     DB.parent.mkdir(parents=True, exist_ok=True)
-    con = sqlite3.connect(DB)
+    fresh = not DB.exists()
+    con = sqlite3.connect(DB, timeout=30)
+    con.execute("PRAGMA busy_timeout=30000")
+    key = str(DB)
+    if fresh or key not in _SCHEMA_READY:
+        _db_schema(con)
+        con.commit()
+        _SCHEMA_READY.add(key)
+    return con
+
+
+def _db_schema(con: sqlite3.Connection) -> None:
     con.execute(
         """CREATE TABLE IF NOT EXISTS global_bans (
             user_id INTEGER PRIMARY KEY, reason TEXT, by_id INTEGER, ts INTEGER
@@ -480,7 +497,6 @@ def _db() -> sqlite3.Connection:
             con.execute(ddl)
         except sqlite3.OperationalError:
             pass
-    return con
 
 
 def _esc(s) -> str:
@@ -1498,10 +1514,45 @@ def _url_host(url: str) -> str:
     return host.split("@")[-1]  # strip any userinfo@ prefix
 
 
-def _resolve_shortlink_sync(url: str) -> str | None:
+def _public_host(host: str) -> bool:
+    """True only when every address the host resolves to is a normal public one (never loopback, private, link-local
+    or a cloud metadata address)."""
+    import ipaddress
+    import socket
     try:
+        infos = socket.getaddrinfo(host, None)
+    except OSError:
+        return False
+    for info in infos:
+        try:
+            ip = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            return False
+        if not ip.is_global:
+            return False
+    return bool(infos)
+
+
+class _SafeRedirect(urllib.request.HTTPRedirectHandler):
+    max_redirections = 5
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        from urllib.parse import urlparse
+        u = urlparse(newurl)
+        if u.scheme not in ("http", "https") or not u.hostname or not _public_host(u.hostname):
+            raise urllib.error.URLError("redirect to a non-public address refused")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _resolve_shortlink_sync(url: str) -> str | None:
+    from urllib.parse import urlparse
+    try:
+        host = urlparse(url).hostname or ""
+        if urlparse(url).scheme not in ("http", "https") or not host or not _public_host(host):
+            return None
+        opener = urllib.request.build_opener(_SafeRedirect)
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (FerzanGuardian)"})
-        with urllib.request.urlopen(req, timeout=6) as resp:
+        with opener.open(req, timeout=6) as resp:
             return resp.geturl()
     except Exception:
         return None
@@ -1514,7 +1565,7 @@ async def _resolve_shortlinks(text: str) -> list[str]:
     targets = [u for u in urls if _url_host(u) in SHORTENER_DOMAINS][:2]
     if not targets:
         return []
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     resolved = []
     for u in targets:
         try:
@@ -2889,10 +2940,9 @@ async def gfilter(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     is_regex = 0
     if raw.lower().startswith("regex:"):
         pattern = raw[len("regex:"):].strip()
-        try:
-            re.compile(pattern, re.I)
-        except re.error as exc:
-            await update.effective_message.reply_text(f"That regex doesn't compile: {exc}")
+        good, why = _regex_ok(pattern)
+        if not good:
+            await update.effective_message.reply_text(f"That pattern can't be used: {why}.")
             return
         word = pattern
         is_regex = 1
@@ -3988,6 +4038,24 @@ async def setlogchat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     val = context.args[0].strip()
     if val.lower() == "off":
         val = None
+    else:
+        if not re.fullmatch(r"-?\d{5,20}", val):
+            await update.effective_message.reply_text("Use the numeric chat id, like -1001234567890.")
+            return
+        # The log chat receives this group's moderation alerts: check I can post there and that YOU run it.
+        try:
+            me = await context.bot.get_chat_member(int(val), context.bot.id)
+            you = await context.bot.get_chat_member(int(val), update.effective_user.id)
+        except Exception:
+            await update.effective_message.reply_text(
+                "I couldn't check that chat. Add me there first (as admin in a channel), and make sure the id is right.")
+            return
+        if you.status not in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER):
+            await update.effective_message.reply_text("You need to be an admin of that log chat too.")
+            return
+        if me.status in (ChatMemberStatus.LEFT, ChatMemberStatus.BANNED):
+            await update.effective_message.reply_text("I'm not in that chat. Add me first.")
+            return
     con = _db()
     con.execute(
         "INSERT INTO settings(chat_id, log_chat_id) VALUES(?,?) "
@@ -4797,6 +4865,55 @@ def _export_config(chat_id: int) -> dict:
     }
 
 
+_NESTED_QUANT = re.compile(r"\((?:[^()\\]|\\.)*[+*](?:[^()\\]|\\.)*\)\s*(?:[+*]|\{\d*,\d*\})")
+MAX_REGEX_LEN = 120
+MAX_SCAN_CHARS = 2000
+
+
+def _regex_ok(pattern: str) -> tuple[bool, str]:
+    """Filters are patterns run against every message by the bot itself, so a pattern like (a+)+$ could freeze it.
+    Python's re has no timeout: refuse long patterns and the classic nested-repeat shapes, and check it compiles."""
+    if not pattern or len(pattern) > MAX_REGEX_LEN:
+        return False, f"keep a pattern under {MAX_REGEX_LEN} characters"
+    if _NESTED_QUANT.search(pattern):
+        return False, "a repeated group that itself repeats (like (a+)+) can freeze the bot"
+    try:
+        re.compile(pattern, re.I)
+    except re.error as exc:
+        return False, f"it doesn't compile: {exc}"
+    return True, ""
+
+
+def _clean_config(config) -> dict:
+    """Keeps only well-formed pieces of an imported config (types, lengths, safe regexes). Anything else is dropped."""
+    if not isinstance(config, dict):
+        raise ValueError("not a config object")
+    out: dict = {}
+    st = config.get("settings")
+    if isinstance(st, dict):
+        out["settings"] = {k: v for k, v in st.items()
+                           if k != "log_chat_id" and isinstance(k, str) and (v is None or isinstance(v, (int, float, str))) and len(str(v)) <= 4000}
+    fl = []
+    for f in (config.get("filters") or [])[:300] if isinstance(config.get("filters"), list) else []:
+        if not isinstance(f, dict) or not isinstance(f.get("word"), str) or not f["word"] or len(f["word"]) > 300:
+            continue
+        if f.get("is_regex") and not _regex_ok(f["word"])[0]:
+            continue
+        fl.append({"word": f["word"], "action": f.get("action") if f.get("action") in ("warn", "mute", "ban") else "mute",
+                   "is_regex": bool(f.get("is_regex"))})
+    out["filters"] = fl
+    out["local_scam"] = [{"value": x["value"][:200], "kind": x.get("kind") if x.get("kind") in ("ca", "domain", "user") else "ca"}
+                         for x in (config.get("local_scam") or [])[:1000]
+                         if isinstance(x, dict) and isinstance(x.get("value"), str) and x["value"]] if isinstance(config.get("local_scam"), list) else []
+    out["link_whitelist"] = [d[:200] for d in (config.get("link_whitelist") or [])[:500] if isinstance(d, str) and d] if isinstance(config.get("link_whitelist"), list) else []
+    if isinstance(config.get("faq"), list):
+        out["faq"] = [{"question": f["question"][:500], "answer": f["answer"][:3000], "keywords": str(f.get("keywords") or "")[:500]}
+                      for f in config["faq"][:100] if isinstance(f, dict) and isinstance(f.get("question"), str) and isinstance(f.get("answer"), str)]
+    if isinstance(config.get("welcome_variants"), list):
+        out["welcome_variants"] = [t[:3000] for t in config["welcome_variants"][:50] if isinstance(t, str) and t.strip()]
+    return out
+
+
 def _apply_config(chat_id: int, config: dict) -> None:
     con = _db()
     con.execute("INSERT OR IGNORE INTO settings(chat_id) VALUES(?)", (chat_id,))
@@ -4865,16 +4982,24 @@ async def importconfig_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if not doc:
         await msg.reply_text("Reply to a Guardian config .json file (from /exportconfig) with /importconfig.")
         return
+    if (doc.file_size or 0) > 512 * 1024:
+        await msg.reply_text("That file is too big to be a Guardian config (limit 512 KB).")
+        return
     try:
         file = await context.bot.get_file(doc.file_id)
         buf = BytesIO()
         await file.download_to_memory(buf)
-        config = json.loads(buf.getvalue().decode("utf-8"))
+        config = _clean_config(json.loads(buf.getvalue().decode("utf-8")))
     except Exception as exc:
         log.warning("importconfig %s", exc)
         await msg.reply_text("Couldn't read that file — make sure it's a Guardian config export.")
         return
-    _apply_config(update.effective_chat.id, config)
+    try:
+        _apply_config(update.effective_chat.id, config)
+    except Exception as exc:
+        log.warning("importconfig apply %s", exc)
+        await msg.reply_text("That config couldn't be applied, so nothing was changed.")
+        return
     await msg.reply_text(
         "✅ Config imported — filters, scam list, link whitelist, settings"
         + (", FAQs" if "faq" in config else "")
@@ -4902,7 +5027,7 @@ async def cloneconfig_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if member.status not in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER):
         await update.effective_message.reply_text("You need to be an admin in the source group too.")
         return
-    _apply_config(update.effective_chat.id, _export_config(source_id))
+    _apply_config(update.effective_chat.id, _clean_config(_export_config(source_id)))  # the other group's log chat is not copied
     await update.effective_message.reply_text(f"✅ Cloned config from {source_id} into this group.")
 
 
@@ -5034,9 +5159,10 @@ async def _slash_filter_trigger(update: Update, context: ContextTypes.DEFAULT_TY
     -priority handler group, so it only fires for slash-words that are not already a real
     registered bot command (those get handled first, in their own groups, as normal)."""
     msg = update.effective_message
-    if not msg or not msg.text:
-        return
-    chat_id = update.effective_chat.id
+    chat = update.effective_chat
+    if not msg or not msg.text or not chat or chat.type not in ("group", "supergroup"):
+        return  # saved filters belong to groups; in a private chat or channel there is nothing to pull
+    chat_id = chat.id
     cmd = msg.text.split()[0][1:].split("@")[0].strip().lower()
     if not cmd:
         return
@@ -5513,6 +5639,19 @@ async def gnewacct_threshold(update: Update, context: ContextTypes.DEFAULT_TYPE)
     con.commit()
     con.close()
     await update.effective_message.reply_text(f"New-account id threshold set to {val}.")
+
+
+async def _shadowban_sweep(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    msg, user = update.effective_message, update.effective_user
+    if not msg or not user or not update.effective_chat:
+        return
+    if _is_shadowbanned(update.effective_chat.id, user.id):
+        try:
+            await msg.delete()
+        except Exception as exc:
+            log.warning("shadowban sweep delete %s", exc)
+        from telegram.ext import ApplicationHandlerStop
+        raise ApplicationHandlerStop
 
 
 async def gshadowban(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -6671,7 +6810,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 continue
             if is_regex:
                 try:
-                    matched = re.search(w, text_raw, re.I) is not None
+                    matched = _regex_ok(w)[0] and re.search(w, text_raw[:MAX_SCAN_CHARS], re.I) is not None
                 except re.error:
                     matched = False
             else:
@@ -7088,6 +7227,12 @@ def main() -> None:
         group=-3,
     )
     app.add_handler(ChatMemberHandler(on_member, ChatMemberHandler.CHAT_MEMBER))
+    # A shadowbanned member's messages vanish whatever they are (video, file, audio, poll, contact...), not only the
+    # types the main moderation handler listens to.
+    app.add_handler(
+        MessageHandler(filters.ChatType.GROUPS & ~filters.StatusUpdate.ALL, _shadowban_sweep),
+        group=-5,
+    )
     app.add_handler(
         MessageHandler(
             (
