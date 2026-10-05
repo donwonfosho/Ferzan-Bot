@@ -84,5 +84,40 @@ class LaunchHardening(unittest.TestCase):
         self.assertIn("is_finite", self.read("launch_app.py"))
 
 
+
+class StuckLaunches(unittest.TestCase):
+    def test_finds_only_old_submitted_rows(self):
+        import contextlib
+        import datetime as dt
+        import sqlite3
+        with open(os.path.join(HERE, "launch_bot.py"), encoding="utf-8") as f:
+            src = f.read()
+        i = src.index("_STUCK_SQL = ")
+        j = src.index("async def _stuck_loop")
+        conn = sqlite3.connect(":memory:")
+        conn.execute("CREATE TABLE launch_requests (id TEXT, chain TEXT, mode TEXT, name TEXT, symbol TEXT, tx_hash TEXT, "
+                     "telegram_user_id INTEGER, updated_at TEXT, status TEXT)")
+        now = dt.datetime.now(dt.timezone.utc)
+
+        def row(rid, status, mins):
+            conn.execute("INSERT INTO launch_requests VALUES (?,?,?,?,?,?,?,?,?)",
+                         (rid, "base", "bonding_curve", "N", "S", "0xabc", 7, (now - dt.timedelta(minutes=mins)).isoformat(), status))
+        row("old-submitted", "submitted", 45)
+        row("fresh-submitted", "submitted", 5)
+        row("old-confirmed", "confirmed", 45)
+        row("ancient", "submitted", 60 * 24 * 5)
+
+        class FakeDb:
+            @staticmethod
+            @contextlib.contextmanager
+            def _get_conn():
+                yield conn
+        ns = {"db": FakeDb}
+        exec(src[i:j], ns)
+        ids = [r[0] for r in ns["_stuck_launches"](now)]
+        self.assertEqual(ids, ["old-submitted"])
+        self.assertIn("_stuck_loop(application)", src)
+
+
 if __name__ == "__main__":
     unittest.main()

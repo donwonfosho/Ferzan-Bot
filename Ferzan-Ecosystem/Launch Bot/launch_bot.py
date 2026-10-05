@@ -660,6 +660,45 @@ def _ms_due(progress: float, graduated: bool, sent: set) -> list:
     return [k for k in reached if k not in sent]
 
 
+_STUCK_SQL = ("SELECT id, chain, mode, name, symbol, tx_hash, telegram_user_id, updated_at FROM launch_requests "
+              "WHERE status = 'submitted' AND updated_at < ? AND updated_at >= ? ORDER BY updated_at LIMIT 20")
+
+
+def _stuck_launches(now=None) -> list:
+    """Launches that were sent to the chain but never marked confirmed or failed (a restart or a closed page mid-launch)."""
+    import datetime as _dt
+    now = now or _dt.datetime.now(_dt.timezone.utc)
+    old = (now - _dt.timedelta(minutes=20)).isoformat()
+    oldest = (now - _dt.timedelta(days=3)).isoformat()
+    with db._get_conn() as conn:
+        return [tuple(r) for r in conn.execute(_STUCK_SQL, (old, oldest)).fetchall()]
+
+
+async def _stuck_loop(application: Application):
+    """Every 10 min: tell the admins about any launch stuck in 'submitted' for 20+ minutes, once each, so a launch
+    that went on-chain but was never recorded or announced does not sit unnoticed."""
+    seen: set = set()
+    while True:
+        await asyncio.sleep(600)
+        try:
+            rows = await asyncio.to_thread(_stuck_launches)
+            fresh = [r for r in rows if r[0] not in seen]
+            if not fresh:
+                continue
+            lines = [f"⚠️ {len(fresh)} launch(es) sent to the chain but never confirmed:"]
+            for rid, chain, mode, name, sym, tx, uid, upd in fresh:
+                lines.append(f"• {_esc(name)} ({_esc(sym)}) on {_esc(chain)}/{_esc(mode)} · user {uid} · tx {_esc((tx or 'none')[:20])} · id {rid[:8]}")
+            lines.append("Check the tx on the explorer. If it landed, complete it from the app or tell me and I will.")
+            for aid in _admin_ids():
+                try:
+                    await application.bot.send_message(aid, "\n".join(lines), parse_mode="HTML")
+                except Exception:
+                    pass
+            seen.update(r[0] for r in fresh)
+        except Exception:
+            logger.exception("stuck-launch check failed")
+
+
 async def _milestone_loop(application: Application):
     """Every 90s: tell a creator when their coin reaches 25 / 50 / 90 percent and when it graduates, with the
     card image and a Share to X button. The first pass after a deploy only records where coins already are, so
@@ -2678,6 +2717,7 @@ def main():
         application.create_task(_draft_loop(application))
         application.create_task(_watch_loop(application))
         application.create_task(_milestone_loop(application))
+        application.create_task(_stuck_loop(application))
 
     app.post_init = _post_all
     logger.info("Ferzan Launch starting...")
