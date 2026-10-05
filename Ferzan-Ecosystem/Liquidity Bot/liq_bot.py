@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import html
 import logging
+import math
 import os
 import re
 from pathlib import Path
@@ -116,7 +117,7 @@ def _holder_count(chain_id: str, ca: str) -> int | None:
                 return None
             r = requests.get(
                 f"https://api.covalenthq.com/v1/{covalent_chain}/tokens/{ca}/token_holders_v2/",
-                params={"key": COVALENT_API_KEY},
+                headers={"Authorization": f"Bearer {COVALENT_API_KEY}"},  # header, so it can never end up in a logged URL
                 timeout=8,
             )
             if r.status_code != 200:
@@ -129,14 +130,31 @@ def _holder_count(chain_id: str, ca: str) -> int | None:
         # No provider wired up for this chain (e.g. "hood") -- be honest.
         return None
     except Exception as exc:
-        log.warning("holder lookup errored chain=%s ca=%s: %s", chain_id, ca, exc)
+        log.warning("holder lookup errored chain=%s ca=%s: %s", chain_id, ca, type(exc).__name__)
         return None
+
+
+def _f(x) -> float:
+    """A float from provider data; junk, NaN and inf all become 0."""
+    try:
+        v = float(x)
+        return v if math.isfinite(v) else 0.0
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _pools(ca: str) -> list[dict]:
     r = requests.get(DS.format(ca), timeout=12)
-    pairs = (r.json() or {}).get("pairs") or []
-    pairs.sort(key=lambda p: float((p.get("liquidity") or {}).get("usd") or 0), reverse=True)
+    if r.status_code != 200:
+        raise RuntimeError(f"DexScreener answered {r.status_code}")
+    pairs = [p for p in ((r.json() or {}).get("pairs") or []) if isinstance(p, dict)]
+    # Prefer pools where this CA is the token being traded; if it only appears as the
+    # quote side, fall back to what we have rather than showing nothing.
+    is_evm = bool(EVM.match(ca))
+    same = lambda a: (str(a or "").lower() == ca.lower()) if is_evm else (str(a or "") == ca)
+    mine = [p for p in pairs if same((p.get("baseToken") or {}).get("address"))]
+    pairs = mine or pairs
+    pairs.sort(key=lambda p: _f((p.get("liquidity") or {}).get("usd")), reverse=True)
     return pairs
 
 
@@ -255,18 +273,18 @@ def _fetch_referral_stats(uid: int) -> dict | None:
         if r.status_code != 200:
             log.warning("referral-stats lookup failed uid=%s status=%s", uid, r.status_code)
             return None
-        return r.json()
+        data = r.json()
+        return data if isinstance(data, dict) else None
     except Exception as exc:
-        log.warning("referral-stats lookup errored uid=%s: %s", uid, exc)
+        log.warning("referral-stats lookup errored uid=%s: %s", uid, type(exc).__name__)
         return None
 
 
-def _earn_text(uid: int) -> str:
+def _earn_text(uid: int, stats: dict | None) -> str:
     # NOTE: must match the "ref_" prefix Trade Desk's bot.py actually parses
     # on /start (see bot.py's deep-link handling) -- the old "r-{uid}" prefix
     # here didn't match anything, so shared links silently attributed to no one.
     link = f"https://t.me/{TRADE}?start=ref_{uid}"
-    stats = _fetch_referral_stats(uid)
     if stats is None:
         return (
             "🎁 <b>Earn with Ferzan</b>\n\n"
@@ -284,10 +302,10 @@ def _earn_text(uid: int) -> str:
         "a cut of the real fee lands for you — not a fake-volume rebate.\n\n"
         f"🔗 <b>Your link</b>\n<code>{link}</code>\n\n"
         f"🏅 Tier — {_esc(stats.get('tier'))}\n"
-        f"👥 Referrals — {int(stats.get('invites') or 0):,}\n"
-        f"📈 Their volume — ${float(stats.get('volume') or 0):,.2f}\n"
-        f"💰 Earned (lifetime) — ${float(stats.get('earned') or 0):.4f}\n"
-        f"💸 Claimable now — ${float(stats.get('open') or 0):.4f}\n\n"
+        f"👥 Referrals — {int(_f(stats.get('invites'))):,}\n"
+        f"📈 Their volume — ${_f(stats.get('volume')):,.2f}\n"
+        f"💰 Earned (lifetime) — ${_f(stats.get('earned')):.4f}\n"
+        f"💸 Claimable now — ${_f(stats.get('open')):.4f}\n\n"
         "<i>Claim with /claim on Ferzan Trade once claimable ≥ $5.</i>"
     )
 
@@ -358,21 +376,22 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def token_card(update: Update, ca: str) -> None:
     try:
-        pools = _pools(ca)
+        pools = await asyncio.to_thread(_pools, ca)
     except Exception as exc:
-        await update.effective_message.reply_text(f"Lookup failed: {exc}")
+        log.warning("pool lookup failed ca=%s: %s", ca, type(exc).__name__)
+        await update.effective_message.reply_text("Lookup failed -- try again in a moment.")
         return
     if not pools:
         await update.effective_message.reply_text("No DexScreener pool for that CA.")
         return
     p = pools[0]
     base = p.get("baseToken") or {}
-    liq = float((p.get("liquidity") or {}).get("usd") or 0)
-    vol = float((p.get("volume") or {}).get("h24") or 0)
+    liq = _f((p.get("liquidity") or {}).get("usd"))
+    vol = _f((p.get("volume") or {}).get("h24"))
     txns24 = (p.get("txns") or {}).get("h24") or {}
-    buys = int(txns24.get("buys") or 0)
-    sells = int(txns24.get("sells") or 0)
-    holders = _holder_count(p.get("chainId") or "", ca)
+    buys = int(_f(txns24.get("buys")))
+    sells = int(_f(txns24.get("sells")))
+    holders = await asyncio.to_thread(_holder_count, p.get("chainId") or "", ca)
     holders_line = f"👥 Holders {holders:,}" if holders is not None else "👥 Holders — not available"
     lines = [
         f"💧 <b>{_esc(base.get('name'))}</b> ${_esc(base.get('symbol'))}",
@@ -433,7 +452,11 @@ async def token_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not context.args:
         await update.effective_message.reply_text("Usage: /token 0x… or /token SOL_MINT")
         return
-    await token_card(update, context.args[0].strip())
+    ca = context.args[0].strip()
+    if not (EVM.match(ca) or SOL.match(ca)):
+        await update.effective_message.reply_text("That is not a contract address. Usage: /token 0x… or /token SOL_MINT")
+        return
+    await token_card(update, ca)
 
 
 async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -499,7 +522,8 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await q.message.reply_text("Paste a contract address (CA) in this chat.")
         return
     if data == "liq:earn":
-        await q.edit_message_text(_earn_text(uid), parse_mode="HTML", reply_markup=_nav_kb(
+        stats = await asyncio.to_thread(_fetch_referral_stats, uid)
+        await q.edit_message_text(_earn_text(uid, stats), parse_mode="HTML", reply_markup=_nav_kb(
             [InlineKeyboardButton("⚡ Open Trade", url=f"https://t.me/{TRADE}?start=ref_{uid}")]
         ))
         return
@@ -537,7 +561,8 @@ async def cmd_react(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def cmd_ref(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     uid = update.effective_user.id
-    await update.effective_message.reply_text(_earn_text(uid), parse_mode="HTML", reply_markup=_nav_kb(
+    stats = await asyncio.to_thread(_fetch_referral_stats, uid)
+    await update.effective_message.reply_text(_earn_text(uid, stats), parse_mode="HTML", reply_markup=_nav_kb(
         [InlineKeyboardButton("⚡ Open Trade", url=f"https://t.me/{TRADE}?start=ref_{uid}")]
     ))
 
@@ -560,11 +585,37 @@ async def setkeys(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "Key must be TRADE only, no withdraw. Loop is testnet/sandbox."
         )
         return
-    credentials_db.init_db()
-    credentials_db.store_credentials(
-        update.effective_user.id, context.args[0], context.args[1], context.args[2], context.args[3]
-    )
-    await update.effective_message.reply_text("Keys stored encrypted. /start_liquidity to quote on testnet.")
+    ex, symbol, api_key, api_secret = (a.strip() for a in context.args[:4])
+    ex = ex.lower()
+    try:
+        import ccxt.async_support as _cx
+        known = set(getattr(_cx, "exchanges", []) or [])
+    except Exception:
+        known = set()
+    problem = None
+    if not re.fullmatch(r"[a-z][a-z0-9]{1,39}", ex) or (known and ex not in known):
+        problem = "Unknown exchange name."
+    elif not re.fullmatch(r"[A-Za-z0-9/:_.\-]{2,30}", symbol):
+        problem = "That market symbol doesn't look right (example: BTC/USDT)."
+    elif not (0 < len(api_key) <= 256 and 0 < len(api_secret) <= 512):
+        problem = "That API key or secret looks the wrong length."
+    if not problem:
+        try:
+            credentials_db.init_db()
+            credentials_db.store_credentials(update.effective_user.id, ex, symbol, api_key, api_secret)
+        except Exception as exc:  # never echo the exception: it can carry the arguments
+            log.warning("storing exchange keys failed: %s", type(exc).__name__)
+            problem = "Couldn't store the keys on this host (encrypted storage isn't set up). Nothing was saved."
+    # The message holds a live secret: take it out of the chat either way.
+    try:
+        await update.effective_message.delete()
+        gone = " I deleted your message so the secret isn't left in the chat."
+    except Exception:
+        gone = " I couldn't delete your message -- please delete it yourself now."
+    if problem:
+        await update.effective_chat.send_message(problem + gone)
+        return
+    await update.effective_chat.send_message("Keys stored encrypted. /start_liquidity to quote on testnet." + gone)
 
 
 # --- guided /mm wizard: chain -> CA -> round size -> budget -> duration -> confirm ---
@@ -606,17 +657,32 @@ def _mm_duration_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([row, [InlineKeyboardButton("✖️ Cancel", callback_data="mmw:cancel")]])
 
 
+PAID_ANY_SENDER = (os.getenv("LIQ_PAID_ANY_SENDER") or "").strip() == "1"
+
+
+def _paywall_text(uid: int) -> str:
+    wallet = basestonk_mm.get_linked_evm_address(uid) if HAS_BSTONK_MM else None
+    if wallet:
+        how = (
+            f"Send that amount of ETH on Base to:\n<code>{MM_TREASURY or 'set PLATFORM_TREASURY_EVM'}</code>\n"
+            f"<b>from your Ferzan wallet</b> <code>{_esc(wallet)}</code> (that ties the payment to you), "
+            "then run /paid followed by the transaction hash."
+        )
+    else:
+        how = (
+            f"Open @{TRADE} and send /start once to create your Ferzan wallet, fund it, then send that amount of "
+            f"ETH on Base from it to:\n<code>{MM_TREASURY or 'set PLATFORM_TREASURY_EVM'}</code>\n"
+            "and run /paid followed by the transaction hash."
+        )
+    return f"🔒 MM (paste-a-CA volume) is a paid feature — ${MM_PRICE_USD:.0f}/{MM_PLAN_DAYS}d.\n\n{how}"
+
+
 async def _mm_wizard_start(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: int) -> None:
     if not HAS_BSTONK_MM:
         await update.effective_message.reply_text("MM module is not installed on this host.")
         return
     if not (subscription.is_premium(uid) or _is_admin(uid)):
-        await update.effective_message.reply_text(
-            f"🔒 MM (paste-a-CA volume) is a paid feature — ${MM_PRICE_USD:.0f}/{MM_PLAN_DAYS}d.\n\n"
-            f"Send that amount of ETH on Base to:\n<code>{MM_TREASURY or 'set PLATFORM_TREASURY_EVM'}</code>\n"
-            "then run /paid followed by the transaction hash.",
-            parse_mode="HTML",
-        )
+        await update.effective_message.reply_text(_paywall_text(uid), parse_mode="HTML")
         return
     existing = basestonk_mm.status(uid) if HAS_BSTONK_MM else None
     if existing and uid in basestonk_mm._active:
@@ -667,8 +733,16 @@ async def _mm_wizard_button(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         await q.edit_message_text("That setup expired — tap 💧 Run MM to start again.")
         return
 
+    val = parts[2] if len(parts) > 2 else ""
+    want = {"chain": "chain", "round": "round", "budget": "budget", "dur": "duration", "confirm": "confirm"}.get(action)
+    if want is None or wiz.get("step") != want:
+        await q.edit_message_text("That setup expired — tap 💧 Run MM to start again.")
+        return
+
     if action == "chain":
-        wiz["chain"] = parts[2]
+        if val not in ("base", "robinhood"):
+            return
+        wiz["chain"] = val
         wiz["step"] = "ca"
         await q.edit_message_text(
             "💧 <b>Run MM — step 2 of 5</b>\n\nPaste the token's contract address (CA) now.",
@@ -677,7 +751,9 @@ async def _mm_wizard_button(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         return
 
     if action == "round":
-        wiz["trade_usd"] = float(parts[2])
+        if val not in {str(v) for v in MM_ROUNDS}:
+            return
+        wiz["trade_usd"] = float(val)
         wiz["step"] = "budget"
         await q.edit_message_text(
             "💧 <b>Run MM — step 3 of 5</b>\n\nTotal budget for this session?",
@@ -687,7 +763,9 @@ async def _mm_wizard_button(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         return
 
     if action == "budget":
-        wiz["budget_usd"] = float(parts[2])
+        if val not in {str(v) for v in MM_BUDGETS}:
+            return
+        wiz["budget_usd"] = float(val)
         wiz["step"] = "duration"
         await q.edit_message_text(
             "💧 <b>Run MM — step 4 of 5</b>\n\nHow long should it run?",
@@ -697,7 +775,9 @@ async def _mm_wizard_button(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         return
 
     if action == "dur":
-        wiz["minutes"] = int(parts[2])
+        if val not in {str(v) for v in MM_DURATIONS}:
+            return
+        wiz["minutes"] = int(val)
         wiz["step"] = "confirm"
         await q.edit_message_text(
             "💧 <b>Run MM — step 5 of 5</b>\n\n"
@@ -716,8 +796,11 @@ async def _mm_wizard_button(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         return
 
     if action == "confirm":
+        MM_WIZ.pop(uid, None)  # first, so a double tap can't start it twice
+        if not (subscription.is_premium(uid) or _is_admin(uid)):
+            await q.edit_message_text("Your MM access has expired -- renew it with /paid, then try again.")
+            return
         err = await _mm_begin(context, uid, wiz["chain"], wiz["token"], wiz["trade_usd"], wiz["budget_usd"], wiz["minutes"])
-        MM_WIZ.pop(uid, None)
         if err:
             await q.edit_message_text(err)
             return
@@ -747,6 +830,9 @@ async def grantmm_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     except ValueError:
         await update.effective_message.reply_text("user_id and days must be numbers.")
         return
+    if target <= 0 or not (1 <= days <= 366):
+        await update.effective_message.reply_text("user_id must be a Telegram id and days between 1 and 366.")
+        return
     expiry = subscription.grant_premium(target, days)
     await update.effective_message.reply_text(f"Granted MM to {target} until {expiry.strftime('%Y-%m-%d')}.")
 
@@ -757,12 +843,7 @@ async def mm_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     uid = update.effective_user.id
     if not (subscription.is_premium(uid) or _is_admin(uid)):
-        await update.effective_message.reply_text(
-            f"🔒 MM (paste-a-CA volume) is a paid feature — ${MM_PRICE_USD:.0f}/{MM_PLAN_DAYS}d.\n\n"
-            f"Send that amount of ETH on Base to:\n<code>{MM_TREASURY or 'set PLATFORM_TREASURY_EVM'}</code>\n"
-            "then run /paid followed by the transaction hash.",
-            parse_mode="HTML",
-        )
+        await update.effective_message.reply_text(_paywall_text(uid), parse_mode="HTML")
         return
     args = context.args or []
     if not args:
@@ -823,6 +904,48 @@ async def mmstatus_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     )
 
 
+TXH = re.compile(r"^0x[0-9a-f]{64}$")
+
+
+def _norm_txh(raw: str) -> str | None:
+    """One canonical spelling per transaction, so '0xABC..' and '0xabc..' can't be redeemed as two."""
+    t = (raw or "").strip().lower()
+    return t if TXH.match(t) else None
+
+
+def _tx_claimed(txh: str) -> bool:
+    with subscription._get_conn() as conn:
+        conn.execute("CREATE TABLE IF NOT EXISTS redeemed_tx (tx_hash TEXT PRIMARY KEY, user_id INTEGER)")
+        return conn.execute("SELECT 1 FROM redeemed_tx WHERE lower(tx_hash)=?", (txh,)).fetchone() is not None
+
+
+def _claim_tx(txh: str, uid: int) -> bool:
+    """Atomically mark a payment as used. False if it already was (by anyone, in any letter case)."""
+    with subscription._get_conn() as conn:
+        conn.execute("CREATE TABLE IF NOT EXISTS redeemed_tx (tx_hash TEXT PRIMARY KEY, user_id INTEGER)")
+        conn.execute("BEGIN IMMEDIATE")
+        if conn.execute("SELECT 1 FROM redeemed_tx WHERE lower(tx_hash)=?", (txh,)).fetchone():
+            return False
+        conn.execute("INSERT INTO redeemed_tx (tx_hash, user_id) VALUES (?,?)", (txh, uid))
+        return True
+
+
+def _unclaim_tx(txh: str, uid: int) -> None:
+    with subscription._get_conn() as conn:
+        conn.execute("DELETE FROM redeemed_tx WHERE tx_hash=? AND user_id=?", (txh, uid))
+
+
+def _fetch_tx(txh: str):
+    """(receipt, tx) from the Base RPC. Blocking -- call through asyncio.to_thread."""
+    rc = requests.post(
+        MM_RPC, json={"jsonrpc": "2.0", "id": 1, "method": "eth_getTransactionReceipt", "params": [txh]}, timeout=15
+    )
+    ti = requests.post(
+        MM_RPC, json={"jsonrpc": "2.0", "id": 1, "method": "eth_getTransactionByHash", "params": [txh]}, timeout=15
+    )
+    return (rc.json() or {}).get("result"), (ti.json() or {}).get("result")
+
+
 async def paid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not HAS_BSTONK_MM:
         return
@@ -832,38 +955,48 @@ async def paid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not MM_TREASURY:
         await update.effective_message.reply_text("Payments aren't configured yet — ask an admin to set PLATFORM_TREASURY_EVM.")
         return
-    txh = context.args[0].strip()
     uid = update.effective_user.id
+    txh = _norm_txh(context.args[0])
+    if not txh:
+        await update.effective_message.reply_text("That doesn't look like a transaction hash (0x followed by 64 characters).")
+        return
     subscription.init_db()
-    with subscription._get_conn() as conn:
-        conn.execute("CREATE TABLE IF NOT EXISTS redeemed_tx (tx_hash TEXT PRIMARY KEY, user_id INTEGER)")
-        used = conn.execute("SELECT 1 FROM redeemed_tx WHERE tx_hash=?", (txh,)).fetchone()
-    if used:
+    if _tx_claimed(txh):
         await update.effective_message.reply_text("That transaction was already redeemed.")
         return
     try:
-        r = requests.post(
-            MM_RPC,
-            json={"jsonrpc": "2.0", "id": 1, "method": "eth_getTransactionReceipt", "params": [txh]},
-            timeout=15,
-        )
-        receipt = (r.json() or {}).get("result")
-        r2 = requests.post(
-            MM_RPC,
-            json={"jsonrpc": "2.0", "id": 1, "method": "eth_getTransactionByHash", "params": [txh]},
-            timeout=15,
-        )
-        txinfo = (r2.json() or {}).get("result")
-    except Exception as exc:
-        await update.effective_message.reply_text(f"Couldn't reach Base RPC: {exc}")
+        receipt, txinfo = await asyncio.to_thread(_fetch_tx, txh)
+    except Exception as exc:  # not echoed: the RPC address may carry a key
+        log.warning("paid: Base RPC lookup failed: %s", type(exc).__name__)
+        await update.effective_message.reply_text("Couldn't reach the Base network just now. Try again in a minute.")
         return
-    if not receipt or receipt.get("status") not in ("0x1", 1):
+    if not isinstance(receipt, dict) or receipt.get("status") not in ("0x1", 1):
         await update.effective_message.reply_text("That transaction isn't confirmed (or failed). Wait a minute and try again.")
         return
-    if not txinfo or str(txinfo.get("to") or "").lower() != MM_TREASURY:
+    if not isinstance(txinfo, dict) or str(txinfo.get("to") or "").lower() != MM_TREASURY:
         await update.effective_message.reply_text("That transaction doesn't pay the Ferzan treasury address.")
         return
-    value_wei = int(txinfo.get("value") or "0x0", 16)
+    # The treasury receives every Ferzan fee, so "paid the treasury" alone would let anyone
+    # redeem somebody else's transaction. The payer has to be this user's own Ferzan wallet.
+    if not PAID_ANY_SENDER:
+        mine = (basestonk_mm.get_linked_evm_address(uid) or "").lower()
+        if not mine:
+            await update.effective_message.reply_text(
+                f"I can't tie this payment to you yet. Open @{TRADE}, send /start to create your wallet, "
+                "and pay from that wallet."
+            )
+            return
+        if str(txinfo.get("from") or "").lower() != mine:
+            await update.effective_message.reply_text(
+                "That payment came from a different address, so I can't credit it to you. "
+                f"Pay from your Ferzan wallet: {mine}"
+            )
+            return
+    try:
+        value_wei = int(txinfo.get("value") or "0x0", 16)
+    except (TypeError, ValueError):
+        await update.effective_message.reply_text("Couldn't read the amount of that transaction.")
+        return
     px = await asyncio.to_thread(_eth_usd)
     if px <= 0:
         await update.effective_message.reply_text("Couldn't get a live ETH price right now, so nothing was redeemed. Try again in a minute.")
@@ -872,9 +1005,17 @@ async def paid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if paid_usd < MM_PRICE_USD * 0.9:
         await update.effective_message.reply_text(f"That payment (~${paid_usd:.2f}) is short of the ${MM_PRICE_USD:.0f} price.")
         return
-    with subscription._get_conn() as conn:
-        conn.execute("INSERT INTO redeemed_tx (tx_hash, user_id) VALUES (?,?)", (txh, uid))
-    expiry = subscription.grant_premium(uid, MM_PLAN_DAYS)
+    if not _claim_tx(txh, uid):
+        await update.effective_message.reply_text("That transaction was already redeemed.")
+        return
+    try:
+        expiry = subscription.grant_premium(uid, MM_PLAN_DAYS)
+    except Exception:
+        # Give the payment back to the user rather than burn it without unlocking anything.
+        log.exception("paid: grant failed after claiming %s", txh)
+        _unclaim_tx(txh, uid)
+        await update.effective_message.reply_text("Something went wrong unlocking MM. Nothing was used up -- try /paid again in a minute.")
+        return
     await update.effective_message.reply_text(f"✅ MM unlocked until {expiry.strftime('%Y-%m-%d')}. Run /mm to start.")
 
 

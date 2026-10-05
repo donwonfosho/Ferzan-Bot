@@ -25,8 +25,10 @@ import asyncio
 import base64
 import hashlib
 import logging
+import math
 import os
 import random
+import re
 import sqlite3
 import time
 from contextlib import contextmanager
@@ -73,6 +75,14 @@ MAX_MINUTES = 6 * 60
 DWELL_MIN_S = 20
 DWELL_MAX_S = 90
 MAX_CONSECUTIVE_FAILS = 3
+MAX_SELL_FAILS = 2            # buying more while sells fail only piles up tokens that can't be sold
+MAX_TX_GAS = 1_500_000        # no transaction we sign may ask for more gas than this
+MAX_GAS_GWEI = float(os.getenv("MM_MAX_GAS_GWEI", "30"))
+PRICE_STALE_S = 1800          # stop if we have had no live native-token price for this long
+_ADDR = re.compile(r"^0x[0-9a-fA-F]{40}$")
+# calldata that moves tokens/approvals directly: never legitimate as a "swap" step
+_NOT_A_SWAP = {"a9059cbb", "23b872dd", "095ea7b3", "42842e0e", "b88d4fde", "2e1a7d4d", "39509351"}
+_APPROVE = "095ea7b3"
 
 _active: dict[int, dict] = {}  # user_id -> {"task": Task, "stop": bool, "session": dict}
 
@@ -94,6 +104,18 @@ def _fernet():
             raise RuntimeError("No FERZAN_MASTER_KEY and no .master file -- can't read the shared wallet store.")
     digest = hashlib.sha256(secret.encode()).digest()
     return Fernet(base64.urlsafe_b64encode(digest))
+
+
+def get_linked_evm_address(user_id: int) -> str | None:
+    """The user's Ferzan EVM address (public only -- nothing is decrypted)."""
+    if not FERZAN_DB_PATH.exists():
+        return None
+    conn = sqlite3.connect(str(FERZAN_DB_PATH))
+    try:
+        row = conn.execute("SELECT evm_pub FROM user_wallets WHERE user_id = ?", (user_id,)).fetchone()
+    finally:
+        conn.close()
+    return (row[0] or None) if row else None
 
 
 def get_linked_evm_key(user_id: int) -> tuple[str, str] | None:
@@ -211,6 +233,9 @@ def _sign_and_send(rpc: str, chain_id: int, key_hex: str, tx: dict) -> tuple[boo
 
     raw = key_hex.replace("0x", "").replace("0X", "")
     acct = Account.from_key("0x" + raw)
+    gas_price = int(_gas_price(rpc) * 1.15)
+    if gas_price > MAX_GAS_GWEI * 1e9:
+        return False, f"gas price too high right now ({gas_price / 1e9:.1f} gwei) -- skipped"
     full_tx = {
         # eth-account's legacy validator requires a proper EIP-55 checksummed
         # 'to' -- plain lowercase (what BaseStonk's API returns token/router
@@ -219,9 +244,9 @@ def _sign_and_send(rpc: str, chain_id: int, key_hex: str, tx: dict) -> tuple[boo
         "to": to_checksum_address(tx["to"]),
         "data": tx["data"] if str(tx["data"]).startswith("0x") else "0x" + str(tx["data"]),
         "value": int(tx.get("value") or 0),
-        "chainId": int(tx.get("chainId") or chain_id),
-        "gas": int(tx.get("gas") or 400000),
-        "gasPrice": int(_gas_price(rpc) * 1.15),
+        "chainId": chain_id,  # always ours, whatever a caller or API put in the tx
+        "gas": min(int(tx.get("gas") or 400000), MAX_TX_GAS),
+        "gasPrice": gas_price,
         "nonce": _nonce(rpc, acct.address),
     }
     signed = acct.sign_transaction(full_tx)
@@ -538,6 +563,45 @@ def _reprepare_after_approval(
     return None, last_exc
 
 
+def _tx_problem(tx, chain_id: int, kind: str, max_value: int = 0, spend_tokens: set | None = None) -> str | None:
+    """Why a transaction handed to us by BaseStonk's API must NOT be signed,
+    or None if it looks like what we asked for. We sign with the user's real
+    key, so the API's answer is checked, not trusted: no ETH value beyond this
+    round's spend, no wrong chain, no huge gas, no direct token transfers
+    dressed up as a swap, and an "approval" must really be an approve()
+    on one of the tokens in this leg."""
+    if not isinstance(tx, dict):
+        return "malformed transaction"
+    to, data = str(tx.get("to") or ""), str(tx.get("data") or "")
+    if not _ADDR.match(to):
+        return "bad destination address"
+    body = data[2:] if data[:2].lower() == "0x" else data
+    if len(body) < 8 or len(body) % 2 or not re.fullmatch(r"[0-9a-fA-F]+", body):
+        return "bad calldata"
+    try:
+        value = int(tx.get("value") or 0)
+        gas = int(tx.get("gas") or 0)
+        cid = tx.get("chainId")
+        cid = int(cid) if cid not in (None, "") else chain_id
+    except (TypeError, ValueError):
+        return "malformed numbers"
+    if value < 0 or value > max_value:
+        return "asks to send more ETH than this trade needs"
+    if cid != chain_id:
+        return "for a different chain"
+    if gas > MAX_TX_GAS:
+        return "asks for too much gas"
+    sel = body[:8].lower()
+    if kind == "approve":
+        if sel != _APPROVE:
+            return "an 'approval' that is not an approve() call"
+        if spend_tokens and to.lower() not in spend_tokens:
+            return "approval is for a token this trade does not use"
+    elif sel in _NOT_A_SWAP:
+        return "a direct token transfer/approval, not a swap"
+    return None
+
+
 def _basestonk_leg(
     cfg: dict, key_hex: str, address: str, token: str, side: str, amount_in: int, slippage_bps: int = 300
 ) -> tuple[bool, str, str | None]:
@@ -550,6 +614,18 @@ def _basestonk_leg(
     swap dance the original single-hop code used -- just no longer
     assuming the pair is WETH, so it works for any hop in a chain."""
     rpc, chain_id = cfg["rpc"], cfg["chain_id"]
+    weth = (cfg.get("weth") or "").lower()
+    pair = _pair_token(cfg.get("api_chain", ""), token)
+    spend_tokens = ({token.lower(), weth, pair} if pair else None)  # None = pair unknown, skip that one check
+    # ETH value on the swap is only ever plausible when this leg spends WETH-equivalent
+    # native on a buy; every other transaction must carry zero value.
+    swap_max_value = int(amount_in) if (side == "buy" and pair == weth) else 0
+
+    def _refuse(tx, kind):
+        why = _tx_problem(tx, chain_id, kind, 0 if kind == "approve" else swap_max_value, spend_tokens)
+        if why:
+            log.warning("refusing to sign %s tx from BaseStonk API: %s", kind, why)
+        return why
 
     try:
         prep = api.prepare_trade(key_hex, address, chain_id, token, side, amount_in, slippage_bps)
@@ -561,6 +637,9 @@ def _basestonk_leg(
         body = exc.body or {}
         pre_approval = body.get("approvalTx")
         if pre_approval and pre_approval.get("to") and pre_approval.get("data"):
+            why = _refuse(pre_approval, "approve")
+            if why:
+                return False, f"pre-approval not signed ({why})", None
             ok, res = _sign_and_send(rpc, chain_id, key_hex, pre_approval)
             if not ok:
                 return False, f"pre-approval failed: {res}", None
@@ -578,6 +657,9 @@ def _basestonk_leg(
 
     approval = prep.get("approvalTx")
     if approval and approval.get("to") and approval.get("data"):
+        why = _refuse(approval, "approve")
+        if why:
+            return False, f"approval not signed ({why})", None
         ok, res = _sign_and_send(rpc, chain_id, key_hex, approval)
         if not ok:
             return False, f"approval failed: {res}", None
@@ -590,6 +672,9 @@ def _basestonk_leg(
     tx = prep.get("tx") or {}
     if not tx.get("to") or not tx.get("data"):
         return False, "prepare returned no transaction", None
+    why = _refuse(tx, "swap")
+    if why:
+        return False, f"swap not signed ({why})", None
 
     ok, res = _sign_and_send(rpc, chain_id, key_hex, tx)
     if not ok:
@@ -783,7 +868,12 @@ async def _run_inner(user_id: int, chain: str, token: str, trade_usd: float, bud
         return
     address, key_hex = wallet
 
-    px = _native_usd(cfg["native_cg"]) or 3000.0
+    # A made-up price here would size every trade wrong, so no live price = no run.
+    px = await asyncio.to_thread(_native_usd, cfg["native_cg"])
+    if px <= 0:
+        await notify("Couldn't get a live price for the gas token right now, so nothing was started. Try again in a minute.")
+        return
+    px_ts = time.time()
     bal_wei = await asyncio.to_thread(_native_balance_wei, rpc, address)
     bal_usd = (bal_wei / 1e18) * px
     if bal_usd < trade_usd * 2 + 2:
@@ -804,11 +894,18 @@ async def _run_inner(user_id: int, chain: str, token: str, trade_usd: float, bud
     spent = 0.0
     trades = 0
     fails = 0
+    sell_fails = 0
     entry = _active[user_id]
 
     await notify(f"MM started on {chain}: {token[:10]}… · ${trade_usd:.2f}/round · budget ${budget_usd:.2f} · {minutes}m")
 
     while not entry.get("stop") and time.time() < deadline and spent < budget_usd:
+        fresh = await asyncio.to_thread(_native_usd, cfg["native_cg"])
+        if fresh > 0:
+            px, px_ts = fresh, time.time()
+        elif time.time() - px_ts > PRICE_STALE_S:
+            await notify("Stopping: no live gas-token price for 30 minutes, so I can't size trades safely.")
+            break
         wei_in = int((trade_usd / max(px, 1e-9)) * 1e18)
 
         ok, detail, txh = await asyncio.to_thread(_do_trade, cfg, key_hex, address, token, "buy", wei_in)
@@ -818,6 +915,8 @@ async def _run_inner(user_id: int, chain: str, token: str, trade_usd: float, bud
                 (session_id, "buy", time.time(), trade_usd, txh, int(ok), detail),
             )
         if not ok:
+            if "confirm in time" in str(detail):
+                spent += trade_usd  # it may still land -- count it so the budget can't be exceeded
             fails += 1
             log.warning("mm buy failed user=%s: %s", user_id, detail)
             if fails >= MAX_CONSECUTIVE_FAILS:
@@ -835,9 +934,9 @@ async def _run_inner(user_id: int, chain: str, token: str, trade_usd: float, bud
         spent += trade_usd
         trades += 1
 
-        await asyncio.sleep(random.uniform(DWELL_MIN_S, DWELL_MAX_S))
-        if entry.get("stop"):
-            break
+        # Stop pressed mid-round: skip the wait but still sell what we just bought.
+        if not entry.get("stop"):
+            await asyncio.sleep(random.uniform(DWELL_MIN_S, DWELL_MAX_S))
 
         tok_bal = await asyncio.to_thread(_erc20_balance, rpc, token, address)
         if tok_bal <= 0:
@@ -851,12 +950,16 @@ async def _run_inner(user_id: int, chain: str, token: str, trade_usd: float, bud
             )
         if not ok:
             fails += 1
+            sell_fails += 1
             log.warning("mm sell failed user=%s: %s", user_id, detail)
-            if fails >= MAX_CONSECUTIVE_FAILS:
+            # Buying again while sells fail just piles up tokens that may not be sellable
+            # (a honeypot looks exactly like this), so stop sooner than for buys.
+            if sell_fails >= MAX_SELL_FAILS or fails >= MAX_CONSECUTIVE_FAILS:
                 await notify(f"Stopping: sells failing ({detail}). Your tokens are still in your wallet -- sell manually if needed.")
                 break
         else:
             fails = 0
+            sell_fails = 0
             trades += 1
 
         with _mmdb() as c:
@@ -872,7 +975,12 @@ async def _run_inner(user_id: int, chain: str, token: str, trade_usd: float, bud
             (time.time(), spent, trades, "stopped" if entry.get("stop") else "finished", session_id),
         )
 
-    await notify(f"MM ended on {chain}: {trades} legs, ~${spent:.2f} of volume routed. /mm again to run another round.")
+    try:
+        left = await asyncio.to_thread(_erc20_balance, rpc, token, address)
+    except Exception:
+        left = 0
+    tail = "\n⚠️ Some of this token is still in your wallet -- sell it manually if you don't want to hold it." if left > 0 else ""
+    await notify(f"MM ended on {chain}: {trades} legs, ~${spent:.2f} of volume routed. /mm again to run another round.{tail}")
     _active.pop(user_id, None)
 
 
@@ -880,11 +988,13 @@ def start(user_id: int, chain: str, token: str, trade_usd: float, budget_usd: fl
     """Returns an error string if it couldn't start, else None and a task is running."""
     if user_id in _active:
         return "You already have an MM session running. /mmstop first."
-    chain = CHAIN_ALIASES.get(chain.lower())
+    chain = CHAIN_ALIASES.get(str(chain).lower())
     if not chain:
         return "Chain must be base or robinhood."
-    if not (token.startswith("0x") and len(token) == 42):
+    if not _ADDR.match(str(token)):
         return "Need a 0x contract address (BaseStonk is EVM-only right now)."
+    if not all(isinstance(v, (int, float)) and math.isfinite(v) for v in (trade_usd, budget_usd, minutes)):
+        return "Round size, budget and minutes must be ordinary numbers."
     trade_usd = max(MIN_TRADE_USD, min(MAX_TRADE_USD, trade_usd))
     budget_usd = max(MIN_BUDGET_USD, min(MAX_BUDGET_USD, budget_usd))
     minutes = max(5, min(MAX_MINUTES, minutes))
