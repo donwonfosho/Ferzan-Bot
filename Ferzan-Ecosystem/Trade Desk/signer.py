@@ -260,6 +260,7 @@ def _swap_send_with_retry(quote: dict, kp, opts: dict | None = None) -> tuple[bo
     if fresh is None:
         return False, res + "\nFallback re-quote failed — nothing else sent."
     opts["route_used"] = "priority fee (Jito didn't land, resent)"
+    opts.pop("tip_paid", None)  # the Jito bundle never landed: that tip was not spent
     return _swap_send_rpc(fresh, kp, fee)
 
 
@@ -278,6 +279,7 @@ def _swap_send_sender(quote: dict, kp, opts: dict, _retry: bool = True) -> tuple
         wire, sig, last_valid = sender.build(quote, kp, rpc, prio, tip)
     except Exception as exc:
         log.warning("sender build failed, using fallback route: %s", exc)
+        opts.pop("tip_paid", None)  # nothing was sent, so no tip was paid on this route
         return None
     why_fail = sender.simulate(rpc, wire)
     if why_fail:
@@ -285,6 +287,7 @@ def _swap_send_sender(quote: dict, kp, opts: dict, _retry: bool = True) -> tuple
     verdict, err = sender.send(wire, mev)
     if verdict == "refused":
         log.warning("sender refused tx (not forwarded), using fallback route: %s", err)
+        opts.pop("tip_paid", None)
         return None
     opts["route_used"] = "Helius Sender · MEV-protect" if mev else "Helius Sender"
     log.info("sender tx %s mev=%s prio=%s tip=%s %s %s", sig, mev, prio, tip, verdict, err or "")
@@ -950,9 +953,10 @@ def send_sol(dest: str, secret: str | None = None, lamports: int | None = None) 
     msg = Message.new_with_blockhash([ix], kp.pubkey(), Hash.from_string(blockhash))
     tx = Transaction.new_unsigned(msg)
     tx.sign([kp], Hash.from_string(blockhash))
-    raw = bytes(tx).hex()
+    import base64
+    raw = base64.b64encode(bytes(tx)).decode()  # Solana RPC takes base58 or base64; "hex" is not an encoding it accepts
     body = _rpc_post(
-        json={"jsonrpc": "2.0", "id": 1, "method": "sendTransaction", "params": [raw, {"encoding": "hex"}]},
+        json={"jsonrpc": "2.0", "id": 1, "method": "sendTransaction", "params": [raw, {"encoding": "base64"}]},
         timeout=20,
     ).json()
     if body.get("error"):
