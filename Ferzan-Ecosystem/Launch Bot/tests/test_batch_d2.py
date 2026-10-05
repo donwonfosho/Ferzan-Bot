@@ -51,7 +51,7 @@ class Wiring(unittest.TestCase):
     def test_promo_saves_before_posting(self):
         s = src("ferzan_promo.py")
         i = s.index("def post(")
-        self.assertLess(s.index("save(s)", i), s.index("fm.tg_photo(os.environ", i))
+        self.assertLess(s.index("save(s)", i), s.index("send(os.environ", i))
 
     def test_flagship_marks_posted_before_sending(self):
         s = src("ferzan_flagship.py")

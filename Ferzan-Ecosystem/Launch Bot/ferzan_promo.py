@@ -2,7 +2,7 @@
   - FERZAN countdown: 14 and 10 days, 7, 5, 3 and 2 days, 24, 12, 6 and 3 hours, 1 hour, 30, 10 and 5 minutes before launch,
     each with its own graphic and a different fact about FERZAN
   - daily recap (23:30 UTC): new launches and the top coins by 24h volume
-  - 23 rotating feature promos, every PROMO_EVERY_HOURS hours (default 4; X copies carry hashtags and the $FERZAN cashtag where relevant)
+  - 44 rotating feature promos (some with video), every PROMO_EVERY_HOURS hours (default 4; X copies carry hashtags and the $FERZAN cashtag where relevant)
 Where: the @Ferzan_Launches channel and X get everything; the groups in PROMO_GROUPS
 (default @Ferzan_Trade_Ecosystem and @Ferzan_Chat) get everything too (PROMO_GROUP_PROMOS=0 keeps promos out of them). Preview mode (default) sends everything to the admins only;
 set PROMO_LIVE=1 to post publicly, PROMO_OFF=1 to stop. X posts are capped by PROMO_X_PER_DAY (default 6)."""
@@ -168,6 +168,25 @@ PROMOS = [
     (f"🌍 Eight chains. One board. Solana, Base, BNB, Ethereum, Robinhood, Arc, Tron and TON.\n{SITE}",
      f"🌍 Eight chains. One board. @solana, @base, @BNBCHAIN, Ethereum, Robinhood Chain, Arc, Tron and @ton_blockchain.\n{SITE}",
      "#multichain #crypto"),
+    # ---- 39-44: third set (images 39-43 and the build-drop video 44), each with its own hook ----
+    (f"🧭 Two doors, one room. Launch from Telegram with @Ferzan_Launch_Bot or from the website: both land on the same Ferzan board, and @Ferzan_Trade_Bot can trade every coin on it.\n{SITE}",
+     f"🧭 Telegram or web, your coin lands on the same board. Launch with @Ferzan_Launch_Bot or the site, trade it with @Ferzan_Trade_Bot.\n{SITE}",
+     "#Telegram #memecoin"),
+    (f"💰 The fee isn't just the platform's. Every Ferzan trade pays 1%, and half of that 1% belongs to the creator of the coin.\n{SITE}/launch",
+     f"💰 Every trade pays a 1% fee. Half of it goes to the coin's creator. Launch yours.\n{SITE}/launch",
+     "#creators #memecoin"),
+    (f"🏭 Doors open, machines running. Eight chains are live on Ferzan Factory: launch it, trade it, and keep half of the trading fee as the creator.\n{SITE}",
+     f"🏭 The factory floor is live: 8 chains, launch it, trade it, keep half the creator fee.\n{SITE}",
+     "#Web3 #Solana"),
+    (f"🪙 Make a coin, earn from its volume. Creators keep half of the 1% trade fee on Ferzan, so a coin people trade pays the person who launched it.\n{SITE}/launch",
+     f"🪙 Your coin, your cut: creators keep half of the 1% trade fee on Ferzan.\n{SITE}/launch",
+     "#BuildInPublic #crypto"),
+    (f"🚪 Get in. Solana, Base, BNB, Ethereum, Robinhood Chain, Arc, Tron and TON, all on one board, all tradable from Telegram and the web.\n{SITE}",
+     f"🚪 Eight chains, one board. Pick yours and get in.\n{SITE}",
+     "#multichain #DeFi"),
+    (f"🎬 Build drop. Creators keep half the 1% trade fee. 30% of Ferzan's Solana fees buy $FERZAN and burn it. Eight chains, one board. Watch, then get in.\n{SITE}",
+     f"🎬 Build drop: creators keep half the fee, 30% of Ferzan's Solana fees buy and burn $FERZAN, eight chains on one board.\n{SITE}",
+     "#buyback #burn #Solana"),
 ]
 GENERAL_TAGS = ["#crypto", "#altcoins", "#Web3", "#cryptocurrency", "#DeFi"]
 
@@ -224,7 +243,7 @@ def admins(text: str) -> None:
 GROUPS = [g.strip() for g in (os.environ.get("PROMO_GROUPS") or "@Ferzan_Trade_Ecosystem,@Ferzan_Chat").split(",") if g.strip()]
 
 
-def post(s: dict, key: str, text: str, x_text: str | None = None, groups: bool = False, image: str = "") -> None:
+def post(s: dict, key: str, text: str, x_text: str | None = None, groups: bool = False, image: str = "", video: str = "") -> None:
     """Posts once per key, with its graphic when promo_img/<image> exists. Preview mode sends it to the admins only."""
     if key in s["done"]:
         return
@@ -232,22 +251,24 @@ def post(s: dict, key: str, text: str, x_text: str | None = None, groups: bool =
     if LIVE:
         save(s)  # remembered before sending, so a crash never causes a repeat post
     pic = fm.img(image) if image else None
+    vfile = fm.vid(video) if video else None
+    send = (lambda chat, t: fm.tg_video(chat, t, vfile, pic)) if vfile else (lambda chat, t: fm.tg_photo(chat, t, pic))
     if not LIVE:
         where = "channel + X" + (" + " + ", ".join(GROUPS) if groups else "")
         for chat in _admin_ids():
-            fm.tg_photo(chat, f"PREVIEW (would go to {where}):\n\n" + text, pic)
+            send(chat, f"PREVIEW (would go to {where}):\n\n" + text)
         print("preview:", key); return
-    fm.tg_photo(os.environ.get("FERZAN_LAUNCHES_CHANNEL") or "", text, pic)
+    send(os.environ.get("FERZAN_LAUNCHES_CHANNEL") or "", text)
     if groups:
         for g in GROUPS:
-            if not fm.tg_photo(g, text, pic):
+            if not send(g, text):
                 admins(f"Could not post in {g}: add @Ferzan_Launch_Bot to it (admin in a channel, member in a group).")
     cap = int(os.environ.get("PROMO_X_PER_DAY") or 6)
     if ramp():
         cap = max(cap, 10)
     if x_text is not None and len(s["x_log"]) < cap:
         try:
-            ok, info = fm.x_post(x_text[:280], pic)
+            ok, info = fm.x_post_video(x_text[:280], vfile, pic) if vfile else fm.x_post(x_text[:280], pic)
             if ok:
                 s["x_log"].append(time.time())
             elif info != "no X keys":
@@ -299,7 +320,8 @@ def promo(s: dict, now: float) -> None:
     tg_text, x_body, tags = PROMOS[i]
     n = int(s.get("promo_n") or 0)  # rotating extra tag keeps repeat cycles from being identical (X rejects duplicates)
     post(s, f"promo:{int(now // every)}", tg_text, with_tags(x_body, tags, GENERAL_TAGS[n % len(GENERAL_TAGS)]),
-         groups=os.environ.get("PROMO_GROUP_PROMOS") != "0", image=f"promo_{i + 1:02d}.jpg")
+         groups=os.environ.get("PROMO_GROUP_PROMOS") != "0", image=f"promo_{i + 1:02d}.jpg",
+         video=f"promo_{i + 1:02d}.mp4")
     s["promo_n"] = n + 1
     s["promo_i"] = i + 1; s["last_promo"] = now
 
