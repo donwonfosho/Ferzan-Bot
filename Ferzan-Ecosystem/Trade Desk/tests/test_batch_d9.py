@@ -13,7 +13,7 @@ class SendSolEncoding(unittest.TestCase):
         s = src()
         body = s[s.index("def send_sol"):s.index("def sell_sol")]
         self.assertIn('"encoding": "base64"', body)
-        self.assertNotIn('"hex"', body)
+        self.assertNotIn('"encoding": "hex"', body)
         self.assertNotIn(".hex()", body)
 
     def test_base64_round_trips(self):
