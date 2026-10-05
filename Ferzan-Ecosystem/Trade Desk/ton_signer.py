@@ -565,15 +565,25 @@ async def _jetton_wallet_and_balance(provider, jetton_master: str, owner) -> tup
     raise last if last else RuntimeError("jetton balance lookup failed")
 
 
+_DECIMALS: dict = {}  # only answers that came from a real lookup are kept
+
+
 def _jetton_decimals(jetton: str) -> int:
-    """Display-only: STON.fi asset metadata, falling back to the TEP-64
-    default of 9 (USDT-style 6-decimal jettons are listed by STON.fi)."""
-    try:
-        r = requests.get(f"{STON}/v1/assets/{jetton}", headers=_headers(), timeout=10)
-        dec = ((r.json() or {}).get("asset") or {}).get("decimals")
-        return int(dec) if dec is not None else 9
-    except Exception:
-        return 9
+    """STON.fi asset metadata, then tonapi's jetton metadata. Only if both fail does it use the TEP-64 default of 9
+    (and that guess is not remembered, so the next call looks again)."""
+    if jetton in _DECIMALS:
+        return _DECIMALS[jetton]
+    for url, pick in ((f"{STON}/v1/assets/{jetton}", lambda d: (d.get("asset") or {}).get("decimals")),
+                      (f"https://tonapi.io/v2/jettons/{jetton}", lambda d: (d.get("metadata") or {}).get("decimals"))):
+        try:
+            r = requests.get(url, headers=_headers(), timeout=10)
+            dec = pick(r.json() or {}) if r.status_code == 200 else None
+            if dec is not None and 0 <= int(dec) <= 18:
+                _DECIMALS[jetton] = int(dec)
+                return int(dec)
+        except Exception:  # noqa: BLE001
+            continue
+    return 9
 
 
 async def _holding(seed64: bytes, jetton: str) -> tuple[int, str]:

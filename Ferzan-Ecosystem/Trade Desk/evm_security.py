@@ -23,6 +23,8 @@ def security_line(chain: str, ca: str) -> str:
     if not blob:
         return ""
     def _tax(k):  # GoPlus reports taxes as fractions: "0.01" is 1%
+        if blob.get(k) in (None, ""):
+            return "?"  # not reported is not the same as 0%
         try:
             return f"{float(blob.get(k) or 0) * 100:.1f}".rstrip("0").rstrip(".")
         except (TypeError, ValueError):
@@ -50,9 +52,13 @@ def security_line(chain: str, ca: str) -> str:
         flags.append("⚠️ tax can change")
     if blob.get("is_proxy") == "1":
         flags.append("ℹ️ proxy")
-    head = "🚨 HONEYPOT RISK" if blob.get("is_honeypot") == "1" else (
-        "⚠️ Contract flags" if flags else "✅ No honeypot flag"
-    )
+    hp = str(blob.get("is_honeypot", "")).strip()
+    if hp == "1":
+        head = "🚨 HONEYPOT RISK"
+    elif hp != "0":  # GoPlus often has no honeypot verdict yet for a new token: say so, never imply it is clean
+        head = "⚠️ Contract flags (honeypot check unavailable)" if flags else "❔ Honeypot check unavailable for this token"
+    else:
+        head = "⚠️ Contract flags" if flags else "✅ No honeypot flag"
     out = f"{head}  ·  buy {buy_t}%  ·  sell {sell_t}%"
     try:
         hs = [h for h in (blob.get("holders") or []) if str(h.get("is_contract", "0")) != "1"][:10]
