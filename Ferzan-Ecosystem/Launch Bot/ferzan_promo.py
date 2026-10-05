@@ -189,16 +189,16 @@ def with_tags(body: str, tags: str, extra: str = "") -> str:
     return out if x_len(out) <= 280 else body + "\n\n" + " ".join(tags.split())
 
 
+import statefile  # noqa: E402
+
+
 def load() -> dict:
-    try:
-        return json.loads(STATE.read_text())
-    except Exception:
-        return {"done": [], "x_log": [], "promo_i": 0, "last_promo": 0}
+    return statefile.read_json(STATE, lambda: {"done": [], "x_log": [], "promo_i": 0, "last_promo": 0})
 
 
 def save(s: dict) -> None:
     s["done"] = s["done"][-500:]; s["x_log"] = [t for t in s["x_log"] if t > time.time() - 86400]
-    STATE.write_text(json.dumps(s))
+    statefile.write_json(STATE, s)
 
 
 def tg(chat: str, text: str) -> bool:
@@ -229,6 +229,8 @@ def post(s: dict, key: str, text: str, x_text: str | None = None, groups: bool =
     if key in s["done"]:
         return
     s["done"].append(key)
+    if LIVE:
+        save(s)  # remembered before sending, so a crash never causes a repeat post
     pic = fm.img(image) if image else None
     if not LIVE:
         where = "channel + X" + (" + " + ", ".join(GROUPS) if groups else "")
@@ -305,6 +307,12 @@ def promo(s: dict, now: float) -> None:
 if __name__ == "__main__":
     if os.environ.get("PROMO_OFF") == "1":
         print("promos are off (PROMO_OFF=1)"); sys.exit(0)
-    s = load(); now = time.time()
-    countdown(s, now); recap(s, now); promo(s, now)
-    save(s)
+    try:
+        with statefile.lock(STATE):
+            s = load(); now = time.time()
+            countdown(s, now); recap(s, now); promo(s, now)
+            save(s)
+    except statefile.Busy:
+        print("another promo run is in progress")
+    except statefile.StateCorrupt as e:
+        admins(f"Promo did NOT run: {e}"); sys.exit(1)

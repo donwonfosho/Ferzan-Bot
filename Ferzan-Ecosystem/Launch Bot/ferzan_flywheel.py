@@ -23,15 +23,15 @@ LIVE = os.environ.get("FLYWHEEL_LIVE") == "1"
 env_f = lambda k, d: float(os.environ.get(k) or d)
 
 
+import statefile  # noqa: E402
+
+
 def load() -> dict:
-    try:
-        return json.loads(STATE.read_text())
-    except Exception:
-        return {"carry_lamports": 0, "days": {}, "totals": {"claimed_sol": 0, "bought_sol": 0, "burned_raw": "0", "forward_sol": 0}}
+    return statefile.read_json(STATE, lambda: {"carry_lamports": 0, "days": {}, "totals": {"claimed_sol": 0, "bought_sol": 0, "burned_raw": "0", "forward_sol": 0}})
 
 
 def save(s: dict) -> None:
-    STATE.write_text(json.dumps(s, indent=1)); os.chmod(STATE, 0o600)
+    statefile.write_json(STATE, s, indent=1)
 
 
 def tg(chat: str, text: str) -> None:
@@ -54,10 +54,18 @@ def admins(text: str) -> None:
 def run() -> int:
     if os.environ.get("FLYWHEEL_OFF") == "1":
         print("flywheel is switched off (FLYWHEEL_OFF=1)"); return 0
-    s = load()
+    try:
+        s = load()
+    except statefile.StateCorrupt as e:
+        admins(f"Flywheel did NOT run: {e}"); return 1
     today = time.strftime("%Y-%m-%d", time.gmtime())
     if LIVE and s["days"].get(today, {}).get("live"):
         print("already ran live today"); return 0
+    if LIVE and s["days"].get(today, {}).get("started") and not s["days"][today].get("live"):
+        admins("Flywheel did NOT run: an earlier run today started but never recorded its result. "
+               "Check the wallet and Solscan for what happened, then clear today's 'started' entry in the state file."); return 1
+    if LIVE:  # written before any money moves, so a crash mid-run blocks a second spend the same day
+        s["days"][today] = {"live": False, "started": time.time()}; save(s)
     now = time.time()
     payload = {"mode": "live" if LIVE else "plan", "rpc": RPC,
                "treasury": (os.environ.get("PLATFORM_TREASURY_SOL") or os.environ.get("TREASURY_SOL") or "").strip(),
@@ -72,7 +80,8 @@ def run() -> int:
     except ValueError:
         r = {}
     if not r.get("ok"):
-        admins(f"Flywheel {'LIVE' if LIVE else 'plan'} run FAILED: {r.get('error') or (p.stderr or '')[-300:]}\nNothing more was done today.")
+        admins(f"Flywheel {'LIVE' if LIVE else 'plan'} run FAILED: {r.get('error') or (p.stderr or '')[-300:]}\nNothing more was done today. "
+               "Check the wallet before clearing today's entry: part of the run may have gone through.")
         return 1
     if LIVE:
         s["carry_lamports"] = int(r.get("carry_lamports") or 0)
@@ -114,4 +123,8 @@ def run() -> int:
 if __name__ == "__main__":
     if (sys.argv[1] if len(sys.argv) > 1 else "run") == "status":
         print(json.dumps(load(), indent=1)); sys.exit(0)
-    sys.exit(run())
+    try:
+        with statefile.lock(STATE):
+            sys.exit(run())
+    except statefile.Busy:
+        print("another flywheel run is in progress"); sys.exit(0)

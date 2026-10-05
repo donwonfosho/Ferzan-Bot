@@ -30,15 +30,15 @@ STATE = Path("/opt/ferzan/dbc-keys/ferzan-flagship-state.json")
 RPC = os.environ.get("SOLANA_RPC_URL") or "https://api.mainnet-beta.solana.com"
 
 
+import statefile  # noqa: E402
+
+
 def load() -> dict:
-    try:
-        return json.loads(STATE.read_text())
-    except Exception:
-        return {}
+    return statefile.read_json(STATE, dict)
 
 
 def save(s: dict) -> None:
-    STATE.write_text(json.dumps(s, indent=1)); os.chmod(STATE, 0o600)
+    statefile.write_json(STATE, s, indent=1)
 
 
 def notify(text: str) -> None:
@@ -128,6 +128,7 @@ def launch() -> int:
             pass
         time.sleep(10)
     if not s.get("live_posted"):  # the public launch post, once: channel, the Ferzan groups and X, with the IS LIVE graphic
+        s["live_posted"] = True; save(s)  # marked before sending: a crash must never post the launch twice
         import ferzan_media as fm
         link = f"https://ferzan-factory.com/coin/solana/{s['mint']}"
         pic = fm.img("ferzan_live.jpg")
@@ -143,7 +144,6 @@ def launch() -> int:
                 notify(f"FERZAN launch X post failed: {info}")
         except Exception as e:
             print("X post skipped:", e)
-        s["live_posted"] = True; save(s)
     notify(f"FERZAN IS LIVE\nCA: {s['mint']}\nPool: {s['pool']}\nCreator now: {s.get('creator_now')} (Squads vault)\n"
            f"Announced: {'yes' if s.get('announced') else 'NO - re-run: systemctl start ferzan-flagship'}\n"
            f"Trade: https://ferzan-factory.com/coin/solana/{s['mint']}")
@@ -152,9 +152,13 @@ def launch() -> int:
 
 if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else "status"
-    if cmd == "prepare":
-        sys.exit(prepare("--notify" in sys.argv))
-    if cmd == "launch":
-        sys.exit(launch())
+    try:
+        if cmd in ("prepare", "launch"):
+            with statefile.lock(STATE):
+                sys.exit(prepare("--notify" in sys.argv) if cmd == "prepare" else launch())
+    except statefile.Busy:
+        print("another flagship run is in progress"); sys.exit(0)
+    except statefile.StateCorrupt as e:
+        notify(f"FERZAN flagship did NOT run: {e}"); sys.exit(1)
     s = load()
     print(json.dumps({k: v for k, v in s.items()}, indent=1) if s else "nothing yet")

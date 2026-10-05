@@ -156,10 +156,12 @@ def run(live: bool) -> int:
         print("no gas tank yet: run 'ferzan_refill.py create'")
         return 1
     t = tank()
+    import statefile
     try:
-        st = json.loads(STATE.read_text())
-    except Exception:
-        st = {}
+        st = statefile.read_json(STATE, dict)
+    except statefile.StateCorrupt as e:
+        (admins if live else print)(f"Refill did NOT run: {e}")
+        return 1
     today = time.strftime("%Y-%m-%d", time.gmtime())
     used = st.setdefault("used", {}).setdefault(today, {"sol": 0.0, "tron": 0.0})
     st["used"] = {k: v for k, v in st["used"].items() if k >= time.strftime("%Y-%m-%d", time.gmtime(time.time() - 7 * 86400))}
@@ -192,6 +194,7 @@ def run(live: bool) -> int:
             link = send_sol(addr, amount) if chain == "sol" else send_trx(addr, amount)
             used[chain] += amount
             tank_bal[chain] -= amount
+            statefile.write_json(STATE, st)  # the daily cap is counted the moment the money moved
             lines.append(f"⛽ Topped up {label}: +{amount:g} {unit} (was {bal:.4g}){' — ' + why if why else ''}\n{link}")
         except Exception as e:
             lines.append(f"⚠️ Top-up of {label} failed: {str(e)[:160]}. Nothing more sent this round.")
@@ -200,8 +203,7 @@ def run(live: bool) -> int:
     if low and live and time.time() - float(st.get("low_note", 0)) > 12 * 3600:
         st["low_note"] = time.time()
         lines.append(f"🪫 Gas tank is running low ({', '.join(low)}). Refill:\n  SOL → {t['sol_address']}\n  TRX → {t['tron_address']}")
-    STATE.parent.mkdir(parents=True, exist_ok=True)
-    STATE.write_text(json.dumps(st))
+    statefile.write_json(STATE, st)
     if lines:
         (admins if live else print)("\n\n".join(lines))
     else:
@@ -213,4 +215,9 @@ if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else "plan"
     if cmd == "create":
         sys.exit(create())
-    sys.exit(run(live=cmd == "run"))
+    import statefile
+    try:
+        with statefile.lock(STATE):
+            sys.exit(run(live=cmd == "run"))
+    except statefile.Busy:
+        print("another refill run is in progress"); sys.exit(0)
