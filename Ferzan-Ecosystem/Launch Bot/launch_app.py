@@ -108,6 +108,8 @@ def _num(raw: str, label: str, lo: Decimal, hi: Decimal, allow_zero: bool = Fals
         v = Decimal(str(raw or "0").strip().replace(",", "") or "0")
     except InvalidOperation:
         raise HTTPException(400, f"{label} looks wrong")
+    if not v.is_finite():
+        raise HTTPException(400, f"{label} looks wrong")
     if v == 0 and allow_zero:
         return v
     if v < lo or v > hi:

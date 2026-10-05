@@ -157,7 +157,7 @@ _PUBLIC_HITS: dict = {}
 
 def _public_rate_ok(request, bucket: str, limit: int, per_s: int = 60) -> bool:
     """Tiny per-caller limiter for open endpoints that write rows. Keyed on the real client address."""
-    ip = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip() or (request.client.host if request.client else "?")
+    ip = (request.headers.get("x-forwarded-for") or "").split(",")[-1].strip() or (request.client.host if request.client else "?")
     now = time.time()
     if len(_PUBLIC_HITS) > 20000:
         for k in [k for k, v in _PUBLIC_HITS.items() if not v or v[-1] < now - per_s]:
@@ -193,7 +193,11 @@ def get_request(request_id: str):
     req = db.get_launch_request(request_id)
     if not req:
         raise HTTPException(404, "Launch request not found")
-    return req
+    import dataclasses
+    out = dataclasses.asdict(req) if dataclasses.is_dataclass(req) else dict(req)
+    out.pop("telegram_user_id", None)  # the page never needs who or where the creator is on Telegram
+    out.pop("chat_id", None)
+    return out
 
 
 @app.get("/api/metadata/{request_id}")
@@ -249,7 +253,9 @@ def _curve_info(curve: str):
 
 
 @app.post("/api/launch-requests/{request_id}/build-tx")
-def build_tx(request_id: str, body: BuildTxRequest):
+def build_tx(request_id: str, body: BuildTxRequest, request: Request):
+    if not _public_rate_ok(request, "build-tx", int(os.environ.get("BUILD_TX_PER_IP_MIN") or 30)):
+        raise HTTPException(429, "Too many requests. Wait a minute.")
     req = db.get_launch_request(request_id)
     if not req:
         raise HTTPException(404, "Launch request not found")
@@ -666,6 +672,8 @@ def site_launch(body: SiteLaunchBody, request: Request):
     """Called by the website (SITE_OPEN_BATCH19: no shared key). Creates a launch request with
     no Telegram user; the visitor's own wallet then signs the tx from /build-tx. Nothing is posted
     anywhere until /complete has verified the launch on chain."""
+    if not _public_rate_ok(request, "site-launch", int(os.environ.get("SITE_LAUNCH_PER_IP_MIN") or 10)):
+        raise HTTPException(429, "Too many launches from this connection. Wait a minute.")
     chain = (body.chain or "").strip().lower()
     if chain not in _SITE_CHAINS:
         raise HTTPException(400, "That chain is not open for website launches")
@@ -1211,7 +1219,9 @@ def _token_names(mints: list) -> dict:
 
 
 @app.get("/api/sol-fees")
-def sol_fees(wallet: str, role: str = "creator"):
+def sol_fees(wallet: str, request: Request, role: str = "creator"):
+    if not _public_rate_ok(request, "sol-fees", int(os.environ.get("SOL_FEES_PER_IP_MIN") or 30)):
+        raise HTTPException(429, "Too many requests. Wait a minute.")
     role = "partner" if role == "partner" else "creator"
     if not _sol_addr_ok(wallet):
         raise HTTPException(400, "That isn't a Solana wallet address.")

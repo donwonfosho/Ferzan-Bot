@@ -169,8 +169,11 @@ def parse_when(text: str, tz_name: str, now: datetime | None = None) -> tuple[da
     if m:
         n = float(m.group(1))
         unit = m.group(2)[0]
-        delta = timedelta(minutes=n) if unit == "m" else timedelta(hours=n) if unit == "h" else timedelta(days=n)
-        return now + delta, ""
+        try:
+            delta = timedelta(minutes=n) if unit == "m" else timedelta(hours=n) if unit == "h" else timedelta(days=n)
+            return now + delta, ""
+        except OverflowError:
+            return None, "That is too far away. Pick a time within the next few weeks."
 
     day: date | None = None
     rest = s

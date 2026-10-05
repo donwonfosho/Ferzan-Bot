@@ -65,9 +65,10 @@ CREATE TABLE IF NOT EXISTS referral_wallets (
 
 @contextmanager
 def _get_conn():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
     try:
+        conn.execute("PRAGMA busy_timeout = 30000")  # wait for a writer instead of failing with 'database is locked'
         yield conn
         conn.commit()
     finally:

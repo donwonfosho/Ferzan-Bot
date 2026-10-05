@@ -54,5 +54,35 @@ class InternalGate(unittest.TestCase):
         self.assertIn("_public_rate_ok(request, \"call-credit\"", s)
 
 
+
+class LaunchHardening(unittest.TestCase):
+    def read(self, n):
+        with open(os.path.join(HERE, n), encoding="utf-8") as f:
+            return f.read()
+
+    def test_launch_request_hides_telegram_ids(self):
+        s = self.read("api.py")
+        i = s.index('@app.get("/api/launch-requests/{request_id}")')
+        body = s[i:i + 600]
+        self.assertIn('pop("telegram_user_id"', body)
+        self.assertIn('pop("chat_id"', body)
+
+    def test_open_endpoints_are_rate_limited(self):
+        s = self.read("api.py")
+        for bucket in ("build-tx", "site-launch", "sol-fees", "call-credit"):
+            self.assertIn(f'_public_rate_ok(request, "{bucket}"', s)
+        self.assertIn('split(",")[-1]', s)  # the address our own proxy saw, not a client-supplied one
+
+    def test_db_waits_for_locks(self):
+        self.assertIn("busy_timeout", self.read("launch_bot_db.py"))
+
+    def test_huge_time_and_nan_rejected(self):
+        from launch_extras import parse_when
+        when, err = parse_when("in 99999999999999 d", "UTC")
+        self.assertIsNone(when)
+        self.assertTrue(err)
+        self.assertIn("is_finite", self.read("launch_app.py"))
+
+
 if __name__ == "__main__":
     unittest.main()
