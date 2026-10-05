@@ -4504,7 +4504,13 @@ def main() -> None:
     app.add_handler(CommandHandler("topbuyers", topbuyers_cmd))
     app.job_queue.run_repeating(tick, interval=25, first=8)
     log.info("Ferzan Buy running")
-    app.run_polling(drop_pending_updates=True)
+    try:
+        app.run_polling(drop_pending_updates=True, bootstrap_retries=-1)
+    except Exception as _e:  # Telegram blip at start-up (Bad Gateway etc.): restart cleanly, do not crash-loop
+        if type(_e).__name__ in {'NetworkError', 'TimedOut', 'RetryAfter'}:
+            __import__('time').sleep(5)
+            __import__('os').execv(__import__('sys').executable, [__import__('sys').executable] + __import__('sys').argv)
+        raise
 
 
 if __name__ == "__main__":

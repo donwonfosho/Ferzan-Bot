@@ -30,5 +30,17 @@ class Scrub(unittest.TestCase):
         self.assertEqual(redact.scrub("Insufficient funds for gas"), "Insufficient funds for gas")
 
 
+
+class StartupResilience(unittest.TestCase):
+    def test_polling_retries_on_telegram_blip(self):
+        root = os.path.dirname(HERE)
+        for rel in ("Launch Bot/launch_bot.py", "Trade Desk/bot.py", "Guardian Bot/guardian_bot.py",
+                    "Liquidity Bot/liq_bot.py", "Buy Bot/buy_bot.py"):
+            with open(os.path.join(root, rel), encoding="utf-8") as f:
+                s = f.read()
+            self.assertIn("bootstrap_retries=-1", s, rel)
+            self.assertIn("'NetworkError'", s, rel)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -10310,7 +10310,13 @@ def main() -> None:
         logger.warning("job-queue extra missing; commands still work, scanners off")
 
     logger.info("FERZAN starting")
-    app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
+    try:
+        app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES, bootstrap_retries=-1)
+    except Exception as _e:  # Telegram blip at start-up (Bad Gateway etc.): restart cleanly, do not crash-loop
+        if type(_e).__name__ in {'NetworkError', 'TimedOut', 'RetryAfter'}:
+            __import__('time').sleep(5)
+            __import__('os').execv(__import__('sys').executable, [__import__('sys').executable] + __import__('sys').argv)
+        raise
 
 
 if __name__ == "__main__":
