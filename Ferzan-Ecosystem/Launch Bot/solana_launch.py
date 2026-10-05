@@ -69,14 +69,26 @@ def _borsh_string(s: str) -> bytes:
     b = s.encode("utf-8")
     return len(b).to_bytes(4, "little") + b
 
+def clip_utf8(text: str, max_bytes: int) -> str:
+    """Longest start of `text` that fits in max_bytes of UTF-8, never cutting a character in half. On-chain name and
+    symbol limits are in bytes, so cutting by characters overflows for emoji and non-Latin names."""
+    out, used = [], 0
+    for ch in str(text or ""):
+        n = len(ch.encode("utf-8"))
+        if used + n > max_bytes:
+            break
+        out.append(ch); used += n
+    return "".join(out)
+
+
 def _create_metadata_instruction(mint_pubkey, mint_authority, payer, name, symbol, uri):
     metadata_pda, _ = Pubkey.find_program_address(
         [b"metadata", bytes(METAPLEX_PROGRAM_ID), bytes(mint_pubkey)],
         METAPLEX_PROGRAM_ID,
     )
     data = bytes([33])  # CreateMetadataAccountV3 discriminator
-    data += _borsh_string(name[:32])
-    data += _borsh_string(symbol[:10])
+    data += _borsh_string(clip_utf8(name, 32))
+    data += _borsh_string(clip_utf8(symbol, 10))
     data += _borsh_string(uri[:200])
     data += (0).to_bytes(2, "little")  # seller_fee_basis_points
     data += bytes([0])  # creators: None
@@ -180,6 +192,8 @@ def build_unsigned_launch_tx(
         fee_lamports, _ = launch_fee_lamports(creator_pubkey, fee_lamports, telegram_user_id)
     except Exception:
         pass
+    if fee_lamports > 0 and not treasury:
+        raise ValueError("The launch fee wallet isn't configured (PLATFORM_TREASURY_SOL), so nothing was sent. Try again later.")
     if treasury and fee_lamports > 0:
         instructions.append(
             transfer(

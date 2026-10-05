@@ -97,6 +97,9 @@ def build_unsigned_meteora_tx(
         _fee_lamports, _perk_note = launch_fee_lamports(creator_pubkey, _fee_lamports, telegram_user_id)
     except Exception:
         pass
+    _treasury = (os.environ.get("PLATFORM_TREASURY_SOL") or os.environ.get("TREASURY_SOL") or "").strip()
+    if _fee_lamports > 0 and not _treasury:  # never launch for free by accident
+        raise _fail("The launch fee wallet isn't configured (PLATFORM_TREASURY_SOL), so nothing was sent. Try again later.")
     payload = {
         "mintSecret": _mint_secret,
         "creator": creator_pubkey,
@@ -106,7 +109,7 @@ def build_unsigned_meteora_tx(
         "devBuyLamports": _dev_buy_lamports(dev_buy),
         "config": config,
         "rpc": rpc_url,
-        "treasury": (os.environ.get("PLATFORM_TREASURY_SOL") or os.environ.get("TREASURY_SOL") or "").strip(),
+        "treasury": _treasury,
         "feeLamports": _fee_lamports,
     }
     try:

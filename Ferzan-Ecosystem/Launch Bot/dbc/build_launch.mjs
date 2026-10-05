@@ -8,6 +8,17 @@ import { NATIVE_MINT } from '@solana/spl-token'
 import { DynamicBondingCurveClient, deriveDbcPoolAddress } from '@meteora-ag/dynamic-bonding-curve-sdk'
 import { simulate } from './common.mjs'
 
+// On-chain name/symbol limits are in UTF-8 bytes: cut at a character boundary, never in the middle of one.
+export function clipUtf8(text, maxBytes) {
+    let out = '', used = 0
+    for (const ch of String(text ?? '')) {
+        const n = Buffer.byteLength(ch, 'utf8')
+        if (used + n > maxBytes) break
+        out += ch; used += n
+    }
+    return out
+}
+
 try {
     const inp = JSON.parse(fs.readFileSync(0, 'utf8'))
     const conn = new Connection(inp.rpc, 'confirmed')
@@ -37,7 +48,7 @@ try {
     const tx = await client.creator.createPoolWithFirstBuy({
         createPoolParam: {
             baseMint: baseMint.publicKey, config,
-            name: String(inp.name).slice(0, 32), symbol: String(inp.symbol).slice(0, 10), uri: inp.uri || '',
+            name: clipUtf8(inp.name, 32), symbol: clipUtf8(inp.symbol, 10), uri: inp.uri || '',
             payer: creator, poolCreator: creator,
         },
         // Same transaction as the pool creation, so nothing can buy before the creator.
@@ -45,6 +56,7 @@ try {
             ? { buyer: creator, receiver: creator, buyAmount: devBuy, minimumAmountOut: new BN(0), referralTokenAccount: null }
             : undefined,
     })
+    if (fee > 0 && !inp.treasury) throw new Error("The launch fee wallet isn't configured, so nothing was sent.")
     if (inp.treasury && fee > 0) {
         tx.add(SystemProgram.transfer({ fromPubkey: creator, toPubkey: new PublicKey(inp.treasury), lamports: fee }))
     }
