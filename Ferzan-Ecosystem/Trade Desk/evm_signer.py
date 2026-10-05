@@ -351,7 +351,9 @@ def buy_curve(
     acct = Account.from_key("0x" + raw)
     quoted = _quote_curve_tokens(meta["rpc"], curve, wei)
     slip = int(slip_bps if slip_bps is not None else 1000)
-    min_out = 0 if quoted <= 0 else max(1, quoted * (10_000 - max(1, min(slip, 4900))) // 10_000)
+    if quoted <= 0:  # no quote = no price protection; a bot-sniped price can't be allowed through with minOut 0
+        return False, "Couldn't get a price quote from the curve, buy skipped. Nothing sent."
+    min_out = max(1, quoted * (10_000 - max(1, min(slip, 4900))) // 10_000)
     data = _encode_curve_buy(min_out, referrer)
     sim = _rpc(meta["rpc"], "eth_call", [{"from": acct.address, "to": curve, "data": data, "value": hex(wei)}, "latest"])
     if isinstance(sim, dict) and sim.get("error"):

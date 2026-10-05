@@ -128,9 +128,10 @@ def _broadcast(tx: dict, key_hex: str) -> tuple[bool, str]:
         return False, str(tx.get("Error") or tx.get("message") or "TronGrid built no tx")
     tx["signature"] = [_sign(raw, key_hex)]
     out = _post("/wallet/broadcasttransaction", tx, retries=2)
-    if out.get("result") is True or out.get("txid") or out.get("txID"):
+    dup = str(out.get("code") or "") == "DUP_TRANSACTION_ERROR"  # a retry of a broadcast that already went through
+    if out.get("result") is True or out.get("txid") or out.get("txID") or dup:
         _SENT.flag = True
-        txid = out.get("txid") or out.get("txID") or ""
+        txid = out.get("txid") or out.get("txID") or tx.get("txID") or ""
         return True, f"https://tronscan.org/#/transaction/{txid}"
     return False, str(out.get("message") or out.get("Error") or out)[:220]
 

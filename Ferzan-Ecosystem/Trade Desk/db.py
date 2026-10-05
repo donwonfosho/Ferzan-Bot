@@ -1070,6 +1070,14 @@ def get_user_wallet(user_id: int) -> dict[str, Any] | None:
         return dict(row) if row else None
 
 
+def any_wallets() -> bool:
+    """True when at least one encrypted wallet already exists (their master key must not be regenerated)."""
+    with get_conn() as conn:
+        n = conn.execute("SELECT COUNT(*) FROM wallet_slots").fetchone()[0]
+        n += conn.execute("SELECT COUNT(*) FROM user_wallets").fetchone()[0]
+        return n > 0
+
+
 def save_user_wallet(user_id: int, sol_pub: str, sol_key: str, evm_pub: str, evm_key: str) -> None:
     """Legacy single-wallet write (first wallet creation). Also records it as
     a slot so multi-wallet sees it; keys already in a slot are never dropped."""

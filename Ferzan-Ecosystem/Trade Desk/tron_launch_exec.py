@@ -86,6 +86,14 @@ def _const(ts, contract: str, sig: str, params: str = "") -> str:
     return (r.get("constant_result") or [""])[0]
 
 
+def _launch_fee(ts, factory: str) -> int:
+    """launchFeeSun() from the factory. An empty answer means the node failed: never guess 0 and build a tx that underpays."""
+    raw = _const(ts, factory, "launchFeeSun()")
+    if not raw:
+        raise RuntimeError("Could not read the launch fee from the factory. Nothing sent.")
+    return int(raw, 16)
+
+
 def _balance(ts, addr: str) -> int:
     return int(ts._post("/wallet/getaccount", {"address": ts._to_hex(addr)}).get("balance") or 0)
 
@@ -156,7 +164,7 @@ def info(args: dict) -> None:
     addr, _ = _wallet(int(args["uid"]))
     curve = bool(args.get("curve"))
     factory = _curve_factory() if curve else _factory()
-    fee = int(_const(ts, factory, "launchFeeSun()") or "0", 16)
+    fee = _launch_fee(ts, factory)
     spare = CURVE_SPARE_SUN if curve else MIN_SPARE_SUN
     need = fee + spare + int(args.get("dev_buy_sun") or 0)
     bal = _balance(ts, addr)
@@ -223,7 +231,7 @@ def curve(args: dict) -> None:
         expired = not prev.get("broadcast") and res.get("pending") and time.time() - int(prev.get("at") or 0) > 120
         if not expired:
             out(**res, address=addr, repeat=True)
-    fee = int(_const(ts, factory, "launchFeeSun()") or "0", 16)
+    fee = _launch_fee(ts, factory)
     bal = _balance(ts, addr)
     if bal < fee + dev + CURVE_SPARE_SUN:
         out(ok=False, error="low_balance", address=addr, balance_trx=bal / 1e6, need_trx=(fee + dev + CURVE_SPARE_SUN) / 1e6)
@@ -265,7 +273,7 @@ def launch(args: dict) -> None:
         if not expired:
             out(**res, address=addr, repeat=True)
 
-    fee = int(_const(ts, factory, "launchFeeSun()") or "0", 16)
+    fee = _launch_fee(ts, factory)
     bal = _balance(ts, addr)
     if bal < fee + MIN_SPARE_SUN:
         out(ok=False, error="low_balance", address=addr, balance_trx=bal / 1e6, need_trx=(fee + MIN_SPARE_SUN) / 1e6)

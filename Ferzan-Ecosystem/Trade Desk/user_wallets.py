@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import os
+import threading
 from pathlib import Path
 
 import db
@@ -20,10 +21,15 @@ def _fernet():
         if MASTER_PATH.exists():
             secret = MASTER_PATH.read_text().strip()
         else:
+            if db.any_wallets():
+                # a fresh key would make every stored wallet undecryptable: stop instead of silently replacing it
+                raise RuntimeError("Master key file is missing but wallets exist. Restore FERZAN_MASTER_KEY or "
+                                   f"{MASTER_PATH} from backup; refusing to create a new key.")
             secret = base64.urlsafe_b64encode(os.urandom(32)).decode()
             MASTER_PATH.parent.mkdir(parents=True, exist_ok=True)
-            MASTER_PATH.write_text(secret)
-            MASTER_PATH.chmod(0o600)
+            fd = os.open(str(MASTER_PATH), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)  # never world-readable, never overwritten
+            with os.fdopen(fd, "w") as fh:
+                fh.write(secret)
     digest = hashlib.sha256(secret.encode()).digest()
     return Fernet(base64.urlsafe_b64encode(digest))
 
@@ -50,13 +56,20 @@ def _fresh_keys() -> tuple[str, str, str, str]:
     return str(sol.pubkey()), _lock(sol_secret), evm.address, _lock(evm.key.hex())
 
 
+_CREATE_LOCK = threading.Lock()
+
+
 def ensure(user_id: int) -> dict:
     """The user's ACTIVE wallet, creating their first one if needed."""
     row = db.get_user_wallet(user_id)
     if row:
         return row
-    db.save_user_wallet(user_id, *_fresh_keys())
-    return db.get_user_wallet(user_id) or {}
+    with _CREATE_LOCK:  # two quick taps must not create two different first wallets
+        row = db.get_user_wallet(user_id)
+        if row:
+            return row
+        db.save_user_wallet(user_id, *_fresh_keys())
+        return db.get_user_wallet(user_id) or {}
 
 
 def new_wallet(user_id: int, label: str = "") -> dict:
