@@ -110,7 +110,7 @@ def sell_hood(token: str, key_hex: str | None = None) -> tuple[bool, str]:
         min_out = _min_out(meta["rpc"], bal, [token, WETH])
     except Exception as exc:
         return False, f"Hood sell not sent: {str(exc)[:120]}. Nothing was sent."
-    approve = "0x095ea7b3" + _enc_addr(ROUTER) + ("f" * 64)
+    approve = "0x095ea7b3" + _enc_addr(ROUTER) + hex(int(bal))[2:].zfill(64)  # exactly this sale, not unlimited
     ok, msg = _broadcast(acct, meta, token, approve, 0)
     if not ok:
         return False, "Hood approve failed: " + msg

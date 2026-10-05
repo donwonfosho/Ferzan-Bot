@@ -495,6 +495,45 @@ def dln_status(order_id: str) -> dict:
     }
 
 
+_NO_BRIDGE_SELECTORS = {"a9059cbb", "23b872dd", "095ea7b3", "39509351", "a22cb465", "42842e0e", "b88d4fde"}  # transfer, transferFrom, approve, allowance changes, NFT moves
+
+
+def _evm_items_problem(items: list, pack: dict, chain_id: int) -> str | None:
+    """The bridge API's transactions are signed with the user's key, so they are checked first: right chain, no more
+    native coin than the user asked to bridge (plus a small cushion), sane gas, and no token transfer/approval calls
+    (this flow only ever moves the chain's native coin)."""
+    try:
+        dec = int(CHAINS[pack["src"]]["dec"])
+        cap = int(float(pack["amt"]) * (10 ** dec) * 1.05) + 10 ** max(0, dec - 6)
+        if pack.get("via") == "dln":
+            cap += 10 ** max(0, dec - 2)  # deBridge adds its fixed protocol fee to the transaction value
+    except Exception:  # noqa: BLE001
+        return "cannot work out the amount being bridged"
+    total = 0
+    for item in items:
+        try:
+            v = item.get("value") or 0
+            value = int(str(v), 0) if str(v).startswith("0x") else int(v)
+            cid = item.get("chainId")
+            gas = int(item.get("gas") or item.get("gasLimit") or 0)
+        except (TypeError, ValueError):
+            return "malformed numbers"
+        data = str(item.get("data") or "0x")
+        body = data[2:] if data[:2].lower() == "0x" else data
+        if cid not in (None, "") and int(cid) != chain_id:
+            return "for a different chain"
+        if value < 0:
+            return "negative value"
+        if gas > 3_000_000:
+            return "asks for too much gas"
+        if body[:8].lower() in _NO_BRIDGE_SELECTORS:
+            return "a token transfer or approval, not a bridge call"
+        total += value
+    if total > cap:
+        return "asks to send more than the amount you chose"
+    return None
+
+
 def _exec_evm(uid: int, pack: dict, data: dict) -> str:
     import evm_signer
     import user_wallets
@@ -510,6 +549,9 @@ def _exec_evm(uid: int, pack: dict, data: dict) -> str:
     meta = DESK.get(desk_key) or DESK["eth"]
     raw = evm_key.replace("0x", "").replace("0X", "")
     acct = Account.from_key("0x" + raw)
+    why = _evm_items_problem(items, pack, int(meta["chain_id"]))
+    if why:
+        raise RuntimeError(f"Bridge not sent: the route looked wrong ({why}). Nothing was signed.")
     links = []
     for i, item in enumerate(items):
         ok, msg = evm_signer._broadcast(

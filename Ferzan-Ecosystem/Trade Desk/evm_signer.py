@@ -263,7 +263,7 @@ def sell_curve(cid: str, meta: dict, acct, token: str, curve: str, amount: int, 
     allow_data = "0xdd62ed3e" + owner[2:].lower().zfill(64) + curve[2:].lower().zfill(64)
     al = _call_words(meta["rpc"], token, allow_data)
     if not al or al[0] < amount:
-        ok, msg = _broadcast(acct, meta, token, "0x095ea7b3" + curve[2:].lower().zfill(64) + ("f" * 64), 0)
+        ok, msg = _broadcast(acct, meta, token, "0x095ea7b3" + curve[2:].lower().zfill(64) + _u256(amount), 0)
         if not ok:
             return False, f"Approve failed: {msg}"
         note = f"Approved curve\n{msg}\n"
@@ -476,6 +476,14 @@ def buy_evm(
     tx = (quote.get("transaction") or quote.get("tx") or {})
     if not tx.get("to") or not tx.get("data"):
         return False, str(quote.get("message") or "0x returned no transaction")
+    why = _quote_tx_problem(tx, meta, wei)
+    if why:
+        log.warning("refusing to sign 0x buy tx on %s: %s", cid, why)
+        if cid == "hood":  # Hood has its own fixed router with a minimum-out check
+            import hood
+
+            return hood.buy_hood(buy_token, usd, key_hex)
+        return False, f"Buy not sent: the swap route looked wrong ({why}). Nothing was sent."
     raw_tx = {
         "to": _addr(tx["to"]),
         "data": tx["data"] if str(tx["data"]).startswith("0x") else "0x" + str(tx["data"]),
@@ -485,6 +493,12 @@ def buy_evm(
         "gasPrice": _as_int(tx.get("gasPrice"), 2_000_000_000),
         "nonce": _nonce_guarded(meta, acct.address),
     }
+    try:  # the quote's gas price may not be more than 5x what the node itself says
+        node_gp = _gas_price(meta["rpc"])
+        if node_gp > 0:
+            raw_tx["gasPrice"] = min(int(raw_tx["gasPrice"]), int(node_gp) * 5)
+    except Exception:  # noqa: BLE001
+        pass
     try:
         signed = acct.sign_transaction(raw_tx)
         raw_hex = "0x" + signed.raw_transaction.hex() if hasattr(signed, "raw_transaction") else signed.rawTransaction.hex()
@@ -610,6 +624,41 @@ def receipt_status(chain_id: int, txh: str):
             if not rec:
                 return None
             return int(rec.get("status") or "0x0", 16) == 1
+    return None
+
+
+# 0x's AllowanceHolder is the only contract a 0x quote may send us to, and the only spender we approve.
+# These are the official per-hardfork addresses (docs.0x.org core-concepts/contracts). Extra ones: EVM_ALLOWANCE_HOLDERS=0x..,0x..
+_ALLOWANCE_HOLDERS = {"0x0000000000001ff3684f28c67538d4d072c22734", "0x0000000000005e88410ccdfade4a5efae4b49562"}
+MAX_QUOTE_GAS = 3_000_000
+
+
+def _holders() -> set:
+    extra = {a.lower() for a in re.findall(r"0x[0-9a-fA-F]{40}", os.getenv("EVM_ALLOWANCE_HOLDERS") or "")}
+    return _ALLOWANCE_HOLDERS | extra
+
+
+def _quote_tx_problem(tx: dict, meta: dict, max_value: int) -> str | None:
+    """Why a transaction from the 0x API must NOT be signed with the user's key, or None. The API's answer is checked,
+    not trusted: it must go to 0x's AllowanceHolder, carry no more native coin than this trade, and ask for sane gas."""
+    try:
+        to = str(tx.get("to") or "").lower()
+        value = _as_int(tx.get("value"), 0)
+        gas = _as_int(tx.get("gas") or tx.get("gasLimit"), 0)
+    except Exception:  # noqa: BLE001
+        return "malformed transaction"
+    if to not in _holders():
+        return f"destination {to[:10]}... is not 0x's AllowanceHolder"
+    if value < 0 or value > max_value:
+        return "asks to send more native coin than this trade needs"
+    if gas > MAX_QUOTE_GAS:
+        return "asks for too much gas"
+    return None
+
+
+def _spender_problem(spender: str) -> str | None:
+    if str(spender or "").lower() not in _holders():
+        return f"spender {str(spender)[:10]}... is not 0x's AllowanceHolder"
     return None
 
 
@@ -953,7 +1002,15 @@ def sell_evm(chain: str, sell_token: str, key_hex: str | None = None, pct: int =
     allow = issues.get("allowance") if isinstance(issues, dict) else None
     if allow and allow.get("spender"):
         spender = _addr(allow["spender"])
-        approve_data = "0x095ea7b3" + spender[2:].lower().zfill(64) + ("f" * 64)
+        why = _spender_problem(spender)
+        if why:
+            log.warning("refusing to approve on %s: %s", cid, why)
+            if cid == "hood":
+                import hood
+
+                return hood.sell_hood(sell_token, key_hex)
+            return False, f"Sell not sent: the approval looked wrong ({why}). Nothing was approved or sold."
+        approve_data = "0x095ea7b3" + spender[2:].lower().zfill(64) + hex(int(bal))[2:].zfill(64)  # exactly this sale, not unlimited
         ok, msg = _broadcast(acct, meta, token, approve_data, 0)
         if not ok:
             return False, f"Approve failed: {msg}"
@@ -989,7 +1046,15 @@ def sell_evm(chain: str, sell_token: str, key_hex: str | None = None, pct: int =
             + (f"\n{why}" if why else "")
             + "\nYour tokens are still in your wallet; nothing was sold."
         )
-    ok, msg = _broadcast(acct, meta, tx["to"], tx["data"], _as_int(tx.get("value"), 0))
+    why = _quote_tx_problem(tx, meta, 0)
+    if why:
+        log.warning("refusing to sign 0x sell tx on %s: %s", cid, why)
+        if cid == "hood":
+            import hood
+
+            return hood.sell_hood(sell_token, key_hex)
+        return False, approve_note + f"Sell not sent: the swap route looked wrong ({why}). Your tokens are still in your wallet."
+    ok, msg = _broadcast(acct, meta, tx["to"], tx["data"], 0)
     if not ok:
         return False, approve_note + f"Sell failed: {msg}"
     _m = _TXH_RE.search(msg or "")

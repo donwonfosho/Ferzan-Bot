@@ -5663,7 +5663,19 @@ async def gshadowban(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             "no ban, no notice to them."
         )
         return
-    uid = update.message.reply_to_message.from_user.id
+    target = update.message.reply_to_message.from_user
+    uid = target.id if target else 0
+    if not uid or (target and target.is_bot) or uid == update.effective_user.id:
+        await update.effective_message.reply_text("That one can't be shadowbanned.")
+        return
+    try:
+        tm = await context.bot.get_chat_member(update.effective_chat.id, uid)
+        is_staff = tm.status in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER)
+    except Exception:
+        is_staff = False
+    if is_staff or _is_guardian_mod(update.effective_chat.id, uid):
+        await update.effective_message.reply_text("Admins and mods can't be shadowbanned.")
+        return
     con = _db()
     con.execute(
         "INSERT OR REPLACE INTO shadowbanned(chat_id, user_id, by_id, ts) VALUES(?,?,?,strftime('%s','now'))",

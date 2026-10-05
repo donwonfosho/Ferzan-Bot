@@ -390,6 +390,38 @@ async def broadcast(provider, boc: bytes) -> tuple[bool, str]:
     return ok, "; ".join(errs)
 
 
+_LAST_SIGNED: dict[str, tuple[int, float]] = {}  # wallet -> (seqno of its last signed message, when)
+LAG_WINDOW_S = 120.0   # a send this recent may not be visible yet on the node we read from
+LAG_WAIT_S = 25.0
+
+
+def _addr_key(wallet) -> str:
+    try:
+        return wallet.address.to_str(is_user_friendly=False)
+    except Exception:  # noqa: BLE001
+        return repr(getattr(wallet, "address", wallet))
+
+
+async def _after_previous_send(provider, wallet, seqno: int) -> int:
+    """Back-to-back sends (a sell then its fee, two buys): the node can still report the OLD seqno for a few
+    seconds after the first message landed, and a second message signed with it is silently dropped. If this wallet
+    signed a message very recently and the node has not moved past it, wait briefly for the seqno to advance, then
+    use the fresh one. If it never advances the earlier message did not land, and the same seqno is the right one."""
+    import asyncio
+    import time as _t
+
+    prev = _LAST_SIGNED.get(_addr_key(wallet))
+    if not prev or _t.monotonic() - prev[1] > LAG_WINDOW_S or seqno > prev[0]:
+        return seqno
+    deadline = _t.monotonic() + LAG_WAIT_S
+    while _t.monotonic() < deadline:
+        await asyncio.sleep(2)
+        now = await _seqno(wallet)
+        if now > prev[0]:
+            return now
+    return seqno
+
+
 async def _send_one(provider, wallet, destination, value: int, body, **msg_kwargs) -> tuple[str, int]:
     """Sign + broadcast one internal message from `wallet`. Handles a
     never-used wallet (no contract deployed yet): seqno 0 + state_init in the
@@ -402,6 +434,7 @@ async def _send_one(provider, wallet, destination, value: int, body, **msg_kwarg
 
     msg = wallet.create_wallet_internal_message(destination=destination, value=value, body=body, **msg_kwargs)
     seqno = await _seqno_for_send(provider, wallet)
+    seqno = await _after_previous_send(provider, wallet, seqno)
     # state_init is ignored by the chain for an already-active account, so
     # attaching it whenever seqno is 0 is safe either way.
     state_init = wallet.state_init if seqno == 0 else None
@@ -417,6 +450,7 @@ async def _send_one(provider, wallet, destination, value: int, body, **msg_kwarg
     ok, why = await broadcast(provider, cell.to_boc())
     if not ok:
         raise RuntimeError(f"no TON relay accepted the message ({why})")
+    _LAST_SIGNED[_addr_key(wallet)] = (seqno, _t.monotonic())
     return cell.hash.hex(), seqno
 
 

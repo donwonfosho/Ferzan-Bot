@@ -615,10 +615,14 @@ def _tx_problem(tx, chain_id: int, kind: str, max_value: int = 0, spend_tokens: 
             return "an 'approval' that is not an approve() call"
         if spend_tokens and to.lower() not in spend_tokens:
             return "approval is for a token this trade does not use"
+        if allowed_to and len(body) >= 72:
+            spender = "0x" + body[32:72].lower()
+            if spender not in allowed_to:
+                return f"approval is to {spender}, not a known BaseStonk/Uniswap contract"
     elif sel in _NOT_A_SWAP:
         return "a direct token transfer/approval, not a swap"
     elif allowed_to and to.lower() not in allowed_to:
-        return "swap destination is not a known BaseStonk/Uniswap contract"
+        return f"swap destination {to.lower()} is not a known BaseStonk/Uniswap contract"
     return None
 
 
