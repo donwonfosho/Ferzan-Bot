@@ -1966,6 +1966,28 @@ def _live_buy(
     return bool(ok), _trade_result("buy", bool(ok), label, msg, usd=usd)
 
 
+_LARGE_BUY_USD = float(os.getenv("LARGE_BUY_CONFIRM_USD", "2000") or 2000)
+_LARGE_PENDING: dict = {}  # (uid, token) -> (usd, expires)
+
+
+def _large_buy_ask(uid: int, token: str, usd: float) -> str:
+    """'' when the buy may go ahead. At or above the threshold the first tap only asks; the same buy
+    repeated within 90 seconds goes through."""
+    if _LARGE_BUY_USD <= 0 or usd < _LARGE_BUY_USD:
+        return ""
+    now = time.time()
+    for k in [k for k, v in _LARGE_PENDING.items() if v[1] < now]:
+        _LARGE_PENDING.pop(k, None)
+    key = (uid, token)
+    hit = _LARGE_PENDING.get(key)
+    if hit and hit[1] >= now and abs(hit[0] - usd) < 0.01:
+        _LARGE_PENDING.pop(key, None)
+        return ""
+    _LARGE_PENDING[key] = (usd, now + 90)
+    return (f"⚠️ Large buy: about ${usd:,.0f}. Nothing was sent.\n"
+            "Tap Buy again within 90 seconds to confirm.")
+
+
 def _live_buy_followup(
     uid: int, card, query: str, paper_ok: bool, force: bool, usd_override: float | None = None,
     multi: bool = False, xbuy: bool = False,
@@ -1975,6 +1997,15 @@ def _live_buy_followup(
     # turning multi-buy on can never quietly multiply automated spending.
     # A cross-chain funding OFFER (never an automatic bridge) is allowed only on a
     # manual tap (multi) or paste-to-buy (xbuy): DCA / feed auto-buys never offer one.
+    if multi:  # manual tap only: big buys need the same tap twice (automated paths are never blocked here)
+        try:
+            slots = len(db.multi_buy_slots(uid) or []) or 1
+            est = float(usd_override if usd_override is not None else _default_buy_usd(uid)) * slots
+            ask = _large_buy_ask(uid, (query or "").strip() or str(getattr(card.snapshot, "token_address", "")), est)
+            if ask:
+                return ask
+        except Exception:
+            logger.exception("large-buy check failed")
     crossbuy.allow(bool(multi or xbuy))
     try:
         if multi and db.multi_buy_slots(uid):
@@ -3372,7 +3403,7 @@ async def buylimit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     mint = context.args[0].strip()
     try:
         target = float(context.args[1])
-        usd = float(context.args[2]) if len(context.args) > 2 else float(signer.max_usd())
+        usd = float(context.args[2]) if len(context.args) > 2 else _default_buy_usd(update.effective_user.id)
     except ValueError:
         await update.effective_message.reply_text("Price and size must be numbers.")
         return
@@ -4144,7 +4175,7 @@ async def settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             if key in {"size", "size_pct", "buy"}:
                 val = float(raw)
                 if key == "buy" or val > 20:
-                    if not 1 <= val <= 5000:
+                    if not 1 <= val <= signer.max_usd():
                         raise ValueError
                     db.update_user(uid, buy_usd=val)
                 else:
@@ -7288,7 +7319,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await context.bot.send_message(uid, "No mark to hang a limit on.")
             return
         target = px * 0.8
-        usd = float(signer.max_usd())
+        usd = _default_buy_usd(uid)
         chain = card.snapshot.chain or ""
         lid = db.add_buy_limit(uid, card.snapshot.token_address or mint, chain, usd, target)
         await context.bot.send_message(
@@ -7303,14 +7334,14 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             user_id=uid,
             query=ca,
             chain=None,
-            usd=float(signer.max_usd()),
+            usd=_default_buy_usd(uid),
             min_liq=25_000,
             min_score=int(user.get("min_confluence") or 62),
             max_age_h=6.0,
             require_long=True,
         )
         await context.bot.send_message(
-            uid, f"🎯 Snipe #{sid} armed · ${signer.max_usd():.0f} · gates on"
+            uid, f"🎯 Snipe #{sid} armed · ${_default_buy_usd(uid):.0f} · gates on"
         )
         return
     if data.startswith("qte:"):
@@ -7321,7 +7352,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await context.bot.send_message(uid, "Quote module not loaded.")
             return
         try:
-            usd = float(signer.max_usd())
+            usd = _default_buy_usd(uid)
             if chain in {"sol", "solana"} or (token and not token.startswith("0x")):
                 q = quotes.sol_quote(token, usd)
             else:
@@ -9477,13 +9508,13 @@ async def _settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE,
     except ValueError:
         return
     key = parts[1]
-    if key == "buy" and 1 <= v <= 5000:
+    if key == "buy" and 1 <= v <= signer.max_usd():
         db.update_user(uid, buy_usd=v)
     elif key == "bs" and 0.1 <= v <= 99:
         db.update_user(uid, buy_slip_pct=v)
     elif key == "ss" and 0.1 <= v <= 99:
         db.update_user(uid, sell_slip_pct=v)
-    elif key == "ab" and 0 <= v <= 5000:
+    elif key == "ab" and 0 <= v <= signer.max_usd():
         db.update_user(uid, auto_buy_usd=v)
         db.set_flag(uid, "auto_buy", v > 0)
     elif key == "fl" and 0 <= v <= 90:

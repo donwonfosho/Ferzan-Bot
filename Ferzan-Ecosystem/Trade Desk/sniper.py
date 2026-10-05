@@ -387,7 +387,7 @@ def try_fill(order: dict[str, Any]) -> tuple[str, str]:
         if mint and sendstate.held(uid, mint, "buy"):
             db.release_snipe(int(order["id"]))
             return "armed", "Paused: the last buy of this token may have gone through. Check your wallet."
-        usd = min(signer.max_usd(), float(order.get("usd") or signer.max_usd()))
+        usd = min(signer.max_usd(), float(order.get("usd") or 25))
         sol_secret, evm_secret = user_wallets.secrets(uid)
         slip = int(max(10, min(9900, float(order.get("slip") or 15) * 100)))
         from trade_locks import user_lock

@@ -2,7 +2,7 @@
 
 SIGNER_KEY (preferred) or SIGNER_MNEMONIC in .env.
 Live sends stay off until LIVE_BUYS=1.
-Capped by SIGNER_MAX_USD (default 10).
+Safety ceiling per trade: SIGNER_MAX_USD (default 25000).
 """
 
 from __future__ import annotations
@@ -595,9 +595,9 @@ def live_enabled() -> bool:
 
 def max_usd() -> float:
     try:
-        return max(1.0, min(5000.0, float(os.getenv("SIGNER_MAX_USD", "500"))))
+        return max(1.0, min(1_000_000.0, float(os.getenv("SIGNER_MAX_USD", "25000"))))
     except ValueError:
-        return 500.0
+        return 25000.0
 
 
 def _rpc_fallback() -> str:

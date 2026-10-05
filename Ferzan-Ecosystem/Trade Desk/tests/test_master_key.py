@@ -64,5 +64,38 @@ class SourceGuards(unittest.TestCase):
         self.assertIn("_CREATE_LOCK", self.read("user_wallets.py"))
 
 
+
+class SpendCeiling(unittest.TestCase):
+    def read(self, n):
+        with open(os.path.join(HERE, n), encoding="utf-8") as f:
+            return f.read()
+
+    def test_no_5000_clamp_and_new_default(self):
+        for n in ("signer.py", "evm_signer.py"):
+            s = self.read(n)
+            self.assertNotIn("min(5000.0", s, n)
+            self.assertIn('"SIGNER_MAX_USD", "25000"', s, n)
+
+    def test_defaults_do_not_use_the_ceiling_as_a_size(self):
+        s = self.read("bot.py")
+        self.assertNotIn("usd = float(signer.max_usd())", s)
+        self.assertNotIn("usd=float(signer.max_usd())", s)
+        self.assertNotIn("else float(signer.max_usd())", s)
+
+    def test_large_buy_needs_second_tap(self):
+        import time as _t
+        s = self.read("bot.py")
+        i = s.index("_LARGE_BUY_USD = ")
+        j = s.index("def _live_buy_followup(")
+        ns = {"os": os, "time": _t}
+        exec(s[i:j], ns)
+        ask = ns["_large_buy_ask"]
+        self.assertEqual(ask(1, "MINT", 500), "")            # small: straight through
+        self.assertIn("Nothing was sent", ask(1, "MINT", 3000))  # large: asks first
+        self.assertEqual(ask(1, "MINT", 3000), "")           # same buy again: goes
+        self.assertIn("Nothing was sent", ask(1, "MINT", 3000))  # and it asks again next time
+        self.assertIn("Nothing was sent", ask(1, "MINT", 4000))  # a different size asks again
+
+
 if __name__ == "__main__":
     unittest.main()
