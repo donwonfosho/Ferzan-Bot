@@ -63,14 +63,22 @@ def node(mode: str, uri: str) -> dict:
         return {"ok": False, "error": (p.stdout or "")[-300:]}
 
 
-def ensure_metadata(s: dict) -> dict:
-    if s.get("uri"):
+def ensure_metadata(s: dict, redo: bool = False) -> dict:
+    # metadata made earlier with the website-URL logo is redone once with the permanent copy, but never after launch
+    if s.get("uri") and (not redo or s.get("image") != LOGO_URL or s.get("create_sig") or s.get("pool_created") or s.get("announced")):
         return s
     img = requests.get(LOGO_URL, timeout=30).content
     if hashlib.sha256(img).hexdigest() != LOGO_SHA:
         raise SystemExit("ABORT: the logo on ferzan-factory.com is not the approved FERZAN logo")
     from irys_upload import upload_bytes
-    image = LOGO_URL  # the approved logo on ferzan-factory.com (hash checked above); keeps the Irys upload free-size
+    # The logo bytes were just hash-checked. Store THOSE bytes permanently on Irys, so a later change to the website
+    # (or a takeover of it) can never change the logo wallets show for FERZAN. If the upload fails, fall back to the URL.
+    try:
+        image = upload_bytes(img, tags=[("Content-Type", "image/jpeg")])
+    except Exception as exc:
+        image = LOGO_URL
+        notify(f"FERZAN: could not store the logo permanently ({str(exc)[:120]}). Using the website URL instead; "
+               "the logo then depends on ferzan-factory.com staying yours.")
     meta = {"name": NAME, "symbol": SYMBOL, "description": DESC, "image": image, "external_url": LINKS["website"],
             "extensions": {"website": LINKS["website"], "twitter": LINKS["x"], "telegram": LINKS["telegram"]},
             "properties": {"files": [{"uri": image, "type": "image/jpeg"}], "category": "image"}}
@@ -80,7 +88,7 @@ def ensure_metadata(s: dict) -> dict:
 
 
 def prepare(tell: bool) -> int:
-    s = ensure_metadata(load())
+    s = ensure_metadata(load(), redo=True)  # only the rehearsal may redo it, never the launch itself
     r = node("plan", s["uri"])
     when = time.strftime("%a %b %d %Y %H:%M UTC", time.gmtime(LAUNCH_AT))
     lines = [f"FERZAN rehearsal: {'READY' if r.get('ok') else 'PROBLEM'}", f"Launch: {when} (4:00 PM Eastern)",

@@ -35,6 +35,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 import launch_bot_db as db
+import launch_reserved as _reserved
 from evm_launch import (
     EvmLaunchTxBuilder,
     EvmBondingCurveTxBuilder,
@@ -685,6 +686,9 @@ def site_launch(body: SiteLaunchBody, request: Request):
     symbol = (body.symbol or "").strip().upper()
     if not (1 <= len(name) <= 32) or not _re.fullmatch(r"[A-Z0-9]{1,10}", symbol):
         raise HTTPException(400, "Name or ticker looks wrong")
+    _why = _reserved.problem(name, symbol)
+    if _why:
+        raise HTTPException(400, _why)
     wallet = (body.wallet_address or "").strip()
     if chain == "solana":
         if not _re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{32,44}", wallet):

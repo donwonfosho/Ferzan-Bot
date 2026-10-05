@@ -19,6 +19,7 @@ import html
 import logging
 import os
 import re
+import launch_reserved as _reserved
 from decimal import Decimal
 import time
 from pathlib import Path
@@ -945,6 +946,10 @@ async def name_entered(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not name or len(name) > 32:
         await update.message.reply_text("Name must be 1–32 characters — try again.")
         return ENTERING_NAME
+    _why = _reserved.problem(name, "")
+    if _why:
+        await update.message.reply_text(_why + " Try again.")
+        return ENTERING_NAME
     launch["name"] = name
     sug = _auto_symbol(name)
     await _send(
@@ -1086,6 +1091,10 @@ async def symbol_entered(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not re.fullmatch(r"[A-Z0-9]{2,10}", sym):
         await update.message.reply_text("Ticker must be 2–10 letters/numbers, no spaces — try again.")
         return ENTERING_SYMBOL
+    _why = _reserved.problem(launch.get("name", ""), sym)
+    if _why:
+        await update.message.reply_text(_why + " Try again.")
+        return ENTERING_SYMBOL
     launch["symbol"] = sym
     return await _after_symbol(update, context)
 
@@ -1095,7 +1104,12 @@ async def symbol_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     launch = context.user_data.get("launch")
     if not launch:
         return ConversationHandler.END
-    launch["symbol"] = update.callback_query.data.split(":", 1)[1]
+    sym = update.callback_query.data.split(":", 1)[1]
+    _why = _reserved.problem(launch.get("name", ""), sym)
+    if _why:
+        await update.callback_query.message.reply_text(_why + " Type a different ticker.")
+        return ENTERING_SYMBOL
+    launch["symbol"] = sym
     return await _after_symbol(update, context)
 
 
