@@ -96,6 +96,14 @@ class SpendCeiling(unittest.TestCase):
         self.assertIn("Nothing was sent", ask(1, "MINT", 3000))  # and it asks again next time
         self.assertIn("Nothing was sent", ask(1, "MINT", 4000))  # a different size asks again
 
+    def test_mini_app_orders_use_the_same_rule(self):
+        s = self.read("bot.py")
+        i = s.index("def _webapp_trade")
+        body = s[i:i + 1800]
+        self.assertIn("_large_buy_ask(uid, mint", body)
+        j = s.index("def _live_buy_followup")
+        self.assertIn("_large_buy_ask(uid, str(getattr(card.snapshot", s[j:j + 1500])
+
 
 if __name__ == "__main__":
     unittest.main()

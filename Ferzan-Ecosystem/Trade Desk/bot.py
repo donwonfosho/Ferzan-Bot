@@ -2001,7 +2001,7 @@ def _live_buy_followup(
         try:
             slots = len(db.multi_buy_slots(uid) or []) or 1
             est = float(usd_override if usd_override is not None else _default_buy_usd(uid)) * slots
-            ask = _large_buy_ask(uid, (query or "").strip() or str(getattr(card.snapshot, "token_address", "")), est)
+            ask = _large_buy_ask(uid, str(getattr(card.snapshot, "token_address", "") or "").strip() or (query or "").strip(), est)
             if ask:
                 return ask
         except Exception:
@@ -8578,6 +8578,10 @@ def _webapp_trade(uid: int, o: dict) -> tuple[bool, str]:
             return False, "Couldn't price the native coin right now — nothing sent."
         usd = float(o["amount"]) * px
     usd = min(signer.max_usd(), max(1.0, usd))
+    slots = len(db.multi_buy_slots(uid) or []) if o.get("multi") else 0
+    ask = _large_buy_ask(uid, mint, usd * (slots if slots >= 2 else 1))  # same two-tap rule as the bot's buttons
+    if ask:
+        return False, ask
     if o.get("multi") and db.multi_buy_slots(uid):
         return _multi_buy(uid, card, mint, True, usd)
     return _live_buy(uid, card, mint, True, usd)
