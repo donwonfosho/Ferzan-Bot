@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import redact
 import re
 
 import requests
@@ -113,7 +114,7 @@ def status_text() -> str:
     try:
         addr = public_evm()
     except Exception as exc:
-        return f"EVM key present but invalid.\n{exc}"
+        return f"EVM key present but invalid.\n{redact.scrub(exc)}"
     flag = "ON" if live_enabled() else "OFF"
     return (
         f"EVM signer {addr}\n"
@@ -373,7 +374,7 @@ def buy_curve(
             raw_hex = "0x" + raw_hex
         body = _send_raw(meta, raw_hex, acct.address, raw_tx["nonce"])
     except Exception as exc:
-        return False, f"Curve buy failed: {exc}"
+        return False, f"Curve buy failed: {redact.scrub(exc)}"
     if body.get("error"):
         err = body["error"]
         return False, str(err.get("message") if isinstance(err, dict) else err)
@@ -422,7 +423,7 @@ def buy_evm(
         from eth_account import Account
         from price_fetcher import get_price_usd
     except Exception as exc:
-        return False, f"EVM deps missing: {exc}"
+        return False, f"EVM deps missing: {redact.scrub(exc)}"
 
     meta = CHAINS[cid]
     try:
@@ -462,7 +463,7 @@ def buy_evm(
             import hood
 
             return hood.buy_hood(buy_token, usd, key_hex)
-        return False, f"0x quote failed: {exc}"
+        return False, f"0x quote failed: {redact.scrub(exc)}"
     if qr.status_code >= 400:
         if cid == "hood":
             import hood
@@ -488,7 +489,7 @@ def buy_evm(
             raw_hex = "0x" + raw_hex
         body = _send_raw(meta, raw_hex, acct.address, raw_tx["nonce"])
     except Exception as exc:
-        return False, f"EVM broadcast failed: {exc} | to={raw_tx.get('to')}"
+        return False, f"EVM broadcast failed: {redact.scrub(exc)} | to={raw_tx.get('to')}"
     if body.get("error"):
         err = body["error"]
         return False, str(err.get("message") if isinstance(err, dict) else err)
@@ -629,7 +630,7 @@ def _send_raw_once(meta: dict, raw_hex: str, addr: str = "", nonce=None) -> dict
         try:
             body = _rpc(priv, "eth_sendRawTransaction", [raw_hex])
         except Exception as exc:
-            body = {"error": {"message": f"{exc}"}}
+            body = {"error": {"message": f"{redact.scrub(exc)}"}}
         if isinstance(body, dict) and body.get("result"):
             if addr and nonce is not None:
                 _NONCE_MEM[(int(meta.get("chain_id") or 0), str(addr).lower())] = (int(nonce), _time.time())
@@ -852,7 +853,7 @@ def sell_evm(chain: str, sell_token: str, key_hex: str | None = None, pct: int =
     try:
         from eth_account import Account
     except Exception as exc:
-        return False, f"EVM deps missing: {exc}"
+        return False, f"EVM deps missing: {redact.scrub(exc)}"
     meta = CHAINS[cid]
     raw = (key_hex or _key_hex()).replace("0x", "").replace("0X", "")
     acct = Account.from_key("0x" + raw)
@@ -911,7 +912,7 @@ def sell_evm(chain: str, sell_token: str, key_hex: str | None = None, pct: int =
             import hood
 
             return hood.sell_hood(sell_token, key_hex)
-        return False, f"0x quote failed: {exc}"
+        return False, f"0x quote failed: {redact.scrub(exc)}"
     if qr.status_code >= 400:
         if cid == "hood":
             import hood
@@ -947,7 +948,7 @@ def sell_evm(chain: str, sell_token: str, key_hex: str | None = None, pct: int =
             )
             quote = qr.json() if qr.content else {}
         except requests.RequestException as exc:
-            return False, approve_note + f"0x requote failed: {exc}"
+            return False, approve_note + f"0x requote failed: {redact.scrub(exc)}"
     else:
         approve_note = ""
     tx = quote.get("transaction") or quote.get("tx") or {}

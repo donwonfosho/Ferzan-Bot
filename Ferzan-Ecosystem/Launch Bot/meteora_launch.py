@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import redact
 import re
 import subprocess
 from dataclasses import dataclass
@@ -126,7 +127,7 @@ def build_unsigned_meteora_tx(
     except ValueError:
         out = {}
     if proc.returncode != 0 or out.get("error") or not out.get("tx_hex"):
-        detail = out.get("error") or (proc.stderr or "").strip()[-300:] or "unknown error"
+        detail = out.get("error") or redact.scrub((proc.stderr or "").strip()[-300:]) or "unknown error"
         print(f"METEORA_BUILD_FAILED: {detail}")
         if "needs about" in detail:  # balance check: show it to the launcher as-is
             raise _fail(detail[:300])

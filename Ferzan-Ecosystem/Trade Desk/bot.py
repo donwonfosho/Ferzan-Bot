@@ -312,7 +312,7 @@ def _operators() -> set[int]:
 
 def _is_operator(user_id: int) -> bool:
     ops = _operators()
-    return (not ops) or user_id in ops
+    return bool(ops) and user_id in ops  # nobody configured = nobody is an operator
 
 
 def _allowlist() -> set[int]:
@@ -4276,6 +4276,9 @@ async def feedmin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 async def sponsor_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update):
         return
+    if not _is_operator(update.effective_user.id):
+        await update.effective_message.reply_text("Operators only.")
+        return
     if not context.args or len(context.args) < 4:
         await update.effective_message.reply_text(
             "Paid slot (you collect off-Telegram).\n"
@@ -4285,9 +4288,15 @@ async def sponsor_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     kind, chain, title = context.args[0], context.args[1], context.args[2]
     url = context.args[3]
-    hours = float(context.args[4]) if len(context.args) > 4 else 24
+    try:
+        hours = float(context.args[4]) if len(context.args) > 4 else 24
+    except ValueError:
+        hours = 0
     if kind not in {"ad", "trend"}:
         await update.effective_message.reply_text("kind: ad or trend")
+        return
+    if not (0 < hours <= 24 * 90) or not re.match(r"^https://[^\s<>\"']+$", url) or len(title) > 60:
+        await update.effective_message.reply_text("Need an https:// link, a title under 60 characters and hours between 0 and 2160.")
         return
     sid = db.add_sponsored(chain, kind, title, url, hours)
     await update.effective_message.reply_text(f"Slot #{sid} {kind} {chain} {hours:g}h")
@@ -4817,6 +4826,9 @@ async def walletname_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 async def importsol_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update):
         return
+    if update.effective_chat and update.effective_chat.type != "private":
+        await update.effective_message.reply_text("Import keys in a private chat with me only. Delete that message if you pasted a key here.")
+        return
     if not context.args:
         await update.effective_message.reply_text("Usage: /importsol <base58-key>")
         return
@@ -4838,6 +4850,9 @@ async def importsol_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def importevm_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update):
+        return
+    if update.effective_chat and update.effective_chat.type != "private":
+        await update.effective_message.reply_text("Import keys in a private chat with me only. Delete that message if you pasted a key here.")
         return
     if not context.args:
         await update.effective_message.reply_text("Usage: /importevm <0x-key>")

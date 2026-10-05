@@ -12,6 +12,7 @@ Signup (free, no card):
 from __future__ import annotations
 
 import os
+import redact
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -92,7 +93,10 @@ def _es(params: dict[str, Any]) -> Any:
         )
     q = {"apikey": key, **params}
     r = requests.get(ETHERSCAN_V2, params=q, timeout=15)
-    r.raise_for_status()
+    try:
+        r.raise_for_status()
+    except requests.HTTPError as exc:
+        raise OnchainError(f"Etherscan HTTP {r.status_code}") from None
     data = r.json()
     if str(data.get("status")) == "0" and data.get("message") not in {"No transactions found", "OK"}:
         raise OnchainError(str(data.get("result") or data.get("message")))
@@ -330,7 +334,7 @@ def hood_recent(address: str, limit: int = 8) -> list[WalletEvent]:
         r.raise_for_status()
         rows = (r.json() or {}).get("result") or []
     except requests.RequestException as exc:
-        raise OnchainError(f"Robinhood explorer error: {exc}") from exc
+        raise OnchainError(f"Robinhood explorer error: {redact.scrub(exc)}") from exc
     if isinstance(rows, str):
         raise OnchainError(rows)
     events: list[WalletEvent] = []

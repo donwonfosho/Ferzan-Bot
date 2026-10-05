@@ -20,6 +20,7 @@ Telegram Mini Apps require the page to be served over HTTPS.)
 """
 
 import os
+import redact
 import logging
 import time
 import html as _html
@@ -105,6 +106,14 @@ RPC_URLS = {
 PLATFORM_TREASURY_EVM = os.environ.get("PLATFORM_TREASURY_EVM", "")
 
 app = FastAPI(title="Launch Bot API")
+
+
+@app.exception_handler(HTTPException)
+async def _scrubbed_http_error(request, exc):  # no API key / RPC URL ever leaves in an error body
+    from fastapi.responses import JSONResponse
+    d = exc.detail
+    d = redact.scrub(d) if isinstance(d, str) else d
+    return JSONResponse({"detail": d}, status_code=exc.status_code, headers=getattr(exc, "headers", None))
 import launch_app as _launch_app  # noqa: E402
 app.include_router(_launch_app.router)
 
@@ -1161,7 +1170,7 @@ def _run_fees(payload: dict, timeout: int = 90) -> dict:
     except ValueError:
         out = {}
     if proc.returncode != 0 or out.get("error"):
-        detail = out.get("error") or (proc.stderr or "").strip()[-300:] or "unknown error"
+        detail = out.get("error") or redact.scrub((proc.stderr or "").strip()[-300:]) or "unknown error"
         logger.warning("SOL_FEES_FAILED: %s", detail)
         raise HTTPException(400, str(detail)[:300])
     return out
@@ -2150,7 +2159,7 @@ def sol_swap(body: SolSwapBody, request: Request):
     try:
         out = _json.loads(p.stdout or "{}")
     except Exception:
-        out = {"error": (p.stderr or "no output")[-200:]}
+        out = {"error": redact.scrub((p.stderr or "no output")[-200:])}
     if out.get("error"):
         raise HTTPException(400, str(out["error"])[:300])
     return out

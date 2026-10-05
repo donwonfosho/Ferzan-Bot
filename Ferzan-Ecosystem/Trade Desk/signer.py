@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import logging
 import os
+import redact
 
 import requests
 
@@ -362,7 +363,7 @@ def _jito_bundle_status(bundle_id: str) -> str:
                 return f"{row.get('status')} (landed_slot={row.get('landed_slot')})"
             return str(body.get("error") or body)[:200]
         except Exception as exc:
-            return f"status lookup failed: {exc}"
+            return f"status lookup failed: {redact.scrub(exc)}"
     return "status endpoint not found"
 
 
@@ -400,14 +401,14 @@ def _swap_send_jito(quote: dict, kp, tip: int, opts: dict | None = None) -> tupl
         if opts is not None:
             opts["tip_paid"] = max(JITO_MIN_TIP, tip)
     except requests.RequestException as exc:
-        return False, f"Jupiter swap failed: {exc}"
+        return False, f"Jupiter swap failed: {redact.scrub(exc)}"
     raw_tx = swap.get("swapTransaction")
     if not raw_tx:
         return False, str(swap.get("error") or swap.get("message") or "Jupiter returned no transaction")
     try:
         wire, sig = _sign(raw_tx, kp)
     except Exception as exc:
-        return False, f"Signing failed: {exc}"
+        return False, f"Signing failed: {redact.scrub(exc)}"
     # Jito's default limit is ~1 req/s per IP. Resending the IDENTICAL signed
     # tx is always safe (one signature can only land once), so rate limits
     # just back off and resend.
@@ -424,7 +425,7 @@ def _swap_send_jito(quote: dict, kp, tip: int, opts: dict | None = None) -> tupl
             )
             body = resp.json() if resp.content else {}
         except Exception as exc:
-            maybe_sent, last_err = True, f"Jito send: {exc}"  # may have been accepted
+            maybe_sent, last_err = True, f"Jito send: {redact.scrub(exc)}"  # may have been accepted
             break
         err = body.get("error") if isinstance(body, dict) else None
         msg = str(err.get("message") if isinstance(err, dict) else err or "")
@@ -493,7 +494,7 @@ def _rpc_broadcast(wire: str) -> tuple[bool, str]:
         )
         body = r.json() if r.content else {}
     except Exception as exc:
-        return False, str(exc)[:200]
+        return False, redact.scrub(exc)[:200]
     if body.get("error"):
         err = body["error"]
         return False, str(err.get("message") if isinstance(err, dict) else err)[:300]
@@ -507,7 +508,7 @@ def _swap_send_rpc(quote: dict, kp, base_fee: int) -> tuple[bool, str]:
         try:
             swap = _jupiter_swap_tx(quote, kp, int(base_fee * bump))
         except requests.RequestException as exc:
-            last_err = f"Jupiter swap failed: {exc}"
+            last_err = f"Jupiter swap failed: {redact.scrub(exc)}"
             if attempt < len(bumps) - 1:
                 continue
             return False, last_err
@@ -517,7 +518,7 @@ def _swap_send_rpc(quote: dict, kp, base_fee: int) -> tuple[bool, str]:
         try:
             wire, sig = _sign(raw_tx, kp)
         except Exception as exc:
-            return False, f"Signing failed: {exc}"
+            return False, f"Signing failed: {redact.scrub(exc)}"
         try:
             send = _rpc_post(
                 json={
@@ -536,9 +537,9 @@ def _swap_send_rpc(quote: dict, kp, base_fee: int) -> tuple[bool, str]:
             if landed:
                 return True, sig
             if landed is False and "Expired" in why and attempt < len(bumps) - 1:
-                last_err = f"Broadcast failed ({exc}); tx expired unlanded"
+                last_err = f"Broadcast failed ({redact.scrub(exc)}); tx expired unlanded"
                 continue
-            return False, f"Broadcast error: {exc}. {why}\nhttps://solscan.io/tx/{sig}"
+            return False, f"Broadcast error: {redact.scrub(exc)}. {why}\nhttps://solscan.io/tx/{sig}"
         if body.get("error"):
             err = body["error"]
             last_err = str(err.get("message") if isinstance(err, dict) else err)
@@ -618,7 +619,7 @@ def _rpc_post(**kwargs):
     except Exception as exc:
         if not fb or fb == _rpc():
             raise
-        log.warning("main Solana RPC failed (%s); retrying on the fallback", str(exc)[:80])
+        log.warning("main Solana RPC failed (%s); retrying on the fallback", redact.scrub(exc)[:80])
         return requests.post(fb, **kwargs)
 
 
@@ -657,7 +658,7 @@ def status_text() -> str:
     try:
         addr = public_sol()
     except Exception as exc:
-        return f"Signer present but could not derive address.\n{exc}"
+        return f"Signer present but could not derive address.\n{redact.scrub(exc)}"
     cap = max_usd()
     flag = "ON" if live_enabled() else "OFF (set LIVE_BUYS=1)"
     return (
@@ -708,7 +709,7 @@ def _ferzan_dbc_swap(mint: str, side: str, amount_raw: int, kp, slip_bps: int | 
         msg = unsigned.message
         signed = Transaction([kp], msg, msg.recent_blockhash)
     except Exception as exc:
-        return False, f"Direct Meteora route: could not sign ({exc}). Nothing sent."
+        return False, f"Direct Meteora route: could not sign ({redact.scrub(exc)}). Nothing sent."
     wire, sig = _b64.b64encode(bytes(signed)).decode(), str(signed.signatures[0])
     ok, err = _rpc_broadcast(wire)
     if not ok:
@@ -745,7 +746,7 @@ def buy_sol(
         from solders.transaction import VersionedTransaction
         from price_fetcher import get_price_usd
     except Exception as exc:
-        return False, f"Signer deps missing: {exc}"
+        return False, f"Signer deps missing: {redact.scrub(exc)}"
 
     try:
         kp = keypair_from_secret(secret) if secret else _keypair()
@@ -773,7 +774,7 @@ def buy_sol(
         jup_err = "" if qr.status_code < 400 and not quote.get("error") else str(
             quote.get("error") or quote.get("message") or qr.text[:180])
     except requests.RequestException as exc:
-        quote, jup_err = {}, f"Jupiter quote failed: {exc}"
+        quote, jup_err = {}, f"Jupiter quote failed: {redact.scrub(exc)}"
     opts = exec_opts(user_id)
     if jup_err:
         direct = _ferzan_dbc_swap(mint, "buy", lamports, kp, slip_bps, opts)
@@ -816,7 +817,7 @@ def _token_raw_balance(mint: str, kp=None) -> int:
     try:
         data = r.json() if r.content else {}
     except Exception as exc:
-        raise RuntimeError(f"RPC token balance failed: {exc}") from exc  # never report a failed read as 0
+        raise RuntimeError(f"RPC token balance failed: {redact.scrub(exc)}") from exc  # never report a failed read as 0
     if not isinstance((data or {}).get("result"), dict):
         raise RuntimeError(f"RPC token balance error: {str((data or {}).get('error') or r.status_code)[:120]}")
     total = 0
@@ -864,7 +865,7 @@ def holdings_pub(owner: str, strict: bool = False) -> list[dict]:
         try:
             data = r.json() if r.content else {}
         except Exception as exc:
-            raise RuntimeError(f"RPC holdings failed: {exc}") from exc
+            raise RuntimeError(f"RPC holdings failed: {redact.scrub(exc)}") from exc
         if strict and (r.status_code >= 400 or data.get("error") or not isinstance(data.get("result"), dict)):
             raise RuntimeError(f"RPC holdings error: {str(data.get('error') or r.status_code)[:120]}")
         for acc in (data.get("result") or {}).get("value") or []:
@@ -900,7 +901,7 @@ def holdings_text(secret: str | None = None) -> str:
         rows = holdings(secret)
         lamports = sol_balance_lamports(addr)
     except Exception as exc:
-        return f"Could not read bag.\n{exc}"
+        return f"Could not read bag.\n{redact.scrub(exc)}"
     lines = [
         f"Live bag on {addr}",
         f"SOL {lamports / 1_000_000_000:.6f}",
@@ -977,7 +978,7 @@ def sell_sol(
     try:
         from solders.transaction import VersionedTransaction
     except Exception as exc:
-        return False, f"Signer deps missing: {exc}"
+        return False, f"Signer deps missing: {redact.scrub(exc)}"
     try:
         kp = keypair_from_secret(secret) if secret else _keypair()
         raw_amt = _token_raw_balance(mint, kp)
@@ -1002,7 +1003,7 @@ def sell_sol(
         jup_err = "" if qr.status_code < 400 and not quote.get("error") else str(
             quote.get("error") or quote.get("message") or qr.text[:180])
     except requests.RequestException as exc:
-        quote, jup_err = {}, f"Jupiter quote failed: {exc}"
+        quote, jup_err = {}, f"Jupiter quote failed: {redact.scrub(exc)}"
     opts = exec_opts(user_id)
     if jup_err:
         direct = _ferzan_dbc_swap(mint, "sell", raw_amt, kp, slip_bps, opts)

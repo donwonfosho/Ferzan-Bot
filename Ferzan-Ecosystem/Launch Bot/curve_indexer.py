@@ -16,6 +16,7 @@ import html
 import json
 import logging
 import os
+import redact
 import sqlite3
 import sys
 import time
@@ -166,7 +167,7 @@ class Rpc:
             except (requests.RequestException, ValueError) as e:
                 last = e
                 self.i += 1  # network trouble: try the next endpoint
-        raise RuntimeError(f"rpc {method} failed: {last}")
+        raise RuntimeError(f"rpc {method} failed: {redact.scrub(last)}")
 
 
 def _word(hexdata: str, i: int) -> int:
