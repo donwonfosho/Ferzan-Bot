@@ -2121,6 +2121,19 @@ def _mint_from_position(pos: dict) -> str:
 _EVM_SCAN = ("eth", "base", "bsc", "hood", "arb", "avax")
 
 
+async def _chain_label_for(mint: str) -> str:
+    """Chain label saved with a DCA plan / buy limit: from the token lookup for 0x addresses."""
+    import chains
+
+    detected = None
+    if mint.startswith("0x"):
+        try:
+            detected = (await asyncio.to_thread(analyze, mint)).snapshot.chain
+        except Exception:
+            detected = None
+    return chains.label_for_mint(mint, detected)
+
+
 def _chain_of_mint(uid: int, mint: str, evm_addr: str | None = None) -> str:
     """Best-effort chain id for a token address (blocking — call via _off)."""
     if mint.startswith("T") and 30 <= len(mint) <= 36:
@@ -2807,7 +2820,7 @@ async def dca_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not interval_s:
         await update.effective_message.reply_text("Frequency must be hourly, daily, or weekly.")
         return
-    chain = "base" if mint.startswith("0x") else "solana"
+    chain = await _chain_label_for(mint)
     db.set_dca_plan(uid, mint, chain, usd, interval_s)
     await update.effective_message.reply_text(
         f"📅 DCA armed: ${usd:.0f} every {interval_key}.\n"
@@ -3410,7 +3423,7 @@ async def buylimit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.effective_message.reply_text("Price and size must be numbers.")
         return
     usd = min(signer.max_usd(), max(1.0, usd))
-    chain = "sol" if not mint.startswith("0x") else "bsc"
+    chain = await _chain_label_for(mint)
     lid = db.add_buy_limit(update.effective_user.id, mint, chain, usd, target)
     await update.effective_message.reply_text(
         f"⏳ Buy limit #{lid}\n{_fmt_px(target)} · ${usd:.0f}\n`{mint}`",
@@ -8585,6 +8598,7 @@ def _webapp_trade(uid: int, o: dict) -> tuple[bool, str]:
     if ask:
         return False, ask
     _MANUAL_TAP.on = True
+    crossbuy.allow(True)  # a manual tap: the funding offer may come back for the app to confirm
     try:
         # force=False: the app honours the user's score floor exactly like the chat's Buy button does
         if o.get("multi") and db.multi_buy_slots(uid):
@@ -8593,6 +8607,7 @@ def _webapp_trade(uid: int, o: dict) -> tuple[bool, str]:
             ok, msg = _live_buy(uid, card, mint, False, usd)
     finally:
         _MANUAL_TAP.on = False
+        crossbuy.allow(False)
     if not ok and msg.startswith("Blocked by your score floor"):
         msg += "\n(The app has no Override: lower the floor in /settings or buy from the chat.)"
     return ok, msg
@@ -8603,6 +8618,12 @@ async def _run_webapp_order(context: ContextTypes.DEFAULT_TYPE, o: dict) -> None
     try:
         if not _allowed(uid):
             ok, msg = False, "This desk is locked to an allowlist."
+        elif o["side"] == "buy" and o.get("chain") == "xbuy":  # the app confirmed a cross-chain funding offer: same engine as the chat's Confirm
+            if not crossbuy.has_pending(uid):
+                ok, msg = False, "That funding offer expired (5 min). Tap Buy again."
+            else:
+                asyncio.create_task(_xbuy_execute(context.bot, uid, uid, None))
+                ok, msg = True, "🌉 Funding started. Progress and the buy result will arrive in your Ferzan chat."
         else:
             ok, msg = await _off(uid, _webapp_trade, uid, o, _busy=(False, BUSY_MSG))
     except Exception as exc:
@@ -8610,7 +8631,7 @@ async def _run_webapp_order(context: ContextTypes.DEFAULT_TYPE, o: dict) -> None
         ok, msg = False, f"Trade failed: {exc}"
     db.finish_webapp_order(o["id"], bool(ok), msg)
     try:
-        await context.bot.send_message(uid, "📱 From the app\n" + msg, disable_web_page_preview=True)
+        await context.bot.send_message(uid, "📱 From the app\n" + msg.replace(crossbuy.MARK, ""), disable_web_page_preview=True)
     except Exception:
         pass
 

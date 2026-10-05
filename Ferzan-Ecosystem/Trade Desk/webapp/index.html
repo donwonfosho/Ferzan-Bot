@@ -600,7 +600,7 @@
   let busy = false;
   async function order(o, question) {
     if (busy) { toast("A trade is already running…", 2500); return; }
-    if (!(await confirmBox(question))) return;
+    if (question !== null && !(await confirmBox(question))) return;
     busy = true; document.body.classList.add("busy");
     tg && tg.HapticFeedback && tg.HapticFeedback.impactOccurred("medium");
     toast("⏳ Sending…");
@@ -621,6 +621,13 @@
         }
         if (["done", "failed", "expired"].includes(st.status)) {
           const ok = st.status === "done";
+          if (!ok && /\[\[XBUY\]\]/.test(st.result || "")) {  // short on gas here, another chain can fund it: same offer as the chat
+            const offer = (st.result || "").replace(/\u2063?\[\[XBUY\]\]/g, "").trim();
+            $("toast").classList.remove("show");
+            busy = false; document.body.classList.remove("busy");
+            if (await confirmBox(offer)) await order({ side: "xbuy", mint: o.mint, chain: o.chain, amount: 1, unit: "usd" }, null);
+            return;
+          }
           tg && tg.HapticFeedback && tg.HapticFeedback.notificationOccurred(ok ? "success" : "error");
           if (ok) confetti();
           // Stays up until tapped, so a result that lands while you look away isn't missed.

@@ -113,6 +113,26 @@ class SpendCeiling(unittest.TestCase):
         self.assertNotIn("_live_buy(uid, card, mint, True, usd)", body)
         self.assertIn('getattr(_MANUAL_TAP, "on", False)', s)
 
+    def test_cross_chain_funding_in_the_app(self):
+        b, w, h = self.read("bot.py"), self.read("webapp.py"), self.read("webapp/index.html")
+        self.assertIn("crossbuy.allow(True)", b)
+        self.assertIn("crossbuy.has_pending(uid)", b)
+        self.assertIn('o.get("chain") == "xbuy"', b)
+        self.assertIn('msg.replace(crossbuy.MARK, "")', b)
+        self.assertIn('chain = "buy", 1.0, "usd", "xbuy"'.replace('chain = "buy"', 'side, amount, unit, chain = "buy"'), w)
+        self.assertIn("XBUY", h)
+        self.assertIn("question !== null", h)
+
+    def test_saved_chain_labels_are_real(self):
+        import chains
+        self.assertEqual(chains.label_for_mint("0x" + "a" * 40, "ethereum"), "eth")
+        self.assertEqual(chains.label_for_mint("0x" + "a" * 40, None), "base")
+        self.assertEqual(chains.label_for_mint("TXYZ" + "a" * 30), "trx")
+        self.assertEqual(chains.label_for_mint("EQ" + "A" * 46), "ton")
+        self.assertEqual(chains.label_for_mint("So11111111111111111111111111111111111111112"), "sol")
+        b = self.read("bot.py")
+        self.assertNotIn('chain = "base" if mint.startswith("0x") else "solana"', b)
+
 
 if __name__ == "__main__":
     unittest.main()

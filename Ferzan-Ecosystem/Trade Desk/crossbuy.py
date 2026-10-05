@@ -191,6 +191,12 @@ def take_pending(uid: int) -> dict | None:
     return item
 
 
+def has_pending(uid: int) -> bool:
+    with _LOCK:
+        item = _PENDING.get(uid)
+    return bool(item and item["exp"] >= time.time())
+
+
 def drop_pending(uid: int) -> None:
     with _LOCK:
         _PENDING.pop(uid, None)

@@ -300,6 +300,19 @@ def token_info(mint: str) -> dict:
     return info
 
 
+async def _chain_label(mint: str) -> str:
+    """Real chain for a saved DCA plan / limit (the token lookup is cached, so this is cheap)."""
+    import chains
+
+    detected = None
+    if mint.startswith("0x"):
+        try:
+            detected = (await asyncio.to_thread(token_info, mint)).get("chain")
+        except Exception:
+            detected = None
+    return chains.label_for_mint(mint, detected)
+
+
 def _max_usd() -> float:
     import signer  # env-only read; no key is touched
 
@@ -343,8 +356,13 @@ async def api_order(request: Request) -> JSONResponse:
         amount = float(body.get("amount"))
     except (TypeError, ValueError):
         raise HTTPException(status_code=400, detail="Bad amount.")
-    if side not in ("buy", "sell") or not _valid_mint(mint):
+    if side not in ("buy", "sell", "xbuy") or not _valid_mint(mint):
         raise HTTPException(status_code=400, detail="Bad order.")
+    xbuy = side == "xbuy"
+    if chain == "xbuy" and not xbuy:
+        chain = ""  # the marker is ours alone
+    if xbuy:  # confirms the funding offer already waiting for this user; stored as a marked buy (the table only allows buy/sell)
+        side, amount, unit, chain = "buy", 1.0, "usd", "xbuy"
     if side == "sell" and (unit != "pct" or not 1 <= amount <= 100):
         raise HTTPException(status_code=400, detail="Sell 1–100%.")
     if side == "buy" and (unit not in ("native", "usd") or not 0 < amount <= 1_000_000):
@@ -447,7 +465,7 @@ async def api_rules_save(request: Request) -> JSONResponse:
         every = str(body.get("every") or "")
         if usd is None or every not in DCA_EVERY:
             raise HTTPException(status_code=400, detail="Pick an amount and hourly / daily / weekly.")
-        db.set_dca_plan(uid, mint, "base" if mint.startswith("0x") else "solana", usd, DCA_EVERY[every])
+        db.set_dca_plan(uid, mint, await _chain_label(mint), usd, DCA_EVERY[every])
     elif kind == "dca_off":
         db.clear_dca_plan(uid, mint)
     elif kind == "limit":
@@ -457,7 +475,7 @@ async def api_rules_save(request: Request) -> JSONResponse:
             raise HTTPException(status_code=400, detail="Pick a target price and an amount.")
         if len(db.armed_buy_limits(uid)) >= db.MAX_BUY_LIMITS:
             raise HTTPException(status_code=400, detail=f"Limit reached ({db.MAX_BUY_LIMITS} open limit buys).")
-        db.add_buy_limit(uid, mint, "bsc" if mint.startswith("0x") else "sol", usd, px)
+        db.add_buy_limit(uid, mint, await _chain_label(mint), usd, px)
     elif kind == "limit_cancel":
         try:
             lid = int(body.get("id"))

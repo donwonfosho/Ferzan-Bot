@@ -193,6 +193,19 @@ def resolve_chain(raw: str | None) -> str | None:
     return ALIASES.get(key)
 
 
+def label_for_mint(mint: str, detected: str | None = None) -> str:
+    """The chain a saved DCA plan / buy limit belongs to. Non-EVM addresses say it themselves; a 0x address
+    uses the chain the token lookup found (Base only if the lookup could not tell)."""
+    mint = (mint or "").strip()
+    if mint.startswith(("EQ", "UQ", "kQ")):
+        return "ton"
+    if mint.startswith("T") and 30 <= len(mint) <= 36:
+        return "trx"
+    if not mint.startswith("0x"):
+        return "sol"
+    return resolve_chain(detected) or "base"
+
+
 def meta(chain: str) -> dict:
     cid = resolve_chain(chain)
     if not cid:
