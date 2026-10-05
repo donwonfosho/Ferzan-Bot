@@ -31,7 +31,7 @@ def parse_alert_target(text: str, px: float, mc: float) -> tuple[str, str, float
             pct = float(t[:-1].replace("+", ""))
         except ValueError:
             return "Percent looks off. Try +50% or -30%."
-        if pct == 0 or pct <= -100:
+        if pct != pct or pct in (float('inf'), float('-inf')) or pct == 0 or pct <= -100:
             return "Pick a move between -99% and anything up."
         if px <= 0:
             return "No live price for this token right now — use a market cap target like 2m."

@@ -195,7 +195,7 @@ def build_portfolio(uid: int) -> dict:
     try:
         eth_bal, _ = evm_signer.native_balance("base", evm_pub)
     except Exception:
-        eth_bal = 0.0
+        eth_bal, unread = 0.0, unread + 1
     sol_px, eth_px = _price("solana"), _price("ethereum")
 
     try:

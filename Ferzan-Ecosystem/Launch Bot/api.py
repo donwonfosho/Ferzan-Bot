@@ -513,7 +513,7 @@ def complete_request(request_id: str, body: CompleteRequest):
             db.set_curve_address(request_id, curve_addr)
         except Exception as exc:
             logger.warning("set_curve_address failed %s: %s", request_id, exc)
-    if req.wallet_address and req.telegram_user_id and req.chain not in ("tron", "ton"):  # payouts go to EVM/Solana wallets
+    if req.wallet_address and req.telegram_user_id and req.chain not in ("tron", "ton", "solana") and _re.fullmatch(r"0x[0-9a-fA-F]{40}", req.wallet_address or ""):  # referral payouts are EVM-address only
         try:
             db.set_payout_wallet(req.telegram_user_id, req.wallet_address)
         except Exception as exc:
@@ -845,7 +845,10 @@ def fail_request(request_id: str, body: CompleteRequest):
     if not req:
         raise HTTPException(404, "Launch request not found")
 
-    db.update_status(request_id, "failed", error_message=body.tx_hash)  # tx_hash field reused as message here
+    # tx_hash field reused as message here. Only a request that was never broadcast may be failed:
+    # a submitted/confirmed launch stays as it is (a late error in the page must not undo a real launch).
+    if not db.fail_if_open(request_id, body.tx_hash or ""):
+        return {"status": "ignored"}
     _notify_telegram(
         chat_id=req.chat_id,
         text=f"⚠️ Launch of <b>{_html.escape(req.name)}</b> failed or was cancelled in your wallet.",
@@ -2453,19 +2456,19 @@ def share_page(chain: str, token: str, w: str = "", r: str = ""):
     name, sym, path = "", "", ""
     c = _idx_db()
     try:
-        r = c.execute("SELECT name, symbol, curve, token FROM curves WHERE chain = ? AND (token = ? OR token = ? OR curve = ? OR curve = ?)",
+        crow = c.execute("SELECT name, symbol, curve, token FROM curves WHERE chain = ? AND (token = ? OR token = ? OR curve = ? OR curve = ?)",
                       (chain, token, token.lower(), token, token.lower())).fetchone() if c else None
     finally:
         if c is not None:
             c.close()
-    if r:
-        name, sym = r["name"] or "", r["symbol"] or ""
+    if crow:
+        name, sym = crow["name"] or "", crow["symbol"] or ""
         if chain == "solana":
-            path = f"/coin/solana/{r['token']}"
+            path = f"/coin/solana/{crow['token']}"
         elif chain in _SHARE_EVM:
-            path = f"/coin/{chain}/{str(r['curve']).lower()}"
+            path = f"/coin/{chain}/{str(crow['curve']).lower()}"
         else:
-            path = f"/token/{chain}/{r['token']}"
+            path = f"/token/{chain}/{crow['token']}"
     else:
         with db._get_conn() as conn:
             row = conn.execute("SELECT name, symbol FROM launch_requests WHERE status = 'confirmed' AND chain = ? AND "

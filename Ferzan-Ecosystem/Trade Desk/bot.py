@@ -2588,6 +2588,9 @@ async def tp_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     except ValueError:
         await update.effective_message.reply_text("Use a number. /tp 50")
         return
+    if not (0 < pct <= 10000) or pct != pct:
+        await update.effective_message.reply_text("Take-profit must be above 0 and at most 10000. Example: /tp 100")
+        return
     mint = context.args[1] if len(context.args) > 1 else ""
     if not mint:
         found = db.live_mints(update.effective_user.id)
@@ -2609,6 +2612,9 @@ async def sl_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         pct = float(context.args[0])
     except ValueError:
         await update.effective_message.reply_text("Use a number. /sl 30")
+        return
+    if not (0 < pct < 100) or pct != pct:
+        await update.effective_message.reply_text("Stop-loss must be between 1 and 99. Example: /sl 30")
         return
     mint = context.args[1] if len(context.args) > 1 else ""
     if not mint:
@@ -5897,8 +5903,10 @@ async def claim_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             f"Claimable ${st['open']:.4f}. Minimum $5. Keep sharing /ref."
         )
         return
-    amt = db.request_referral_claim(uid)
-    upto = db.max_claimed_ref_id(uid)
+    amt, upto = db.claim_referral_batch(uid)
+    if amt <= 0:
+        await update.effective_message.reply_text("Nothing left to claim right now.")
+        return
     sol_pub = (db.get_user_wallet(uid) or {}).get("sol_pub") or "(no wallet yet)"
     import referral_pay
 
@@ -6720,11 +6728,12 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 )
             return
         if parts[1] == "go":
-            pack = context.user_data.get("bridge_pack")
+            # pop first: a double-tap or a retry after a timeout must never send twice
+            pack = context.user_data.pop("bridge_pack", None)
             if not pack:
-                await query.edit_message_text("Quote expired. Tap Get Quote again.", reply_markup=_bridge_kb(st, uid))
+                await query.edit_message_text("Quote expired (or already sent). Tap Get Quote again.", reply_markup=_bridge_kb(st, uid))
                 return
-            await query.edit_message_text("Signing on the desk… (35s cap)")
+            await query.edit_message_text("Signing on the desk… (45s cap)")
             try:
                 # NOTE: no local `import asyncio` here — a function-level import
                 # makes `asyncio` local to all of on_callback and breaks every
@@ -6750,7 +6759,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             except asyncio.TimeoutError:
                 await context.bot.send_message(
                     uid,
-                    "Bridge timed out after 35s (RPC hung).\nTry Base → ETH, or a smaller SOL size.",
+                    "Bridge is taking longer than 45s. It MAY have been sent - check your wallet or the explorer before trying again.",
                 )
             except Exception as exc:
                 await context.bot.send_message(uid, f"Bridge send failed.\n{exc}")

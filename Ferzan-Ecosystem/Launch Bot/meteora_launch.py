@@ -54,6 +54,8 @@ def _dev_buy_lamports(raw) -> int:
     """'0.5', '0.5 SOL', 1, None -> lamports. Anything unreadable -> 0."""
     if raw is None:
         return 0
+    if re.search(r"\d[eE][+-]?\d", str(raw)):  # "5e-05" must never be read as 5 SOL
+        return 0
     m = re.search(r"\d*\.\d+|\d+", str(raw).replace(",", ""))
     if not m:
         return 0

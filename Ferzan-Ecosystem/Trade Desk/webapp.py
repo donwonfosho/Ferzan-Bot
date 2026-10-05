@@ -68,7 +68,7 @@ def verify_init_data(init_data: str, token: str | None = None, now: float | None
     check = "\n".join(f"{k}={v}" for k, v in sorted(pairs.items()))
     secret = hmac.new(b"WebAppData", token.encode(), hashlib.sha256).digest()
     want = hmac.new(secret, check.encode(), hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(want, got):
+    if not hmac.compare_digest(want.encode(), str(got).encode()):
         raise ValueError("bad signature")
     auth_date = int(pairs.get("auth_date") or 0)
     if (now or time.time()) - auth_date > INIT_DATA_MAX_AGE_S:

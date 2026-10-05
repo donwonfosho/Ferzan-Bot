@@ -177,6 +177,20 @@ def update_status(
         conn.execute(f"UPDATE launch_requests SET {', '.join(fields)} WHERE id = ?", values)
 
 
+def fail_if_open(request_id: str, message: str = "") -> bool:
+    """Mark a request failed ONLY if nothing has been broadcast for it yet
+    (status pending/built/failed). A submitted or confirmed launch is never
+    flipped to failed by a late or forged /fail call. Returns True if changed."""
+    now = datetime.now(timezone.utc).isoformat()
+    with _get_conn() as conn:
+        cur = conn.execute(
+            "UPDATE launch_requests SET status = 'failed', error_message = ?, updated_at = ? "
+            "WHERE id = ? AND status IN ('pending', 'built', 'failed')",
+            (message or "", now, request_id),
+        )
+        return cur.rowcount > 0
+
+
 def get_user_launch_history(telegram_user_id: int, limit: int = 20) -> List[LaunchRequest]:
     with _get_conn() as conn:
         rows = conn.execute(

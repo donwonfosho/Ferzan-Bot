@@ -19,6 +19,7 @@ import html
 import logging
 import os
 import re
+from decimal import Decimal
 import time
 from pathlib import Path
 
@@ -1333,7 +1334,7 @@ async def _ask_devbuy(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def _set_devbuy(update: Update, context: ContextTypes.DEFAULT_TYPE, amount: float):
     launch = context.user_data["launch"]
-    launch["extra_params"]["dev_buy"] = f"{amount:g}" if amount > 0 else "0"
+    launch["extra_params"]["dev_buy"] = format(Decimal(str(amount)), "f") if amount > 0 else "0"
     if launch["mode"] == "meteora":
         return await _show_confirm(update, context)
     return await _ask_window(update, context)
@@ -1407,7 +1408,7 @@ async def window_entered(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.user_data.get("launch"):
         return ConversationHandler.END
     text = (update.message.text or "").strip()
-    if re.fullmatch(r"\\d+", text):
+    if re.fullmatch(r"\d+", text):
         return await _set_window(update, context, int(text))  # plain number = minutes
     return await open_at_entered(update, context)
 
@@ -1453,7 +1454,7 @@ async def open_at_entered(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def _set_maxbuy(update: Update, context: ContextTypes.DEFAULT_TYPE, amount: float):
-    context.user_data["launch"]["extra_params"]["max_buy"] = f"{amount:g}" if amount > 0 else "0"
+    context.user_data["launch"]["extra_params"]["max_buy"] = format(Decimal(str(amount)), "f") if amount > 0 else "0"
     return await _show_confirm(update, context)
 
 
@@ -2538,7 +2539,7 @@ async def refer_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def referwallet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     raw = " ".join(context.args or []).strip()
-    if not (raw.startswith("0x") and len(raw) == 42):
+    if not re.fullmatch(r"0x[0-9a-fA-F]{40}", raw):
         await update.effective_message.reply_text("Usage: /referwallet 0xYourEvmAddress")
         return
     db.set_payout_wallet(update.effective_user.id, raw)

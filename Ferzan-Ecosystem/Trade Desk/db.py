@@ -1923,6 +1923,39 @@ def request_referral_claim(user_id: int) -> float:
     return stats["open"]
 
 
+def claim_referral_batch(user_id: int) -> tuple[float, int]:
+    """Atomically move this user's open share rows to 'claimed' and return
+    (amount, highest row id in THIS batch). Two simultaneous /claim taps can
+    not both get the money: the second finds no open rows and gets (0.0, 0)."""
+    uid = int(user_id)
+    with get_conn() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            rows = conn.execute(
+                "SELECT id, share_usd FROM referral_ledger "
+                "WHERE user_id = ? AND kind = 'share' AND status = 'open'",
+                (uid,),
+            ).fetchall()
+            if not rows:
+                conn.execute("COMMIT")
+                return 0.0, 0
+            ids = [int(r["id"]) for r in rows]
+            amt = float(sum(float(r["share_usd"] or 0) for r in rows))
+            conn.execute(
+                "UPDATE referral_ledger SET status = 'claimed' WHERE status = 'open' AND id IN (%s)"
+                % ",".join("?" * len(ids)),
+                ids,
+            )
+            conn.execute("COMMIT")
+            return amt, max(ids)
+        except Exception:
+            try:
+                conn.execute("ROLLBACK")
+            except Exception:
+                pass
+            raise
+
+
 def max_claimed_ref_id(user_id: int) -> int:
     with get_conn() as conn:
         return int(conn.execute(

@@ -2916,6 +2916,8 @@ async def gfilters(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def gban(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_chat.type == "private" and update.effective_user.id not in OWNER_IDS:
+        return  # _is_admin is True in DMs; a global ban must never be open to anyone who messages the bot
     if not await _check_cmd_perm(update, context, "gban", "admin"):
         return
     uid = None
@@ -2953,6 +2955,8 @@ async def gban(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def gunban(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_chat.type == "private" and update.effective_user.id not in OWNER_IDS:
+        return
     if not await _check_cmd_perm(update, context, "gunban", "admin") or not context.args:
         return
     uid = int(context.args[0])
