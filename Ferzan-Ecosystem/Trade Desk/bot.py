@@ -8922,8 +8922,15 @@ async def drawdown_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             logger.exception("drawdown notify failed for %s", uid)
 
 
+_BL_FAIL: dict = {}  # limit id -> (failures, next try); a limit that keeps failing backs off and tells the user once
+_BL_BACKOFF_S = (300, 900, 3600)
+
+
 async def buy_limit_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     for row in db.list_buy_limits():
+        fails, nxt = _BL_FAIL.get(int(row["id"]), (0, 0.0))
+        if nxt > time.time():
+            continue
         px = await asyncio.to_thread(_token_mark_usd, row["mint"])
         if px <= 0 or px > float(row["target_px"]):
             continue
@@ -8936,12 +8943,20 @@ async def buy_limit_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         # Only a real fill closes the limit; refusals and send failures leave
         # it armed so it retries on the next dip (previous prefix-matching
         # marked failed sends as filled).
+        lid = int(row["id"])
         if ok:
-            db.fill_buy_limit(int(row["id"]))
+            db.fill_buy_limit(lid)
+            _BL_FAIL.pop(lid, None)
+        else:
+            fails += 1
+            _BL_FAIL[lid] = (fails, time.time() + _BL_BACKOFF_S[min(fails - 1, len(_BL_BACKOFF_S) - 1)])
+            if fails not in (1, 5):
+                continue  # told on the first failure and once more at the fifth; after that it keeps retrying quietly
+            msg = f"{msg}\n\nThis limit stays armed and retries" + (" every hour; cancel it if you no longer want it." if fails >= 5 else " shortly.")
         try:
             await context.bot.send_message(
                 uid,
-                f"⏳ Buy limit #{row['id']} hit @ {_fmt_px(px)}\n{msg}",
+                f"⏳ Buy limit #{lid} hit @ {_fmt_px(px)}\n{msg}",
             )
         except Exception:
             logger.exception("buy limit notify")

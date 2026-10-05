@@ -17,6 +17,27 @@ def _enc_addr(addr: str) -> str:
     return _addr(addr)[2:].lower().zfill(64)
 
 
+GET_AMOUNTS_OUT = "0xd06ca61f"
+
+
+def _min_out(rpc: str, amount_in: int, path: list) -> int:
+    """What the router says the swap returns, less HOOD_SLIP_BPS (default 20%), so a sandwich or a fast price move
+    makes the swap revert instead of filling at any price. Raises when there is no quote: then nothing is sent."""
+    from evm_signer import _rpc
+    data = (GET_AMOUNTS_OUT + hex(int(amount_in))[2:].zfill(64) + "40".zfill(64) + hex(len(path))[2:].zfill(64)
+            + "".join(_enc_addr(a) for a in path))
+    body = _rpc(rpc, "eth_call", [{"to": ROUTER, "data": data}, "latest"])
+    res = (body.get("result") or "")
+    if body.get("error") or len(res) < 2 + 64 * (2 + len(path)):
+        raise RuntimeError("no router quote for this token (no pool yet?)")
+    out = int(res[-64:], 16)
+    bps = max(100, min(9000, int(__import__("os").environ.get("HOOD_SLIP_BPS") or 2000)))
+    mn = out * (10_000 - bps) // 10_000
+    if mn <= 0:
+        raise RuntimeError("router quote is zero (no liquidity)")
+    return mn
+
+
 def buy_hood(token: str, usd: float, key_hex: str | None = None) -> tuple[bool, str]:
     if not live_enabled():
         return False, "Live buys OFF."
@@ -39,10 +60,14 @@ def buy_hood(token: str, usd: float, key_hex: str | None = None) -> tuple[bool, 
         return False, "No live ETH price right now, so no buy was sent. Try again in a minute."
     wei = max(10**12, int((usd / max(px, 1e-9)) * 10**18))
     deadline = int(time.time()) + 600
+    try:
+        min_out = _min_out(CHAINS["hood"]["rpc"], wei, [WETH, token])
+    except Exception as exc:
+        return False, f"Hood buy not sent: {str(exc)[:120]}. Nothing was sent."
     # offset path dynamic array after 4 * 32
     data = (
         SWAP_ETH
-        + "0".zfill(64)  # amountOutMin
+        + hex(min_out)[2:].zfill(64)  # amountOutMin
         + "80".zfill(64)  # path offset
         + _enc_addr(acct.address)
         + hex(deadline)[2:].zfill(64)
@@ -81,6 +106,10 @@ def sell_hood(token: str, key_hex: str | None = None) -> tuple[bool, str]:
         return False, "Couldn't read your token balance on Hood (the node is busy). Nothing was sent. Tap sell again in a few seconds."
     if bal <= 0:
         return False, f"No token on Hood for {token}"
+    try:
+        min_out = _min_out(meta["rpc"], bal, [token, WETH])
+    except Exception as exc:
+        return False, f"Hood sell not sent: {str(exc)[:120]}. Nothing was sent."
     approve = "0x095ea7b3" + _enc_addr(ROUTER) + ("f" * 64)
     ok, msg = _broadcast(acct, meta, token, approve, 0)
     if not ok:
@@ -90,7 +119,7 @@ def sell_hood(token: str, key_hex: str | None = None) -> tuple[bool, str]:
     data = (
         SWAP_TOKEN
         + hex(bal)[2:].zfill(64)
-        + "0".zfill(64)
+        + hex(min_out)[2:].zfill(64)
         + "a0".zfill(64)
         + _enc_addr(acct.address)
         + hex(deadline)[2:].zfill(64)
