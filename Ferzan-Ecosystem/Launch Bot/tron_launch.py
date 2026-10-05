@@ -66,6 +66,26 @@ def curve_min_grad_trx() -> float:
         return 10000.0
 
 
+REAP_GRACE_S = 600
+
+
+async def _kill(p) -> None:
+    try:
+        if p.returncode is None:
+            p.kill()
+        await asyncio.wait_for(p.wait(), 10)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+async def _reap(p, grace: float | None = None) -> None:
+    """After run() gave up waiting: let the helper finish for `grace` seconds, then kill and collect it."""
+    try:
+        await asyncio.wait_for(p.communicate(), grace or REAP_GRACE_S)
+    except Exception:  # noqa: BLE001
+        await _kill(p)
+
+
 async def run(cmd: str, args: dict, timeout: int = 150, script: str = "tron_launch_exec.py") -> dict:
     """Runs a Trade Desk launch helper (Tron or TON) with a clean environment; it loads the Trade Bot's
     own settings."""
@@ -74,14 +94,20 @@ async def run(cmd: str, args: dict, timeout: int = 150, script: str = "tron_laun
     env["TRON_FACTORY"] = factory()
     if curve_factory():
         env["TRON_CURVE_FACTORY"] = curve_factory()
+    p = None
     try:
         p = await asyncio.create_subprocess_exec(
             sys.executable, "-W", "ignore", str(exe), cmd, json.dumps(args), cwd=str(EXEC.parent), env=env,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         so, _ = await asyncio.wait_for(p.communicate(), timeout=timeout)
     except asyncio.TimeoutError:
+        # The helper may already have broadcast, so it is not killed on the spot; it gets a grace period to
+        # finish, then is killed and reaped so a stuck helper can never pile up on the droplet.
+        asyncio.get_running_loop().create_task(_reap(p))
         return {"ok": False, "pending": True, "error": "still waiting for the network"}
     except Exception as e:  # noqa: BLE001
+        if p is not None:
+            await _kill(p)
         return {"ok": False, "error": f"could not start the wallet helper ({type(e).__name__})"}
     for line in reversed((so or b"").decode(errors="replace").splitlines()):
         if line.startswith("{"):

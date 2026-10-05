@@ -1,5 +1,7 @@
 # Ferzan Launch — mainnet checklist
 
+> Checked on 4 Oct 2026: the folder path in section 1 and the fee variable in section 2 match the code. Section 3's notes on Solana (Meteora), Tron and TON describe an earlier state; confirm each path's real status in the bot (`/launchday`) before relying on it.
+
 Treasury already in use:
 - SOL `6yxsKcSeqAcoLXgyKDtVVW7Hb2d4uLYVT8X9zGa64HRp`
 - EVM `0x4d5955afb9ABF5943729CB74A0196498483e4622`
@@ -14,7 +16,7 @@ V2 routers (addLiquidityETH) — bonding curve only:
 ## 1. Compile and test on the droplet
 
 ```
-cd /opt/ferzan/app/launch
+cd "/opt/ferzan/app/Ferzan-Ecosystem/Launch Bot"
 npm install
 npx hardhat compile
 npx hardhat test

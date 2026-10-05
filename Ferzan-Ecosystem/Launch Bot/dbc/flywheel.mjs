@@ -10,7 +10,7 @@ import BN from 'bn.js'
 import { Connection, PublicKey, Transaction, VersionedTransaction, SystemProgram, LAMPORTS_PER_SOL, sendAndConfirmTransaction } from '@solana/web3.js'
 import { NATIVE_MINT, getAssociatedTokenAddressSync, createBurnCheckedInstruction } from '@solana/spl-token'
 import * as DBC from '@meteora-ag/dynamic-bonding-curve-sdk'
-import { loadOrCreateKey, allConfigs, findPool, simulate } from './common.mjs'
+import { loadKey, allConfigs, findPool, simulate } from './common.mjs'
 
 const { DynamicBondingCurveClient, deriveDbcPoolAddress } = DBC
 const out = { ok: false, steps: [] }
@@ -40,8 +40,8 @@ try {
     const live = inp.mode === 'live'
     const conn = new Connection(inp.rpc, 'confirmed')
     const client = new DynamicBondingCurveClient(conn, 'confirmed')
-    const keeper = loadOrCreateKey('fee-keeper.json')
-    const mint = loadOrCreateKey('ferzan-mint.json').publicKey
+    const keeper = loadKey('fee-keeper.json')
+    const mint = loadKey('ferzan-mint.json').publicKey
     const treasury = new PublicKey(inp.treasury)
     const share = Math.max(0, Math.min(10000, Number(inp.buyShareBps || 3000)))
     const reserve = Number(inp.reserveLamports || 20_000_000)

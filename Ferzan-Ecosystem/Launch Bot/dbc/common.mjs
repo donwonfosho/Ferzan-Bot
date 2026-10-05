@@ -20,15 +20,45 @@ export function loadEnv(file = '/opt/ferzan/.env') {
 // Keys live OUTSIDE the git repo so they can never be committed.
 export const KEYDIR = '/opt/ferzan/dbc-keys'
 
+function readKey(f, name) {
+    let arr
+    try { arr = JSON.parse(fs.readFileSync(f, 'utf8')) } catch (e) {
+        throw new Error(`key file ${name} cannot be read (${String(e.message).slice(0, 60)}); refusing to replace it`)
+    }
+    if (!Array.isArray(arr) || arr.length !== 64) throw new Error(`key file ${name} is damaged (not a 64-byte key); refusing to replace it`)
+    return Keypair.fromSecretKey(Uint8Array.from(arr))
+}
+
+// For anything that runs unattended or moves money. A missing key file is a problem to fix by hand
+// (restore it from backup), never something to quietly replace with a brand-new address.
+export function loadKey(name) {
+    const f = path.join(KEYDIR, name)
+    if (!fs.existsSync(f)) {
+        throw new Error(`key file ${name} is missing from ${KEYDIR}; refusing to make a new one (restore it from backup, or run the setup script)`)
+    }
+    return readKey(f, name)
+}
+
+// Setup scripts only. Safe against two processes racing: the first file written wins and the
+// loser reads it, so nobody keeps a key that was overwritten a moment later.
 export function loadOrCreateKey(name) {
     fs.mkdirSync(KEYDIR, { recursive: true, mode: 0o700 })
     const f = path.join(KEYDIR, name)
-    if (fs.existsSync(f)) {
-        return Keypair.fromSecretKey(Uint8Array.from(JSON.parse(fs.readFileSync(f, 'utf8'))))
-    }
+    if (fs.existsSync(f)) return readKey(f, name)
     const k = Keypair.generate()
-    fs.writeFileSync(f, JSON.stringify(Array.from(k.secretKey)), { mode: 0o600 })
-    return k
+    const tmp = `${f}.${process.pid}.${Date.now()}.tmp`
+    const fd = fs.openSync(tmp, 'wx', 0o600)
+    try {
+        fs.writeSync(fd, JSON.stringify(Array.from(k.secretKey)))
+        fs.fsyncSync(fd)
+    } finally { fs.closeSync(fd) }
+    try {
+        fs.linkSync(tmp, f) // atomic, and fails if the file appeared in the meantime
+        return k
+    } catch (e) {
+        if (e.code === 'EEXIST') return readKey(f, name)
+        throw e
+    } finally { try { fs.unlinkSync(tmp) } catch {} }
 }
 
 // MULTI_CONFIG_B23: every Ferzan partner config, newest first. METEORA_CONFIG is the one new launches

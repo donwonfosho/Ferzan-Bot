@@ -7,7 +7,7 @@ import fs from 'fs'
 import { Connection, PublicKey, LAMPORTS_PER_SOL, SystemProgram, sendAndConfirmTransaction } from '@solana/web3.js'
 import { NATIVE_MINT } from '@solana/spl-token'
 import * as DBC from '@meteora-ag/dynamic-bonding-curve-sdk'
-import { loadOrCreateKey, simulate } from './common.mjs'
+import { loadKey, loadOrCreateKey, simulate } from './common.mjs'
 
 const { DynamicBondingCurveClient, deriveDbcPoolAddress } = DBC
 const out = { ok: false }
@@ -16,9 +16,10 @@ try {
     const inp = JSON.parse(fs.readFileSync(0, 'utf8'))
     const conn = new Connection(inp.rpc, 'confirmed')
     const client = new DynamicBondingCurveClient(conn, 'confirmed')
-    const launcher = loadOrCreateKey('ferzan-launcher.json')
-    const mint = loadOrCreateKey('ferzan-mint.json') // FERZAN's address, fixed once
-    const config = loadOrCreateKey('ferzan-flagship-config.json').publicKey
+    const launcher = loadKey('ferzan-launcher.json')
+    // FERZAN's address, fixed once: a dry run may create it, but a live send never makes a new one
+    const mint = inp.mode === 'send' ? loadKey('ferzan-mint.json') : loadOrCreateKey('ferzan-mint.json')
+    const config = loadKey('ferzan-flagship-config.json').publicKey
     const vault = new PublicKey(inp.vault)
     const pool = deriveDbcPoolAddress(NATIVE_MINT, mint.publicKey, config)
     Object.assign(out, { launcher: launcher.publicKey.toBase58(), mint: mint.publicKey.toBase58(), pool: pool.toBase58(),

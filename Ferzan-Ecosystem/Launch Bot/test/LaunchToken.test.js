@@ -16,18 +16,15 @@ describe("LaunchToken", function () {
     expect(Token.interface.fragments.some((f) => f.name === "mint")).to.equal(false);
   });
 
-  it("allows the owner to renounce ownership permanently", async function () {
-    const [owner] = await ethers.getSigners();
+  it("has no owner or admin functions at all (nothing to renounce)", async function () {
     const Token = await ethers.getContractFactory("LaunchToken");
-    const token = await Token.deploy("Test Token", "TEST", 1000n, owner.address, "");
-    await token.waitForDeployment();
-    await token.renounceOwnership();
-    expect(await token.owner()).to.equal(ethers.ZeroAddress);
+    const names = Token.interface.fragments.map((f) => f.name);
+    for (const n of ["owner", "renounceOwnership", "transferOwnership"]) expect(names.includes(n)).to.equal(false);
   });
 });
 
 describe("LaunchTokenFactory", function () {
-  it("deploys a token owned by the caller with full supply", async function () {
+  it("deploys a token that sends the full supply to the caller", async function () {
     const [creator, treasury] = await ethers.getSigners();
     const Factory = await ethers.getContractFactory("LaunchTokenFactory");
     const factory = await Factory.deploy(treasury.address, 0);
@@ -38,7 +35,6 @@ describe("LaunchTokenFactory", function () {
     const tokenAddr = ev.args.token;
     const Token = await ethers.getContractFactory("LaunchToken");
     const token = Token.attach(tokenAddr);
-    expect(await token.owner()).to.equal(creator.address);
     expect(await token.balanceOf(creator.address)).to.equal(1000n * 10n ** 18n);
   });
 });
