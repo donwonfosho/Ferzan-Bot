@@ -1674,6 +1674,22 @@ def cancel_buy_limit(user_id: int, lid: int) -> None:
         conn.commit()
 
 
+def feed_autobuy_take(user_id: int, per_day: int) -> bool:
+    """Counts one feed auto-buy against a rolling 24h limit. False = the limit is used up (nothing recorded)."""
+    import time as _t
+    now = _t.time()
+    with get_conn() as conn:
+        conn.execute("CREATE TABLE IF NOT EXISTS feed_autobuy_log (user_id INTEGER NOT NULL, ts REAL NOT NULL)")
+        conn.execute("DELETE FROM feed_autobuy_log WHERE ts < ?", (now - 86400,))
+        n = int(conn.execute("SELECT COUNT(*) FROM feed_autobuy_log WHERE user_id = ?", (int(user_id),)).fetchone()[0])
+        if n >= max(0, int(per_day)):
+            conn.commit()
+            return False
+        conn.execute("INSERT INTO feed_autobuy_log (user_id, ts) VALUES (?, ?)", (int(user_id), now))
+        conn.commit()
+        return True
+
+
 def flag_on(user_id: int, flag: str, default: int = 1) -> bool:
     with get_conn() as conn:
         row = conn.execute(

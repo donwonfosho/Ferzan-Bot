@@ -4213,6 +4213,13 @@ async def settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     raise ValueError
                 db.update_user(uid, auto_buy_usd=val)
                 db.set_flag(uid, "auto_buy", val > 0)
+            elif key in {"feedbuy", "feedautobuy"}:
+                on = raw in {"on", "1", "true", "yes"}
+                db.set_flag(uid, "feed_auto_buy", on)
+                await update.effective_message.reply_text(
+                    ("⚡️ Feed auto-buy ON: with auto-buy set above $0, the bot may buy new launches from the feed, "
+                     f"at most {_feed_buy_per_day()} a day. /settings feedbuy off to stop.") if on else "Feed auto-buy OFF.")
+                return
             elif key in {"floor", "min", "score"}:
                 val = int(raw)
                 if not 0 <= val <= 90:
@@ -4232,7 +4239,7 @@ async def settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 db.update_user(uid, drawdown_alert_pct=val)
             else:
                 await update.effective_message.reply_text(
-                    "Keys: buy, buyslip, sellslip, autobuy, floor, cap, alerts"
+                    "Keys: buy, buyslip, sellslip, autobuy, feedbuy, floor, cap, alerts"
                 )
                 return
         except ValueError:
@@ -5019,6 +5026,7 @@ _FLAG_DEFAULTS = {
     "lp_watch": 0,
     "score_gate": 0,
     "auto_buy": 0,
+    "feed_auto_buy": 0,
     "copy_live": 0,
     "daily_recap": 1,
     "multi_buy": 0,
@@ -8922,6 +8930,13 @@ async def drawdown_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             logger.exception("drawdown notify failed for %s", uid)
 
 
+def _feed_buy_per_day() -> int:
+    try:
+        return max(0, int(os.getenv("FEED_AUTOBUY_PER_DAY") or 5))
+    except ValueError:
+        return 5
+
+
 _BL_FAIL: dict = {}  # limit id -> (failures, next try); a limit that keeps failing backs off and tells the user once
 _BL_BACKOFF_S = (300, 900, 3600)
 
@@ -9856,8 +9871,11 @@ async def _launch_feed_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                     break
                 except Exception:
                     logger.exception("launch feed failed for %s", uid)
-            if db.flag_on(uid, "auto_buy", 0) and not _auto_trading_killed():
+            # Feed buying is its own opt-in ("feedbuy"): turning on paste-to-buy never means buying every new launch.
+            if db.flag_on(uid, "auto_buy", 0) and db.flag_on(uid, "feed_auto_buy", 0) and not _auto_trading_killed():
                 auto_usd = float(user.get("auto_buy_usd") or 0)
+                if auto_usd > 0 and (ln.token or "").strip() and not db.feed_autobuy_take(uid, _feed_buy_per_day()):
+                    auto_usd = 0  # today's feed auto-buys are used up
                 if auto_usd > 0 and (ln.token or "").strip():
                     try:
                         auto_card = await asyncio.to_thread(analyze, ln.token)
