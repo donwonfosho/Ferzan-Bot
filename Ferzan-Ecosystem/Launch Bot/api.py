@@ -139,15 +139,36 @@ class CompleteRequest(BaseModel):
 
 
 def _internal_ok(request) -> bool:
+    import hmac as _hm
     expected = (os.environ.get("INTERNAL_API_TOKEN") or "").strip()
     got = (request.headers.get("x-ferzan-internal") or "").strip()
-    if expected and got == expected:
-        return True
-    if not expected:
-        # Local droplet default: allow loopback only.
-        client = (request.client.host if request.client else "") or ""
-        return client in {"127.0.0.1", "::1"}
-    return False
+    if expected:
+        return _hm.compare_digest(expected.encode(), got.encode())
+    # No token configured: loopback only, and never when the request came through a reverse proxy
+    # (a proxy on this box would make every outside caller look like 127.0.0.1).
+    if request.headers.get("x-forwarded-for") or request.headers.get("x-real-ip") or request.headers.get("forwarded"):
+        return False
+    client = (request.client.host if request.client else "") or ""
+    return client in {"127.0.0.1", "::1"}
+
+
+_PUBLIC_HITS: dict = {}
+
+
+def _public_rate_ok(request, bucket: str, limit: int, per_s: int = 60) -> bool:
+    """Tiny per-caller limiter for open endpoints that write rows. Keyed on the real client address."""
+    ip = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip() or (request.client.host if request.client else "?")
+    now = time.time()
+    if len(_PUBLIC_HITS) > 20000:
+        for k in [k for k, v in _PUBLIC_HITS.items() if not v or v[-1] < now - per_s]:
+            _PUBLIC_HITS.pop(k, None)
+    q = [t for t in _PUBLIC_HITS.get((bucket, ip), []) if t > now - per_s]
+    if len(q) >= limit:
+        _PUBLIC_HITS[(bucket, ip)] = q
+        return False
+    q.append(now)
+    _PUBLIC_HITS[(bucket, ip)] = q
+    return True
 
 
 @app.get("/internal/referrer-wallet/{user_id}")
@@ -3720,9 +3741,11 @@ class CallCreditBody(BaseModel):
 
 
 @app.post("/api/call-credit")
-def call_credit(body: CallCreditBody):
+def call_credit(body: CallCreditBody, request: Request):
     """The site reports a Solana/TON buy that came through someone's share link. Only counted once the trade is on-chain
     and the buyer is not the caller."""
+    if not _public_rate_ok(request, "call-credit", int(os.environ.get("CALL_CREDIT_PER_IP_MIN") or 30)):
+        raise HTTPException(429, "slow down")
     if body.chain not in ("solana", "ton") or not _re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{64,90}|[0-9a-fA-F]{64}|[A-Za-z0-9+/_=-]{43,48}", body.tx or "") \
             or not _re.fullmatch(_ADDR_ANY, body.ref or ""):
         raise HTTPException(400, "bad request")

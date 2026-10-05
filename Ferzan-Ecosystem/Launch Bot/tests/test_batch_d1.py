@@ -42,5 +42,17 @@ class StartupResilience(unittest.TestCase):
             self.assertIn("'NetworkError'", s, rel)
 
 
+
+class InternalGate(unittest.TestCase):
+    def test_gate_rejects_proxied_and_compares_constant_time(self):
+        with open(os.path.join(HERE, "api.py"), encoding="utf-8") as f:
+            s = f.read()
+        i = s.index("def _internal_ok")
+        body = s[i:i + 1200]
+        self.assertIn("compare_digest", body)
+        self.assertIn("x-forwarded-for", body)
+        self.assertIn("_public_rate_ok(request, \"call-credit\"", s)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -31,15 +31,16 @@ app = FastAPI(title="Ferzan Trade Desk Internal API")
 
 
 def _internal_ok(request: Request) -> bool:
+    import hmac
     expected = (os.environ.get("INTERNAL_API_TOKEN") or "").strip()
     got = (request.headers.get("x-ferzan-internal") or "").strip()
-    if expected and got == expected:
-        return True
-    if not expected:
-        # Local droplet default: allow loopback only.
-        client = (request.client.host if request.client else "") or ""
-        return client in {"127.0.0.1", "::1"}
-    return False
+    if expected:
+        return hmac.compare_digest(expected.encode(), got.encode())
+    # No token: loopback only, and never through a reverse proxy (it would make outsiders look local).
+    if request.headers.get("x-forwarded-for") or request.headers.get("x-real-ip") or request.headers.get("forwarded"):
+        return False
+    client = (request.client.host if request.client else "") or ""
+    return client in {"127.0.0.1", "::1"}
 
 
 @app.get("/internal/referral-stats/{user_id}")
