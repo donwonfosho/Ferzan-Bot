@@ -106,7 +106,7 @@ def _launches(launch_db: str) -> list:
         rows = c.execute(
             "SELECT id, name, symbol, wallet_address, result_token_address, created_at, extra_params, chat_id "
             "FROM launch_requests WHERE chain = 'ton' AND mode = 'bonding_curve' AND status = 'confirmed' "
-            "AND result_token_address IS NOT NULL ORDER BY created_at DESC LIMIT 100").fetchall()
+            "AND result_token_address IS NOT NULL ORDER BY created_at DESC LIMIT " + str(int(os.environ.get("INDEXER_MAX_CURVES") or 500)) + "").fetchall()
         c.close()
         return rows
     except sqlite3.Error as e:
@@ -269,10 +269,21 @@ def _check_graduation(idx_conn, curve, cs, first, now, st) -> None:
                         f"A TON curve filled but the keeper wallet {res.get('address', '')} has only "
                         f"{res.get('balance_ton', 0):.2f} TON. Send about {res.get('need_ton', 1):.1f} TON to it so it can "
                         f"graduate {curve}.")
+        elif res.get("stage") == "lock":
+            _admin_note(idx_conn, f"ton_lock_{curve}",
+                        f"TON curve {curve}: the pool was opened but the LP lock step failed: {str(res.get('error'))[:160]}. "
+                        f"Check the keeper wallet and re-run scripts/ton_graduate.py {curve}; liquidity is NOT locked yet.")
         elif res.get("stage") == "pool":  # coins reached the keeper but the pool step failed: a human should look
             _admin_note(idx_conn, f"ton_pool_{curve}",
                         f"TON curve {curve} graduated (funds are with the keeper) but the STON.fi pool step failed: "
                         f"{str(res.get('error'))[:160]}. Re-run scripts/ton_graduate.py {curve}.")
+    if graduated and not first and not st[7] == "done":
+        # the contract says graduated but the keeper has not finished the STON.fi pool: don't announce or list as
+        # graduated yet (a pool failure is reported to the admins above and the keeper retries)
+        res_ok = False
+        with idx_conn() as c:
+            res_ok = (c.execute("SELECT note FROM ton_state WHERE curve = ?", (curve,)).fetchone() or [""])[0] == "done"
+        graduated = res_ok
     if graduated:
         with idx_conn() as c:
             row = c.execute("SELECT real_eth FROM curves WHERE chain = 'ton' AND curve = ?", (curve,)).fetchone()

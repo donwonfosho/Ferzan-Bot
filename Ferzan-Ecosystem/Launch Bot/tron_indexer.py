@@ -75,7 +75,7 @@ def _launches(launch_db: str) -> list:
         rows = c.execute(
             "SELECT id, name, symbol, wallet_address, result_token_address, created_at, extra_params, chat_id "
             "FROM launch_requests WHERE chain = 'tron' AND mode = 'bonding_curve' AND status = 'confirmed' "
-            "AND result_token_address IS NOT NULL ORDER BY created_at DESC LIMIT 100").fetchall()
+            "AND result_token_address IS NOT NULL ORDER BY created_at DESC LIMIT " + str(int(os.environ.get("INDEXER_MAX_CURVES") or 500)) + "").fetchall()
         c.close()
         return rows
     except sqlite3.Error as e:
@@ -87,7 +87,7 @@ def _events(curve: str, since_ms: int) -> list:
     """Confirmed Trade events after since_ms, oldest first."""
     url = f"{tl._grid()}/v1/contracts/{curve}/events"
     params = {"event_name": "Trade", "only_confirmed": "true", "order_by": "block_timestamp,asc", "limit": 200,
-              "min_block_timestamp": since_ms + 1}
+              "min_block_timestamp": max(since_ms - 60000, 0)}
     h = {"TRON-PRO-API-KEY": tl._setting("TRONGRID_API_KEY")} if tl._setting("TRONGRID_API_KEY") else {}
     out = []
     for _ in range(5):

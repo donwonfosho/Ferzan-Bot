@@ -45,7 +45,7 @@ def _launches(launch_db: str) -> list:
         rows = c.execute(
             "SELECT id, name, symbol, wallet_address, result_token_address, created_at, extra_params FROM launch_requests "
             "WHERE chain = 'solana' AND mode = 'meteora' AND status = 'confirmed' AND result_token_address IS NOT NULL "
-            "ORDER BY created_at DESC LIMIT 60").fetchall()
+            "ORDER BY created_at DESC LIMIT " + str(int(os.environ.get("INDEXER_MAX_CURVES") or 500)) + "").fetchall()
         c.close()
         return rows
     except sqlite3.Error as e:

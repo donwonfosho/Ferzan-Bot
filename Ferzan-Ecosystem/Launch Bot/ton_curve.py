@@ -37,7 +37,7 @@ BUY_OVERHEAD = 120_000_000    # 0.12 TON on top of the amount spent (matches the
 SELL_ATTACH = 300_000_000     # 0.3 TON attached to the coin transfer (most of it returns)
 SELL_FORWARD = 200_000_000    # 0.2 TON forwarded to the curve with the sell instruction
 GRAD_ATTACH = 300_000_000     # 0.3 TON to call graduate()
-START_DELAY_S = 120
+START_DELAY_S = 300  # trading opens well after the signed message can no longer be accepted (valid_until below)
 
 _LAUNCH_SUPPLY_DECIMALS = 9
 
@@ -136,7 +136,7 @@ def build_curve_launch_tx(request_id: str, creator_address: str, supply_raw: int
     total = CURVE_TON + tl.DEPLOY_TON + tl.ADMIN_TON + fee
     out = tl.TonLaunchTx(
         minter=_fmt(minter), minter_raw=minter.to_str(is_user_friendly=False), messages=messages,
-        valid_until=int(time.time()) + 600, network="-3" if testnet() else "-239",
+        valid_until=int(time.time()) + 240, network="-3" if testnet() else "-239",
         note=(f"Your wallet sends {total / 1e9:.2f} TON; most of the {(CURVE_TON + tl.DEPLOY_TON + tl.ADMIN_TON) / 1e9:.2f} TON "
               f"for the contracts stays as their gas buffer or comes back as change. Trading opens about 2 minutes after launch."),
         cells={"curve": curve, "curve_si": curve_si, "minter": minter, "start": start, "grad": int(grad_nano)},

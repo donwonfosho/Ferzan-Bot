@@ -81,7 +81,7 @@ def parse_swap(action: dict, coin_raw: str) -> dict | None:
         return None
     return {"is_buy": is_buy, "ton": ton, "tokens": tokens, "trader": _friendly(d.get("sender") or tin.get("source")),
             "ts": int(action.get("start_utime") or action.get("trace_end_utime") or 0),
-            "id": action.get("trace_id") or action.get("action_id") or "",
+            "id": action.get("action_id") or action.get("trace_id") or "",
             "seqno": int(action.get("trace_mc_seqno_end") or 0)}
 
 

@@ -93,6 +93,7 @@ def _trade_url(r) -> str:
     base = (os.environ.get("MINI_APP_BASE_URL") or "https://launch.ferzaneco.com/miniapp").rstrip("/")
     return f"{base}/curve.html?chain={r['chain']}&curve={r['curve']}"
 CONFIRMATIONS = 2
+REORG_OVERLAP = int(os.environ.get("CURVE_INDEX_OVERLAP") or "10")  # re-scan the last blocks each pass (node lag / RPC switch)
 # Free public nodes only keep recent history ("archive requests require a token"), so we follow
 # the chain from near its head and read older curves' current state straight from the contracts.
 RECENT_BLOCKS = int(os.environ.get("CURVE_INDEX_RECENT_BLOCKS") or "100")
@@ -306,7 +307,7 @@ class ChainIndexer:
         with idx_conn() as c:
             row = c.execute("SELECT block FROM cursor WHERE chain = ?", (self.chain,)).fetchone()
         if row:
-            return int(row["block"]) + 1
+            return max(int(row["block"]) + 1 - REORG_OVERLAP, 1)  # replay is safe: every insert is keyed/ignored
         env = os.environ.get(f"CURVE_INDEX_FROM_{self.chain.upper()}")
         if env:
             return int(env)
@@ -408,6 +409,8 @@ class ChainIndexer:
         tokens = tok_out if is_buy else tok_in
         if native <= 0 or tokens <= 0:
             return
+        if self.chain == "arc":
+            native *= 10 ** 12  # post-graduation quote is USDC (6 decimals); curve trades are 18-decimal native
         price = native / tokens
         blk = int(lg["blockNumber"], 16)
         ts = self.block_ts(blk)
@@ -474,13 +477,15 @@ class ChainIndexer:
                     log.info("%s: node is rate limiting, pausing", self.chain)
                     time.sleep(8)
                     return done
-                if self.step > 50:
-                    self.step = max(50, self.step // 2)
-                    self.max_step = self.step
-                    log.info("%s: smaller log range %d (%s)", self.chain, self.step, str(e)[:80])
-                    continue
+                if any(k in msg for k in ("range", "limit", "too many results", "exceed", "10000", "response size")):
+                    if self.step > 50:
+                        self.step = max(50, self.step // 2)
+                        self.max_step = self.step
+                        log.info("%s: smaller log range %d (%s)", self.chain, self.step, str(e)[:80])
+                        continue
                 raise
             events.sort(key=lambda x: (int(x["blockNumber"], 16), int(x["logIndex"], 16)))
+            grads_before = set(pools)
             with idx_conn() as c:
                 for lg in events:
                     if lg.get("removed"):
@@ -491,6 +496,21 @@ class ChainIndexer:
                         self.on_grad(lg, c)
                     elif lg["topics"][0] == T_SWAP:
                         self.on_swap(lg, pools, c)
+            new_pools = {k: v for k, v in self.pool_curves().items() if k not in grads_before}
+            late = []
+            if new_pools:  # a curve graduated inside this range: its swaps in the same range were not fetched yet
+                try:
+                    npl = list(new_pools)
+                    for i in range(0, len(npl), 50):
+                        late += self.get_logs(frm, to, address=npl[i:i + 50], topics=[T_SWAP])
+                except RuntimeError as e:
+                    log.warning("%s: could not fetch swaps for new pools: %s", self.chain, str(e)[:80])
+                    return done  # cursor not advanced: the range is retried
+                late.sort(key=lambda x: (int(x["blockNumber"], 16), int(x["logIndex"], 16)))
+            with idx_conn() as c:
+                for lg in late:
+                    if not lg.get("removed"):
+                        self.on_swap(lg, new_pools, c)
                 c.execute(
                     "INSERT INTO cursor (chain, block, rpc) VALUES (?, ?, ?) ON CONFLICT(chain) DO UPDATE SET block = excluded.block, rpc = excluded.rpc",
                     (self.chain, to, self.rpc.url.split("//")[-1].split("/")[0]),
@@ -555,7 +575,7 @@ def send_graduation_alerts() -> None:
                      else f"{cfg['explorer']}/token/{r['token']}")
             text = (
                 f"🎓 <b>{name} (${sym}) just graduated!</b>\n\n"
-                f"The curve filled at {raised} {cfg['sym']}. Liquidity is now on {cfg['dex']} "
+                f"The curve filled at {raised} {cfg['sym']}. Liquidity is {'moving to' if r['chain'] == 'solana' else 'now on'} {cfg['dex']} "
                 f"{'(Meteora DAMM v2 pool, liquidity locked) 🔒' if r['chain'] == 'solana' else 'and the LP tokens are burned 🔥'}\n\n"
                 f"<code>{r['token']}</code>\n"
                 f'<a href="{chart}">📊 Chart</a> · <a href="{_trade_url(r)}">Trade</a>'

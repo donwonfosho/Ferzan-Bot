@@ -107,7 +107,8 @@ async function main() {
       const b = await client.getBalance(wallet.address); const j = await jettonBalance(minter, kaddr);
       return b > RESERVE_TON && j.balance > 0n ? { b, j } : null; }, "the curve's TON and coins to reach the keeper", 30, 6000).catch(() => null);
     if (!arrived) out({ ok: false, stage: "pool", error: "graduation funds have not reached the keeper yet" });
-    const tonIn = arrived.b - RESERVE_TON, coinsIn = arrived.j.balance;
+    let tonIn = arrived.b - RESERVE_TON; if (cs.grad > 0n && tonIn > cs.grad) tonIn = cs.grad;  // never pool more than the curve raised (keeper's own float stays put)
+    const coinsIn = arrived.j.balance;
     const sim = await api.simulateLiquidityProvision({
       tokenA: TON_ADDRESS, tokenB: minter, provisionType: "Initial", slippageTolerance: "0.05",
       walletAddress: kaddr, tokenAUnits: tonIn.toString(), tokenBUnits: coinsIn.toString() });
