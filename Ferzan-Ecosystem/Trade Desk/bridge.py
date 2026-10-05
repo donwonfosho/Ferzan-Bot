@@ -60,11 +60,15 @@ def chain_id(key: str) -> int:
 
 def _amount_raw(key: str, amt: str) -> str:
     meta = CHAINS[key]
-    val = float(amt)
+    from decimal import Decimal, InvalidOperation
+    try:
+        val = Decimal(str(amt).strip())
+    except InvalidOperation:
+        raise ValueError("That amount isn't a number.") from None
     cap = MAX_NATIVE.get(meta["unit"], 25.0)
-    if val <= 0 or val > cap:
+    if not val.is_finite() or val <= 0 or val > Decimal(str(cap)):
         raise ValueError(f"Size must be between 0 and {cap:g} {meta['unit']}.")
-    return str(int(val * (10 ** meta["dec"])))
+    return str(int(val * (Decimal(10) ** meta["dec"])))
 
 
 DLN = "https://dln.debridge.finance/v1.0/dln/order/create-tx"
@@ -381,10 +385,10 @@ def execute(uid: int, pack: dict) -> str:
         raise RuntimeError("Bridging out of Tron isn't enabled yet.")
     if pack.get("via") == "dln" and CHAINS[src]["kind"] == "sol":
         return _exec_dln_sol(uid, pack, data)
+    if pack.get("via") == "dln":  # deBridge answers with one {"tx": ...}; the EVM signer reads Relay-style steps
+        return _exec_evm(uid, pack, {"steps": [{"items": [{"data": data.get("tx") or {}}]}]})
     if CHAINS[src]["kind"] == "evm":
         return _exec_evm(uid, pack, data)
-    if pack.get("via") == "dln":
-        return _exec_evm(uid, pack, {"steps": [{"items": [{"data": data.get("tx") or {}}]}]})
     return _exec_sol(uid, pack, data)
 
 

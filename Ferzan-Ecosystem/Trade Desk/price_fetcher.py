@@ -195,13 +195,25 @@ class MarketSnapshot:
         return self.buys_h1 / max(self.sells_h1, 1)
 
 
-def snapshot_from_pair(pair: dict[str, Any], query: str) -> MarketSnapshot:
+def snapshot_from_pair(pair: dict[str, Any], query: str, token: str = "") -> MarketSnapshot:
+    """`token` is the address the caller asked about. When it is the pair's QUOTE side, the price, symbol and
+    changes are flipped to that token's view instead of silently describing the other token."""
     base = pair.get("baseToken") or {}
+    quote = pair.get("quoteToken") or {}
+    flipped = bool(token) and (base.get("address") or "").lower() != token.lower() and (quote.get("address") or "").lower() == token.lower()
     txns = pair.get("txns") or {}
     h1 = txns.get("h1") or {}
     ch = pair.get("priceChange") or {}
     liq = pair.get("liquidity") or {}
     vol = pair.get("volume") or {}
+    if flipped:
+        base = quote
+        pq = _num((pair.get("priceNative")))
+        pu = _num(pair.get("priceUsd"))
+        price = (pu / pq) if pq > 0 else 0.0  # USD per quote token = USD per base / base-per-quote
+        ch = {}  # the pair's changes describe the base token, not this one
+    else:
+        price = _num(pair.get("priceUsd"))
     return MarketSnapshot(
         query=query,
         symbol=(base.get("symbol") or query).upper(),
@@ -210,16 +222,16 @@ def snapshot_from_pair(pair: dict[str, Any], query: str) -> MarketSnapshot:
         dex=pair.get("dexId") or "unknown",
         pair_address=pair.get("pairAddress") or "",
         token_address=base.get("address") or "",
-        price_usd=_num(pair.get("priceUsd")),
+        price_usd=price,
         liquidity_usd=_num(liq.get("usd")),
         volume_24h=_num(vol.get("h24")),
         change_5m=_num(ch.get("m5")),
         change_1h=_num(ch.get("h1")),
         change_6h=_num(ch.get("h6")),
         change_24h=_num(ch.get("h24")),
-        fdv=_num(pair.get("fdv") or pair.get("marketCap")),
-        buys_h1=_int(h1.get("buys")),
-        sells_h1=_int(h1.get("sells")),
+        fdv=0.0 if flipped else _num(pair.get("fdv") or pair.get("marketCap")),  # the pair's fdv is the base token's
+        buys_h1=_int(h1.get("sells" if flipped else "buys")),  # a base-token sell is a buy of the quote token
+        sells_h1=_int(h1.get("buys" if flipped else "sells")),
         pair_created_ms=_int(pair.get("pairCreatedAt")) or None,
         url=pair.get("url") or "",
         source="dexscreener",
@@ -283,10 +295,7 @@ def search_dex(query: str) -> MarketSnapshot | None:
         vol = _num((p.get("volume") or {}).get("h24"))
         return (exact, liq + vol * 0.25)
 
-    snap = snapshot_from_pair(max(pairs, key=rank), query)
-    if _looks_ca(q) and snap.token_address.lower() != ql:
-        # Keep the pasted CA even if DexScreener listed it as quote.
-        snap.token_address = q
+    snap = snapshot_from_pair(max(pairs, key=rank), query, q if _looks_ca(q) else "")
     return snap
 
 
