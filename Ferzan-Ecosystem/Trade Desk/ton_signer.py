@@ -905,6 +905,38 @@ async def _buy_v2(seed64: bytes, jetton: str, nano: int, slip_bps: int):
         await provider.close_all()
 
 
+FILL_WAIT_S = 90
+
+
+def _no_tokens_msg(spent: float, addr: str) -> str:
+    return (f"TON swap was accepted by your wallet (~{spent:.3f} TON) but no tokens have arrived after {FILL_WAIT_S}s. "
+            "A price bounce refunds the TON, and a slow swap may still land: check your wallet before retrying: "
+            f"https://tonviewer.com/{addr}")
+
+
+def _held_amount(secret: str, jetton: str) -> float | None:
+    """Whole-token balance, or None when it can't be read (then the fill check is skipped, never faked)."""
+    try:
+        return float(jetton_holding(secret, jetton)[0])
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _bought_tokens(secret: str, jetton: str, before: float | None, wait_s: int = FILL_WAIT_S) -> float | None:
+    """Tokens received since `before`, polling until some arrive. 0.0 = none yet; None = can't tell.
+    A wallet that accepted the swap message proves nothing: a slippage bounce refunds the TON."""
+    if before is None:
+        return None
+    deadline = time.monotonic() + wait_s
+    while True:
+        now = _held_amount(secret, jetton)
+        if now is not None and now > before + 1e-12:
+            return now - before
+        if time.monotonic() >= deadline:
+            return 0.0 if now is not None else None
+        time.sleep(6)
+
+
 def buy_ton(jetton: str, usd: float, secret: str | None = None, slip_bps: int = 0) -> tuple[bool, str]:
     if not live_enabled():
         return False, "Live buys OFF."
@@ -941,6 +973,7 @@ def buy_ton(jetton: str, usd: float, secret: str | None = None, slip_bps: int = 
     if sim.get("error"):
         return False, "STON.fi quote failed: " + str(sim["error"])[:180]
 
+    held_before = _held_amount(secret, jetton)  # to prove the swap really paid out tokens
     router = sim.get("router") or {}
     router_addr = sim.get("router_address") or router.get("address")
     pton_wallet = router.get("pton_wallet_address") or sim.get("offer_jetton_wallet")
@@ -966,7 +999,11 @@ def buy_ton(jetton: str, usd: float, secret: str | None = None, slip_bps: int = 
         if not confirmed:
             return False, (f"TON buy sent (~{spent:.3f} TON) but not confirmed on-chain within 60s — "
                            f"check before retrying: https://tonviewer.com/{addr}")
-        return True, f"~{spent:.3f} TON in (incl. gas) · STON.fi v2 swap confirmed by wallet\nWallet: https://tonviewer.com/{addr}"
+        got = _bought_tokens(secret, jetton, held_before)
+        if got == 0.0:
+            return False, _no_tokens_msg(spent, addr)
+        extra = f" · +{got:,.4g} tokens" if got else ""
+        return True, f"~{spent:.3f} TON in (incl. gas) · STON.fi v2 swap confirmed{extra}\nWallet: https://tonviewer.com/{addr}"
 
     gas = sim.get("gas_params") or {}
     try:
@@ -993,9 +1030,13 @@ def buy_ton(jetton: str, usd: float, secret: str | None = None, slip_bps: int = 
             f"TON buy sent (~{spent:.3f} TON) but not confirmed on-chain within 60s — "
             f"check before retrying: https://tonviewer.com/{addr}"
         )
+    got = _bought_tokens(secret, jetton, held_before)
+    if got == 0.0:
+        return False, _no_tokens_msg(spent, addr)
+    extra = f" · +{got:,.4g} tokens" if got else ""
     return (
         True,
-        f"~{spent:.3f} TON in (incl. gas) · STON.fi swap confirmed by wallet\n"
+        f"~{spent:.3f} TON in (incl. gas) · STON.fi swap confirmed{extra}\n"
         f"Wallet: https://tonviewer.com/{addr}",
     )
 
