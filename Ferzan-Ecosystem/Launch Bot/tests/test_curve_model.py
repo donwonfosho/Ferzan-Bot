@@ -1,5 +1,6 @@
 """FerzanCurve.sol math + accounting, ported to exact integers and fuzzed (solvency, rounding, graduation).
 Does not model the EVM (reentrancy, token hooks): those are covered by reading the contracts."""
+import random, sys
 FEE=100; CREATOR=5000; REF=1000; DUST=1
 def cd(a,b): return 0 if a==0 else (a-1)//b+1
 class Curve:
