@@ -444,6 +444,9 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if data.startswith("mmw:"):
         await _mm_wizard_button(update, context, uid, data)
         return
+    if data == "liq:upgrade":  # the paywall's Upgrade button: show how to pay (or the MM wizard if already paid)
+        await _mm_wizard_start(update, context, uid)
+        return
     if data == "liq:chain":
         await q.edit_message_text(
             "⛓ <b>Choose a chain</b>\n\n"
@@ -934,7 +937,7 @@ def main() -> None:
         app.add_handler(CommandHandler("paid", paid_cmd))
         app.add_handler(CommandHandler("whoami", whoami_cmd))
         app.add_handler(CommandHandler("grantmm", grantmm_cmd))
-    app.add_handler(CallbackQueryHandler(buttons, pattern=r"^liq:"))
+    app.add_handler(CallbackQueryHandler(buttons, pattern=r"^(liq|mmw):"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     async def _post(app):
         await app.bot.set_my_commands(

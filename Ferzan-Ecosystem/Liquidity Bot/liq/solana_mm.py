@@ -436,7 +436,7 @@ async def _run_inner(user_id: int, token: str, trade_usd: float, budget_usd: flo
         ok, detail, sig = await asyncio.to_thread(_do_buy, kp, address, token, lamports_in)
         with _mmdb() as c:
             c.execute(
-                "INSERT INTO mm_trades (session_id, side, ts, usd, tx_hash, ok, note) VALUES (?,?,,?,,?, ?, ?)",
+                "INSERT INTO mm_trades (session_id, side, ts, usd, tx_hash, ok, note) VALUES (?,?,?,?,?,?,?)",
                 (session_id, "buy", time.time(), trade_usd, sig, int(ok), detail),
             )
         if not ok:

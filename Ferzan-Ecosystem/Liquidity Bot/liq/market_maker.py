@@ -91,7 +91,14 @@ class TestnetMarketMaker:
         # legitimate whole-number tick size on some markets) as falsy, same
         # as "not reported" -- silently using a 1e-8 tick instead of 1.0 and
         # under-clamping quotes on those markets. `is not None` is the fix.
-        self._tick_size = (10 ** -precision) if precision is not None else 1e-8
+        # ccxt reports price precision two ways: as a number of decimal places (tick = 10**-n) or, in
+        # TICK_SIZE mode, as the tick itself (0.01). Treating a tick as decimal places gave a bogus ~0.98 tick.
+        if precision is None:
+            self._tick_size = 1e-8
+        elif getattr(self.exchange, "precisionMode", None) == getattr(ccxt, "TICK_SIZE", 4):
+            self._tick_size = float(precision) if float(precision) > 0 else 1e-8
+        else:
+            self._tick_size = 10 ** -precision
 
         self._running = True
         try:
@@ -186,6 +193,16 @@ class TestnetMarketMaker:
             except ccxt.NetworkError as e:
                 logger.warning(f"Network error placing {side} order (attempt {attempt}): {e}")
                 await asyncio.sleep(1 * attempt)
+                # The exchange may have accepted the order before the connection dropped. Look before
+                # retrying, so one timeout never turns into two live orders.
+                try:
+                    mine = await self._find_our_order(side, price)
+                except Exception as look_err:  # noqa: BLE001
+                    logger.error(f"Could not check for an already-placed {side} order ({look_err}); not retrying blind")
+                    return None
+                if mine is not None:
+                    self.open_orders[mine["id"]] = mine
+                    return mine
 
             except ccxt.ExchangeError as e:
                 logger.error(f"Exchange error placing {side} order: {e}")
@@ -194,23 +211,41 @@ class TestnetMarketMaker:
         logger.error(f"Giving up on {side} order after {max_retries} attempts")
         return None
 
+    async def _find_our_order(self, side: str, price: float):
+        """An open order that matches what we were trying to place and that we are not already tracking."""
+        tick = getattr(self, "_tick_size", 1e-8) or 1e-8
+        for o in await self.exchange.fetch_open_orders(self.symbol):
+            if o.get("id") in self.open_orders or o.get("side") != side:
+                continue
+            try:
+                if abs(float(o.get("price")) - float(price)) <= tick and abs(float(o.get("amount")) - float(self.order_size)) <= 1e-12 + float(self.order_size) * 1e-6:
+                    return o
+            except (TypeError, ValueError):
+                continue
+        return None
+
     async def _cancel_all_open_orders(self):
         for order_id in list(self.open_orders):
+            gone = False  # only forget an order once we know it is no longer live
             try:
                 await self.exchange.cancel_order(order_id, self.symbol)
+                gone = True
             except ccxt.OrderNotFound:
-                pass  # already filled or already cancelled -- fine
+                gone = True  # already filled or already cancelled -- fine
             except ccxt.RateLimitExceeded:
                 wait = self.exchange.rateLimit / 1000
                 logger.warning(f"Rate limited cancelling {order_id}; backing off {wait:.1f}s")
                 await asyncio.sleep(wait)
                 try:
                     await self.exchange.cancel_order(order_id, self.symbol)
+                    gone = True
                 except ccxt.OrderNotFound:
-                    pass
+                    gone = True
                 except (ccxt.NetworkError, ccxt.ExchangeError) as e:
                     logger.warning(f"Cancel retry failed for {order_id}: {e}")
             except (ccxt.NetworkError, ccxt.ExchangeError) as e:
                 logger.warning(f"Error cancelling {order_id}: {e}")
-            finally:
+            if gone:
                 self.open_orders.pop(order_id, None)
+            else:
+                logger.error(f"Order {order_id} may still be LIVE on the exchange - cancel it by hand")

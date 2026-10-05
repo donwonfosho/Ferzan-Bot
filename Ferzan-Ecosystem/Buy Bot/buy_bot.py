@@ -1,6 +1,7 @@
 """Ferzan Buy — channel buy alerts. Token: BUYBOT_TOKEN in .env"""
 from __future__ import annotations
 
+import asyncio
 import html
 import logging
 import os
@@ -3314,6 +3315,24 @@ def _get_usd_prices() -> tuple[float, float]:
     return _PRICE_CACHE["sol"], _PRICE_CACHE["eth"]
 
 
+_BNB_CACHE = {"ts": 0.0, "px": 0.0}
+
+
+def _native_quote(chain: str, sol_usd: float, eth_usd: float) -> tuple[float, str]:
+    """(USD price, ticker) of the coin people pay with on this chain. BNB Smart Chain pays in BNB, not ETH."""
+    c = (chain or "").lower()
+    if c in ("sol", "solana"):
+        return sol_usd, "SOL"
+    if c in ("bsc", "bnb"):
+        now = time.time()
+        if now - _BNB_CACHE["ts"] > 300:
+            px = _dex_usd(_DEX_WRAPPED["bsc"])
+            if px:
+                _BNB_CACHE.update(ts=now, px=px)
+        return _BNB_CACHE["px"], "BNB"
+    return eth_usd, "ETH"
+
+
 def _tier_label(hours: float) -> str:
     return {24: "24h", 72: "3 days", 168: "7 days"}.get(int(hours), f"{hours:.0f}h")
 
@@ -3321,8 +3340,7 @@ def _tier_label(hours: float) -> str:
 def _tier_lines(kind: str, chain: str) -> list[str]:
     sol_usd, eth_usd = _get_usd_prices()
     is_sol = chain in ("sol", "solana")
-    price = sol_usd if is_sol else eth_usd
-    sym = "SOL" if is_sol else "ETH"
+    price, sym = _native_quote(chain, sol_usd, eth_usd)
     lines = []
     for hours, usd in BOOST_TIERS.get(kind, []):
         amt = f"{usd / price:.4f} {sym}" if price else "(price feed down)"
@@ -3696,8 +3714,7 @@ async def boost_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         }
         sol_usd, eth_usd = _get_usd_prices()
         is_sol = chain in ("sol", "solana")
-        price = sol_usd if is_sol else eth_usd
-        sym = "SOL" if is_sol else "ETH"
+        price, sym = await asyncio.to_thread(_native_quote, chain, sol_usd, eth_usd)
         amt_disp = f"{usd / price:.4f} {sym}" if price else "(price feed down)"
         wallet = TREASURY_SOL if is_sol else TREASURY_EVM
         label = "Raid Leaderboard boost" if bkind == "raid" else "Trending boost"
@@ -3743,8 +3760,7 @@ async def _finalize_boost_target(msg, context: ContextTypes.DEFAULT_TYPE, raw_te
     context.user_data["boost_pending"] = pending
     sol_usd, eth_usd = _get_usd_prices()
     is_sol = chain in ("sol", "solana")
-    price = sol_usd if is_sol else eth_usd
-    sym = "SOL" if is_sol else "ETH"
+    price, sym = await asyncio.to_thread(_native_quote, chain, sol_usd, eth_usd)
     amt = f"{usd / price:.4f} {sym}" if price else "(price feed down — contact support before paying)"
     wallet = TREASURY_SOL if is_sol else TREASURY_EVM
     label = "Raid Leaderboard boost" if kind == "raid" else "Trending boost"
@@ -3758,7 +3774,17 @@ async def _finalize_boost_target(msg, context: ContextTypes.DEFAULT_TYPE, raw_te
     )
 
 
+ADS_LIVE = (os.getenv("FERZAN_ADS_LIVE", "0") or "0").strip() == "1"  # buy-card ads are not placed on cards yet
+
+
 async def _start_ads_flow(target, context: ContextTypes.DEFAULT_TYPE, edit: bool) -> None:
+    if not ADS_LIVE:  # never take payment for a product that does nothing yet
+        text = "📊 Buy-card button ads are coming soon. Trending and Raid boosts are open now: /trending and /raidboost."
+        if edit:
+            await target.edit_message_text(text)
+        else:
+            await target.reply_text(text)
+        return
     context.user_data["boost_pending"] = {"kind": "ads", "chain": "sol"}
     rows = [
         [InlineKeyboardButton(f"{_tier_label(h)}  {a} SOL", callback_data=f"bst:ads:tier:{h}")]
@@ -3785,6 +3811,8 @@ async def paid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.effective_message.reply_text("Usage: /paid <txhash>")
         return
     tx = args[0].strip()
+    if tx.lower().startswith("0x"):
+        tx = tx.lower()  # EVM hashes are case-insensitive: 0xABC and 0xabc are the same payment
     pending = context.user_data.get("boost_pending")
     if not pending or not pending.get("target_set") or not pending.get("hours"):
         extra = " ".join(args[1:])
@@ -3798,7 +3826,7 @@ async def paid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     kind = pending["kind"]
     chain = pending.get("chain", "sol")
     is_sol = chain in ("sol", "solana") or kind == "ads"
-    ok, amount, err = _verify_sol_tx(tx) if is_sol else _verify_evm_tx(tx, chain)
+    ok, amount, err = await asyncio.to_thread(_verify_sol_tx, tx) if is_sol else await asyncio.to_thread(_verify_evm_tx, tx, chain)
     if not ok:
         await update.effective_message.reply_text(
             f"❌ Couldn't verify that payment: {err}\nDouble-check the hash, and if it's still confirming, retry in a minute."
@@ -3811,7 +3839,7 @@ async def paid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.effective_message.reply_text("That transaction has already been used for a boost.")
         return
     hours_full = pending.get("hours") or 24.0
-    sol_usd, eth_usd = _get_usd_prices()
+    sol_usd, eth_usd = await asyncio.to_thread(_get_usd_prices)
     if kind == "ads":
         target_native = pending.get("native_amt") or ADS_TIERS_SOL[0][1]
         full_hit = amount >= target_native
@@ -3824,7 +3852,7 @@ async def paid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             f"any boost time. Send the difference and /paid again with the new tx."
         )
     else:
-        price = sol_usd if is_sol else eth_usd
+        price = sol_usd if is_sol else (await asyncio.to_thread(_native_quote, chain, sol_usd, eth_usd))[0]
         usd_paid = amount * price if price else 0.0
         target_usd = pending.get("usd") or 0.0
         full_hit = usd_paid >= target_usd

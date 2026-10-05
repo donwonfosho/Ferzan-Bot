@@ -39,7 +39,7 @@ CREATE TABLE IF NOT EXISTS subscriptions (
 # Callback data for the "Upgrade" button shown in the payment prompt.
 # Wire a CallbackQueryHandler to this in your bot's setup to actually
 # start a checkout/payment flow.
-CB_UPGRADE = "subscription:upgrade"
+CB_UPGRADE = "liq:upgrade"
 
 DEFAULT_PAYMENT_PROMPT = (
     "🔒 This is a premium feature.\n\n"

@@ -90,7 +90,9 @@ ME = (os.getenv("FERZAN_GUARDIAN_BOT") or "FerzanGuardianBot").lstrip("@")
 CHAT = os.getenv("FERZAN_CHAT_URL") or "https://t.me/Ferzan_Chat"
 X_URL = os.getenv("FERZAN_X_URL") or "https://x.com/ferzaneco"
 LOG_CHAT = os.getenv("GUARDIAN_LOG_CHAT", "").strip()
-FAKE = re.compile(r"(admin|owner|dev|support|moderator|official|helpdesk)", re.I)
+# Whole words only ("Devon" / "Towner" are real names). "_" and digits count as separators in handles.
+FAKE = re.compile(r"(?<![a-z0-9])(admin|owner|support|moderator|official|helpdesk|dev ?team|developer)(?![a-z0-9])", re.I)
+FAKE_ACTION = (os.getenv("GUARDIAN_FAKE_ACTION", "mute") or "mute").strip().lower()  # "mute" (default) or "ban"
 DEFAULT_WORDS = {"airdrop claim", "double your sol", "seed phrase", "connect wallet to claim", "free mint drainer"}
 LINK_RE = re.compile(r"(https?://|t\.me/|@\w{4,})", re.I)
 OWNER_IDS = {5107098957}
@@ -1524,10 +1526,29 @@ async def _resolve_shortlinks(text: str) -> list[str]:
     return resolved
 
 
+_PROTECTED_DOMAINS = {
+    "t.me", "telegram.org", "telegram.me", "x.com", "twitter.com", "google.com", "github.com", "youtube.com",
+    "discord.com", "discord.gg", "coingecko.com", "coinmarketcap.com", "dexscreener.com", "solscan.io",
+    "etherscan.io", "basescan.org", "bscscan.com", "uniswap.org", "raydium.io", "jup.ag", "ferzan-factory.com",
+    "ferzaneco.com", "ferzan.io",
+}
+_CA_SHAPE = re.compile(r"^(0x[a-f0-9]{40}|[1-9A-HJ-NP-Za-km-z]{32,44})$", re.I)
+_DOMAIN_SHAPE = re.compile(r"^(?:[a-z0-9-]+\.)+[a-z]{2,}$")
+
+
+def _scam_value_ok(value: str, kind: str) -> bool:
+    v = (value or "").strip().lower()
+    if kind == "ca":
+        return bool(_CA_SHAPE.fullmatch(value.strip()))
+    return bool(_DOMAIN_SHAPE.fullmatch(v)) and len(v) >= 6
+
+
 def _federate_report(value: str, kind: str, chat_id: int) -> bool:
-    """Records that `chat_id` flagged `value`; auto-promotes to the ecosystem-wide scam list
-    once enough distinct groups have reported the same value. Returns True if just promoted."""
-    if not value:
+    """Records that `chat_id` flagged `value`. A full contract address reported by enough distinct groups is
+    promoted to the ecosystem-wide list automatically. A DOMAIN is never auto-promoted (three throwaway groups
+    could otherwise get a real site blocked everywhere); the owner adds it with /gscamadd after looking.
+    Returns True if just promoted."""
+    if not value or not _scam_value_ok(value, kind):
         return False
     con = _db()
     con.execute(
@@ -1540,7 +1561,7 @@ def _federate_report(value: str, kind: str, chat_id: int) -> bool:
     ).fetchone()[0]
     already = con.execute("SELECT 1 FROM scam_list WHERE value=?", (value,)).fetchone()
     promoted = False
-    if distinct >= FEDERATION_THRESHOLD and not already:
+    if distinct >= FEDERATION_THRESHOLD and not already and kind == "ca":
         con.execute(
             "INSERT OR REPLACE INTO scam_list(value, kind, added_by, ts) VALUES(?,?,0,strftime('%s','now'))",
             (value, kind),
@@ -3896,7 +3917,11 @@ async def scamadd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.effective_message.reply_text("Usage: /scamadd <ca-or-domain> — blocks it in this group only")
         return
     val = " ".join(context.args).strip().lower()
+    val = re.sub(r"^https?://", "", val).split("/")[0] if val.startswith("http") else val
     kind = "domain" if "." in val and not val.startswith("0x") else "ca"
+    if not _scam_value_ok(val if kind == "domain" else " ".join(context.args).strip(), kind):
+        await update.effective_message.reply_text("That does not look like a contract address or a domain (like scam-site.xyz).")
+        return
     chat_id = update.effective_chat.id
     con = _db()
     con.execute(
@@ -4346,6 +4371,12 @@ async def gendgiveaway(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.effective_message.reply_text("Usage: /gendgiveaway <id>")
         return
     giveaway_id = int(context.args[0])
+    con = _db()
+    own = con.execute("SELECT 1 FROM giveaways WHERE id=? AND chat_id=?", (giveaway_id, update.effective_chat.id)).fetchone()
+    con.close()
+    if not own:
+        await update.effective_message.reply_text("That giveaway is not running in this chat.")
+        return
     if context.job_queue:
         for job in context.job_queue.get_jobs_by_name(f"giveaway:{giveaway_id}"):
             job.schedule_removal()
@@ -4445,7 +4476,9 @@ async def votemute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             await update.effective_message.reply_text("Can't vote-mute an admin.")
             return
     except Exception:
-        pass
+        # could not check: never risk muting an admin on a failed lookup
+        await update.effective_message.reply_text("Couldn't check that member right now. Try again in a moment.")
+        return
     con = _db()
     existing = con.execute(
         "SELECT id FROM vote_mutes WHERE chat_id=? AND target_id=? AND status='active'", (chat_id, target.id)
@@ -4573,7 +4606,11 @@ async def _scheduled_post_fire(context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         await context.bot.send_message(chat_id, text, parse_mode="HTML")
     except Exception as exc:
-        log.warning("scheduled post %s", exc)
+        log.warning("scheduled post (html) %s", exc)
+        try:  # text like "a < b" or "Q&A" is not valid HTML: send it as plain text rather than dropping the post
+            await context.bot.send_message(chat_id, text)
+        except Exception as exc2:
+            log.warning("scheduled post %s", exc2)
 
 
 def _register_scheduled_post(app: Application, post_id: int, kind: str, hour: int, minute: int, weekday: int | None) -> None:
@@ -5091,7 +5128,8 @@ async def testwelcome_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         chosen_text = random.choice(pool)
     else:
         chosen_text = welcome_text or _default_welcome_for(user.language_code)
-    greeting = chosen_text.format(
+    greeting = _safe_fmt(
+        chosen_text,
         first=_esc(user.first_name or user.full_name),
         chatname=_esc(update.effective_chat.title or ""),
     )
@@ -5836,6 +5874,53 @@ async def report_resolve_callback(update: Update, context: ContextTypes.DEFAULT_
         log.warning("resolve edit %s", exc)
 
 
+def _safe_fmt(text: str, first: str = "", chatname: str = "") -> str:
+    """Fills {first} and {chatname} without str.format, so a stray '{' or '{wallet}' in an admin's welcome
+    text can never raise and take the whole join handler (captcha, raid and new-account checks) down with it."""
+    return (text or "").replace("{first}", first).replace("{chatname}", chatname)
+
+
+async def _lift_restriction(context, chat_id: int, user_id: int) -> None:
+    try:
+        chat = await context.bot.get_chat(chat_id)
+        perms = chat.permissions or ChatPermissions(can_send_messages=True)
+        await context.bot.restrict_chat_member(chat_id, user_id, perms)
+    except Exception as exc:
+        log.warning("lift restriction %s", exc)
+
+
+async def _gate_send_fallback(context, chat_id: int, user_id: int, prompt: str, kb, pending: dict, timeout_cb, timeout_s: int) -> None:
+    """The captcha / rules message could not be sent (stale media id, bad markup). Try plain text; if even
+    that fails, let the person talk instead of leaving them muted forever with no way to unlock."""
+    plain = html.unescape(re.sub(r"<[^>]+>", "", prompt or ""))
+    try:
+        sent = await context.bot.send_message(chat_id, plain, reply_markup=kb)
+        pending[(chat_id, user_id)] = sent.message_id
+        if context.job_queue:
+            context.job_queue.run_once(timeout_cb, timeout_s, data={"chat_id": chat_id, "user_id": user_id, "msg_id": sent.message_id})
+        return
+    except Exception as exc:
+        log.warning("gate fallback send %s", exc)
+    await _lift_restriction(context, chat_id, user_id)
+
+
+async def _hold_impersonator(context, chat_id: int, user, why: str) -> None:
+    """A joiner looks like staff. Default is a mute plus a note to admins, never a ban: real people are
+    called Admin, Support or share a name with a moderator."""
+    ban = FAKE_ACTION == "ban"
+    try:
+        if ban:
+            await context.bot.ban_chat_member(chat_id, user.id)
+        else:
+            await context.bot.restrict_chat_member(chat_id, user.id, ChatPermissions(can_send_messages=False))
+        tail = "" if ban else " Muted, not banned. Admins: reply to them with /gunmute if this is a real person."
+        await context.bot.send_message(chat_id, f"🛡 {why}: {_esc(user.full_name)}.{tail}")
+    except Exception as exc:
+        log.warning("impersonator hold %s", exc)
+    else:
+        await _log(context, f"\U0001F6E1 Held on join: {_esc(user.full_name)} ({user.id}) in {chat_id} — {why}.", chat_id)
+
+
 async def _admins(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> list[str]:
     names = []
     try:
@@ -5901,7 +5986,8 @@ async def on_member(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     ):
         goodbye_text, goodbye_on = _goodbye_settings(chat_id)
         if goodbye_on:
-            farewell = (goodbye_text or _default_goodbye_for(new.user.language_code)).format(
+            farewell = _safe_fmt(
+                goodbye_text or _default_goodbye_for(new.user.language_code),
                 first=_esc(new.user.first_name or new.user.full_name),
                 chatname=_esc(update.effective_chat.title or ""),
             )
@@ -5971,6 +6057,16 @@ async def on_member(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             f"\U0001F6A8 Raid detected in {chat_id}: {len(dq)} joins in {RAID_WINDOW_SECONDS}s.{top_link_note}",
             chat_id,
         )
+        for admin in await _admin_users(context, chat_id):
+            try:
+                await context.bot.send_message(
+                    admin.id,
+                    f"🚨 Raid detected in <b>{_esc(chat_title)}</b> — {len(dq)} joins in {RAID_WINDOW_SECONDS}s. "
+                    f"Guardian has locked the chat down for {RAID_LOCK_SECONDS // 60} min.",
+                    parse_mode="HTML",
+                )
+            except Exception:
+                pass  # admin hasn't started a DM with the bot — nothing we can do
 
     has_photo = True
     try:
@@ -5985,50 +6081,37 @@ async def on_member(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         while npdq and now_ts - npdq[0] > RAID_WINDOW_SECONDS:
             npdq.popleft()
         nophoto_burst = len(npdq) >= NOPHOTO_RAID_THRESHOLD
-        for admin in await _admin_users(context, chat_id):
-            try:
-                await context.bot.send_message(
-                    admin.id,
-                    f"🚨 Raid detected in <b>{_esc(chat_title)}</b> — {len(dq)} joins in {RAID_WINDOW_SECONDS}s. "
-                    f"Guardian has locked the chat down for {RAID_LOCK_SECONDS // 60} min.",
-                    parse_mode="HTML",
-                )
-            except Exception:
-                pass  # admin hasn't started a DM with the bot — nothing we can do
 
     con = _db()
     banned = con.execute("SELECT 1 FROM global_bans WHERE user_id=?", (user.id,)).fetchone()
     con.close()
     handle = f"{user.username or ''} {user.full_name or ''}"
-    if banned or FAKE.search(handle):
+    if banned:
         try:
             await context.bot.ban_chat_member(chat_id, user.id)
-            await context.bot.send_message(chat_id, f"🛡 Removed impersonator / listed ban: {_esc(user.full_name)}")
+            await context.bot.send_message(chat_id, f"🛡 Removed listed ban: {_esc(user.full_name)}")
         except Exception as exc:
             log.warning("join ban %s", exc)
         else:
             await _log(
                 context,
-                f"\U0001F6E1 Blocked join: {_esc(user.full_name)} ({user.id}) in {chat_id} — impersonator/listed ban.",
+                f"\U0001F6E1 Blocked join: {_esc(user.full_name)} ({user.id}) in {chat_id} — listed ban.",
             )
         return
+    if FAKE.search(handle) and not _is_trusted(user.id):
+        await _hold_impersonator(context, chat_id, user, "Possible impersonator")
+        return
+    admin_ids = {u.id for u in await _admin_users(context, chat_id)}
     admins = await _admins(context, chat_id)
     low = (user.full_name or "").lower()
-    look_alike = low and any(
-        low == a or (len(low) > 4 and low in a) or (len(low) > 4 and len(a) > 4 and _levenshtein(low, a) <= 2)
-        for a in admins
+    look_alike = bool(
+        user.id not in admin_ids
+        and low
+        and len(low) >= 6
+        and any(low == a or _levenshtein(low, a) <= 1 for a in admins if len(a) >= 6)
     )
     if look_alike:
-        try:
-            await context.bot.ban_chat_member(chat_id, user.id)
-            await context.bot.send_message(chat_id, "🛡 Removed admin look-alike.")
-        except Exception:
-            pass
-        else:
-            await _log(
-                context,
-                f"\U0001F6E1 Blocked join: {_esc(user.full_name)} ({user.id}) in {chat_id} — admin look-alike.",
-            )
+        await _hold_impersonator(context, chat_id, user, "Same name as an admin")
         return
 
     con = _db()
@@ -6046,7 +6129,8 @@ async def on_member(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         chosen_text = random.choice(pool)
     else:
         chosen_text = welcome_text or _default_welcome_for(user.language_code)
-    greeting = chosen_text.format(
+    greeting = _safe_fmt(
+        chosen_text,
         first=_esc(user.first_name or user.full_name),
         chatname=_esc(update.effective_chat.title or ""),
     )
@@ -6093,6 +6177,7 @@ async def on_member(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 )
         except Exception as exc:
             log.warning("captcha send %s", exc)
+            await _gate_send_fallback(context, chat_id, user.id, prompt, kb, _pending_captcha, _captcha_timeout, CAPTCHA_TIMEOUT_SECONDS)
         return
 
     if _rules_gate_enabled(chat_id):
@@ -6126,6 +6211,7 @@ async def on_member(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 )
         except Exception as exc:
             log.warning("rules gate send %s", exc)
+            await _gate_send_fallback(context, chat_id, user.id, prompt, kb, _pending_rules, _rules_gate_timeout, RULES_GATE_TIMEOUT_SECONDS)
         return
 
     if now_ts < _raid_lock_until[chat_id]:
@@ -6225,6 +6311,50 @@ def _match_faq(chat_id: int, text_lower: str) -> tuple[int, str] | None:
     return None
 
 
+async def _fire_notes(context, msg, chat_id: int, user_id: int, text_raw: str, text: str, admin: bool) -> bool:
+    """#note and bare-word note triggers. They run only AFTER a message has cleared moderation (so a scam
+    wrapped in '#faq' is still removed), and members get a short per-note cooldown so nobody can make the
+    bot spam the chat. Admins skip the cooldown. Returns True if a note was sent."""
+    async def _send(name, ntext, mid, mtype):
+        if not admin and _check_cooldown(user_id, chat_id, f"note:{name}", 20) > 0:
+            return True  # swallowed quietly; the trigger fired recently
+        try:
+            if mid and mtype == "photo":
+                await context.bot.send_photo(chat_id, mid, caption=ntext or None)
+            elif mid and mtype == "animation":
+                await context.bot.send_animation(chat_id, mid, caption=ntext or None)
+            elif mid and mtype == "video":
+                await context.bot.send_video(chat_id, mid, caption=ntext or None)
+            else:
+                await msg.reply_text(ntext)
+        except Exception as exc:
+            log.warning("note send %s", exc)
+        return True
+
+    if text_raw.startswith("#") and len(text_raw) > 1:
+        note_name = text_raw[1:].strip().lower().split()[0] if text_raw[1:].strip() else ""
+        if note_name:
+            con = _db()
+            row = con.execute(
+                "SELECT text, media_id, media_type FROM notes WHERE chat_id=? AND name=?",
+                (chat_id, note_name),
+            ).fetchone()
+            con.close()
+            if row:
+                return await _send(note_name, row[0], row[1], row[2])
+    # Bare-word match: typing a saved note's name anywhere in an ordinary message fires it too (like Rose).
+    if not text_raw.startswith("/") and not text_raw.startswith("#") and text_raw.strip():
+        con = _db()
+        note_rows = con.execute(
+            "SELECT name, text, media_id, media_type FROM notes WHERE chat_id=?", (chat_id,)
+        ).fetchall()
+        con.close()
+        for bw_name, bw_text, bw_media_id, bw_media_type in note_rows:
+            if bw_name and re.search(rf"\b{re.escape(bw_name)}\b", text, re.I):
+                return await _send(bw_name, bw_text, bw_media_id, bw_media_type)
+    return False
+
+
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     msg = update.effective_message
     if not msg or update.effective_chat.type == "private":
@@ -6242,61 +6372,16 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         _bump_msg_count(chat_id)
         _maybe_touch_trust(user.id)
 
-    if text_raw.startswith("#") and len(text_raw) > 1:
-        note_name = text_raw[1:].strip().lower().split()[0] if text_raw[1:].strip() else ""
-        if note_name:
-            con = _db()
-            row = con.execute(
-                "SELECT text, media_id, media_type FROM notes WHERE chat_id=? AND name=?",
-                (chat_id, note_name),
-            ).fetchone()
-            con.close()
-            if row:
-                note_text, note_media_id, note_media_type = row
-                try:
-                    if note_media_id and note_media_type == "photo":
-                        await context.bot.send_photo(chat_id, note_media_id, caption=note_text or None)
-                    elif note_media_id and note_media_type == "animation":
-                        await context.bot.send_animation(chat_id, note_media_id, caption=note_text or None)
-                    elif note_media_id and note_media_type == "video":
-                        await context.bot.send_video(chat_id, note_media_id, caption=note_text or None)
-                    else:
-                        await msg.reply_text(note_text)
-                except Exception as exc:
-                    log.warning("note send %s", exc)
-                return
-
-    # Bare-word filter match: typing a saved filter's name anywhere in an ordinary message
-    # (not a command, not a #-trigger) fires it too — same behavior people know from Rose.
-    if not text_raw.startswith("/") and not text_raw.startswith("#") and text_raw.strip():
-        con = _db()
-        note_rows = con.execute(
-            "SELECT name, text, media_id, media_type FROM notes WHERE chat_id=?", (chat_id,)
-        ).fetchall()
-        con.close()
-        for bw_name, bw_text, bw_media_id, bw_media_type in note_rows:
-            if not bw_name:
-                continue
-            if re.search(rf"\b{re.escape(bw_name)}\b", text, re.I):
-                try:
-                    if bw_media_id and bw_media_type == "photo":
-                        await context.bot.send_photo(chat_id, bw_media_id, caption=bw_text or None)
-                    elif bw_media_id and bw_media_type == "animation":
-                        await context.bot.send_animation(chat_id, bw_media_id, caption=bw_text or None)
-                    elif bw_media_id and bw_media_type == "video":
-                        await context.bot.send_video(chat_id, bw_media_id, caption=bw_text or None)
-                    else:
-                        await msg.reply_text(bw_text)
-                except Exception as exc:
-                    log.warning("bare-word filter trigger %s", exc)
-                return
-
     if msg.sender_chat and msg.sender_chat.id == chat_id:
         # Posted anonymously as the group itself — only admins can do that, never moderate it.
+        if not is_edit:
+            await _fire_notes(context, msg, chat_id, user.id, text_raw, text, True)
         return
     try:
         member = await context.bot.get_chat_member(chat_id, user.id)
         if member.status in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER):
+            if not is_edit:
+                await _fire_notes(context, msg, chat_id, user.id, text_raw, text, True)
             return
     except Exception:
         return
@@ -6377,7 +6462,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         slow_s = max(slow_s, ADAPTIVE_SLOWMODE_SECONDS)
     if _in_quiet_hours(chat_id):
         slow_s = max(slow_s, ADAPTIVE_SLOWMODE_SECONDS)
-    if slow_s > 0:
+    if slow_s > 0 and not is_edit:
         last = _slowmode_last.get((chat_id, user.id), 0)
         if now_ts - last < slow_s:
             try:
@@ -6388,7 +6473,8 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         _slowmode_last[(chat_id, user.id)] = now_ts
 
     dq = _flood[(chat_id, user.id)]
-    dq.append(now_ts)
+    if not is_edit:
+        dq.append(now_ts)
     while dq and now_ts - dq[0] > FLOOD_SECONDS:
         dq.popleft()
     if len(dq) > FLOOD_LIMIT:
@@ -6619,13 +6705,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 await context.bot.ban_chat_member(chat_id, user.id)
             except Exception as exc:
                 log.warning("filter ban %s", exc)
-            con = _db()
-            con.execute(
-                "INSERT OR REPLACE INTO global_bans(user_id, reason, by_id, ts) VALUES(?,?,?,strftime('%s','now'))",
-                (user.id, f"filter: {hit_word}", 0),
-            )
-            con.commit()
-            con.close()
+            _track_ban(chat_id, user.id)  # this group's own filter bans in this group only, never ecosystem-wide
             await _log(
                 context,
                 f"\U0001F528 Instant-banned {user.id} in {chat_id} — filter '{_esc(hit_word)}'.",
@@ -6644,6 +6724,9 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         else:
             await _strike(context, chat_id, user.id, f"blocked phrase (warn): {hit_word}")
         return
+
+    if not is_edit and await _fire_notes(context, msg, chat_id, user.id, text_raw, text, False):
+        return  # cleared every moderation check above, so the note may fire
 
     con = _db()
     triggers = con.execute("SELECT trig, reply FROM autoreply WHERE chat_id=?", (chat_id,)).fetchall()
@@ -7167,6 +7250,7 @@ def main() -> None:
             url_path=WEBHOOK_PATH.lstrip("/"),
             webhook_url=WEBHOOK_URL.rstrip("/") + "/" + WEBHOOK_PATH.lstrip("/"),
             drop_pending_updates=True,
+            secret_token=(os.getenv("GUARDIAN_WEBHOOK_SECRET") or __import__("hashlib").sha256((token + ":guardian-webhook").encode()).hexdigest()[:48]),
             allowed_updates=Update.ALL_TYPES,
         )
     else:
