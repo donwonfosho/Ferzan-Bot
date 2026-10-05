@@ -521,6 +521,24 @@ async def api_degen(request: Request) -> JSONResponse:
     return JSONResponse({"on": bool(db.degen_on(uid))})
 
 
+@app.post("/api/feedbuy")
+async def api_feedbuy(request: Request) -> JSONResponse:
+    """Feed auto-buy opt-in: the same flag as the bot's /settings feedbuy. Needs an auto-buy amount (/settings autobuy)."""
+    body = await _json(request)
+    uid = _auth(body, max_age=ORDER_MAX_AGE_S if "on" in body else None)
+    if "on" in body:
+        if not _rate_ok(uid, "feedbuy", 6):
+            raise HTTPException(status_code=429, detail="Slow down a moment.")
+        db.set_flag(uid, "feed_auto_buy", bool(body.get("on")))
+    usd = float((db.get_user(uid) or {}).get("auto_buy_usd") or 0)
+    try:
+        per_day = max(0, int(os.getenv("FEED_AUTOBUY_PER_DAY") or 5))
+    except ValueError:
+        per_day = 5
+    return JSONResponse({"on": bool(db.flag_on(uid, "feed_auto_buy", 0)), "auto_usd": usd,
+                         "armed": bool(db.flag_on(uid, "auto_buy", 0)) and usd > 0, "per_day": per_day})
+
+
 @app.post("/api/card")
 async def api_card(request: Request) -> JSONResponse:
     body = await _json(request)

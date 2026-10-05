@@ -2078,6 +2078,26 @@ def _init_v4(conn) -> None:
         conn.execute("ALTER TABLE chain_trade ADD COLUMN presets TEXT")
     conn.executescript(
         """
+        CREATE TABLE IF NOT EXISTS pending_fills (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            mint TEXT NOT NULL,
+            chain TEXT NOT NULL DEFAULT '',
+            chain_id INTEGER NOT NULL,
+            tx_hash TEXT NOT NULL UNIQUE,
+            usd REAL NOT NULL,
+            label TEXT NOT NULL DEFAULT '',
+            fee_kind TEXT NOT NULL DEFAULT 'manual',
+            record_basis INTEGER NOT NULL DEFAULT 1,
+            liq REAL NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'pending',
+            created_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_pending_fills_status ON pending_fills(status);
+        """
+    )
+    conn.executescript(
+        """
         CREATE TABLE IF NOT EXISTS webapp_orders (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER NOT NULL,
@@ -3282,3 +3302,33 @@ def week_stats(user_id: int, days: int = 7) -> dict:
             "win_rate": round(wins * 100.0 / len(sells), 1) if sells else None, "pnl_usd": round(pnl, 2), "best_usd": round(best, 2),
             "chains": len({r["chain"] for r in rows if r["chain"]})}
 
+
+
+def add_pending_fill(user_id: int, mint: str, chain: str, chain_id: int, tx_hash: str, usd: float,
+                     label: str = "", fee_kind: str = "manual", record_basis: bool = True, liq: float = 0.0) -> bool:
+    """Remember a buy that was sent but not confirmed in time, so a late success still gets its cost basis."""
+    try:
+        with get_conn() as conn:
+            conn.execute(
+                "INSERT INTO pending_fills (user_id, mint, chain, chain_id, tx_hash, usd, label, fee_kind, record_basis, liq, created_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (int(user_id), mint, chain, int(chain_id), str(tx_hash).lower(), float(usd), label, fee_kind,
+                 1 if record_basis else 0, float(liq or 0), int(time.time())),
+            )
+            conn.commit()
+        return True
+    except Exception:  # noqa: BLE001  (duplicate hash = already tracked)
+        return False
+
+
+def pending_fills_open() -> list[dict]:
+    with get_conn() as conn:
+        return [dict(r) for r in conn.execute("SELECT * FROM pending_fills WHERE status = 'pending' ORDER BY id").fetchall()]
+
+
+def claim_pending_fill(fill_id: int, status: str) -> bool:
+    """Move a pending fill to done/reverted/expired exactly once; False if someone else already did."""
+    with get_conn() as conn:
+        cur = conn.execute("UPDATE pending_fills SET status = ? WHERE id = ? AND status = 'pending'", (status, int(fill_id)))
+        conn.commit()
+        return cur.rowcount > 0

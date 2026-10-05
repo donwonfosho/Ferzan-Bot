@@ -302,6 +302,10 @@ def build_tx(request_id: str, body: BuildTxRequest, request: Request):
                 )
                 unsigned_tx_hex = bytes(result.unsigned_transaction).hex()
                 response = {"chain": "solana", "unsigned_transaction": unsigned_tx_hex, "mint_address": result.mint_address}
+                # /complete only accepts a coin THIS request built (a rebuild keeps the earlier mints, last 5)
+                _prev = [m for m in (_ex0.get("sol_mints") or []) if isinstance(m, str)]
+                _set_extra(request_id, {**_ex0, "sol_mint": result.mint_address,
+                                        "sol_mints": (_prev + [result.mint_address])[-5:]})
             elif req.mode in ("meteora", "pumpfun", "bonding_curve"):
                 from irys_upload import upload_token_metadata
                 metadata_uri = ""
@@ -491,7 +495,7 @@ def _verifiable_launch(req) -> bool:
         logger.warning("launch %s has no wallet yet; skipping the on-chain check", req.id)
         return False
     if req.chain == "solana":
-        return req.mode == "meteora"
+        return req.mode in ("meteora", "plain")  # plain SPL coins are proven too: the caller's mint is never taken on trust
     return req.mode == "bonding_curve" and bool(FACTORY_ADDRESSES.get(req.chain, {}).get("bonding_curve"))
 
 

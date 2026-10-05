@@ -365,6 +365,7 @@
 </div>
 
 <div class="list" style="margin-top:10px"><button class="w" id="degenBtn" style="border-top:0"><span id="degenTxt">😈 Degen mode</span><span class="hint" id="degenHint"></span></button></div>
+<div class="list" style="margin-top:10px"><button class="w" id="feedBtn" style="border-top:0"><span id="feedTxt">⚡ Feed auto-buy</span><span class="hint" id="feedHint"></span></button></div>
 <p class="foot" id="foot">Trades run through the bot — same safety checks as a button tap.</p>
 <p class="foot"><a href="#" id="toClassic">💬 Switch to classic chat mode</a></p>
 <div class="sheet-bg" id="sheetBg" hidden></div>
@@ -597,6 +598,24 @@
     catch (e) { toast(e.message, 3000); }
   });
   loadDegen();
+  let feed = { on: false, auto_usd: 0, armed: false, per_day: 5 };
+  function paintFeed() {
+    $("feedTxt").textContent = feed.on ? "⚡ Feed auto-buy: ON" : "⚡ Feed auto-buy: OFF";
+    $("feedHint").textContent = feed.on
+      ? (feed.armed ? "$" + feed.auto_usd + " per launch, max " + feed.per_day + "/day" : "Set an amount in chat: /settings autobuy 20")
+      : "Tap to turn on";
+  }
+  async function loadFeed() { try { feed = await api("/api/feedbuy", {}); paintFeed(); } catch (e) { $("feedBtn").hidden = true; } }
+  $("feedBtn").addEventListener("click", async () => {
+    const want = !feed.on;
+    const q = want
+      ? "Turn on feed auto-buy?\n\nThe bot may buy brand-new launches from the feed with your auto-buy amount, at most " + feed.per_day + " a day, using your normal safety checks. You must also have an auto-buy amount set (/settings autobuy)."
+      : "Turn off feed auto-buy?";
+    if (!(await confirmBox(q))) return;
+    try { feed = await api("/api/feedbuy", { on: want }); paintFeed(); toast(feed.on ? "⚡ Feed auto-buy ON" : "Feed auto-buy OFF", 2500); }
+    catch (e) { toast(e.message, 3000); }
+  });
+  loadFeed();
   let busy = false;
   async function order(o, question) {
     if (busy) { toast("A trade is already running…", 2500); return; }

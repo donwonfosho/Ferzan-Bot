@@ -3,11 +3,15 @@ from __future__ import annotations
 
 import asyncio
 import html
+import json
 import logging
+import math
 import os
 import re
+import secrets
 import sqlite3
 import time
+from decimal import Decimal
 from pathlib import Path
 
 import requests
@@ -521,6 +525,21 @@ def _db() -> sqlite3.Connection:
         con.execute("ALTER TABLE boosts ADD COLUMN reminded INTEGER DEFAULT 0")
     except sqlite3.OperationalError:
         pass
+    # One row per quote shown to a buyer. Its tag is baked into the amount they must send, so a
+    # treasury payment can only ever be matched to the order it was made for.
+    con.execute(
+        """CREATE TABLE IF NOT EXISTS boost_orders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            chain TEXT,
+            tag INTEGER,
+            exact_units TEXT,
+            payload TEXT,
+            created_ts INTEGER,
+            status TEXT DEFAULT 'open',
+            tx_hash TEXT
+        )"""
+    )
     con.execute(
         """CREATE TABLE IF NOT EXISTS user_wallets (
             user_id INTEGER,
@@ -3464,6 +3483,200 @@ def _verify_evm_tx(tx_hash: str, chain: str) -> tuple[bool, float, str]:
     return True, wei / 1e18, ""
 
 
+# ---- boost orders: a payment can only be claimed by the order it was made for ----------------------
+# The treasury receives every Ferzan payment, so "this transaction paid the treasury" proves nothing
+# about WHO it was for: anyone could claim a stranger's payment (or an old one). Each quote therefore
+# carries a random 4-digit reference in the lowest digits of the amount to send, and /paid only accepts
+# a payment whose amount ends in that buyer's reference and was made after the quote was shown.
+ORDER_TTL_S = 24 * 3600
+ORDER_SKEW_S = 60
+TAG_RANGE = 9999
+
+
+def _is_sol_chain(chain: str) -> bool:
+    return (chain or "").lower() in ("sol", "solana")
+
+
+def _pay_units(chain: str) -> tuple[int, int, int]:
+    """(decimals, grid, tag unit) in the chain's smallest unit. SOL: 1e-3 grid, tag in 1e-7 steps.
+    EVM coins: 1e-4 grid, tag in 1e-8 steps (both within what exchanges let you withdraw)."""
+    return (9, 10**6, 100) if _is_sol_chain(chain) else (18, 10**14, 10**10)
+
+
+def _exact_units(native_amount: float, chain: str, tag: int) -> int:
+    dec, grid, unit = _pay_units(chain)
+    raw = int((Decimal(str(native_amount)) * (10**dec)).to_integral_value(rounding="ROUND_CEILING"))
+    base = -(-raw // grid) * grid
+    return base + int(tag) * unit
+
+
+def _tag_of(units: int, chain: str) -> int:
+    _dec, _grid, unit = _pay_units(chain)
+    return (int(units) // unit) % 10000
+
+
+def _fmt_units(units: int, chain: str) -> str:
+    dec, _grid, unit = _pay_units(chain)
+    places = dec - len(str(unit)) + 1  # SOL 7, EVM 8
+    return f"{Decimal(int(units)) / Decimal(10**dec):.{places}f}"
+
+
+def _open_order(user_id: int, chain: str, native_amount: float, payload: dict) -> tuple[int, int, int]:
+    """Opens a fresh order for this buyer (cancelling their earlier open one). Returns (id, tag, exact units)."""
+    now = int(time.time())
+    con = _db()
+    try:
+        con.commit()
+        con.execute("BEGIN IMMEDIATE")
+        con.execute("UPDATE boost_orders SET status='expired' WHERE status='open' AND created_ts<?", (now - ORDER_TTL_S,))
+        con.execute("UPDATE boost_orders SET status='cancelled' WHERE status='open' AND user_id=?", (user_id,))
+        used = {r[0] for r in con.execute("SELECT tag FROM boost_orders WHERE status='open' AND chain=?", (chain,))}
+        free = TAG_RANGE - len(used)
+        if free <= 0:
+            raise RuntimeError("no free order references")
+        while True:
+            tag = 1 + secrets.randbelow(TAG_RANGE)
+            if tag not in used:
+                break
+        units = _exact_units(native_amount, chain, tag)
+        cur = con.execute(
+            "INSERT INTO boost_orders(user_id,chain,tag,exact_units,payload,created_ts) VALUES(?,?,?,?,?,?)",
+            (user_id, chain, tag, str(units), json.dumps(payload), now),
+        )
+        con.commit()
+        return cur.lastrowid, tag, units
+    except Exception:
+        con.rollback()
+        raise
+    finally:
+        con.close()
+
+
+def _order_row(order_id: int | None = None, user_id: int | None = None) -> dict | None:
+    """An order that has not been paid yet: by id, or this buyer's newest open one."""
+    con = _db()
+    try:
+        con.row_factory = sqlite3.Row
+        if order_id is not None:
+            r = con.execute("SELECT * FROM boost_orders WHERE id=? AND status!='paid'", (order_id,)).fetchone()
+        else:
+            r = con.execute(
+                "SELECT * FROM boost_orders WHERE user_id=? AND status='open' AND created_ts>=? ORDER BY id DESC LIMIT 1",
+                (user_id, int(time.time()) - ORDER_TTL_S),
+            ).fetchone()
+        if not r:
+            return None
+        d = dict(r)
+        d["payload"] = json.loads(d.get("payload") or "{}")
+        d["exact_units"] = int(d["exact_units"])
+        return d
+    finally:
+        con.close()
+
+
+def _order_problem(order: dict, units, ts, check_tag: bool = True) -> str | None:
+    """Why this payment cannot be matched to this order, in words for the buyer; None if it matches."""
+    chain = order["chain"]
+    if units is None:
+        return "Couldn't read the amount of that payment. Try again in a minute."
+    if not ts or ts < int(order["created_ts"]) - ORDER_SKEW_S:
+        return "That payment was made before this order was opened, so it can't be matched to it."
+    if check_tag and _tag_of(units, chain) != int(order["tag"]):
+        sym = "SOL" if _is_sol_chain(chain) else ("BNB" if (chain or "").lower() in ("bsc", "bnb") else "ETH")
+        return (
+            "That payment doesn't carry this order's reference. Every order has an exact amount "
+            f"({_fmt_units(order['exact_units'], chain)} {sym}) so one payment can only ever belong to one buyer. "
+            f"Start a new order and send the exact amount shown, or contact support with this tx: {CHAT}"
+        )
+    return None
+
+
+def _payment_facts(chain: str, tx_hash: str) -> tuple[int | None, int | None]:
+    """(amount the treasury received in the chain's smallest unit, block time) -- (None, None) if unreadable."""
+    try:
+        if _is_sol_chain(chain):
+            res = requests.post(
+                SOL_RPC,
+                json={"jsonrpc": "2.0", "id": 1, "method": "getTransaction",
+                      "params": [tx_hash, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0}]},
+                timeout=15,
+            ).json().get("result") or {}
+            meta = res.get("meta") or {}
+            keys = res["transaction"]["message"]["accountKeys"]
+            addrs = [k.get("pubkey") if isinstance(k, dict) else k for k in keys]
+            idx = addrs.index(TREASURY_SOL)
+            units = int(meta["postBalances"][idx]) - int(meta["preBalances"][idx])
+            return units, (int(res.get("blockTime") or 0) or None)
+        rpc = EVM_RPC.get(chain)
+        if not rpc:
+            return None, None
+
+        def call(method, params):
+            return (requests.post(rpc, json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params}, timeout=15).json() or {}).get("result")
+
+        tx = call("eth_getTransactionByHash", [tx_hash]) or {}
+        rc = call("eth_getTransactionReceipt", [tx_hash]) or {}
+        blk = call("eth_getBlockByNumber", [rc.get("blockNumber"), False]) or {}
+        return int(tx.get("value") or "0x0", 16), (int(blk["timestamp"], 16) or None)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("payment facts %s: %s", tx_hash[:12], type(exc).__name__)
+        return None, None
+
+
+async def _quote_order(user_id: int, chain: str, native_amount: float, pending: dict):
+    """Opens the order for a quote (off the event loop). (order id, exact units) or None."""
+    payload = {k: pending.get(k) for k in ("kind", "chain", "hours", "usd", "native_amt", "ca", "cashtag", "url")}
+    payload["chain"] = chain
+    try:
+        oid, _tag, units = await asyncio.to_thread(_open_order, user_id, chain, float(native_amount), payload)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("open order failed: %s", exc)
+        return None
+    pending["order_id"] = oid
+    return oid, units
+
+
+def _pay_instruction(units: int, chain: str, sym: str, wallet: str) -> str:
+    return (
+        f"Send exactly <code>{_fmt_units(units, chain)}</code> {html.escape(sym)} to:\n"
+        f"<code>{html.escape(wallet)}</code>\n"
+        "The last digits are your order reference — please don't round the amount. "
+        "Pay from a wallet, or an exchange that allows that many decimals."
+    )
+
+
+def _tx_used(tx: str) -> bool:
+    con = _db()
+    try:
+        return con.execute("SELECT 1 FROM boosts WHERE tx_hash=?", (tx,)).fetchone() is not None
+    finally:
+        con.close()
+
+
+def _grant_boost_for_order(order_id: int, **kw) -> tuple[int, int]:
+    """Grants the boost and marks its order paid in ONE transaction; sqlite3.IntegrityError if the tx was already used."""
+    now = int(time.time())
+    ends = now + int(kw["hours"] * 3600)
+    con = _db()
+    try:
+        con.commit()
+        con.execute("BEGIN IMMEDIATE")
+        con.execute(
+            "INSERT INTO boosts(kind,chat_id,cashtag,ca,url,user_id,chain,tx_hash,usd_paid,hours_granted,"
+            "starts_ts,ends_ts,status,created_ts) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'active',?)",
+            (kw["kind"], kw["chat_id"], kw["cashtag"], kw["ca"], kw["url"], kw["user_id"], kw["chain"], kw["tx_hash"],
+             kw["usd_paid"], kw["hours"], now, ends, now),
+        )
+        con.execute("UPDATE boost_orders SET status='paid', tx_hash=? WHERE id=?", (kw["tx_hash"], order_id))
+        con.commit()
+        return now, ends
+    except Exception:
+        con.rollback()
+        raise
+    finally:
+        con.close()
+
+
 def _grant_boost(
     kind: str, chat_id: int, cashtag: str, ca: str, url: str, user_id: int,
     chain: str, tx_hash: str, usd_paid: float, hours: float,
@@ -3699,9 +3912,14 @@ async def boost_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 "kind": "ads", "chain": "sol", "hours": hours, "native_amt": amt,
                 "ca": "", "cashtag": tag, "url": url, "target_set": True,
             }
+            opened = await _quote_order(q.from_user.id, "sol", amt, context.user_data["boost_pending"])
+            if not opened:
+                await q.edit_message_text("Couldn't open an order right now. Try again in a minute.")
+                return
             await q.edit_message_text(
-                f"🔁 Renew button ad — {tag or url}\nDuration: {_tier_label(hours)} · {amt} SOL\n\n"
-                f"Pay to:\n{TREASURY_SOL or 'set FEE_WALLET_SOL in .env'}\n\nThen /paid <txhash>.",
+                f"🔁 Renew button ad — {tag or url}\nDuration: {_tier_label(hours)}\n\n"
+                f"{_pay_instruction(opened[1], 'sol', 'SOL', TREASURY_SOL or 'set FEE_WALLET_SOL in .env')}\n\nThen /paid <txhash>.",
+                parse_mode="HTML",
             )
             return
         tiers = BOOST_TIERS.get(bkind, [])
@@ -3715,12 +3933,19 @@ async def boost_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         sol_usd, eth_usd = _get_usd_prices()
         is_sol = chain in ("sol", "solana")
         price, sym = await asyncio.to_thread(_native_quote, chain, sol_usd, eth_usd)
-        amt_disp = f"{usd / price:.4f} {sym}" if price else "(price feed down)"
         wallet = TREASURY_SOL if is_sol else TREASURY_EVM
         label = "Raid Leaderboard boost" if bkind == "raid" else "Trending boost"
+        if not price or not usd:
+            await q.edit_message_text("The price feed is down, so I can't quote an exact amount. Try again in a minute.")
+            return
+        opened = await _quote_order(q.from_user.id, chain, usd / price, context.user_data["boost_pending"])
+        if not opened:
+            await q.edit_message_text("Couldn't open an order right now. Try again in a minute.")
+            return
         await q.edit_message_text(
-            f"🔁 Renew {label} — {tag or ca}\nDuration: {_tier_label(hours)} · ${usd:.0f} ≈ {amt_disp}\n\n"
-            f"Pay to:\n{wallet or 'set FEE_WALLET in .env'}\n\nThen /paid <txhash> to activate.",
+            f"🔁 Renew {label} — {tag or ca}\nDuration: {_tier_label(hours)} · ${usd:.0f}\n\n"
+            f"{_pay_instruction(opened[1], chain, sym, wallet or 'set FEE_WALLET in .env')}\n\nThen /paid <txhash> to activate.",
+            parse_mode="HTML",
         )
         return
 
@@ -3739,10 +3964,15 @@ async def _finalize_boost_target(msg, context: ContextTypes.DEFAULT_TYPE, raw_te
         native_amt = pending.get("native_amt") or ADS_TIERS_SOL[0][1]
         pending.update(ca="", cashtag=url[:40], url=url, target_set=True)
         context.user_data["boost_pending"] = pending
+        opened = await _quote_order(msg.from_user.id, "sol", native_amt, pending)
+        if not opened:
+            await msg.reply_text("Couldn't open an order right now. Try again in a minute.")
+            return
+        _oid, units = opened
         await msg.reply_text(
             f"📊 Buy-card button ad — {url}\n"
-            f"Duration: {_tier_label(hours)} · {native_amt} SOL\n\n"
-            f"Pay to:\n<code>{html.escape(TREASURY_SOL or 'set FEE_WALLET_SOL in .env')}</code>\n\n"
+            f"Duration: {_tier_label(hours)}\n\n"
+            f"{_pay_instruction(units, 'sol', 'SOL', TREASURY_SOL or 'set FEE_WALLET_SOL in .env')}\n\n"
             f"Then send <code>/paid &lt;txhash&gt;</code> to activate it. Underpay and you still get boosted "
             f"time — just prorated to what you actually sent.",
             parse_mode="HTML",
@@ -3761,13 +3991,20 @@ async def _finalize_boost_target(msg, context: ContextTypes.DEFAULT_TYPE, raw_te
     sol_usd, eth_usd = _get_usd_prices()
     is_sol = chain in ("sol", "solana")
     price, sym = await asyncio.to_thread(_native_quote, chain, sol_usd, eth_usd)
-    amt = f"{usd / price:.4f} {sym}" if price else "(price feed down — contact support before paying)"
     wallet = TREASURY_SOL if is_sol else TREASURY_EVM
     label = "Raid Leaderboard boost" if kind == "raid" else "Trending boost"
+    if not price:
+        await msg.reply_text("The price feed is down, so I can't quote an exact amount. Try again in a minute.")
+        return
+    opened = await _quote_order(msg.from_user.id, chain, usd / price, pending)
+    if not opened:
+        await msg.reply_text("Couldn't open an order right now. Try again in a minute.")
+        return
+    _oid, units = opened
     await msg.reply_text(
         f"🚀 {label} — {tag or ca}\n"
-        f"Duration: {_tier_label(hours)} · ${usd:.0f} ≈ {amt}\n\n"
-        f"Pay to:\n<code>{html.escape(wallet or 'set FEE_WALLET in .env')}</code>\n\n"
+        f"Duration: {_tier_label(hours)} · ${usd:.0f}\n\n"
+        f"{_pay_instruction(units, chain, sym, wallet or 'set FEE_WALLET in .env')}\n\n"
         f"Then send <code>/paid &lt;txhash&gt;</code> to activate it. Underpay and you still get boosted "
         f"time — just prorated to what you actually sent.",
         parse_mode="HTML",
@@ -3805,6 +4042,10 @@ async def ads_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await _start_ads_flow(update.effective_message, context, edit=False)
 
 
+_TX_EVM = re.compile(r"^0x[0-9a-f]{64}$")
+_TX_SOL = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{64,90}$")
+
+
 async def paid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     args = context.args or []
     if not args:
@@ -3813,18 +4054,22 @@ async def paid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     tx = args[0].strip()
     if tx.lower().startswith("0x"):
         tx = tx.lower()  # EVM hashes are case-insensitive: 0xABC and 0xabc are the same payment
-    pending = context.user_data.get("boost_pending")
-    if not pending or not pending.get("target_set") or not pending.get("hours"):
-        extra = " ".join(args[1:])
-        log.info("PAID legacy/untracked claim uid=%s tx=%s extra=%s", update.effective_user.id, tx, extra)
+    if not (_TX_EVM.match(tx) or _TX_SOL.match(tx)):
+        await update.effective_message.reply_text("That doesn't look like a transaction hash. Paste the full hash from your wallet or explorer.")
+        return
+    uid = update.effective_user.id
+    order = await asyncio.to_thread(_order_row, None, uid)
+    if not order:
+        log.info("PAID claim without an open order uid=%s tx=%s", uid, tx)
         await update.effective_message.reply_text(
-            "Got it, but there's no pending boost purchase tied to your account.\n"
-            "Run /trending, /raidboost, or /ads first to pick a duration and target, then /paid <txhash>.",
+            "Got it, but there's no pending boost purchase tied to your account (orders last 24 hours).\n"
+            "Run /trending, /raidboost, or /ads first to get an exact amount to pay, then /paid <txhash>.",
             disable_web_page_preview=True,
         )
         return
-    kind = pending["kind"]
-    chain = pending.get("chain", "sol")
+    pending = order["payload"]
+    kind = pending.get("kind") or "trending"
+    chain = order["chain"]
     is_sol = chain in ("sol", "solana") or kind == "ads"
     ok, amount, err = await asyncio.to_thread(_verify_sol_tx, tx) if is_sol else await asyncio.to_thread(_verify_evm_tx, tx, chain)
     if not ok:
@@ -3832,6 +4077,23 @@ async def paid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             f"❌ Couldn't verify that payment: {err}\nDouble-check the hash, and if it's still confirming, retry in a minute."
         )
         return
+    if await asyncio.to_thread(_tx_used, tx):
+        await update.effective_message.reply_text("That transaction has already been used for a boost.")
+        return
+    units, ts = await asyncio.to_thread(_payment_facts, chain, tx)
+    why = _order_problem(order, units, ts)
+    if why:
+        log.info("PAID not matched uid=%s order=%s tx=%s: %s", uid, order["id"], tx, why[:60])
+        await update.effective_message.reply_text(f"❌ {why}")
+        return
+    await _complete_boost(update, context, order, tx, amount, is_sol)
+
+
+async def _complete_boost(update, context, order: dict, tx: str, amount: float, is_sol: bool, chat_id: int | None = None) -> None:
+    """Prices the verified payment, grants the boost and marks the order paid. Shared by /paid and the owner's /claimorder."""
+    pending = order["payload"]
+    kind = pending.get("kind") or "trending"
+    chain = order["chain"]
     con = _db()
     dup = con.execute("SELECT 1 FROM boosts WHERE tx_hash=?", (tx,)).fetchone()
     con.close()
@@ -3866,10 +4128,17 @@ async def paid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if too_small:
         await update.effective_message.reply_text(below_min_text)
         return
-    _starts, ends = _grant_boost(
-        kind, update.effective_chat.id, pending.get("cashtag") or "", pending.get("ca") or "",
-        pending.get("url") or "", update.effective_user.id, chain, tx, usd_paid, hours_granted,
-    )
+    try:
+        _starts, ends = await asyncio.to_thread(
+            lambda: _grant_boost_for_order(
+                order["id"], kind=kind, chat_id=chat_id or update.effective_chat.id, cashtag=pending.get("cashtag") or "",
+                ca=pending.get("ca") or "", url=pending.get("url") or "", user_id=order["user_id"], chain=chain,
+                tx_hash=tx, usd_paid=usd_paid, hours=hours_granted,
+            )
+        )
+    except sqlite3.IntegrityError:
+        await update.effective_message.reply_text("That transaction has already been used for a boost.")
+        return
     context.user_data.pop("boost_pending", None)
     until = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(ends))
     await update.effective_message.reply_text(f"✅ Boost active — {hours_granted:.1f}h{note}\nExpires: {until}")
@@ -3880,7 +4149,7 @@ async def paid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 con2 = _db()
                 con2.execute(
                     "INSERT OR IGNORE INTO raid_tokens(cashtag, chat_id, ca, pts) VALUES(?,?,?,0)",
-                    (tag, update.effective_chat.id, pending.get("ca") or ""),
+                    (tag, chat_id or update.effective_chat.id, pending.get("ca") or ""),
                 )
                 con2.commit()
                 con2.close()
@@ -3891,6 +4160,44 @@ async def paid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         # not built yet; the purchase is tracked and verified but the link isn't auto-placed.
     except Exception as exc:
         log.warning("board refresh after paid %s", exc)
+
+
+async def claimorder_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Owner only: attach a real treasury payment to an order by hand, for a buyer whose exchange cut the
+    amount's decimals so the reference digits were lost. The payment itself is still verified on-chain."""
+    if update.effective_user.id not in OWNER_IDS:
+        return
+    args = context.args or []
+    if len(args) != 2 or not args[0].isdigit():
+        await update.effective_message.reply_text("Usage: /claimorder <order id> <txhash>")
+        return
+    tx = args[1].strip()
+    if tx.lower().startswith("0x"):
+        tx = tx.lower()
+    if not (_TX_EVM.match(tx) or _TX_SOL.match(tx)):
+        await update.effective_message.reply_text("That doesn't look like a transaction hash.")
+        return
+    order = await asyncio.to_thread(_order_row, int(args[0]), None)
+    if not order:
+        await update.effective_message.reply_text("No unpaid order with that id.")
+        return
+    chain = order["chain"]
+    is_sol = chain in ("sol", "solana") or (order["payload"].get("kind") == "ads")
+    ok, amount, err = await asyncio.to_thread(_verify_sol_tx, tx) if is_sol else await asyncio.to_thread(_verify_evm_tx, tx, chain)
+    if not ok:
+        await update.effective_message.reply_text(f"❌ Couldn't verify that payment: {err}")
+        return
+    units, ts = await asyncio.to_thread(_payment_facts, chain, tx)
+    why = _order_problem(order, units, ts, check_tag=False)
+    if why:
+        await update.effective_message.reply_text(f"❌ {why}")
+        return
+    log.info("CLAIMORDER by owner %s: order=%s tx=%s", update.effective_user.id, order["id"], tx)
+    await _complete_boost(update, context, order, tx, amount, is_sol, chat_id=order["user_id"])
+    try:
+        await context.bot.send_message(order["user_id"], "✅ Your boost payment was matched to your order by the Ferzan team. /boosts shows it.")
+    except Exception:  # noqa: BLE001
+        pass
 
 
 async def boosts_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -4461,6 +4768,7 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(boost_cb, pattern=r"^bst:"))
     app.add_handler(CommandHandler("ads", ads_cmd))
     app.add_handler(CommandHandler("paid", paid_cmd))
+    app.add_handler(CommandHandler("claimorder", claimorder_cmd))
     app.add_handler(CommandHandler("boosts", boosts_cmd))
     app.add_handler(CommandHandler("refundboost", refundboost_cmd))
     app.add_handler(CommandHandler("revenue", revenue_cmd))

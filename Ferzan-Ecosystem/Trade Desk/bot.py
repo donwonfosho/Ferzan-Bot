@@ -1915,9 +1915,16 @@ def _live_buy(
         if not (os.getenv("ZEROX_API_KEY") or "").strip() and str(getattr(snap, "dex", "") or "").lower() != "ferzan-curve":
             return False, "Live: EVM needs ZEROX_API_KEY on the droplet."
         label = (resolve_chain(chain) or chain or "base").upper()
+        evm_signer.take_unconfirmed()  # drop anything left over from an earlier call on this thread
         ok, msg = evm_signer.buy_evm(
             chain or "base", mint, usd, key_hex=evm_secret, slip_bps=_slip_bps(uid, "buy"), user_id=uid
         )
+        late = None if ok else evm_signer.take_unconfirmed()
+        if late:  # sent but not mined in 45s: keep watching it so a late success still gets its cost basis
+            db.add_pending_fill(uid, mint, (resolve_chain(chain) or chain or "base"), late[0], late[1], usd,
+                                label=label, fee_kind=fee_kind, record_basis=record_basis,
+                                liq=float(getattr(card.snapshot, "liquidity_usd", 0) or 0))
+            msg = f"{msg}\nI'll keep watching it and record the buy (and tell you) if it lands."
     else:
         if "sol" not in chain and not (len(mint) >= 32 and not mint.startswith("0x")):
             return False, f"Live: {chain or 'unknown'} is not Solana."
@@ -9195,6 +9202,81 @@ async def lp_watch_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 logger.exception("lp watch notify")
 
 
+PENDING_FILL_MAX_AGE_S = 6 * 3600
+
+
+async def _settle_pending_fill(context, f: dict) -> None:
+    """One pending fill: late success -> same bookkeeping as an on-time fill; revert -> clear; too old -> give up."""
+    uid, mint, txh = int(f["user_id"]), f["mint"], f["tx_hash"]
+    st = await asyncio.to_thread(evm_signer.receipt_status, int(f["chain_id"]), txh)
+    if st is None:
+        if time.time() - int(f["created_at"]) > PENDING_FILL_MAX_AGE_S and db.claim_pending_fill(f["id"], "expired"):
+            sendstate.clear(uid, mint, "buy")
+            await _notify_user_safe(context, uid, f"ℹ️ A {f['label']} buy of ${f['usd']:,.2f} was sent but never showed up on chain after 6 hours, "
+                                    f"so it was probably dropped. Check your wallet and tx {txh} before buying again.")
+        return
+    if not db.claim_pending_fill(f["id"], "done" if st else "reverted"):
+        return
+    sendstate.clear(uid, mint, "buy")
+    if not st:
+        await _notify_user_safe(context, uid, f"❌ Your earlier {f['label']} buy of ${f['usd']:,.2f} reverted on chain. Nothing changed hands and no fee was taken.")
+        return
+    usd = float(f["usd"])
+    extra = ""
+    if int(f["record_basis"]):
+        db.add_live_cost(uid, mint, usd)
+        if float(f["liq"] or 0) > 0:
+            db.set_lp_mark(uid, mint, float(f["liq"]))
+    _log_trade_safe(uid, "buy", mint, f["label"], usd)
+    fee_taken = False
+    if feecollect.enabled():
+        try:
+            sol_secret, evm_secret = user_wallets.secrets(uid)
+            fee_taken, fee_line = await asyncio.to_thread(
+                lambda: feecollect.skim_buy(uid, usd, "evm", sol_secret=sol_secret or "", evm_secret=evm_secret or "",
+                                            evm_chain=f["chain"] or "base", kind=f["fee_kind"], note=mint[:12]))
+            if fee_line:
+                extra += f"\n{fee_line}"
+        except Exception:
+            logger.exception("late fill fee failed for %s", uid)
+    try:
+        if (fee_taken or not feecollect.enabled()) and not feecollect.exempt(uid):
+            share = db.credit_desk_share(uid, usd, feecollect.live_bps(uid, f["fee_kind"]) if feecollect.enabled() else None)
+            if share:
+                extra += f"\n{share}"
+    except Exception:
+        logger.exception("late fill referral share failed for %s", uid)
+    if int(f["record_basis"]):
+        try:
+            ap_on, ap_tp, ap_sl = db.get_auto_protect(uid)
+            cur = db.get_live_exit(uid, mint) or {}
+            if ap_on and not (cur.get("tp_pct") or cur.get("sl_pct")):
+                trail = 20.0 if db.degen_on(uid) else None
+                db.set_live_exit(uid, mint, tp_pct=ap_tp, sl_pct=ap_sl, trail_pct=trail)
+                extra += f"\n🛡 Auto-protect armed: TP +{ap_tp:g}% · SL -{ap_sl:g}%"
+        except Exception:
+            logger.exception("late fill auto-protect failed for %s", uid)
+    await _notify_user_safe(context, uid, f"✅ Your earlier {f['label']} buy of ${usd:,.2f} landed late and is now recorded in your positions.{extra}")
+
+
+async def _notify_user_safe(context, uid: int, text: str) -> None:
+    try:
+        await context.bot.send_message(chat_id=uid, text=text)
+    except Exception:
+        logger.warning("could not notify %s about a pending fill", uid)
+
+
+async def pending_fill_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    try:
+        for f in await asyncio.to_thread(db.pending_fills_open):
+            try:
+                await _settle_pending_fill(context, f)
+            except Exception:
+                logger.exception("pending fill %s failed; will retry", f.get("id"))
+    except Exception:
+        logger.exception("pending fill job crashed; will retry next cycle")
+
+
 async def live_exit_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         await _live_exit_job(context)
@@ -9942,6 +10024,15 @@ async def _launch_feed_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 except Exception:
                     logger.exception("launch feed failed for %s", uid)
             # Feed buying is its own opt-in ("feedbuy"): turning on paste-to-buy never means buying every new launch.
+            if (db.flag_on(uid, "auto_buy", 0) and not db.flag_on(uid, "feed_auto_buy", 0)
+                    and float(user.get("auto_buy_usd") or 0) > 0 and not db.flag_on(uid, "feedbuy_notice", 0)):
+                db.set_flag(uid, "feedbuy_notice", True)  # one time only
+                try:
+                    await context.bot.send_message(
+                        uid, "ℹ️ Auto-buy no longer buys new launches from the feed by itself. It still works when you paste a CA. "
+                             "To also buy new launches from the feed, turn on Feed auto-buy in the app, or send /settings feedbuy on.")
+                except Exception:
+                    logger.warning("feedbuy notice not delivered to %s", uid)
             if db.flag_on(uid, "auto_buy", 0) and db.flag_on(uid, "feed_auto_buy", 0) and not _auto_trading_killed():
                 auto_usd = float(user.get("auto_buy_usd") or 0)
                 if auto_usd > 0 and (ln.token or "").strip() and not db.feed_autobuy_take(uid, _feed_buy_per_day()):
@@ -10459,6 +10550,7 @@ def main() -> None:
         jq.run_repeating(drawdown_job, interval=DRAWDOWN_POLL_SECONDS, first=55)
         jq.run_repeating(snipe_job, interval=SNIPE_POLL_SECONDS, first=18)
         jq.run_repeating(live_exit_job, interval=45, first=50)
+        jq.run_repeating(pending_fill_job, interval=30, first=65)
         jq.run_repeating(ops_watch_job, interval=300, first=20)
         jq.run_repeating(payout_wallet_job, interval=900, first=75)
         jq.run_repeating(signal_followup_job, interval=300, first=120)

@@ -8,6 +8,7 @@ import redact
 import re
 
 import requests
+import threading
 
 log = logging.getLogger("evm_signer")
 
@@ -588,6 +589,30 @@ def _send_raw(meta: dict, raw_hex: str, addr: str = "", nonce=None) -> dict:
 _TXH_RE = re.compile(r"0x[0-9a-fA-F]{64}")
 
 
+_UNCONF = threading.local()
+
+
+def take_unconfirmed():
+    """(chain_id, tx_hash) of the last buy/sell on THIS thread that was sent but not mined in time, once; else None."""
+    v = getattr(_UNCONF, "tx", None)
+    _UNCONF.tx = None
+    return v
+
+
+def receipt_status(chain_id: int, txh: str):
+    """True = mined OK, False = reverted, None = still unknown (or the chain/RPC can't be reached)."""
+    for meta in CHAINS.values():
+        if int(meta.get("chain_id") or -1) == int(chain_id) and meta.get("rpc"):
+            try:
+                rec = (_rpc(meta["rpc"], "eth_getTransactionReceipt", [txh]) or {}).get("result")
+            except Exception:  # noqa: BLE001
+                return None
+            if not rec:
+                return None
+            return int(rec.get("status") or "0x0", 16) == 1
+    return None
+
+
 def _confirm_tx(meta: dict, txh: str):
     """True = mined OK, False = mined and reverted, None = not mined in time (unknown)."""
     import time as _time
@@ -614,7 +639,10 @@ def _confirm_tx(meta: dict, txh: str):
 def _await_fill(meta: dict, txh: str, ok_text: str, what: str) -> tuple[bool, str]:
     """A trade counts as filled only once its receipt says success. A revert reports failure (so no fee,
     no cost basis); not mined yet says 'may still land' so nothing retries it automatically."""
+    _UNCONF.tx = None
     st = _confirm_tx(meta, txh)
+    if st is None:
+        _UNCONF.tx = (int(meta.get("chain_id") or 0), str(txh))  # bot.py reads this to follow up on a late fill
     if st is True:
         return True, ok_text
     link = (meta.get("explorer_tx") or "https://basescan.org/tx/{txid}").format(txid=txh)
