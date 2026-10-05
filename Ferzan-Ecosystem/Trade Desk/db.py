@@ -654,6 +654,29 @@ def close_position(pos_id: int, exit_price: float, pnl: float) -> None:
         conn.commit()
 
 
+def claim_position_close(pos_id: int, user_id: int) -> bool:
+    """Marks an open position closed; True only for the one caller that got there first (two taps or a tap and the
+    auto-exit can no longer both credit the same sale)."""
+    with get_conn() as conn:
+        cur = conn.execute(
+            "UPDATE positions SET closed_at = ? WHERE id = ? AND user_id = ? AND closed_at IS NULL",
+            (int(time.time()), pos_id, user_id),
+        )
+        conn.commit()
+        return cur.rowcount == 1
+
+
+def set_position_qty_if(pos_id: int, user_id: int, old_qty: float, new_qty: float) -> bool:
+    """Lowers a position's size only if it is still the size the caller saw (and still open)."""
+    with get_conn() as conn:
+        cur = conn.execute(
+            "UPDATE positions SET qty = ? WHERE id = ? AND user_id = ? AND closed_at IS NULL AND qty = ?",
+            (new_qty, pos_id, user_id, old_qty),
+        )
+        conn.commit()
+        return cur.rowcount == 1
+
+
 def get_position(pos_id: int, user_id: int) -> dict[str, Any] | None:
     with get_conn() as conn:
         row = conn.execute(

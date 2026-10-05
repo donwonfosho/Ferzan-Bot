@@ -3182,6 +3182,26 @@ def _mint_label(mint: str) -> str:
     return html.escape(f"{mint[:5]}…{mint[-4:]}" if len(mint) > 11 else mint)
 
 
+async def _on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Last stop for an exception no handler caught: log it (secrets scrubbed) and tell the user, without ever
+    claiming that nothing was sent, because a trade may have gone out before the error."""
+    import redact
+    from telegram.error import NetworkError, TimedOut
+    err = context.error
+    if isinstance(err, (NetworkError, TimedOut)):
+        logger.warning("telegram network blip: %s", redact.scrub(str(err))[:200])
+        return
+    logger.error("unhandled error: %s: %s", type(err).__name__, redact.scrub(str(err))[:400], exc_info=err)
+    try:
+        if isinstance(update, Update) and update.effective_chat and update.effective_chat.type == "private":
+            if update.callback_query:
+                await update.callback_query.answer("Something went wrong. If you were trading, check your wallet before retrying.", show_alert=True)
+            elif update.effective_message:
+                await update.effective_message.reply_text("Something went wrong on our side. If you were trading, check your wallet before retrying.")
+    except Exception:
+        pass
+
+
 async def panic_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update):
         return
@@ -3191,7 +3211,7 @@ async def panic_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.effective_message.reply_text("No open live positions to sell.")
         return
     kb = InlineKeyboardMarkup([[
-        InlineKeyboardButton(f"🚨 Yes, sell ALL {len(mints)}", callback_data="pnc:go"),
+        InlineKeyboardButton(f"🚨 Yes, sell ALL {len(mints)}", callback_data=f"pnc:go:{int(time.time())}"),
         InlineKeyboardButton("Cancel", callback_data="pnc:no"),
     ]])
     listed = "\n".join(f"• <code>{_mint_label(m)}</code>" for m in mints[:25])
@@ -3211,6 +3231,13 @@ async def panic_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await q.answer("Cancelled")
         await q.edit_message_text("Panic sell cancelled — nothing was sold.")
         return
+    try:
+        age = time.time() - int(q.data.split(":")[2])
+    except (IndexError, ValueError):
+        age = 10**9
+    if not 0 <= age <= 600:  # an old confirm button must not sell everything later
+        await q.answer("That confirmation expired. Send /panic again.", show_alert=True)
+        return
     if uid in _PANIC_RUNNING:
         await q.answer("Already selling…", show_alert=True)
         return
@@ -3221,7 +3248,11 @@ async def panic_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await q.edit_message_text(f"🚨 Selling {len(mints)} position(s)…")
         lines, sold, failed = [], 0, 0
         for i, mint in enumerate(mints, 1):
-            status, detail = await _sell_everywhere(uid, mint, "panic")
+            try:
+                status, detail = await _sell_everywhere(uid, mint, "panic")
+            except Exception as exc:  # one bad token must not stop the rest of the panic
+                logger.exception("panic sell failed for %s", mint)
+                status, detail = "failed", "unexpected error, check your wallet before retrying"
             icon = {"sold": "✅", "partial": "⚠️", "failed": "❌", "empty": "▫️"}[status]
             if status == "sold":
                 sold += 1
@@ -10360,6 +10391,7 @@ def main() -> None:
     app.add_handler(CommandHandler("pnl", pnl_cmd))
     app.add_handler(CommandHandler("panic", panic_cmd))
     app.add_handler(CommandHandler("sellall", sellall_cmd))
+    app.add_error_handler(_on_error)
     app.add_handler(CallbackQueryHandler(panic_cb, pattern=r"^pnc:"), group=-1)
     app.add_handler(CallbackQueryHandler(xbuy_cb, pattern=r"^xb:"), group=-1)
     app.add_handler(CommandHandler("xbuy", xbuy_cmd))

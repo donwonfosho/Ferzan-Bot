@@ -141,6 +141,8 @@ def paper_close(user_id: int, pos_id: int, reason: str = "manual") -> tuple[bool
     cut = fees.quote(gross)
     proceeds = cut.working_usd
     pnl = proceeds - (float(pos["entry"]) * float(pos["qty"]))
+    if not db.claim_position_close(pos_id, user_id):
+        return False, "That position was just closed."
     user = db.get_user(user_id)
     db.update_user(user_id, paper_cash=float(user["paper_cash"]) + proceeds)
     fees.record(user_id, "paper_sell", cut, note=str(pos["symbol"]))
@@ -177,6 +179,11 @@ def paper_close_pct(user_id: int, pos_id: int, pct: float) -> tuple[bool, str]:
     cost = sell_qty * float(pos["entry"])
     pnl = proceeds - cost
     left = float(pos["qty"]) - sell_qty
+    if left <= 1e-12:
+        if not db.claim_position_close(pos_id, user_id):
+            return False, "That position was just closed."
+    elif not db.set_position_qty_if(pos_id, user_id, float(pos["qty"]), left):
+        return False, "That position just changed. Try again."
     user = db.get_user(user_id)
     db.update_user(user_id, paper_cash=float(user["paper_cash"]) + proceeds)
     fees.record(user_id, "paper_sell", cut, note=str(pos["symbol"]))
@@ -184,12 +191,6 @@ def paper_close_pct(user_id: int, pos_id: int, pct: float) -> tuple[bool, str]:
         db.close_position(pos_id, px, pnl)
         note = "sold 100%"
     else:
-        with db.get_conn() as conn:
-            conn.execute(
-                "UPDATE positions SET qty = ? WHERE id = ? AND user_id = ?",
-                (left, pos_id, user_id),
-            )
-            conn.commit()
         note = f"sold {pct:g}%"
     db.add_journal(user_id, "SELL", f"#{pos_id} {note} @ {px:.6g} pnl={pnl:+.2f}")
     return True, f"#{pos_id} {note} @ ${px:,.6g}\nPnL {pnl:+,.2f} USD\n{cut.disclose()}"
