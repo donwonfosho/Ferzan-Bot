@@ -310,6 +310,49 @@ class TxChecks(unittest.TestCase):
         self.assertFalse(res[0])
 
 
+class AllowList(unittest.TestCase):
+    ROUTER = "0x161026041cf3701fc8c2f11d1a9121681be3718f"
+
+    def tx(self, to):
+        return {"to": to, "data": "0x04e45aaf" + "00" * 32, "value": "0", "chainId": 8453, "gas": 300000}
+
+    def test_swap_must_go_to_a_known_contract(self):
+        allowed = {self.ROUTER}
+        self.assertIsNone(bm._tx_problem(self.tx(self.ROUTER.upper().replace("0X", "0x")), 8453, "swap", 0, None, allowed))
+        self.assertIn("not a known", bm._tx_problem(self.tx("0x" + "9" * 40), 8453, "swap", 0, None, allowed))
+        self.assertIsNone(bm._tx_problem(self.tx("0x" + "9" * 40), 8453, "swap", 0, None, None))   # unchecked chains still work
+
+    def test_base_defaults_come_from_observed_trades(self):
+        self.assertEqual(bm.CHAINS["base"]["swap_to"], bm._BASE_SWAP_TO)
+        self.assertIn("0x2626664c2603336e57b271c5c0b26f421741e481", bm._BASE_SWAP_TO)
+        self.assertIsNone(bm.CHAINS["hood"]["swap_to"])
+
+    def test_env_can_replace_or_switch_off(self):
+        d = {"0x" + "1" * 40}
+        with mock.patch.dict(os.environ, {"X": "off"}): self.assertIsNone(bm._allowed_swap_to("X", d))
+        with mock.patch.dict(os.environ, {"X": "0x" + "A" * 40 + ", junk"}): self.assertEqual(bm._allowed_swap_to("X", d), {"0x" + "a" * 40})
+        with mock.patch.dict(os.environ, {"X": "garbage"}): self.assertEqual(bm._allowed_swap_to("X", d), d)
+        self.assertEqual(bm._allowed_swap_to("UNSET_ENV_NAME", d), d)
+
+    def test_leg_refuses_an_unknown_swap_destination(self):
+        cfg = {"rpc": "r", "chain_id": 8453, "weth": "0x" + "4" * 40, "api_chain": "base", "swap_to": {self.ROUTER}}
+        sent = []
+        with mock.patch.object(bm, "_pair_token", lambda *a: cfg["weth"]), \
+             mock.patch.object(bm.api, "prepare_trade", lambda *a, **k: {"tx": self.tx("0x" + "9" * 40)}), \
+             mock.patch.object(bm, "_sign_and_send", lambda *a: sent.append(a) or (True, "0x")):
+            res = bm._basestonk_leg(cfg, "0x1", WALLET, "0x" + "6" * 40, "buy", 10**15)
+        self.assertFalse(res[0]); self.assertIn("swap not signed", res[1]); self.assertEqual(sent, [])
+
+    def test_uniswap_approval_is_exact_not_unlimited(self):
+        got = {}
+        def approve(rpc, cid, key, token, spender, amount): got["amount"] = amount; return True, "0xa"
+        with mock.patch.object(bm, "_uni_find_pool", lambda *a: (500, "0xpool")), mock.patch.object(bm, "_uni_quote", lambda *a: 1000), \
+             mock.patch.object(bm, "_erc20_allowance", lambda *a: 0), mock.patch.object(bm, "_erc20_approve", approve), \
+             mock.patch.object(bm, "_wait_receipt", lambda *a, **k: True), mock.patch.object(bm, "_uni_swap_exact_in", lambda *a: (True, "0xs")):
+            ok, *_ = bm._uniswap_leg("r", 8453, "0x1", WALLET, "0x" + "5" * 40, "0x" + "4" * 40, 777)
+        self.assertTrue(ok); self.assertEqual(got["amount"], 777)
+
+
 class Gas(unittest.TestCase):
     def test_absurd_gas_price_is_not_signed(self):
         with mock.patch.object(bm, "_gas_price", lambda rpc: int(500e9)), mock.patch.object(bm, "_rpc", side_effect=AssertionError("sent")):

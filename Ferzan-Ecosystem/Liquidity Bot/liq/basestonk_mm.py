@@ -42,6 +42,21 @@ log = logging.getLogger("basestonk_mm")
 
 # ---- chain config ---------------------------------------------------
 
+def _allowed_swap_to(env_name: str, default: set[str] | None) -> set[str] | None:
+    """Contracts a swap transaction may be sent to. Env value: comma-separated
+    addresses to replace the default, or 'off' to stop checking. None = unchecked."""
+    raw = (os.getenv(env_name) or "").strip()
+    if raw.lower() == "off":
+        return None
+    if raw:
+        found = {a.lower() for a in re.findall(r"0x[0-9a-fA-F]{40}", raw)}
+        return found or default
+    return default
+
+
+# Read off 12 real successful Base MM trades: BaseStonk's own contract and Uniswap's SwapRouter02.
+_BASE_SWAP_TO = {"0x161026041cf3701fc8c2f11d1a9121681be3718f", "0x2626664c2603336e57b271c5c0b26f421741e481"}
+
 CHAINS = {
     "base": {
         "chain_id": 8453,
@@ -52,6 +67,7 @@ CHAINS = {
         # wrapped balance for WETH-paired pools, not raw native ETH.
         "weth": "0x4200000000000000000000000000000000000006",
         "api_chain": "base",  # value BaseStonk's REST API expects for ?chain=
+        "swap_to": _allowed_swap_to("MM_SWAP_TO_BASE", _BASE_SWAP_TO),
     },
     "hood": {
         "chain_id": 4663,
@@ -60,6 +76,7 @@ CHAINS = {
         "native_cg": "ethereum",
         "weth": "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73",
         "api_chain": "robinhood",  # TODO: confirm against a real hood token_record call
+        "swap_to": _allowed_swap_to("MM_SWAP_TO_HOOD", None),  # no trades observed yet: not enforced until set
     },
 }
 CHAIN_ALIASES = {"base": "base", "robinhood": "hood", "hood": "hood", "rh": "hood", "rhc": "hood"}
@@ -490,7 +507,7 @@ def _uniswap_leg(
 
     allowance = _erc20_allowance(rpc, token_in, address, UNISWAP_V3_ROUTER)
     if allowance < amount_in:
-        ok, res = _erc20_approve(rpc, chain_id, key_hex, token_in, UNISWAP_V3_ROUTER, MAX_UINT256)
+        ok, res = _erc20_approve(rpc, chain_id, key_hex, token_in, UNISWAP_V3_ROUTER, amount_in)  # exactly this swap, not unlimited
         if not ok:
             return False, f"approve to Uniswap router failed: {res}", None
         if _wait_receipt(rpc, res) is not True:
@@ -563,7 +580,8 @@ def _reprepare_after_approval(
     return None, last_exc
 
 
-def _tx_problem(tx, chain_id: int, kind: str, max_value: int = 0, spend_tokens: set | None = None) -> str | None:
+def _tx_problem(tx, chain_id: int, kind: str, max_value: int = 0, spend_tokens: set | None = None,
+                allowed_to: set | None = None) -> str | None:
     """Why a transaction handed to us by BaseStonk's API must NOT be signed,
     or None if it looks like what we asked for. We sign with the user's real
     key, so the API's answer is checked, not trusted: no ETH value beyond this
@@ -599,6 +617,8 @@ def _tx_problem(tx, chain_id: int, kind: str, max_value: int = 0, spend_tokens: 
             return "approval is for a token this trade does not use"
     elif sel in _NOT_A_SWAP:
         return "a direct token transfer/approval, not a swap"
+    elif allowed_to and to.lower() not in allowed_to:
+        return "swap destination is not a known BaseStonk/Uniswap contract"
     return None
 
 
@@ -622,7 +642,7 @@ def _basestonk_leg(
     swap_max_value = int(amount_in) if (side == "buy" and pair == weth) else 0
 
     def _refuse(tx, kind):
-        why = _tx_problem(tx, chain_id, kind, 0 if kind == "approve" else swap_max_value, spend_tokens)
+        why = _tx_problem(tx, chain_id, kind, 0 if kind == "approve" else swap_max_value, spend_tokens, cfg.get("swap_to"))
         if why:
             log.warning("refusing to sign %s tx from BaseStonk API: %s", kind, why)
         return why
