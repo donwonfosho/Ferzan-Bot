@@ -508,6 +508,14 @@ def get_all_active_alerts():
         return conn.execute("SELECT * FROM alerts WHERE active = 1").fetchall()
 
 
+def fire_alert(alert_id: int) -> bool:
+    """active -> fired. True only for the caller that flipped it, so overlapping runs never notify twice."""
+    with get_conn() as conn:
+        cur = conn.execute("UPDATE alerts SET active = 0 WHERE id = ? AND active = 1", (alert_id,))
+        conn.commit()
+        return cur.rowcount == 1
+
+
 def deactivate_alert(alert_id: int) -> None:
     with get_conn() as conn:
         conn.execute("UPDATE alerts SET active = 0 WHERE id = ?", (alert_id,))

@@ -558,6 +558,7 @@ def _creator_chats() -> dict:
 
 
 def send_graduation_alerts() -> None:
+    outbox: list = []  # sent only after the database transaction is committed, so the write lock is never held during network calls
     with idx_conn() as c:
         rows = c.execute("SELECT * FROM curves WHERE graduated = 1 AND grad_notified = 0").fetchall()
         if not rows:
@@ -584,9 +585,11 @@ def send_graduation_alerts() -> None:
             trade = (os.environ.get("FERZAN_BOT_USERNAME") or "Ferzan_Trade_Bot").lstrip("@")
             kb = {"inline_keyboard": [[{"text": "📊 Chart", "url": chart},
                                        {"text": "⚡ Buy in Ferzan Trade Bot", "url": f"https://t.me/{trade}?start=buy_{r['token']}"}]]}
-            _tg(chats.get(r["curve"]), text, kb)
+            outbox.append((chats.get(r["curve"]), text, kb))
             if channel:
-                _tg(channel, text, kb)
+                outbox.append((channel, text, kb))
+    for chat, text, kb in outbox:
+        _tg(chat, text, kb)
 
 
 # ---------------------------------------------------------- growth alerts --
@@ -614,6 +617,7 @@ def _progress(r) -> float:
 def send_growth_alerts() -> None:
     now = int(time.time())
     channel = (os.environ.get("FERZAN_LAUNCHES_CHANNEL") or "").strip()
+    outbox: list = []  # sent after the commit: no network call while the write lock is held
     with idx_conn() as c:
         first_run = c.execute("SELECT v FROM alert_state WHERE k = 'growth_init'").fetchone() is None
         rows = c.execute("SELECT * FROM curves WHERE graduated = 0 AND trades > 0").fetchall()
@@ -638,9 +642,9 @@ def send_growth_alerts() -> None:
                     f"{raised:.4g} / {target:.4g} {cfg['sym']} raised · {r['trades']} trades\n"
                     f"<code>{r['token']}</code>")
             chats = chats if chats is not None else _creator_chats()
-            _tg(chats.get(r["curve"]), text, _trade_kb(r))
+            outbox.append((chats.get(r["curve"]), text, _trade_kb(r)))
             if channel:
-                _tg(channel, text, _trade_kb(r))
+                outbox.append((channel, text, _trade_kb(r)))
         # King of the Hill: same rule as the feed (closest to graduating), with a floor and a cooldown
         king = c.execute(
             "SELECT * FROM curves WHERE graduated = 0 AND trades > 0 AND last_trade_ts > ? "
@@ -657,11 +661,13 @@ def send_growth_alerts() -> None:
                 text = (f"👑 <b>New King of the Hill: {name} (${sym})</b> on {CHAIN_LABEL.get(king['chain'], king['chain'])}\n\n"
                         f"{_progress(king):.0f}% to graduation · {king['trades']} trades\n<code>{king['token']}</code>")
                 chats = chats if chats is not None else _creator_chats()
-                _tg(chats.get(king["curve"]), "👑 Your token is now King of the Hill!\n\n" + text, _trade_kb(king))
+                outbox.append((chats.get(king["curve"]), "👑 Your token is now King of the Hill!\n\n" + text, _trade_kb(king)))
                 if channel:
-                    _tg(channel, text, _trade_kb(king))
+                    outbox.append((channel, text, _trade_kb(king)))
         if first_run:
             c.execute("INSERT OR REPLACE INTO alert_state (k, v) VALUES ('growth_init', ?)", (str(now),))
+    for chat, text, kb in outbox:
+        _tg(chat, text, kb)
 
 
 # ------------------------------------------------------------------- main --

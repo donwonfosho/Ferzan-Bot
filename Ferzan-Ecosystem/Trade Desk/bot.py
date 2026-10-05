@@ -8817,7 +8817,8 @@ async def check_alerts_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         if not hit:
             continue
-        db.deactivate_alert(alert["id"])
+        if not await asyncio.to_thread(db.fire_alert, alert["id"]):
+            continue  # another run already took this alert
         try:
             await context.bot.send_message(
                 chat_id=alert["chat_id"],

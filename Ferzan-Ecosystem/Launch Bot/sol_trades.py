@@ -135,11 +135,16 @@ def poll_graduated(st: dict) -> list:
         if not sigs:
             continue
         ok = [x["signature"] for x in sigs if not x.get("err")]
-        for sig, tx in zip(ok, fetch_txs(ok)):
+        txs = fetch_txs(ok)
+        for sig, tx in zip(ok, txs):
             t = parse(tx, {mint: dbc_pool}, DAMM_AUTH) if tx else None
             if t and not t["created"]:
                 found.append(dict(t, sig=sig, post_grad=True))
-        last[pool] = sigs[-1]["signature"]
+        cur = safe_cursor(sigs, txs, ok)
+        if cur:
+            last[pool] = cur
+        elif not until:
+            continue  # first read of this pool and nothing could be fetched: try the whole page again next time
     return found
 
 
@@ -189,6 +194,30 @@ def new_signatures(addr: str, until: str, cap: int = 400) -> list[dict]:
             break
         before = page[-1]["signature"]
     return list(reversed(got))
+
+
+_FAILS: dict = {}  # signature -> failed fetch count
+MAX_FETCH_TRIES = 6
+
+
+def safe_cursor(sigs: list, txs: list, ok: list) -> str:
+    """Signature to resume from: the last one, unless a transaction could not be fetched. Then it stops just before the
+    first missing one so the next pass tries it again (after MAX_FETCH_TRIES it is given up on, so one bad
+    transaction cannot stall the stream forever). `sigs` are oldest first; `ok` are the non-error ones, matching `txs`."""
+    missing = {sig for sig, tx in zip(ok, txs) if tx is None}
+    keep = {s: n for s, n in _FAILS.items() if s in missing}
+    _FAILS.clear(); _FAILS.update(keep)
+    stop = None
+    for sig in missing:
+        _FAILS[sig] = _FAILS.get(sig, 0) + 1
+    order = [x["signature"] for x in sigs]
+    for i, sig in enumerate(order):
+        if sig in missing and _FAILS.get(sig, 0) < MAX_FETCH_TRIES:
+            stop = i
+            break
+    if stop is None:
+        return order[-1]
+    return order[stop - 1] if stop > 0 else ""  # "" = nothing safe to move past yet
 
 
 def fetch_txs(sigs: list[str]) -> list:
@@ -277,6 +306,9 @@ class PoolState:
                 self.n += 1
                 self.p.stdin.write(json.dumps({"id": self.n, "pools": pools}) + "\n")
                 self.p.stdin.flush()
+                import select
+                if not select.select([self.p.stdout], [], [], 20)[0]:
+                    raise RuntimeError("pool helper did not answer in 20s")
                 line = self.p.stdout.readline()
                 return (json.loads(line) or {}).get("states") or {}
             except Exception as e:
@@ -387,6 +419,7 @@ def run() -> int:
     log.info("watching %d Ferzan configs, poll %.1fs", len(configs()), POLL)
     while True:
         t0 = time.time()
+        before = json.loads(json.dumps(st))  # if this pass fails (e.g. the database is busy), the cursors go back with it
         try:
             refreshed = time.time() - map_ts > 20
             if refreshed:
@@ -402,7 +435,8 @@ def run() -> int:
                 if not sigs:
                     continue
                 ok = [s["signature"] for s in sigs if not s.get("err")]
-                for sig, tx in zip(ok, fetch_txs(ok)):
+                txs = fetch_txs(ok)
+                for sig, tx in zip(ok, txs):
                     if tx is None:
                         continue
                     t = parse(tx, mints, pa)
@@ -410,7 +444,9 @@ def run() -> int:
                         found.append(dict(t, sig=sig))
                     else:  # maybe a coin we have not indexed yet: retry for a few minutes
                         pending[sig] = (time.time(), tx)
-                st[cfg] = sigs[-1]["signature"]
+                cur = safe_cursor(sigs, txs, ok)
+                if cur:
+                    st[cfg] = cur
             if pending and refreshed:  # the coin list just refreshed
                 for sig, (seen, tx) in list(pending.items()):
                     t = parse(tx, mints, pa)
@@ -432,6 +468,7 @@ def run() -> int:
             save_state(st)
         except Exception as e:
             log.warning("pass failed: %s", str(e)[:200])
+            st.clear(); st.update(before)
             time.sleep(3)
         time.sleep(max(0.2, POLL - (time.time() - t0)))
 
