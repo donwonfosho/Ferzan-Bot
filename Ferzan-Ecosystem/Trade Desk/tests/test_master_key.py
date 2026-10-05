@@ -104,6 +104,15 @@ class SpendCeiling(unittest.TestCase):
         j = s.index("def _live_buy_followup")
         self.assertIn("_large_buy_ask(uid, str(getattr(card.snapshot", s[j:j + 1500])
 
+    def test_mini_app_behaves_like_a_chat_tap(self):
+        s = self.read("bot.py")
+        i = s.index("def _webapp_trade")
+        body = s[i:i + 2600]
+        self.assertIn("_MANUAL_TAP.on = True", body)
+        self.assertIn("_live_buy(uid, card, mint, False, usd)", body)  # honours the score floor
+        self.assertNotIn("_live_buy(uid, card, mint, True, usd)", body)
+        self.assertIn('getattr(_MANUAL_TAP, "on", False)', s)
+
 
 if __name__ == "__main__":
     unittest.main()

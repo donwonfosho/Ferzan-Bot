@@ -24,6 +24,7 @@ import logging
 import os
 import datetime as dt
 import re
+import threading
 import time
 
 import requests
@@ -1850,6 +1851,7 @@ def _default_buy_usd(uid: int) -> float:
     return min(signer.max_usd(), max(1.0, usd))
 
 
+_MANUAL_TAP = threading.local()  # set by the Mini App order runner so its taps are treated like a chat tap
 _BUY_OK: dict = {}  # uid -> mint of the last live buy that went through, until its card is sent
 
 
@@ -1884,7 +1886,7 @@ def _live_buy(
     blocked = "" if gates_checked else _rug_block(uid, card, mint)
     if blocked:
         return False, blocked
-    if not crossbuy.allowed() and sendstate.held(uid, mint, "buy"):  # only automated callers wait; a manual tap decides for itself
+    if not (crossbuy.allowed() or getattr(_MANUAL_TAP, "on", False)) and sendstate.held(uid, mint, "buy"):  # only automated callers wait; a manual tap (chat OR Mini App) decides for itself
         return False, ("Paused: your last buy of this token was sent but never confirmed, so it may have gone through. "
                        "Check your wallet first. Automatic buys of this token resume in 15 minutes.")
     usd = _default_buy_usd(uid)
@@ -8582,9 +8584,18 @@ def _webapp_trade(uid: int, o: dict) -> tuple[bool, str]:
     ask = _large_buy_ask(uid, mint, usd * (slots if slots >= 2 else 1))  # same two-tap rule as the bot's buttons
     if ask:
         return False, ask
-    if o.get("multi") and db.multi_buy_slots(uid):
-        return _multi_buy(uid, card, mint, True, usd)
-    return _live_buy(uid, card, mint, True, usd)
+    _MANUAL_TAP.on = True
+    try:
+        # force=False: the app honours the user's score floor exactly like the chat's Buy button does
+        if o.get("multi") and db.multi_buy_slots(uid):
+            ok, msg = _multi_buy(uid, card, mint, False, usd)
+        else:
+            ok, msg = _live_buy(uid, card, mint, False, usd)
+    finally:
+        _MANUAL_TAP.on = False
+    if not ok and msg.startswith("Blocked by your score floor"):
+        msg += "\n(The app has no Override: lower the floor in /settings or buy from the chat.)"
+    return ok, msg
 
 
 async def _run_webapp_order(context: ContextTypes.DEFAULT_TYPE, o: dict) -> None:
