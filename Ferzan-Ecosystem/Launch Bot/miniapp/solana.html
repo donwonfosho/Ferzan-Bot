@@ -407,7 +407,7 @@
 
       await api('complete', { tx_hash: signature, result_token_address: mint_address || '' });
       showSuccess(signature);
-      fzCelebrate({ chain: 'solana', token: mint_address, symbol: launchReq.symbol, trade: mint_address ? `https://jup.ag/tokens/${mint_address}` : '' });
+      fzCelebrate({ chain: 'solana', token: mint_address, symbol: launchReq.symbol, trade: mint_address ? `https://ferzan-factory.com/coin/solana/${mint_address}` : '' });
     } catch (e) {
       showStatus(`Failed: ${e.message}`, 'error');
       signBtn.disabled = false;

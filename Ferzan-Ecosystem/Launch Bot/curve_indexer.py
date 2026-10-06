@@ -88,7 +88,7 @@ CHAIN_LABEL = {"bsc": "BNB Chain", "base": "Base", "ethereum": "Ethereum", "robi
 
 def _trade_url(r) -> str:
     if r["chain"] == "solana":
-        return f"https://jup.ag/tokens/{r['token']}"
+        return f"https://ferzan-factory.com/coin/solana/{r['token']}"
     if r["chain"] in ("tron", "ton"):  # Tron and TON curves trade in the Ferzan Trade Bot
         return f"https://t.me/{(os.environ.get('FERZAN_BOT_USERNAME') or 'Ferzan_Trade_Bot').lstrip('@')}?start=buy_{r['token']}"
     base = (os.environ.get("MINI_APP_BASE_URL") or "https://launch.ferzaneco.com/miniapp").rstrip("/")
@@ -604,7 +604,7 @@ def _trade_kb(r) -> dict:
     if r["chain"] in ("tron", "ton"):
         return {"inline_keyboard": [[{"text": "⚡ Buy / Sell in Ferzan Trade Bot", "url": _trade_url(r)}]]}
     return {"inline_keyboard": [
-        [{"text": "🪐 Buy on Jupiter" if r["chain"] == "solana" else "📈 Buy / Sell on the curve", "url": _trade_url(r)}],
+        [{"text": "🏭 Buy on Ferzan Factory" if r["chain"] == "solana" else "📈 Buy / Sell on the curve", "url": _trade_url(r)}],
         [{"text": "⚡ Buy in Ferzan Trade Bot", "url": f"https://t.me/{trade}?start=buy_{r['token']}"}],
     ]}
 

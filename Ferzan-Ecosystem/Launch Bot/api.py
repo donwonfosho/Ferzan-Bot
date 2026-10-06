@@ -1409,9 +1409,9 @@ def _creator_stats(c, creators: list) -> dict:
 
 
 def _trade_url(chain: str, curve: str, token: str) -> str:
-    """Where to trade an indexed launch: Solana tokens trade on Jupiter, EVM curves on our trade page."""
+    """Where to trade an indexed launch: Solana tokens trade on the Ferzan Factory site, EVM curves on our trade page."""
     if chain == "solana":
-        return f"https://jup.ag/tokens/{token}"
+        return f"https://ferzan-factory.com/coin/solana/{token}"
     if chain in {"tron", "ton"}:  # Tron and TON curves trade on the website and in the Ferzan Trade Bot
         return f"https://ferzan-factory.com/coin/{chain}/{curve}"
     return f"{MINI_APP_BASE}/curve.html?chain={chain}&curve={curve}"
@@ -1673,7 +1673,7 @@ def launches_feed(sort: str = "new", limit: int = 30, chain: str = "", q: str = 
                 ts = 0
             items.append({"chain": "solana", "token": r[3], "name": r[0], "symbol": r[1], "image": r[2] or "",
                           "launched_ts": ts, "native": "SOL", "progress": None, "graduated": False,
-                          "url": f"https://jup.ag/tokens/{r[3]}"})
+                          "url": f"https://ferzan-factory.com/coin/solana/{r[3]}"})
         items.sort(key=lambda x: x.get("launched_ts") or 0, reverse=True)
         items = items[:limit]
     if sort == "new" and chain in ("",) + _PLAIN_FEED_CHAINS:
