@@ -3,11 +3,11 @@ fail(){ echo "ABORT: $*"; exit 1; }
 cd $APP || fail "no $APP"
 OLD=$(git rev-parse HEAD); case " $KNOWN " in *" $OLD "*) ;; *) fail "live is $(git rev-parse --short HEAD), not a reviewed commit";; esac
 [ -z "$(git status --porcelain --untracked-files=no -- Ferzan-Ecosystem)" ] || fail "uncommitted changes"
-git fetch -q origin +refs/heads/$BR:refs/remotes/origin/$BR && [ "$(git rev-parse origin/$BR)" = "$WANT" ] || fail "branch is not the reviewed commit"
-BAD=$(git diff --name-only HEAD origin/$BR | grep -v -E '^Ferzan-Ecosystem/(Buy Bot/(buy_bot\.py|tests/test_batch_d18\.py)|Launch Bot/(api\.py|tests/test_batch_d19\.py)|Trade Desk/(bot\.py|db\.py|evm_signer\.py|webapp\.py|webapp/index\.html|tests/test_batch_d2[01]\.py))$')
+git fetch -q origin +refs/heads/$BR:refs/remotes/origin/$BR && git cat-file -e "$WANT^{commit}" && git merge-base --is-ancestor $WANT origin/$BR || fail "reviewed commit is not on the branch"
+BAD=$(git diff --name-only HEAD $WANT | grep -v -E '^Ferzan-Ecosystem/(Buy Bot/(buy_bot\.py|tests/test_batch_d18\.py)|Launch Bot/(api\.py|tests/test_batch_d19\.py)|Trade Desk/(bot\.py|db\.py|evm_signer\.py|webapp\.py|webapp/index\.html|tests/test_batch_d2[01]\.py))$')
 [ -z "$BAD" ] || fail "unexpected files: $BAD"
 echo "dry-run ok"
-git merge -q --ff-only origin/$BR || fail "merge failed"
+git merge -q --ff-only $WANT || fail "merge failed"
 ALL=""; for u in ferzan-buy ferzan-launch ferzan-launch-api ferzan-trade ferzan-webapp ferzan-trade-api; do systemctl cat $u >/dev/null 2>&1 && ALL="$ALL $u"; done
 bad(){ P=$(systemctl show -p MainPID --value $1); ! systemctl is-active -q $1 || [ "$P" = 0 ] || journalctl _PID=$P --no-pager 2>/dev/null | grep -q Traceback; }
 systemctl restart $ALL; sleep 20
