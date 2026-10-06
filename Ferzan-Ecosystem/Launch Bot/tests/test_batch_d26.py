@@ -64,3 +64,35 @@ class VideoPosting(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SkipList(unittest.TestCase):
+    def setUp(self):
+        os.environ.pop("PROMO_SKIP", None)
+
+    def tearDown(self):
+        os.environ.pop("PROMO_SKIP", None)
+
+    def test_default_skips_older_duplicates_and_keeps_new_ones(self):
+        sk = fp.skipped()
+        self.assertTrue({2, 7, 38} <= sk)
+        self.assertTrue(set(range(39, 45)).isdisjoint(sk))
+        seen, p = [], 0
+        for _ in range(len(fp.PROMOS) - len(sk)):
+            i = fp.next_promo(p); seen.append(i + 1); p = i + 1
+        self.assertEqual(len(set(seen)), len(seen))   # one full pass, no repeats
+        self.assertTrue(sk.isdisjoint(seen))
+
+    def test_pointer_inside_a_skipped_run_moves_on(self):
+        os.environ["PROMO_SKIP"] = "5,6,7"
+        self.assertEqual(fp.next_promo(4) + 1, 8)
+
+    def test_none_and_all_skipped(self):
+        os.environ["PROMO_SKIP"] = "none"
+        self.assertEqual(fp.next_promo(1), 1)
+        os.environ["PROMO_SKIP"] = ",".join(str(n) for n in range(1, len(fp.PROMOS) + 1))
+        self.assertEqual(fp.next_promo(3), 3)  # never stuck
+
+    def test_wrap_around_end(self):
+        os.environ["PROMO_SKIP"] = "44"
+        self.assertEqual(fp.next_promo(43) + 1, 1)

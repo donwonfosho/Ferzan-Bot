@@ -191,6 +191,28 @@ PROMOS = [
 GENERAL_TAGS = ["#crypto", "#altcoins", "#Web3", "#cryptocurrency", "#DeFi"]
 
 
+# Older promos that a newer one says better (promo number = its image number). PROMO_SKIP overrides, "none" turns skipping off.
+DEFAULT_SKIP = "2,4,6,7,9,13,17,25,26,31,37,38"
+
+
+def skipped() -> set:
+    raw = (os.environ.get("PROMO_SKIP") if os.environ.get("PROMO_SKIP") is not None else DEFAULT_SKIP).strip().lower()
+    if raw in ("", "none"):
+        return set()
+    return {int(x) for x in raw.split(",") if x.strip().isdigit()}
+
+
+def next_promo(pointer: int) -> int:
+    """Index of the next promo to post, passing over skipped numbers. Images stay matched because numbers never shift."""
+    skip, n = skipped(), len(PROMOS)
+    i = pointer % n
+    for _ in range(n):
+        if (i + 1) not in skip:
+            return i
+        i = (i + 1) % n
+    return pointer % n  # everything skipped: fall back rather than post nothing
+
+
 def ramp(now: float | None = None) -> bool:
     """Final 3 days before launch: more posts (X cap at least 10/day, a promo at least every 3h). PROMO_RAMP=0 turns it off."""
     now = time.time() if now is None else now
@@ -316,7 +338,7 @@ def promo(s: dict, now: float) -> None:
         return
     if LAUNCH_AT - 3 * 3600 < now < LAUNCH_AT + 3 * 3600:
         return  # keep launch hours clear
-    i = int(s.get("promo_i") or 0) % len(PROMOS)
+    i = next_promo(int(s.get("promo_i") or 0))
     tg_text, x_body, tags = PROMOS[i]
     n = int(s.get("promo_n") or 0)  # rotating extra tag keeps repeat cycles from being identical (X rejects duplicates)
     post(s, f"promo:{int(now // every)}", tg_text, with_tags(x_body, tags, GENERAL_TAGS[n % len(GENERAL_TAGS)]),
