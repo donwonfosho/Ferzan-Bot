@@ -62,9 +62,6 @@ class VideoPosting(unittest.TestCase):
             os.environ.pop("FERZAN_ADMIN_IDS", None)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class SkipList(unittest.TestCase):
     def setUp(self):
@@ -76,7 +73,7 @@ class SkipList(unittest.TestCase):
     def test_default_skips_older_duplicates_and_keeps_new_ones(self):
         sk = fp.skipped()
         self.assertTrue({2, 7, 38} <= sk)
-        self.assertTrue(set(range(39, 45)).isdisjoint(sk))
+        self.assertTrue(set(range(45, 51)).isdisjoint(sk))   # all six newest stay in rotation before launch
         seen, p = [], 0
         for _ in range(len(fp.PROMOS) - len(sk)):
             i = fp.next_promo(p); seen.append(i + 1); p = i + 1
@@ -94,5 +91,20 @@ class SkipList(unittest.TestCase):
         self.assertEqual(fp.next_promo(3), 3)  # never stuck
 
     def test_wrap_around_end(self):
-        os.environ["PROMO_SKIP"] = "44"
-        self.assertEqual(fp.next_promo(43) + 1, 1)
+        os.environ["PROMO_SKIP"] = "50"
+        self.assertEqual(fp.next_promo(49) + 1, 1)
+
+    def test_launch_date_graphic_retires_after_launch(self):
+        before, after = fp.LAUNCH_AT - 60, fp.LAUNCH_AT + 60
+        self.assertNotIn(49, fp.skipped(before))
+        self.assertIn(49, fp.skipped(after))
+        os.environ["PROMO_SKIP"] = "none"
+        self.assertEqual(fp.skipped(after), set())
+
+    def test_rotation_size(self):
+        self.assertEqual(len(fp.PROMOS), 50)
+        self.assertEqual(len(fp.skipped(fp.LAUNCH_AT - 60)), 19)
+
+
+if __name__ == "__main__":
+    unittest.main()

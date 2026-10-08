@@ -187,19 +187,42 @@ PROMOS = [
     (f"🎬 Build drop. Creators keep half the 1% trade fee. 30% of Ferzan's Solana fees buy $FERZAN and burn it. Eight chains, one board. Watch, then get in.\n{SITE}",
      f"🎬 Build drop: creators keep half the fee, 30% of Ferzan's Solana fees buy and burn $FERZAN, eight chains on one board.\n{SITE}",
      "#buyback #burn #Solana"),
+    # ---- 45-50: fourth set (six graphics; the date on 49 is skipped automatically after launch) ----
+    (f"👑 Creators get paid on every trade. Launch a coin on Ferzan Factory and half of the 1% trading fee is yours on every buy and every sell.\n{SITE}/launch",
+     f"👑 Creators get paid on every trade. Launch on Ferzan and keep half of the 1% fee.\n{SITE}/launch",
+     "#CreatorEconomy #crypto"),
+    (f"🚀 Liftoff on eight chains: Solana, Base, BNB, Ethereum, Robinhood Chain, Arc, Tron and TON. One launchpad, one board, the same charts and trading everywhere.\n{SITE}/launch",
+     f"🚀 Eight chains, one launchpad: Solana, Base, BNB, Ethereum, Robinhood, Arc, Tron and TON.\n{SITE}/launch",
+     "#Solana #Ethereum"),
+    (f"🔁 Launch. Trade. Repeat. Make a coin on the web or with @Ferzan_Launch_Bot, trade it with @Ferzan_Trade_Bot, then do it again on any of eight chains.\n{SITE}",
+     f"🔁 Launch. Trade. Repeat. Web or Telegram, eight chains, one board.\n{SITE}",
+     "#memecoin #DeFi"),
+    (f"🏁 The Factory is open: launch and trade on 8 chains. Pick a chain, name your coin, and it lands on the board with its own chart and market cap.\n{SITE}/launch",
+     f"🏁 The Factory is open. Launch and trade on 8 chains.\n{SITE}/launch",
+     "#Web3 #memecoin"),
+    (f"✅ How it works: 1) Launch on the site or with @Ferzan_Launch_Bot. 2) They trade, on any of 8 chains, all on one board. 3) You get paid on every single trade. FERZAN goes live Thu Oct 15, 4:00 PM ET; the contract is only on the site and @Ferzan_Launches.\n{SITE}",
+     f"✅ 1) Launch. 2) They trade, any of 8 chains. 3) You get paid on every trade. $FERZAN: Thu Oct 15, 4 PM ET, contract only on the site and @Ferzan_Launches.\n{SITE}",
+     "#memecoin #FairLaunch"),
+    (f"📣 Doors open at ferzan-factory.com. Sign in, launch a coin in about a minute and trade across eight chains, from the web or from Telegram.\n{SITE}",
+     f"📣 Doors are open. Sign in, launch a coin, trade 8 chains. Web or Telegram.\n{SITE}",
+     "#crypto #Solana"),
 ]
 GENERAL_TAGS = ["#crypto", "#altcoins", "#Web3", "#cryptocurrency", "#DeFi"]
 
 
 # Older promos that a newer one says better (promo number = its image number). PROMO_SKIP overrides, "none" turns skipping off.
-DEFAULT_SKIP = "2,4,6,7,9,13,17,25,26,31,37,38"
+DEFAULT_SKIP = "2,4,6,7,9,13,17,24,25,26,29,31,35,37,38,40,41,42,43"
+DATED_AFTER_LAUNCH = {49}  # graphic shows the launch date: skipped once FERZAN is live
 
 
-def skipped() -> set:
+def skipped(now: float | None = None) -> set:
     raw = (os.environ.get("PROMO_SKIP") if os.environ.get("PROMO_SKIP") is not None else DEFAULT_SKIP).strip().lower()
     if raw in ("", "none"):
         return set()
-    return {int(x) for x in raw.split(",") if x.strip().isdigit()}
+    out = {int(x) for x in raw.split(",") if x.strip().isdigit()}
+    if (time.time() if now is None else now) >= LAUNCH_AT:
+        out |= DATED_AFTER_LAUNCH
+    return out
 
 
 def next_promo(pointer: int) -> int:
