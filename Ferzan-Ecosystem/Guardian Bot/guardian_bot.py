@@ -1913,6 +1913,8 @@ def _start_text() -> str:
         "🔇 <b>Scam word filter</b> — blacklisted phrases deleted + the sender muted\n"
         "🌊 <b>Antiflood & slow mode</b> — spam bursts throttled automatically\n"
         "🚨 <b>Anti-raid</b> — join floods trigger an automatic lockdown\n"
+        "✅ <b>New-member check</b> — a quick tap-to-verify keeps bots out of chat\n"
+        "📍 <b>Contract guard</b> — optional: removes any contract address that isn't yours\n"
         "🔗 <b>Cross-group ban</b> — banned in one shielded chat, blocked in every other\n\n"
         "👀 See it.   🦍 Ape it.   🚀 Send it."
     )
@@ -1934,7 +1936,7 @@ def _start_kb() -> InlineKeyboardMarkup:
                 InlineKeyboardButton("🤝 Support", url=CHAT),
             ],
             [InlineKeyboardButton("⚡ Ferzan Trade", url=f"https://t.me/{TRADE}")],
-            [InlineKeyboardButton("🟢 Ferzan Buy", url=f"https://t.me/{TRADE}")],
+            [InlineKeyboardButton("🟢 Ferzan Buy", url=f"https://t.me/{BUY}")],
             [InlineKeyboardButton("💧 Ferzan Liq", url=f"https://t.me/{LIQ}")],
             [InlineKeyboardButton("𝕏 Follow Ferzan", url=X_URL)],
         ]
