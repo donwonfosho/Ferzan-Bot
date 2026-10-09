@@ -1096,18 +1096,7 @@ CHAIN_BTNS = [
 ]
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    arg = (context.args[0] if context.args else "")
-    if arg.startswith("trk_") and update.effective_chat and update.effective_chat.type != "private":
-        parts = arg.split("_", 2)
-        if len(parts) == 3 and parts[1] in GT_NET:
-            if not await _is_chat_admin(update):
-                await update.effective_message.reply_text("Only a group admin can turn on buy alerts. Ask an admin to run /add with the chain and contract address.")
-                return
-            context.args = [parts[1], parts[2]]
-            await track(update, context)
-            return
-    await update.effective_message.reply_text(
+FULL_HELP = (
         "⚡ Ferzan Buy — channel buy alerts for any project chat.\n\n"
         "Dev setup (easiest):\n"
         "/setup  — I ask chain → CA → min buy $ → bar emoji\n\n"
@@ -1142,7 +1131,51 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/paid <txhash>  activate the boost you just paid for\n"
         "/boosts  see what's currently boosted\n"
         "/help"
-    )
+
+)
+
+
+LAUNCH_BOT = (os.getenv("FERZAN_LAUNCH_BOT") or "Ferzan_Launch_Bot").lstrip("@")
+START_TEXT = (
+    "⚡ <b>Ferzan Buy</b>\n"
+    "<i>Live buy alerts for any token channel, on 10 chains</i>\n\n"
+    "<b>Set up in under a minute</b>\n"
+    "1. Add me to your project channel as admin.\n"
+    "2. In the channel, send /setup and answer: chain, contract address, minimum buy, bar emoji.\n"
+    "    Or one line: <code>/add base 0xYOURTOKEN 25</code>\n\n"
+    "Every buy over your minimum posts a live card: size, tokens, market cap, chart and tx. "
+    "Whale buys, milestones and new highs post automatically.\n\n"
+    "Alerts only. This bot is not a wallet."
+)
+
+
+def _start_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📖 All commands", callback_data="bb:cmds")],
+        [InlineKeyboardButton("⚡ Ferzan Trade", url=f"https://t.me/{TRADE}"),
+         InlineKeyboardButton("🚀 Launch a coin", url=f"https://t.me/{LAUNCH_BOT}")],
+        [InlineKeyboardButton("💬 Community", url=CHAT)],
+    ])
+
+
+async def help_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    await q.answer()
+    await q.message.reply_text(FULL_HELP)
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    arg = (context.args[0] if context.args else "")
+    if arg.startswith("trk_") and update.effective_chat and update.effective_chat.type != "private":
+        parts = arg.split("_", 2)
+        if len(parts) == 3 and parts[1] in GT_NET:
+            if not await _is_chat_admin(update):
+                await update.effective_message.reply_text("Only a group admin can turn on buy alerts. Ask an admin to run /add with the chain and contract address.")
+                return
+            context.args = [parts[1], parts[2]]
+            await track(update, context)
+            return
+    await update.effective_message.reply_text(START_TEXT, parse_mode="HTML", reply_markup=_start_kb(), disable_web_page_preview=True)
 
 
 async def setup_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1737,7 +1770,7 @@ async def cleargif_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.effective_message.reply_text("Buy posts are text-only again.")
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await start(update, context)
+    await update.effective_message.reply_text(FULL_HELP)
 
 
 def _chart_caption(chain: str, ca: str, p: dict) -> str:
@@ -4711,6 +4744,7 @@ def main() -> None:
     app.post_init = _menu
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
+    app.add_handler(CallbackQueryHandler(help_buttons, pattern=r"^bb:cmds$"))
     app.add_handler(
         ConversationHandler(
             entry_points=[CommandHandler("setup", setup_start)],
