@@ -273,5 +273,13 @@ class GuardianApp(unittest.TestCase):
         self.assertEqual(c.exception.status_code, 404)
 
 
+class Pages(unittest.TestCase):
+    def test_pages_offer_app_or_classic_like_the_other_bots(self):
+        for name in ("guardian.html", "buybot.html"):
+            html = (HERE / "miniapp" / name).read_text(encoding="utf-8")
+            for needle in ('id="chooser"', 'id="pickApp"', 'id="pickClassic"', 'id="toClassic"', 'qs.get("from")==="menu"', "?start=home"):
+                self.assertIn(needle, html, f"{name}: {needle}")
+
+
 if __name__ == "__main__":
     unittest.main()

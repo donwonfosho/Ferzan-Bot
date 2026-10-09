@@ -61,11 +61,25 @@ code{font:12px ui-monospace,Menlo,monospace;background:var(--surface2);padding:2
 .toast{position:fixed;left:50%;bottom:calc(20px + env(safe-area-inset-bottom,0px));transform:translateX(-50%);background:var(--text);color:var(--bg);padding:9px 14px;border-radius:99px;font-size:13px;opacity:0;pointer-events:none;transition:opacity .2s}
 .toast.show{opacity:1}
 input.ca-in,input.amt{flex:1;min-width:0;background:var(--surface2);border:1px solid var(--line);color:var(--text);border-radius:9px;padding:8px 10px;font:13px ui-monospace,Menlo,monospace}
+
+.chooser{position:fixed;inset:0;z-index:40;background:var(--bg);display:flex;flex-direction:column;justify-content:center;gap:12px;padding:24px 16px calc(24px + env(safe-area-inset-bottom,0px))}
+.chooser h1{text-align:center;font-size:24px}.chooser p{color:var(--muted);text-align:center;margin:0 0 6px}
+.choice{display:block;width:100%;text-align:left;border:1px solid var(--line);background:var(--surface);color:var(--text);border-radius:14px;padding:16px;cursor:pointer;font:inherit}
+.choice.primary{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent) inset}
+.choice b{display:block;font:600 16px var(--head);margin-bottom:2px}.choice span{color:var(--muted);font-size:13px}
+.remember{display:flex;gap:8px;align-items:center;justify-content:center;color:var(--muted);font-size:13px}
+.linkbtn{background:none;border:0;color:var(--accent);font:600 12.5px var(--body);padding:4px 0;cursor:pointer}
 </style>
 <style>input.amt{flex:1;min-width:0}.mini{display:flex;gap:8px}</style>
 </head><body>
+<div class="chooser" id="chooser" hidden role="dialog" aria-labelledby="chTitle">
+  <h1 id="chTitle">🟢 Ferzan Buy</h1><p>How do you want to manage your group?</p>
+  <button class="choice primary" id="pickApp"><b>📱 Open the app</b><span>Minimum buy, whale level, emoji, tokens and recent buys</span></button>
+  <button class="choice" id="pickClassic"><b>💬 Classic</b><span>Back to the chat: buttons and /commands</span></button>
+  <label class="remember"><input type="checkbox" id="rememberApp"> Always open the app</label>
+</div>
 <div class="wrap">
-  <div class="top"><div><h1>🟢 Ferzan Buy</h1><div class="who" id="who">Loading…</div></div></div>
+  <div class="top"><div><h1>🟢 Ferzan Buy</h1><div class="who" id="who">Loading…</div></div><button class="linkbtn" id="toClassic" type="button">💬 Classic chat</button></div>
   <div class="sec" id="gsec"><h2>Your groups</h2><div class="seg" id="groups"></div></div>
   <div id="empty" class="card pad" hidden><b>No groups yet</b><span class="who">Add @Ferzan_Buy_Bot to a group, make yourself an admin and run /track there. It will show up here.</span></div>
   <div id="main" hidden>
@@ -156,6 +170,17 @@ document.addEventListener("click",async e=>{
     const t=S.tokens[+b.dataset.rm];
     try{const r=await post("/api/buybot/untrack",{chat_id:chat,chain:t.chain,ca:t.ca});toast("Stopped");if(r.left){Object.assign(S,r);drawCfg()}else{location.reload()}}catch(er){toast(er.message)}}
 });
+
+/* app or classic: the menu button asks first, like the other Ferzan bots */
+const qs=new URLSearchParams(location.search),menuBot=(qs.get("bot")||"").replace(/[^A-Za-z0-9_]/g,"");
+const toChat=()=>{const u="https://t.me/"+menuBot+"?start=home";if(menuBot&&tg&&tg.openTelegramLink){tg.openTelegramLink(u);setTimeout(()=>{try{tg.close()}catch(e){}},150)}else if(tg){try{tg.close()}catch(e){}}else location.href=u};
+let skip=false;try{skip=localStorage.getItem("ferzan_buybot_open")==="app"}catch(e){}
+$("#toClassic").onclick=()=>{try{localStorage.removeItem("ferzan_buybot_open")}catch(e){}toChat()};
+if(qs.get("from")==="menu"&&!skip){
+  $("#chooser").hidden=false;
+  $("#pickApp").onclick=()=>{try{if($("#rememberApp").checked)localStorage.setItem("ferzan_buybot_open","app")}catch(e){}$("#chooser").hidden=true};
+  $("#pickClassic").onclick=toChat;
+}
 (async function(){
   try{const g=await post("/api/buybot/groups");
     $("#who").textContent=(g.name?"Signed in as "+g.name+" · ":"")+"admin of "+g.groups.length+(g.groups.length===1?" group":" groups");

@@ -1155,6 +1155,22 @@ def _app_url() -> str:
     return u if u.startswith("https://") else ""
 
 
+async def _set_app_menu(bot) -> None:
+    """The menu button next to the message box opens the app page, which first asks: the app, or classic chat mode."""
+    url = _app_url()
+    if not url:
+        return
+    try:
+        from telegram import MenuButtonWebApp
+
+        me = await bot.get_me()
+        await bot.set_chat_menu_button(
+            menu_button=MenuButtonWebApp(text="🟢 Buy", web_app=WebAppInfo(url=f"{url}?from=menu&bot={getattr(me, 'username', '') or ''}"))
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.info("menu button not set: %s", str(exc)[:80])
+
+
 def _start_kb(private: bool = False) -> InlineKeyboardMarkup:
     # An app button only works in a private chat, and only once the page is being served.
     app_row = [[InlineKeyboardButton("🟢 Open Buy app", web_app=WebAppInfo(url=_app_url()))]] if private and _app_url() else []
@@ -4750,6 +4766,7 @@ def main() -> None:
                 BotCommand("help", "Help"),
             ]
         )
+        await _set_app_menu(app_.bot)
     app.post_init = _menu
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))

@@ -1927,6 +1927,22 @@ def _app_url() -> str:
     return u if u.startswith("https://") else ""
 
 
+async def _set_app_menu(bot) -> None:
+    """The menu button next to the message box opens the app page, which first asks: the app, or classic chat mode."""
+    url = _app_url()
+    if not url:
+        return
+    try:
+        from telegram import MenuButtonWebApp
+
+        me = await bot.get_me()
+        await bot.set_chat_menu_button(
+            menu_button=MenuButtonWebApp(text="🛡 Guardian", web_app=WebAppInfo(url=f"{url}?from=menu&bot={getattr(me, 'username', '') or ''}"))
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.info("menu button not set: %s", str(exc)[:80])
+
+
 def _start_kb(private: bool = False) -> InlineKeyboardMarkup:
     add = f"https://t.me/{ME}?startgroup=true"
     rows = [
@@ -7395,6 +7411,7 @@ def main() -> None:
             await application.bot.set_my_commands(cmds)
         except Exception as exc:
             log.error("set_my_commands failed, continuing without updating the menu: %s", exc)
+        await _set_app_menu(application.bot)
 
     app.post_init = _post
     app.add_error_handler(_error_handler)

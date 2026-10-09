@@ -29,5 +29,12 @@ class StartCard(unittest.TestCase):
         self.assertIn("_start_kb(private)", SRC)
 
 
+    def test_menu_button_opens_the_app_chooser(self):
+        self.assertIn("async def _set_app_menu", SRC)
+        self.assertIn("MenuButtonWebApp", SRC)
+        self.assertIn("?from=menu&bot=", SRC)
+        self.assertIn("await _set_app_menu(", SRC)
+
+
 if __name__ == "__main__":
     unittest.main()
