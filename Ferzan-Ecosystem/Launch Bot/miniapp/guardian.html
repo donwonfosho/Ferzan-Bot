@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Ferzan Guardian</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Sora:wght@500;600;700&family=Inter:wght@400;500;600&display=swap">
+<style>
+:root{
+  --bg:#f3f7f6;--surface:#ffffff;--surface2:#eaf1ef;--line:#d8e3e0;--text:#0e1c1a;--muted:#5b706c;
+  --accent:#0f9c8a;--accent-ink:#ffffff;--warn:#b7791f;--bad:#c2410c;--good:#0f9c8a;
+  --shadow:0 1px 2px rgba(10,30,26,.06);
+  --head:'Sora',system-ui,sans-serif;--body:'Inter',system-ui,sans-serif;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --bg:#0b1413;--surface:#121e1c;--surface2:#182826;--line:#233633;--text:#e6f2ef;--muted:#8fa8a3;
+  --accent:#4fd1bd;--accent-ink:#06201c;--warn:#e0a84a;--bad:#f08a5d;--good:#4fd1bd;--shadow:none;color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#0b1413;--surface:#121e1c;--surface2:#182826;--line:#233633;--text:#e6f2ef;--muted:#8fa8a3;
+  --accent:#4fd1bd;--accent-ink:#06201c;--warn:#e0a84a;--bad:#f08a5d;--good:#4fd1bd;--shadow:none;color-scheme:dark}
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--text);font:14px/1.45 var(--body);padding-inline:16px;padding-block:20px 40px}
+.wrap{max-width:440px;margin:0 auto;display:flex;flex-direction:column;gap:14px}
+.note{font-size:12px;color:var(--muted);border:1px dashed var(--line);border-radius:10px;padding:8px 10px}
+h1,h2,h3{font-family:var(--head);margin:0;text-wrap:balance}
+h1{font-size:20px}h2{font-size:15px}
+.top{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.who{font-size:12px;color:var(--muted)}
+.tabs{display:flex;gap:4px;background:var(--surface2);padding:4px;border-radius:12px}
+.tabs button{flex:1;border:0;background:none;color:var(--muted);font:600 12.5px var(--body);padding:8px 4px;border-radius:9px;cursor:pointer}
+.tabs button[aria-selected=true]{background:var(--surface);color:var(--text);box-shadow:var(--shadow)}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow)}
+.row{display:flex;align-items:center;gap:12px;padding:12px 14px;border-top:1px solid var(--line)}
+.row:first-child{border-top:0}
+.row .t{flex:1;min-width:0}
+.row .t b{display:block;font-weight:600}
+.row .t span{display:block;color:var(--muted);font-size:12.5px}
+.sw{width:42px;height:24px;border-radius:99px;background:var(--line);position:relative;border:0;cursor:pointer;flex:none}
+.sw::after{content:"";position:absolute;top:3px;left:3px;width:18px;height:18px;border-radius:50%;background:#fff;transition:transform .15s}
+.sw[aria-checked=true]{background:var(--accent)}
+.sw[aria-checked=true]::after{transform:translateX(18px)}
+.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.stat{padding:10px 12px}
+.stat b{display:block;font:700 20px var(--head);font-variant-numeric:tabular-nums}
+.stat span{font-size:12px;color:var(--muted)}
+.chip{font-size:11.5px;font-weight:600;padding:2px 8px;border-radius:99px;background:var(--surface2);color:var(--muted)}
+.chip.ok{color:var(--good)}.chip.warn{color:var(--warn)}.chip.bad{color:var(--bad)}
+.btn{border:1px solid var(--line);background:var(--surface);color:var(--text);font:600 12.5px var(--body);padding:7px 11px;border-radius:9px;cursor:pointer}
+.btn.pri{background:var(--accent);color:var(--accent-ink);border-color:transparent}
+.btn.dng{color:var(--bad)}
+.seg{display:flex;gap:6px;flex-wrap:wrap}
+.seg button{border:1px solid var(--line);background:var(--surface);color:var(--text);font:500 12.5px var(--body);padding:6px 11px;border-radius:99px;cursor:pointer}
+.seg button[aria-pressed=true]{background:var(--accent);color:var(--accent-ink);border-color:transparent}
+.pad{padding:12px 14px;display:flex;flex-direction:column;gap:10px}
+code{font:12px ui-monospace,Menlo,monospace;background:var(--surface2);padding:2px 6px;border-radius:6px;word-break:break-all}
+.ca{display:flex;align-items:center;gap:8px;justify-content:space-between}
+.sec{display:flex;flex-direction:column;gap:8px}
+.sec>h2{padding-inline:2px;color:var(--muted);font-size:12px;letter-spacing:.08em;text-transform:uppercase}
+.log .t span{font-variant-numeric:tabular-nums}
+[hidden]{display:none!important}
+
+.err{color:var(--bad);font-size:13px;padding:10px 12px}
+.toast{position:fixed;left:50%;bottom:calc(20px + env(safe-area-inset-bottom,0px));transform:translateX(-50%);background:var(--text);color:var(--bg);padding:9px 14px;border-radius:99px;font-size:13px;opacity:0;pointer-events:none;transition:opacity .2s}
+.toast.show{opacity:1}
+input.ca-in{flex:1;min-width:0;background:var(--surface2);border:1px solid var(--line);color:var(--text);border-radius:9px;padding:8px 10px;font:13px ui-monospace,Menlo,monospace}
+</style></head><body>
+<div class="wrap">
+  <div class="top"><div><h1>🛡 Ferzan Guardian</h1><div class="who" id="who">Loading…</div></div></div>
+  <div class="sec" id="gsec"><h2>Your groups</h2><div class="seg" id="groups"></div></div>
+  <div id="empty" class="card pad" hidden><b>No groups yet</b><span class="who">Add @Ferzan_Guardian_Bot to a group and make yourself an admin. It will show up here.</span></div>
+  <div id="main" hidden>
+  <div class="stats" id="stats"></div>
+  <div class="tabs" role="tablist" style="margin-top:14px">
+    <button role="tab" aria-selected="true" data-t="protect">Protection</button>
+    <button role="tab" aria-selected="false" data-t="queue">Reports <span class="chip warn" id="qn">0</span></button>
+    <button role="tab" aria-selected="false" data-t="log">Activity</button>
+  </div>
+  <section id="protect" class="sec" style="margin-top:14px">
+    <div class="card" id="toggles"></div>
+    <div class="card pad"><h2>New-member check</h2>
+      <div class="seg" id="captcha"><button data-m="tap">One tap</button><button data-m="full">Tap + quick sum</button><button data-m="math">Sum only</button></div>
+      <span class="who">Needs the New-member check switch on. New members stay muted until they pass; failing in time removes them.</span></div>
+    <div class="card pad"><h2>Contract guard</h2>
+      <span class="who">With the guard on, any other contract address posted here is removed. Only these are allowed. Type FERZAN to allow the official FERZAN address once it is live.</span>
+      <div id="cas" class="sec"></div>
+      <div class="ca"><input class="ca-in" id="cain" placeholder="0x… or Solana address" autocomplete="off" spellcheck="false"><button class="btn pri" id="addca">Add</button></div></div>
+    <div class="card pad"><h2>Warnings</h2>
+      <div class="ca"><span>Warnings before a ban</span><div class="seg" id="warns"><button data-n="2">2</button><button data-n="3">3</button><button data-n="5">5</button></div></div></div>
+  </section>
+  <section id="queue" class="sec" hidden style="margin-top:14px"><div class="card" id="reports"></div></section>
+  <section id="log" class="sec" hidden style="margin-top:14px"><div class="card log" id="actions"></div>
+    <span class="who">Changes made in this app are recorded with your Telegram id.</span></section>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+<script>
+(function(){
+const tg=window.Telegram&&window.Telegram.WebApp;
+if(tg){try{tg.ready();tg.expand();}catch(e){}}
+const API=location.origin, $=s=>document.querySelector(s);
+const esc=s=>String(s==null?"":s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const LABELS={newcheck:["New-member check","Mutes newcomers until they pass"],antilink:["Block links","Removes links from members who are not approved"],
+ caguard:["Contract guard","Removes contract addresses that are not on your list"],antiforward:["Block forwards","No forwarded posts"],
+ nostickers:["Block stickers","Keeps the chat readable"],slow:["Slow mode (10s)","Calms raids and floods"]};
+let toastT;const toast=m=>{const t=$("#toast");t.textContent=m;t.classList.add("show");clearTimeout(toastT);toastT=setTimeout(()=>t.classList.remove("show"),3500)};
+async function post(path,body){
+  const r=await fetch(API+path,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(Object.assign({initData:(tg&&tg.initData)||""},body||{}))});
+  const j=await r.json().catch(()=>({}));
+  if(!r.ok)throw new Error(typeof j.detail==="string"?j.detail:"Something went wrong");
+  return j;
+}
+let chat=null,S=null;
+const ago=(n,now)=>{const d=Math.max(0,(now||Date.now()/1000)-n);return d<90?"just now":d<5400?Math.round(d/60)+"m ago":d<129600?Math.round(d/3600)+"h ago":Math.round(d/86400)+"d ago"};
+function render(){
+  $("#stats").innerHTML=[["Members",S.members?S.members.toLocaleString("en-US"):"-"],["Actions today",S.actions_today],["Joined today",S.joined_today]].map(([l,v])=>`<div class="card stat"><b>${esc(v)}</b><span>${l}</span></div>`).join("");
+  $("#toggles").innerHTML=Object.keys(LABELS).map(k=>`<div class="row"><div class="t"><b>${LABELS[k][0]}</b><span>${LABELS[k][1]}</span></div><button class="sw" role="switch" aria-checked="${!!S.toggles[k]}" aria-label="${LABELS[k][0]}" data-k="${k}"></button></div>`).join("");
+  setCfg();
+  $("#qn").textContent=S.reports.length;
+  $("#reports").innerHTML=S.reports.length?S.reports.map(r=>`<div class="row" style="align-items:flex-start"><div class="t"><b>Member ${esc(r.target)}</b><span>${esc(r.text||"(no text)")}</span><span>${ago(r.ts,S.now)}</span>
+   <div class="seg" style="margin-top:8px"><button class="btn" data-ra="dismiss" data-id="${r.id}">Dismiss</button><button class="btn" data-ra="warn" data-id="${r.id}">Warn</button><button class="btn dng" data-ra="ban" data-id="${r.id}">Ban</button></div></div></div>`).join("")
+   :`<div class="row"><div class="t"><b>All clear</b><span>No open reports.</span></div></div>`;
+  $("#actions").innerHTML=S.activity.length?S.activity.map(a=>`<div class="row"><div class="t"><b>${esc(a.action)}</b><span>${a.kind==="cfg"?"Admin "+esc(a.who):"By "+(a.who?esc(a.who):"Guardian")+(a.target?" on member "+esc(a.target):"")}${a.detail?" · "+esc(a.detail):""}</span></div><span class="who">${ago(a.ts,S.now)}</span></div>`).join("")
+   :`<div class="row"><div class="t"><b>Nothing yet</b></div></div>`;
+}
+function setCfg(){
+  document.querySelectorAll("#captcha button").forEach(b=>b.setAttribute("aria-pressed",b.dataset.m===S.captcha_mode));
+  document.querySelectorAll("#warns button").forEach(b=>b.setAttribute("aria-pressed",+b.dataset.n===S.warn_limit));
+  $("#cas").innerHTML=S.cas.length?S.cas.map(c=>`<div class="ca"><span><span class="chip">${esc(c.chain)}</span> <code>${esc(c.short)}</code></span><button class="btn dng" data-r="${esc(c.value)}">Remove</button></div>`).join("")
+   :`<span class="who">None yet. With the guard on, every address will be removed until you add one.</span>`;
+  document.querySelectorAll("#toggles .sw").forEach(b=>b.setAttribute("aria-checked",!!S.toggles[b.dataset.k]));
+}
+async function load(){try{S=await post("/api/guardian/group",{chat_id:chat});$("#main").hidden=false;render()}catch(e){$("#main").hidden=true;toast(e.message)}}
+async function setOpt(key,value){
+  try{const st=await post("/api/guardian/set",{chat_id:chat,key,value});Object.assign(S,st);setCfg();toast("Saved");try{tg&&tg.HapticFeedback&&tg.HapticFeedback.impactOccurred("light")}catch(e){}
+    post("/api/guardian/group",{chat_id:chat}).then(x=>{S=x;render()}).catch(()=>{})}
+  catch(e){toast(e.message);setCfg()}
+}
+document.addEventListener("click",async e=>{
+  const b=e.target.closest("button");if(!b)return;
+  if(b.dataset.g){chat=+b.dataset.g;document.querySelectorAll("#groups button").forEach(x=>x.setAttribute("aria-pressed",x===b));load()}
+  else if(b.dataset.t){document.querySelectorAll(".tabs button").forEach(x=>x.setAttribute("aria-selected",x===b));for(const s of["protect","queue","log"])$("#"+s).hidden=s!==b.dataset.t}
+  else if(b.dataset.k){setOpt(b.dataset.k,b.getAttribute("aria-checked")!=="true")}
+  else if(b.dataset.m){setOpt("captcha_mode",b.dataset.m)}
+  else if(b.dataset.n){setOpt("warn_limit",+b.dataset.n)}
+  else if(b.dataset.r){setOpt("ca_remove",b.dataset.r)}
+  else if(b.id==="addca"){const v=$("#cain").value.trim();if(!v)return;await setOpt("ca_add",v);$("#cain").value=""}
+  else if(b.dataset.ra){
+    if(b.dataset.ra==="ban"&&b.dataset.armed!=="1"){b.dataset.armed="1";b.textContent="Tap again to ban";setTimeout(()=>{b.dataset.armed="";b.textContent="Ban"},4000);return}
+    try{const r=await post("/api/guardian/report",{chat_id:chat,report_id:+b.dataset.id,action:b.dataset.ra});toast(r.banned?"Member banned":"Done");load()}catch(er){toast(er.message)}}
+});
+(async function(){
+  try{const g=await post("/api/guardian/groups");
+    $("#who").textContent=(g.name?"Signed in as "+g.name+" · ":"")+"admin of "+g.groups.length+(g.groups.length===1?" group":" groups");
+    if(!g.groups.length){$("#gsec").hidden=true;$("#empty").hidden=false;return}
+    $("#groups").innerHTML=g.groups.map((x,i)=>`<button data-g="${x.chat_id}" aria-pressed="${i===0}">${esc(x.title)}</button>`).join("");
+    chat=g.groups[0].chat_id;load();
+  }catch(e){$("#who").textContent="";$("#gsec").hidden=true;$("#empty").hidden=false;$("#empty").innerHTML='<b>Open this from Telegram</b><span class="who">'+esc(e.message)+'</span>'}
+})();
+})();
+</script></body></html>
