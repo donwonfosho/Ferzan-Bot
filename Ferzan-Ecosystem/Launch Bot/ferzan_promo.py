@@ -21,7 +21,9 @@ os.chdir(HERE); sys.path.insert(0, str(HERE))
 import requests  # noqa: E402
 import ferzan_media as fm  # noqa: E402
 
-LAUNCH_AT = calendar.timegm((2026, 10, 15, 20, 0, 0))
+import ferzan_when  # noqa: E402
+
+LAUNCH_AT = ferzan_when.launch_at()  # FERZAN_LAUNCH_AT in /opt/ferzan/.env; unset = no countdown, no launch-hour quiet window
 STATE = Path("/opt/ferzan/promo-state.json")
 LIVE = os.environ.get("PROMO_LIVE") == "1"
 SITE = "https://ferzan-factory.com"
@@ -200,8 +202,8 @@ PROMOS = [
     (f"🏁 The Factory is open: launch and trade on 8 chains. Pick a chain, name your coin, and it lands on the board with its own chart and market cap.\n{SITE}/launch",
      f"🏁 The Factory is open. Launch and trade on 8 chains.\n{SITE}/launch",
      "#Web3 #memecoin"),
-    (f"✅ How it works: 1) Launch on the site or with @Ferzan_Launch_Bot. 2) They trade, on any of 8 chains, all on one board. 3) You get paid on every single trade. FERZAN goes live Thu Oct 15, 4:00 PM ET; the contract is only on the site and @Ferzan_Launches.\n{SITE}",
-     f"✅ 1) Launch. 2) They trade, any of 8 chains. 3) You get paid on every trade. $FERZAN: Thu Oct 15, 4 PM ET, contract only on the site and @Ferzan_Launches.\n{SITE}",
+    (f"✅ How it works: 1) Launch on the site or with @Ferzan_Launch_Bot. 2) They trade, on any of 8 chains, all on one board. 3) You get paid on every single trade. FERZAN goes live Fri Nov 13, 4:00 PM ET; the contract is only on the site and @Ferzan_Launches.\n{SITE}",
+     f"✅ 1) Launch. 2) They trade, any of 8 chains. 3) You get paid on every trade. $FERZAN: Fri Nov 13, 4 PM ET, contract only on the site and @Ferzan_Launches.\n{SITE}",
      "#memecoin #FairLaunch"),
     (f"📣 Doors open at ferzan-factory.com. Sign in, launch a coin in about a minute and trade across eight chains, from the web or from Telegram.\n{SITE}",
      f"📣 Doors are open. Sign in, launch a coin, trade 8 chains. Web or Telegram.\n{SITE}",
@@ -211,7 +213,7 @@ GENERAL_TAGS = ["#crypto", "#altcoins", "#Web3", "#cryptocurrency", "#DeFi"]
 
 
 # Older promos that a newer one says better (promo number = its image number). PROMO_SKIP overrides, "none" turns skipping off.
-DEFAULT_SKIP = "2,4,6,7,9,13,17,24,25,26,29,31,35,37,38,40,41,42,43"
+DEFAULT_SKIP = "2,4,6,7,9,13,17,24,25,26,29,31,35,37,38,40,41,42,43,49"  # 49 shows the old Oct 15 launch date: stays out until a new graphic replaces it
 X_HARD_CAP = 3            # careful mode: promos per day on X, whatever PROMO_X_PER_DAY says (X_UNLIMITED=1 lifts it)
 X_MIN_GAP = 4 * 3600      # at least this long between X promo posts
 X_COUNTDOWN = {7 * 86400, 3 * 86400, 86400, 3600}  # only these countdown posts go to X; Telegram gets them all
@@ -349,7 +351,7 @@ def countdown(s: dict, now: float) -> None:
     for secs, label in COUNTDOWN:
         due = LAUNCH_AT - secs
         if due <= now < due + 1800:  # within 30 minutes of the moment; never a stale post
-            et = "Thursday Oct 15, 4:00 PM Eastern"
+            et = ferzan_when.label_et(LAUNCH_AT)
             fact = COUNTDOWN_FACTS.get(secs, "")
             text = (f"⏳ FERZAN launches in {label} — {et}.\n\n{fact}\n\nThe launch is automatic. The fee starts at 99% and falls to 1% over 30 minutes, "
                     f"so sniping the open costs almost everything. 650M of the supply is locked in a multisig by Meteora.\n\n"

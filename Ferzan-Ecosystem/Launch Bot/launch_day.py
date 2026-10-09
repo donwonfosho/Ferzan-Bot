@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 
 import requests
 
-DEFAULT_LAUNCH_AT = calendar.timegm((2026, 10, 15, 20, 0, 0))  # Thu Oct 15 2026, 4:00 PM ET
+DEFAULT_LAUNCH_AT = 4102444800  # 2100-01-01: no launch date set yet (FERZAN_LAUNCH_AT in /opt/ferzan/.env sets it)
 SERVICES = ("ferzan-launch", "ferzan-launch-api", "ferzan-curve-indexer", "ferzan-trade", "ferzan-webapp",
             "ferzan-trade-api", "ferzan-buy", "ferzan-guardian", "ferzan-liq")
 JOBS = ("ferzan-refill", "ferzan-watchdog", "ferzan-flywheel", "ferzan-offsite", "ferzan-backup", "ferzan-health", "ferzan-promo")
@@ -32,6 +32,8 @@ def launch_at() -> int:
 
 
 def countdown(now: float | None = None) -> str:
+    if launch_at() >= DEFAULT_LAUNCH_AT:
+        return "date to be announced"
     left = launch_at() - int(now if now is not None else time.time())
     if left <= 0:
         return "live now"

@@ -272,9 +272,9 @@ class Tiers(Base):
         t = lb._tiers_text()
         for frag in ("holder", "booster", "whale", "titan", "1,000,000+", "5,000,000+", "10,000,000+", "25,000,000+",
                      "half price", "free", "0.15%", "0.10%", "0.05%", "0%", "else 0.25%", "10% off (soon)",
-                     "15% off (soon)", "25% off (soon)", "40% off (soon)", "Thu Oct 15 2026, 4PM ET"):
+                     "15% off (soon)", "25% off (soon)", "40% off (soon)", "date to be announced"):
             self.assertIn(frag, t)
-        self.assertLess(t.index("titan"), t.index("Thu Oct 15") + 10_000)
+        self.assertLess(t.index("titan"), t.index("date to be announced") + 10_000)
 
     def test_mint_stays_hidden(self):
         with mock.patch.dict(os.environ, {"FERZAN_PERK_MINT": self.MINT}):

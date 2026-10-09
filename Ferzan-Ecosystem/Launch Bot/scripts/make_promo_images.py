@@ -14,7 +14,7 @@ IMG = HERE / "promo_img"
 BOLD = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 REG = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 CYAN, ORANGE, WHITE = (0, 224, 255), (255, 107, 30), (255, 255, 255)
-LAUNCH_TEXT = "Thursday, October 15  •  4 PM ET"
+LAUNCH_TEXT = "Friday, November 13  •  4 PM ET"
 X0, MAXW = 646, 900  # text column: starts right of the coin, this wide
 
 

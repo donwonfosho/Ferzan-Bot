@@ -283,7 +283,10 @@ def _short(w: str) -> str:
 
 
 # ------------------------------------------------------------ holder tiers --
-PERKS_START_TEXT = "Thu Oct 15 2026, 4PM ET"      # FERZAN launch: perks switch on then (the mint stays hidden until announced)
+import ferzan_when as _fw  # noqa: E402
+
+# FERZAN launch: perks switch on then (the mint stays hidden until announced)
+PERKS_START_TEXT = _fw.label_et() if _fw.is_set() else "the FERZAN launch (date to be announced)"
 _SOL_ADDR = re.compile(r"[1-9A-HJ-NP-Za-km-z]{32,44}")
 
 

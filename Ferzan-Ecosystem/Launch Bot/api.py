@@ -2370,7 +2370,9 @@ def creator_record(wallet: str):
 _PULSE: dict = {"t": 0.0, "v": None}
 _FLAGSHIP_STATE = "/opt/ferzan/dbc-keys/ferzan-flagship-state.json"
 _FLYWHEEL_STATE = "/opt/ferzan/dbc-keys/flywheel-state.json"
-_FERZAN_LAUNCH_AT = 1792094400  # Thu Oct 15 2026 20:00 UTC (4:00 PM Eastern)
+import ferzan_when as _fw  # noqa: E402
+
+_FERZAN_LAUNCH_AT = _fw.launch_at() if _fw.is_set() else 0  # 0 = no date yet; the website shows 'date to be announced'
 
 
 def _feed_hidden() -> set:
@@ -3560,7 +3562,7 @@ def pnl_all(wallet: str):
 
 # ---------------------------------------------------------------- weekly competition and callers
 _WEEK = 7 * 86400
-_COMPETE_START = int(os.environ.get("COMPETE_START") or 1792094400)  # FERZAN launch: Thu Oct 15 2026, 20:00 UTC
+_COMPETE_START = int(os.environ.get("COMPETE_START") or _fw.launch_at())  # weeks start at the FERZAN launch; unset = far future (practice round only)
 _ZERO = ("", "0x0000000000000000000000000000000000000000", "T9yD14Nj9j7xAB4dbGeiX9h8unkKHxuWwb")
 _COMPETE_CACHE: dict = {}
 
@@ -3568,7 +3570,7 @@ _COMPETE_CACHE: dict = {}
 def _compete_window(prev: bool) -> dict:
     now = int(time.time())
     if now < _COMPETE_START:  # before launch: a practice round over the last 7 days
-        return {"week": 0, "start": now - _WEEK, "end": now, "practice": True, "starts_at": _COMPETE_START}
+        return {"week": 0, "start": now - _WEEK, "end": now, "practice": True, "starts_at": _COMPETE_START if _fw.is_set(_COMPETE_START) else 0}
     k = (now - _COMPETE_START) // _WEEK - (1 if prev else 0)
     if k < 0:
         return {"week": 0, "start": _COMPETE_START - _WEEK, "end": _COMPETE_START, "practice": True, "starts_at": _COMPETE_START}

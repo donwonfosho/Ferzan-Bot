@@ -52,12 +52,14 @@ class LaunchDay(unittest.TestCase):
         self.assertEqual(rows["Fee wallet (EVM)"], "ok")
 
     def test_countdown_and_override(self):
-        with self.env():
+        with self.env():  # no date set: nothing is scheduled
             self.assertEqual(ld.launch_at(), ld.DEFAULT_LAUNCH_AT)
-            self.assertEqual(ld.countdown(ld.DEFAULT_LAUNCH_AT + 5), "live now")
-            self.assertEqual(ld.countdown(ld.DEFAULT_LAUNCH_AT - 90_000), "1d 1h 0m")
-        with self.env(FERZAN_LAUNCH_AT="2026-10-16T20:00:00Z"):
-            self.assertEqual(ld.launch_at(), ld.DEFAULT_LAUNCH_AT + 86400)
+            self.assertEqual(ld.countdown(), "date to be announced")
+        with self.env(FERZAN_LAUNCH_AT="2026-11-13T21:00:00Z"):  # Fri Nov 13 2026, 4:00 PM EST
+            at = ld.launch_at()
+            self.assertEqual(at, 1794603600)
+            self.assertEqual(ld.countdown(at + 5), "live now")
+            self.assertEqual(ld.countdown(at - 90_000), "1d 1h 0m")
 
 
 if __name__ == "__main__":

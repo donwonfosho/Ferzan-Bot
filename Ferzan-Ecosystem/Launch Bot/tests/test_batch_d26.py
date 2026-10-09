@@ -73,7 +73,8 @@ class SkipList(unittest.TestCase):
     def test_default_skips_older_duplicates_and_keeps_new_ones(self):
         sk = fp.skipped()
         self.assertTrue({2, 7, 38} <= sk)
-        self.assertTrue(set(range(45, 51)).isdisjoint(sk))   # all six newest stay in rotation before launch
+        self.assertTrue({45, 46, 47, 48, 50}.isdisjoint(sk))   # the new graphics stay in rotation; 49 shows the old date and is out
+        self.assertIn(49, sk)
         seen, p = [], 0
         for _ in range(len(fp.PROMOS) - len(sk)):
             i = fp.next_promo(p); seen.append(i + 1); p = i + 1
@@ -94,16 +95,15 @@ class SkipList(unittest.TestCase):
         os.environ["PROMO_SKIP"] = "50"
         self.assertEqual(fp.next_promo(49) + 1, 1)
 
-    def test_launch_date_graphic_retires_after_launch(self):
-        before, after = fp.LAUNCH_AT - 60, fp.LAUNCH_AT + 60
-        self.assertNotIn(49, fp.skipped(before))
-        self.assertIn(49, fp.skipped(after))
+    def test_old_launch_date_graphic_stays_out(self):
+        self.assertIn(49, fp.skipped(0))
+        self.assertIn(49, fp.skipped(fp.LAUNCH_AT + 60))
         os.environ["PROMO_SKIP"] = "none"
-        self.assertEqual(fp.skipped(after), set())
+        self.assertEqual(fp.skipped(0), set())
 
     def test_rotation_size(self):
         self.assertEqual(len(fp.PROMOS), 50)
-        self.assertEqual(len(fp.skipped(fp.LAUNCH_AT - 60)), 19)
+        self.assertEqual(len(fp.skipped(0)), 20)
 
 
 class CarefulX(unittest.TestCase):

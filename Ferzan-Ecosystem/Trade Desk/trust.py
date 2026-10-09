@@ -27,16 +27,48 @@ def rank_for(volume_usd: float) -> dict:
             "pct": 100.0 if not nxt else round(max(0.0, min(100.0, (v - cur[0]) * 100.0 / (nxt[0] - cur[0]))), 1)}
 
 
-def launch_at() -> int:
-    """FERZAN launch time (unix). FERZAN_LAUNCH_AT overrides; default Oct 15, 2026 4:00 PM ET (20:00 UTC)."""
-    raw = (os.environ.get("FERZAN_LAUNCH_AT") or "2026-10-15T20:00:00+00:00").strip()
+NOT_SET = 4102444800  # 2100-01-01: no launch date yet
+
+
+def _env_launch() -> str:
+    v = (os.environ.get("FERZAN_LAUNCH_AT") or "").strip()
+    if v:
+        return v
     try:
-        return int(datetime.fromisoformat(raw.replace("Z", "+00:00")).astimezone(timezone.utc).timestamp())
+        for line in open("/opt/ferzan/.env", encoding="utf-8"):
+            if line.strip().startswith("FERZAN_LAUNCH_AT="):
+                return line.split("=", 1)[1].strip().strip('"').strip("'")
+    except OSError:
+        pass
+    return ""
+
+
+def launch_at() -> int:
+    """FERZAN launch time (unix), from FERZAN_LAUNCH_AT (ISO 8601 or unix seconds). Not set, or unreadable: NOT_SET (no date yet)."""
+    raw = _env_launch()
+    try:
+        v = int(raw) if raw.isdigit() else int(datetime.fromisoformat(raw.replace("Z", "+00:00")).astimezone(timezone.utc).timestamp())
     except ValueError:
-        return int(datetime(2026, 10, 15, 20, 0, tzinfo=timezone.utc).timestamp())
+        return NOT_SET
+    return v if 1_700_000_000 < v < NOT_SET else NOT_SET
+
+
+def is_scheduled() -> bool:
+    return launch_at() < NOT_SET
+
+
+def label_et() -> str:
+    """'Friday Nov 13, 4:00 PM ET' from the launch time, or '' when no date is set."""
+    if not is_scheduled():
+        return ""
+    from zoneinfo import ZoneInfo
+    d = datetime.fromtimestamp(launch_at(), ZoneInfo("America/New_York"))
+    return d.strftime("%A %b ") + str(d.day) + ", " + str(d.hour % 12 or 12) + d.strftime(":%M ") + ("AM" if d.hour < 12 else "PM") + " ET"
 
 
 def countdown(now: float | None = None) -> str:
+    if not is_scheduled():
+        return "date to be announced"
     left = launch_at() - int(now if now is not None else time.time())
     if left <= 0:
         return "live now"

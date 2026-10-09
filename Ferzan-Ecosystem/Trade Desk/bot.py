@@ -3374,7 +3374,7 @@ async def join_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
               f"<b>{sol:.3f} SOL</b> " + ("✅ ready" if ready else "⚠️ add at least 0.05 SOL to be ready"))
     await update.effective_message.reply_text(
         "🚀 <b>FERZAN launch</b>\n\n"
-        f"Opens in <b>{trust.countdown()}</b> (Oct 15, 4:00 PM ET)\n\n"
+        + (f"Opens in <b>{trust.countdown()}</b> ({trust.label_et()})\n\n" if trust.is_scheduled() else "Launch date: to be announced.\n\n") +
         f"Your Solana trading wallet\n<code>{html.escape(addr)}</code>\n{funded}\n\n"
         "1. Fund this wallet with SOL.\n2. Turn on Auto-snipe to buy new Ferzan launches the moment they appear (opt-in, capped).\n"
         "3. Or buy by hand from the launch post.",

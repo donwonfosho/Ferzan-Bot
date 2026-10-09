@@ -17,7 +17,9 @@ for f in ("/opt/ferzan/.env", str(HERE / ".env")):
 os.chdir(HERE); sys.path.insert(0, str(HERE))
 import requests  # noqa: E402
 
-LAUNCH_AT = calendar.timegm((2026, 10, 15, 20, 0, 0))  # Thursday Oct 15 2026, 4:00 PM Eastern (20:00 UTC)
+import ferzan_when  # noqa: E402
+
+LAUNCH_AT = ferzan_when.launch_at()  # FERZAN_LAUNCH_AT in /opt/ferzan/.env. Unset: the launch refuses to run.
 NAME, SYMBOL = "Ferzan", "FERZAN"
 VAULT = "2vWqwX72ijo24vgvPQW6yBQh2qXE4jrEd18YDdEbWKLG"
 LOGO_URL = "https://ferzan-factory.com/brand/ferzan-token.jpg"
@@ -90,7 +92,7 @@ def ensure_metadata(s: dict, redo: bool = False) -> dict:
 def prepare(tell: bool) -> int:
     s = ensure_metadata(load(), redo=True)  # only the rehearsal may redo it, never the launch itself
     r = node("plan", s["uri"])
-    when = time.strftime("%a %b %d %Y %H:%M UTC", time.gmtime(LAUNCH_AT))
+    when = time.strftime("%a %b %d %Y %H:%M UTC", time.gmtime(LAUNCH_AT)) if ferzan_when.is_set(LAUNCH_AT) else "NOT SCHEDULED (set FERZAN_LAUNCH_AT)"
     lines = [f"FERZAN rehearsal: {'READY' if r.get('ok') else 'PROBLEM'}", f"Launch: {when} (4:00 PM Eastern)",
              f"Token address (keep private until launch): {r.get('mint')}", f"Pool: {r.get('pool')}",
              f"Launcher: {r.get('launcher')} ({float(r.get('launcher_sol') or 0):.4f} SOL)", f"Vault: {r.get('vault')} - {r.get('vault_check')}",
@@ -107,6 +109,9 @@ def prepare(tell: bool) -> int:
 
 def launch() -> int:
     now = time.time()
+    if not ferzan_when.is_set(LAUNCH_AT):
+        notify("FERZAN launch refused: no launch date is set (FERZAN_LAUNCH_AT). Nothing was sent.")
+        return 1
     if now < LAUNCH_AT - 60 or now > LAUNCH_AT + 7200:
         notify(f"FERZAN launch refused: it is not launch time (now {time.strftime('%H:%M UTC', time.gmtime(now))}).")
         return 1
