@@ -21,6 +21,7 @@ from telegram.ext import (
     Application,
     CallbackQueryHandler,
     CommandHandler,
+    ChatMemberHandler,
     ContextTypes,
     ConversationHandler,
     MessageHandler,
@@ -347,6 +348,7 @@ def _db() -> sqlite3.Connection:
             PRIMARY KEY (chat_id, chain, ca)
         )"""
     )
+    con.execute("CREATE TABLE IF NOT EXISTS known_groups (chat_id INTEGER PRIMARY KEY, title TEXT, ts INTEGER)")
     try:
         con.execute("ALTER TABLE watches ADD COLUMN min_usd REAL DEFAULT 15")
     except sqlite3.OperationalError:
@@ -1698,6 +1700,27 @@ async def setup_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop("setup", None)
     await update.effective_message.reply_text("Setup cancelled. /setup to start over.")
     return ConversationHandler.END
+
+
+async def on_my_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Remember groups this bot is added to, so the Buy app can offer to set them up before any token is tracked."""
+    cm = update.my_chat_member
+    if not cm or cm.chat.type not in ("group", "supergroup"):
+        return
+    try:
+        con = _db()
+        if cm.new_chat_member.status in ("member", "administrator"):
+            con.execute(
+                "INSERT INTO known_groups(chat_id, title, ts) VALUES(?,?,strftime('%s','now')) "
+                "ON CONFLICT(chat_id) DO UPDATE SET title=excluded.title, ts=excluded.ts",
+                (cm.chat.id, cm.chat.title or ""),
+            )
+        else:
+            con.execute("DELETE FROM known_groups WHERE chat_id=?", (cm.chat.id,))
+        con.commit()
+        con.close()
+    except Exception as exc:
+        log.warning("known_groups %s", exc)
 
 
 async def track(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -4812,6 +4835,7 @@ def main() -> None:
         remember_media,
     ))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, paste_ca))
+    app.add_handler(ChatMemberHandler(on_my_status, ChatMemberHandler.MY_CHAT_MEMBER))
     app.add_handler(CommandHandler("track", track))
     app.add_handler(CommandHandler("add", track))
     app.add_handler(CommandHandler("untrack", untrack))

@@ -56,6 +56,7 @@ code{font:12px ui-monospace,Menlo,monospace;background:var(--surface2);padding:2
 .sec{display:flex;flex-direction:column;gap:8px}
 .sec>h2{padding-inline:2px;color:var(--muted);font-size:12px;letter-spacing:.08em;text-transform:uppercase}
 .log .t span{font-variant-numeric:tabular-nums}
+.btn:disabled{opacity:.45;cursor:default}
 [hidden]{display:none!important}
 
 .err{color:var(--bad);font-size:13px;padding:10px 12px}
@@ -79,16 +80,18 @@ input.ca-in{flex:1;min-width:0;background:var(--surface2);border:1px solid var(-
 </div>
 <div class="wrap">
   <div class="top"><div><h1>🛡 Ferzan Guardian</h1><div class="who" id="who">Loading…</div></div><button class="linkbtn" id="toClassic" type="button">💬 Classic chat</button></div>
-  <div class="sec" id="gsec"><h2>Your groups</h2><div class="seg" id="groups"></div></div>
-  <div id="empty" class="card pad" hidden><b>No groups yet</b><span class="who">Add @Ferzan_Guardian_Bot to a group and make yourself an admin. It will show up here.</span></div>
+  <div class="sec" id="gsec"><h2>Your groups</h2><div class="seg" id="groups"></div><button class="linkbtn" id="addgroup2" type="button" style="text-align:left">➕ Add Guardian to another group</button></div>
+  <div id="empty" class="card pad" hidden><b>No groups yet</b><span class="who">Add the bot to your group, make yourself an admin there, then come back. The group shows up here and you pick a protection level.</span><button class="btn pri" id="addgroup" type="button">➕ Add Guardian to a group</button></div>
   <div id="main" hidden>
   <div class="stats" id="stats"></div>
   <div class="tabs" role="tablist" style="margin-top:14px">
     <button role="tab" aria-selected="true" data-t="protect">Protection</button>
     <button role="tab" aria-selected="false" data-t="queue">Reports <span class="chip warn" id="qn">0</span></button>
+    <button role="tab" aria-selected="false" data-t="cmds">Commands</button>
     <button role="tab" aria-selected="false" data-t="log">Activity</button>
   </div>
   <section id="protect" class="sec" style="margin-top:14px">
+    <div class="card pad" id="level"></div>
     <div class="card" id="toggles"></div>
     <div class="card pad"><h2>New-member check</h2>
       <div class="seg" id="captcha"><button data-m="tap">One tap</button><button data-m="full">Tap + quick sum</button><button data-m="math">Sum only</button></div>
@@ -101,6 +104,8 @@ input.ca-in{flex:1;min-width:0;background:var(--surface2);border:1px solid var(-
       <div class="ca"><span>Warnings before a ban</span><div class="seg" id="warns"><button data-n="2">2</button><button data-n="3">3</button><button data-n="5">5</button></div></div></div>
   </section>
   <section id="queue" class="sec" hidden style="margin-top:14px"><div class="card" id="reports"></div></section>
+  <section id="cmds" class="sec" hidden style="margin-top:14px"><div class="card" id="perms"></div>
+    <span class="who">"Mods" are people you added with /gmodadd. Telegram admins can always run every command, whichever you pick here.</span></section>
   <section id="log" class="sec" hidden style="margin-top:14px"><div class="card log" id="actions"></div>
     <span class="who">Changes made in this app are recorded with your Telegram id.</span></section>
   </div>
@@ -122,18 +127,29 @@ async function post(path,body){
   if(!r.ok)throw new Error(typeof j.detail==="string"?j.detail:"Something went wrong");
   return j;
 }
-let chat=null,S=null;
+let chat=null,S=null,botName="";
 const ago=(n,now)=>{const d=Math.max(0,(now||Date.now()/1000)-n);return d<90?"just now":d<5400?Math.round(d/60)+"m ago":d<129600?Math.round(d/3600)+"h ago":Math.round(d/86400)+"d ago"};
 function render(){
   $("#stats").innerHTML=[["Members",S.members?S.members.toLocaleString("en-US"):"-"],["Actions today",S.actions_today],["Joined today",S.joined_today]].map(([l,v])=>`<div class="card stat"><b>${esc(v)}</b><span>${l}</span></div>`).join("");
   $("#toggles").innerHTML=Object.keys(LABELS).map(k=>`<div class="row"><div class="t"><b>${LABELS[k][0]}</b><span>${LABELS[k][1]}</span></div><button class="sw" role="switch" aria-checked="${!!S.toggles[k]}" aria-label="${LABELS[k][0]}" data-k="${k}"></button></div>`).join("");
-  setCfg();
+  setCfg();renderLevel();renderPerms();
   $("#qn").textContent=S.reports.length;
   $("#reports").innerHTML=S.reports.length?S.reports.map(r=>`<div class="row" style="align-items:flex-start"><div class="t"><b>Member ${esc(r.target)}</b><span>${esc(r.text||"(no text)")}</span><span>${ago(r.ts,S.now)}</span>
    <div class="seg" style="margin-top:8px"><button class="btn" data-ra="dismiss" data-id="${r.id}">Dismiss</button><button class="btn" data-ra="warn" data-id="${r.id}">Warn</button><button class="btn dng" data-ra="ban" data-id="${r.id}">Ban</button></div></div></div>`).join("")
    :`<div class="row"><div class="t"><b>All clear</b><span>No open reports.</span></div></div>`;
   $("#actions").innerHTML=S.activity.length?S.activity.map(a=>`<div class="row"><div class="t"><b>${esc(a.action)}</b><span>${a.kind==="cfg"?"Admin "+esc(a.who):"By "+(a.who?esc(a.who):"Guardian")+(a.target?" on member "+esc(a.target):"")}${a.detail?" · "+esc(a.detail):""}</span></div><span class="who">${ago(a.ts,S.now)}</span></div>`).join("")
    :`<div class="row"><div class="t"><b>Nothing yet</b></div></div>`;
+}
+const LV={standard:"🟢",shield:"🟡",fortress:"🔴"};
+function renderLevel(){
+  const warn=S.bot_admin===false?`<div class="note" style="border-color:var(--warn);color:var(--warn)">Guardian is not an admin in this group yet. Open the group's settings, make Guardian an admin (delete messages and restrict members), or none of these protections can work.</div>`:"";
+  const cur=S.tiers.find(t=>t.id===S.tier);
+  $("#level").innerHTML=`<h2>${cur?"Protection level":"Set up this group"}</h2>${warn}<span class="who">${cur?"Now: "+LV[cur.id]+" "+esc(cur.name)+". You can still change any single switch below.":"Pick a starting level. It switches on a set of protections together; every switch below can still be changed, and you can undo."}</span>`
+   +S.tiers.map(t=>`<div class="row" style="padding-inline:0"><div class="t"><b>${LV[t.id]} ${esc(t.name)}${S.tier===t.id?" ✓":""}</b><span>${esc(t.blurb)}</span></div><button class="btn${S.tier===t.id?"":" pri"}" data-tier="${t.id}">${S.tier===t.id?"Re-apply":"Use"}</button></div>`).join("")
+   +(cur?`<button class="btn" data-tier="undo">↩ Undo last level change</button>`:"");
+}
+function renderPerms(){
+  $("#perms").innerHTML=S.perms.map(p=>`<div class="row"><div class="t"><b>${esc(p.label)}</b><span><code>/${esc(p.command)}</code> · default: ${p.default==="mod"?"mods":"admins only"}</span></div><div class="seg" data-cmd="${esc(p.command)}"><button data-pt="mod" aria-pressed="${p.tier==="mod"}">Mods</button><button data-pt="admin" aria-pressed="${p.tier==="admin"}">Admins</button></div></div>`).join("");
 }
 function setCfg(){
   document.querySelectorAll("#captcha button").forEach(b=>b.setAttribute("aria-pressed",b.dataset.m===S.captcha_mode));
@@ -151,8 +167,16 @@ async function setOpt(key,value){
 document.addEventListener("click",async e=>{
   const b=e.target.closest("button");if(!b)return;
   if(b.dataset.g){chat=+b.dataset.g;document.querySelectorAll("#groups button").forEach(x=>x.setAttribute("aria-pressed",x===b));load()}
-  else if(b.dataset.t){document.querySelectorAll(".tabs button").forEach(x=>x.setAttribute("aria-selected",x===b));for(const s of["protect","queue","log"])$("#"+s).hidden=s!==b.dataset.t}
+  else if(b.dataset.t){document.querySelectorAll(".tabs button").forEach(x=>x.setAttribute("aria-selected",x===b));for(const s of["protect","queue","cmds","log"])$("#"+s).hidden=s!==b.dataset.t}
   else if(b.dataset.k){setOpt(b.dataset.k,b.getAttribute("aria-checked")!=="true")}
+  else if(b.dataset.tier){
+    const t=b.dataset.tier,lab=b.textContent;
+    if(b.dataset.armed!=="1"){b.dataset.armed="1";b.textContent=t==="undo"?"Tap again to undo":"Tap again to switch on";setTimeout(()=>{b.dataset.armed="";b.textContent=lab},4000);return}
+    try{const r=await post("/api/guardian/tier",{chat_id:chat,tier:t});Object.assign(S,r);toast((r.notes&&r.notes.length)?r.notes[0]:"Saved");render();load()}catch(er){toast(er.message)}}
+  else if(b.dataset.pt){
+    const cmd=b.parentElement.dataset.cmd;
+    try{const r=await post("/api/guardian/perm",{chat_id:chat,command:cmd,tier:b.dataset.pt});S.perms=r.perms;renderPerms();toast("Saved")}catch(er){toast(er.message)}}
+  else if(b.id==="addgroup"||b.id==="addgroup2"){const u="https://t.me/"+(botName||menuBot)+"?startgroup=true";if(tg&&tg.openTelegramLink)tg.openTelegramLink(u);else window.open(u,"_blank")}
   else if(b.dataset.m){setOpt("captcha_mode",b.dataset.m)}
   else if(b.dataset.n){setOpt("warn_limit",+b.dataset.n)}
   else if(b.dataset.r){setOpt("ca_remove",b.dataset.r)}
@@ -173,7 +197,7 @@ if(qs.get("from")==="menu"&&!skip){
   $("#pickClassic").onclick=toChat;
 }
 (async function(){
-  try{const g=await post("/api/guardian/groups");
+  try{const g=await post("/api/guardian/groups");botName=(g.bot||"").replace(/[^A-Za-z0-9_]/g,"");
     $("#who").textContent=(g.name?"Signed in as "+g.name+" · ":"")+"admin of "+g.groups.length+(g.groups.length===1?" group":" groups");
     if(!g.groups.length){$("#gsec").hidden=true;$("#empty").hidden=false;return}
     $("#groups").innerHTML=g.groups.map((x,i)=>`<button data-g="${x.chat_id}" aria-pressed="${i===0}">${esc(x.title)}</button>`).join("");

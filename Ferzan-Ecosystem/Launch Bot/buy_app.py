@@ -83,6 +83,20 @@ def _tg(method: str, **params):
     return j.get("result")
 
 
+_bot_cache: dict = {}
+
+
+def _bot_username() -> str:
+    """The bot's @name (for the add-to-group link), asked once and remembered."""
+    if "u" not in _bot_cache:
+        try:
+            r = _tg("getMe")
+            _bot_cache["u"] = re.sub(r"[^A-Za-z0-9_]", "", str(r.get("username") or "")) if isinstance(r, dict) else ""
+        except HTTPException:
+            return ""
+    return _bot_cache["u"]
+
+
 def _is_admin(chat_id: int, uid: int) -> bool:
     try:
         m = _tg("getChatMember", chat_id=chat_id, user_id=uid)
@@ -106,6 +120,9 @@ def _con() -> sqlite3.Connection:
     con.execute(
         "CREATE TABLE IF NOT EXISTS miniapp_audit (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER, "
         "admin_id INTEGER, action TEXT, detail TEXT, ts INTEGER)"
+    )
+    con.execute(
+        "CREATE TABLE IF NOT EXISTS known_groups (chat_id INTEGER PRIMARY KEY, title TEXT, ts INTEGER)"
     )
     have = {r[1] for r in con.execute("PRAGMA table_info(watches)")}
     need = {"min_usd", "emoji", "tg_url", "discord_url", "x_url", "whale_usd", "sell_alerts"}
@@ -212,6 +229,81 @@ class UntrackBody(GroupBody):
     ca: str
 
 
+# ---- adding a token: the same pool look-up the bot's /track uses (DexScreener, then GeckoTerminal, then the Ferzan curve),
+# run here on the server so the page never decides which pool gets watched.
+MAX_TOKENS_PER_GROUP = 5
+DS_CHAIN = {"sol": "solana", "eth": "ethereum", "base": "base", "bsc": "bsc", "arb": "arbitrum", "avax": "avalanche",
+            "pol": "polygon", "arc": "arc", "tron": "tron", "ton": "ton"}
+GT_NET = {"sol": "solana", "eth": "eth", "base": "base", "bsc": "bsc", "arb": "arbitrum", "avax": "avax",
+          "pol": "polygon", "arc": "arc", "tron": "tron", "ton": "ton"}
+EVM_CHAINS = ("eth", "base", "bsc", "arb", "avax", "pol", "arc")
+CHAIN_LABEL = {"sol": "Solana", "eth": "Ethereum", "base": "Base", "bsc": "BNB Chain", "arb": "Arbitrum",
+               "avax": "Avalanche", "pol": "Polygon", "arc": "Arc", "tron": "Tron", "ton": "TON"}
+_EVM_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
+_SOL_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
+_TRON_RE = re.compile(r"^T[1-9A-HJ-NP-Za-km-z]{33}$")
+_TON_RE = re.compile(r"^((EQ|UQ)[A-Za-z0-9_-]{46}|0:[0-9a-f]{64})$")
+FERZAN_API = (os.environ.get("FERZAN_LAUNCH_API") or "https://launch.ferzaneco.com/api").rstrip("/")
+
+
+def _clean_token(chain, ca) -> tuple[str, str]:
+    c = str(chain or "").strip().lower()
+    a = str(ca or "").strip()
+    if c not in DS_CHAIN:
+        raise HTTPException(400, "Pick a chain from the list")
+    ok = (
+        bool(_EVM_RE.match(a)) if c in EVM_CHAINS
+        else bool(_SOL_RE.match(a)) if c == "sol"
+        else bool(_TRON_RE.match(a)) if c == "tron"
+        else bool(_TON_RE.match(a))
+    )
+    if not ok:
+        raise HTTPException(400, "That address does not look right for " + CHAIN_LABEL[c])
+    return c, (a.lower() if c in EVM_CHAINS else a)
+
+
+def _get_json(url: str, **kw):
+    try:
+        r = requests.get(url, timeout=10, headers={"Accept": "application/json"}, **kw)
+        return r.json() if r.status_code == 200 else None
+    except Exception:
+        return None
+
+
+def _lookup_pool(chain: str, ca: str) -> dict | None:
+    """{'pool','name','symbol','dex'} or None. chain and ca must already be validated."""
+    want = DS_CHAIN[chain]
+    for url in (f"https://api.dexscreener.com/latest/dex/tokens/{ca}", f"https://api.dexscreener.com/latest/dex/search?q={ca}"):
+        pairs = [p for p in ((_get_json(url) or {}).get("pairs") or []) if str(p.get("chainId") or "").lower() == want]
+        if pairs and pairs[0].get("pairAddress"):
+            p = pairs[0]
+            base = p.get("baseToken") or {}
+            return {"pool": p["pairAddress"], "name": base.get("name") or base.get("symbol") or "",
+                    "symbol": base.get("symbol") or "", "dex": str(p.get("dexId") or "")}
+    rows = ((_get_json(f"https://api.geckoterminal.com/api/v2/networks/{GT_NET[chain]}/tokens/{ca}/pools?page=1") or {}).get("data")) or []
+    if rows:
+        pid = str(rows[0].get("id") or "")
+        a = rows[0].get("attributes") or {}
+        nm = str(a.get("name") or "")
+        return {"pool": pid.split("_", 1)[-1] if "_" in pid else pid, "name": nm, "symbol": "", "dex": ""}
+    if chain in EVM_CHAINS or chain == "tron":
+        key = ca if chain == "tron" else ca.lower()
+        d = _get_json(f"{FERZAN_API}/curve-by-token/{key}", params={"since": 0, "kind": "buy"}) or {}
+        if d.get("found") and not d.get("graduated"):
+            return {"pool": "ferzan:" + key, "name": d.get("name") or "", "symbol": d.get("symbol") or "", "dex": "ferzan curve"}
+    return None
+
+
+class TrackBody(GroupBody):
+    chain: str
+    ca: str
+    min_usd: float | None = None
+    sell: bool | None = None
+    whale: float | None = None
+
+
+
+
 def _title(chat_id: int) -> str:
     hit = _title_cache.get(chat_id)
     if hit and time.time() - hit[0] < 600:
@@ -232,11 +324,12 @@ def groups(body: AppBody):
         raise HTTPException(429, "Slow down a little")
     hit = _groups_cache.get(uid)
     if hit and time.time() - hit[0] < 60:
-        return {"name": user.get("first_name") or "", "groups": hit[1]}
+        return {"name": user.get("first_name") or "", "groups": hit[1], "bot": _bot_username()}
     con = _con()
     try:
         ids = [int(r[0]) for r in con.execute(
-            "SELECT chat_id, MAX(last_ts) m FROM watches WHERE chat_id<0 GROUP BY chat_id ORDER BY m DESC LIMIT ?",
+            "SELECT chat_id, MAX(m) mm FROM (SELECT chat_id, MAX(last_ts) m FROM watches WHERE chat_id<0 GROUP BY chat_id "
+            "UNION ALL SELECT chat_id, ts m FROM known_groups WHERE chat_id<0) GROUP BY chat_id ORDER BY mm DESC LIMIT ?",
             (MAX_GROUPS_CHECKED,),
         )]
     finally:
@@ -245,7 +338,7 @@ def groups(body: AppBody):
         flags = list(ex.map(lambda c: _is_admin(c, uid), ids))
     out = [{"chat_id": c, "title": _title(c)} for c, ok in zip(ids, flags) if ok]
     _groups_cache[uid] = (time.time(), out)
-    return {"name": user.get("first_name") or "", "groups": out}
+    return {"name": user.get("first_name") or "", "groups": out, "bot": _bot_username()}
 
 
 @router.post("/api/buybot/group")
@@ -257,9 +350,8 @@ def group(body: GroupBody):
     _require_admin(body.chat_id, uid)
     con = _con()
     try:
-        if not _watching(con, body.chat_id):
-            raise HTTPException(404, "The Buy bot is not tracking a token in that group")
         st = _state(con, body.chat_id)
+        st["tracking"] = bool(st["tokens"])
         t0 = int(time.time()) // 86400 * 86400
         n, vol = con.execute(
             "SELECT COUNT(*), COALESCE(SUM(usd),0) FROM buy_log WHERE chat_id=? AND ts>=? AND COALESCE(kind,'buy')='buy'",
@@ -351,9 +443,84 @@ def untrack(body: UntrackBody):
         cur = con.execute("DELETE FROM watches WHERE chat_id=? AND chain=? AND ca=?", (body.chat_id, body.chain, body.ca))
         if cur.rowcount == 0:
             raise HTTPException(404, "That token is not tracked in this group")
+        con.execute("INSERT OR REPLACE INTO known_groups(chat_id, title, ts) VALUES(?,?,strftime('%s','now'))",
+                    (body.chat_id, _title(body.chat_id)))
         _audit(con, body.chat_id, uid, "untrack", f"{body.chain} {_short(body.ca)}")
         con.commit()
         left = _watching(con, body.chat_id)
         return {"ok": True, "left": left, **(_state(con, body.chat_id) if left else {})}
+    finally:
+        con.close()
+
+
+@router.post("/api/buybot/lookup")
+def lookup(body: TrackBody):
+    """Check a token before adding it: does the same pool look-up the bot's /track does. Changes nothing."""
+    user = _auth(body.initData)
+    uid = int(user["id"])
+    if not _rate_ok(uid, "lookup", 20, 600):
+        raise HTTPException(429, "Too many look-ups. Wait a few minutes.")
+    _require_admin(body.chat_id, uid)
+    chain, ca = _clean_token(body.chain, body.ca)
+    hit = _lookup_pool(chain, ca)
+    if not hit:
+        return {"found": False, "chain": chain, "ca": ca}
+    return {"found": True, "chain": chain, "ca": ca, "name": hit["name"], "symbol": hit["symbol"], "dex": hit["dex"]}
+
+
+@router.post("/api/buybot/track")
+def track(body: TrackBody):
+    """Start buy alerts for a token in this group (same row the /track command writes)."""
+    user = _auth(body.initData)
+    uid = int(user["id"])
+    if not _rate_ok(uid, "write", 60, 3600):
+        raise HTTPException(429, "Too many changes in an hour. Try again later.")
+    if not _rate_ok(uid, "lookup", 20, 600):
+        raise HTTPException(429, "Too many look-ups. Wait a few minutes.")
+    _require_admin(body.chat_id, uid)
+    chain, ca = _clean_token(body.chain, body.ca)
+    cid = body.chat_id
+    min_usd = None if body.min_usd is None else _money(body.min_usd, 1, MIN_FLOOR_MAX, "Minimum buy")
+    whale = None if body.whale is None else _money(body.whale, 1, WHALE_MAX, "Whale level", allow_zero=True)
+    con = _con()
+    try:
+        have = con.execute("SELECT chain, ca FROM watches WHERE chat_id=?", (cid,)).fetchall()
+        if any(r["chain"] == chain and str(r["ca"]).lower() == ca.lower() for r in have):
+            raise HTTPException(409, "That token is already tracked in this group")
+        if len(have) >= MAX_TOKENS_PER_GROUP:
+            raise HTTPException(400, f"A group can track up to {MAX_TOKENS_PER_GROUP} tokens. Stop one first.")
+    finally:
+        con.close()
+    hit = _lookup_pool(chain, ca)  # outside the db connection: network calls can be slow
+    if not hit:
+        raise HTTPException(404, "No pool found for that address yet. Check the chain and address.")
+    con = _con()
+    try:
+        first = con.execute(
+            "SELECT min_usd, emoji, tg_url, x_url, discord_url, whale_usd, sell_alerts FROM watches WHERE chat_id=? "
+            "ORDER BY last_ts DESC LIMIT 1", (cid,),
+        ).fetchone()
+        floor = min_usd if min_usd is not None else (float(first["min_usd"]) if first and first["min_usd"] is not None else 15.0)
+        con.execute(
+            "INSERT OR REPLACE INTO watches(chat_id, chain, ca, pool, last_ts, min_usd) VALUES(?,?,?,?,?,?)",
+            (cid, chain, ca, hit["pool"], int(time.time()), floor),
+        )
+        if first:  # a second token inherits the group's look: emoji, links, whale level, sell alerts
+            con.execute(
+                "UPDATE watches SET emoji=?, tg_url=?, x_url=?, discord_url=?, whale_usd=?, sell_alerts=? "
+                "WHERE chat_id=? AND chain=? AND ca=?",
+                (first["emoji"], first["tg_url"], first["x_url"], first["discord_url"], first["whale_usd"],
+                 first["sell_alerts"], cid, chain, ca),
+            )
+        else:
+            con.execute(
+                "UPDATE watches SET whale_usd=?, sell_alerts=? WHERE chat_id=? AND chain=? AND ca=?",
+                (whale or 0, int(bool(body.sell)), cid, chain, ca),
+            )
+        _audit(con, cid, uid, "track", f"{chain} {_short(ca)} min ${floor:g}")
+        con.commit()
+        st = _state(con, cid)
+        st["tracking"] = True
+        return {**st, "added": {"chain": chain, "name": hit["name"], "symbol": hit["symbol"]}}
     finally:
         con.close()

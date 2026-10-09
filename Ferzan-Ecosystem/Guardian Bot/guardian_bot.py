@@ -1669,6 +1669,18 @@ def _touch_chat(chat_id: int, title: str) -> None:
     con.close()
 
 
+async def on_my_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Guardian was added to (or made admin in) a group: remember it so the Guardian app can offer to set it up."""
+    cm = update.my_chat_member
+    if not cm or cm.chat.type not in ("group", "supergroup"):
+        return
+    if cm.new_chat_member.status in ("member", "administrator"):
+        try:
+            _touch_chat(cm.chat.id, cm.chat.title or "")
+        except Exception as exc:
+            log.warning("my_chat_member touch %s", exc)
+
+
 def _bump_msg_count(chat_id: int) -> None:
     day = time.strftime("%Y-%m-%d", time.gmtime())
     con = _db()
@@ -7268,6 +7280,7 @@ def main() -> None:
         group=-3,
     )
     app.add_handler(ChatMemberHandler(on_member, ChatMemberHandler.CHAT_MEMBER))
+    app.add_handler(ChatMemberHandler(on_my_status, ChatMemberHandler.MY_CHAT_MEMBER))
     # A shadowbanned member's messages vanish whatever they are (video, file, audio, poll, contact...), not only the
     # types the main moderation handler listens to.
     app.add_handler(
