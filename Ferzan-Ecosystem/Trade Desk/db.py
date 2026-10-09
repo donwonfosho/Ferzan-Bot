@@ -1275,6 +1275,12 @@ def set_ton_addr(user_id: int, address: str) -> None:
     if not address:
         return
     try:
+        from ton_addr_fmt import wallet_form
+
+        address = wallet_form(address)  # always the UQ spelling, so an EQ one never reaches a screen
+    except Exception:  # noqa: BLE001
+        pass
+    try:
         with get_conn() as conn:
             conn.execute("CREATE TABLE IF NOT EXISTS ton_addr (user_id INTEGER PRIMARY KEY, address TEXT NOT NULL, updated_at INTEGER)")
             conn.execute(
@@ -1292,7 +1298,14 @@ def get_ton_addr(user_id: int) -> str:
         with get_conn() as conn:
             conn.execute("CREATE TABLE IF NOT EXISTS ton_addr (user_id INTEGER PRIMARY KEY, address TEXT NOT NULL, updated_at INTEGER)")
             row = conn.execute("SELECT address FROM ton_addr WHERE user_id = ?", (int(user_id),)).fetchone()
-            return str(row["address"]) if row else ""
+            if not row:
+                return ""
+            try:
+                from ton_addr_fmt import wallet_form
+
+                return wallet_form(str(row["address"]))  # older rows may still be EQ
+            except Exception:  # noqa: BLE001
+                return str(row["address"])
     except Exception:  # noqa: BLE001
         return ""
 

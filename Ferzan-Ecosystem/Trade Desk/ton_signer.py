@@ -628,7 +628,7 @@ async def _holding(seed64: bytes, jetton: str) -> tuple[int, str]:
     try:
         wallet = await WalletV4R2.from_private_key(provider, seed64)
         _jw, bal = await _jetton_wallet_and_balance(provider, jetton, wallet.address)
-        return bal, wallet.address.to_str()
+        return bal, wallet.address.to_str(is_user_friendly=True, is_bounceable=False)  # UQ: what people send to
     finally:
         await provider.close_all()
 
