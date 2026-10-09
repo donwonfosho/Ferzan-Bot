@@ -773,6 +773,21 @@ async def _milestone_loop(application: Application):
             logger.warning("milestone loop: %s", str(e)[:160])
 
 
+def start_caption(live: str) -> str:
+    """The text under the /start banner. Only the 'Live now' line changes; the rest is fixed copy."""
+    return (
+        "🚀 <b>Ferzan Launch</b>\n\n"
+        "Launch a coin from Telegram. You sign in your own wallet. "
+        "This bot never holds your keys.\n\n"
+        f"Live now: {_esc(live)}\n\n"
+        "Your coin gets its own chart and trading on the Ferzan Factory board, "
+        "and you earn from every trade.\n\n"
+        "Tap Launch. Every step has quick-pick buttons, and the exact cost is shown before you sign.\n"
+        "Want it later? Use ⏰ Launch later (see /drafts).\n\n"
+        "Official site: ferzan-factory.com"
+    )
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     if context.args and (context.args[0] or "").startswith("watch_"):
@@ -807,16 +822,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     live = " · ".join(CHAINS[c].split(" (")[0] for c in _live_chains()) or "—"
     await update.effective_message.reply_photo(
         photo=LAUNCH_BANNER_FILE_ID,
-        caption=(
-            "🚀 <b>Ferzan Launch</b>\n\n"
-            "Create a token from Telegram. You sign in your own wallet — "
-            "this bot never holds keys.\n\n"
-            f"Live now: {_esc(live)}\n"
-            "Solana: plain token or Meteora bonding curve.\n\n"
-            "Tap Launch — every step has quick-pick buttons.\n"
-            "Schedule a launch for later with ⏰ Launch later (see /drafts).\n"
-            "The exact cost is shown before you sign."
-        ),
+        caption=start_caption(live),
         parse_mode="HTML",
         reply_markup=kb,
     )
