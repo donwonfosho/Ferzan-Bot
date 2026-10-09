@@ -1192,7 +1192,8 @@ async def _home_parts(uid: int, first_time: bool) -> tuple[str, list]:
             "⚡ <b>Welcome to Ferzan</b>\n"
             "👀 See it.  🦍 Ape it.  🚀 Send it.\n\n"
             "The one-stop desk for 19 chains: trade, snipe, bridge and launch from one place. "
-            "Your wallet is ready in a moment.\n\n"
+            "Your trading wallet is ready in a moment. The bot holds its key so it can sign your trades: "
+            "keep only trading funds in it, and withdraw or export anytime.\n\n"
             "⚡ <b>Paste any token address</b> and the card appears.\n"
             "👇 New here? Take the 30-second tour, or jump straight in.\n"
             + (f"\n{strip}\n" if strip else "")
