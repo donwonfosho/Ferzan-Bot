@@ -23,5 +23,26 @@ class NoJupiterLinks(unittest.TestCase):
             self.assertNotRegex(src, r"jup\.ag/tokens|Buy on Jupiter", f)
 
 
+class OneXHandle(unittest.TestCase):
+    def test_old_x_handle_is_gone_everywhere(self):
+        eco = os.path.abspath(os.path.join(HERE, "..", ".."))
+        bad = []
+        for root, dirs, files in os.walk(eco):
+            dirs[:] = [d for d in dirs if d not in (".git", "node_modules", "__pycache__", "worktrees", "tests")]
+            for f in files:
+                if f.endswith((".py", ".html", ".js", ".json", ".md", ".sh")):
+                    try:
+                        src = open(os.path.join(root, f), encoding="utf-8").read()
+                    except Exception:
+                        continue
+                    if re.search(r"@ferzaneco(?![.\w])|x\.com/ferzaneco|twitter\.com/ferzaneco", src, re.I):
+                        bad.append(os.path.join(root, f))
+        self.assertEqual(bad, [])
+
+    def test_countdown_names_the_new_handle(self):
+        import ferzan_promo as fp
+        self.assertIn("@ferzanfactory", fp.COUNTDOWN_FACTS[12 * 3600])
+
+
 if __name__ == "__main__":
     unittest.main()

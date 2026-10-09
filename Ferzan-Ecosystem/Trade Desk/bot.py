@@ -985,7 +985,7 @@ async def resolve_symbol_or_reply(update: Update, symbol: str):
 
 def home_keyboard(private: bool = True, hot: list | None = None) -> InlineKeyboardMarkup:
     chat = (os.getenv("FERZAN_CHAT_URL") or "https://t.me/Ferzan_Chat").strip()
-    xurl = (os.getenv("FERZAN_X_URL") or "https://x.com/ferzaneco").strip()
+    xurl = (os.getenv("FERZAN_X_URL") or "https://x.com/ferzanfactory").strip()
     # Signals live in the Ferzan signal channels, not in this chat: the button opens them.
     signals = (os.getenv("FERZAN_SIGNALS_URL") or os.getenv("FERZAN_HUB_URL") or "https://t.me/Ferzan_Trade_Ecosystem").strip()
     # Telegram sizes a photo card's buttons to the photo, so rows stay at three short labels.
@@ -1182,7 +1182,7 @@ async def _home_parts(uid: int, first_time: bool) -> tuple[str, list]:
 
     hub = html.escape(os.getenv("FERZAN_HUB_URL") or "https://t.me/Ferzan_Trade_Ecosystem", quote=True)
     chat = html.escape(os.getenv("FERZAN_CHAT_URL") or "https://t.me/Ferzan_Chat", quote=True)
-    xurl = html.escape(os.getenv("FERZAN_X_URL") or "https://x.com/ferzaneco", quote=True)
+    xurl = html.escape(os.getenv("FERZAN_X_URL") or "https://x.com/ferzanfactory", quote=True)
     foot = f'<a href="{hub}">Hub</a> · <a href="{chat}">Chat</a> · <a href="{xurl}">X</a>'
     pf_task = None if first_time else asyncio.ensure_future(limited(_portfolio_line_fast, uid, secs=2.0, default=""))
     hot = await limited(_hot_rows, secs=2.0, default=[])

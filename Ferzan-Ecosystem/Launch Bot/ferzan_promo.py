@@ -43,11 +43,11 @@ COUNTDOWN_FACTS = {
     3 * D: "60% of the supply is locked for 24 months and only starts releasing after graduation, 25M a month, to a 2-of-3 multisig.",
     2 * D: "Every day part of Ferzan's Solana fees buys FERZAN on the open market and burns it, with receipts posted.",
     D: "The fee at open is 99% and falls to the normal 1% over 30 minutes. Patient buyers win.",
-    12 * H: "The contract address is posted only here, on X from @ferzaneco and on ferzan-factory.com. Any other address is fake.",
+    12 * H: "The contract address is posted only here, on X from @ferzanfactory and on ferzan-factory.com. Any other address is fake.",
     6 * H: "Launch is automatic, created on-chain by Ferzan's own launcher and handed to the multisig.",
     3 * H: "Get your wallet ready on Solana. Sign in at ferzan-factory.com or use @Ferzan_Trade_Bot.",
     H: "One hour. Fee at open: 99%. Minute 1: 85%. Minute 5: 46%. Minute 30: 1%.",
-    30 * M: "30 minutes. Remember: the contract address only comes from @ferzaneco, this channel and ferzan-factory.com/ferzan.",
+    30 * M: "30 minutes. Remember: the contract address only comes from @ferzanfactory, this channel and ferzan-factory.com/ferzan.",
     10 * M: "10 minutes. The fee starts at 99%. Don't rush the first minutes.",
     5 * M: "5 minutes. Stay in this channel: the contract address drops the moment FERZAN is live.",
 }
@@ -354,7 +354,7 @@ def countdown(s: dict, now: float) -> None:
             text = (f"⏳ FERZAN launches in {label} — {et}.\n\n{fact}\n\nThe launch is automatic. The fee starts at 99% and falls to 1% over 30 minutes, "
                     f"so sniping the open costs almost everything. 650M of the supply is locked in a multisig by Meteora.\n\n"
                     f"The contract address is posted here and at {SITE}/ferzan the moment it goes live. Anything posted before that is not FERZAN.")
-            post(s, f"countdown:{secs}", text, with_tags(f"⏳ $FERZAN launches in {label}: {et}. {fact} Contract address only from @ferzaneco and {SITE}/ferzan.", "#Solana #Meteora"), groups=True, image=COUNTDOWN_IMG.get(secs, ""))
+            post(s, f"countdown:{secs}", text, with_tags(f"⏳ $FERZAN launches in {label}: {et}. {fact} Contract address only from @ferzanfactory and {SITE}/ferzan.", "#Solana #Meteora"), groups=True, image=COUNTDOWN_IMG.get(secs, ""))
 
 
 def recap(s: dict, now: float) -> None:

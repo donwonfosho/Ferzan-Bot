@@ -1119,7 +1119,7 @@ def _growth_buttons(req, token_addr: str, curve_addr: str = "", trade_only: bool
         return {"inline_keyboard": rows} if rows else None
     sym = _html.unescape(req.symbol or "")
     share = _share_row(req.chain, token_addr,
-                       f"🚀 I just launched ${sym} on @ferzaneco Ferzan Factory ({_CHAIN_NAME.get(req.chain, req.chain)}). Trade it here:",
+                       f"🚀 I just launched ${sym} on @ferzanfactory Ferzan Factory ({_CHAIN_NAME.get(req.chain, req.chain)}). Trade it here:",
                        (req.wallet_address or "").strip())
     if share:
         rows.append(share)

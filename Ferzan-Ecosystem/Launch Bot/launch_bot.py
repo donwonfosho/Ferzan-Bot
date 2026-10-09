@@ -748,7 +748,7 @@ async def _milestone_loop(application: Application):
                 link = f"{base}/api/share/{chain}/{token}"
                 said = {"p25": "is 25% of the way to graduating", "p50": "is halfway to graduating", "p90": "is at 90% and about to graduate",
                         "grad": "just graduated"}[top]
-                tweet = f"{_MS_SYMBOLS[top]} ${sym} {said} on @ferzaneco Ferzan Factory."
+                tweet = f"{_MS_SYMBOLS[top]} ${sym} {said} on @ferzanfactory Ferzan Factory."
                 x = f"https://twitter.com/intent/tweet?text={quote(tweet)}&url={quote(link, safe='')}&hashtags=memecoin,{_MS_TAGS.get(chain, 'crypto')}"
                 kb = InlineKeyboardMarkup([
                     [InlineKeyboardButton("𝕏 Share this win", url=x)],

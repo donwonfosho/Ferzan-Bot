@@ -388,7 +388,7 @@
     const me = state.me || {}, o = me.origin || API, bots = me.bots || {};
     const share = l.share || "", p = l.progress == null ? null : Math.round(l.progress);
     const msg = l.graduated ? "$" + l.symbol + " just graduated on Ferzan Factory 🎓" : "$" + l.symbol + " is live on Ferzan Factory 🚀";
-    const x = "https://twitter.com/intent/tweet?text=" + encodeURIComponent(msg + " @ferzaneco") + "&url=" + encodeURIComponent(share) + "&hashtags=memecoin," + (({ solana: "Solana", base: "Base", bsc: "BNBChain", ethereum: "Ethereum" })[l.chain] || "crypto");
+    const x = "https://twitter.com/intent/tweet?text=" + encodeURIComponent(msg + " @ferzanfactory") + "&url=" + encodeURIComponent(share) + "&hashtags=memecoin," + (({ solana: "Solana", base: "Base", bsc: "BNBChain", ethereum: "Ethereum" })[l.chain] || "crypto");
     const t = "https://t.me/share/url?url=" + encodeURIComponent(share) + "&text=" + encodeURIComponent(msg);
     $("#sheet").innerHTML = `<div class="top"><b>${esc(l.name)} <span class="pill">$${esc(l.symbol)}</span></b><button class="x" id="sx" type="button">✕</button></div>
       <img class="card" alt="" src="${o}/api/og/${encodeURIComponent(l.chain)}/${encodeURIComponent(l.token)}.png?fresh=1">

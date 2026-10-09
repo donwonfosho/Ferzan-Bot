@@ -103,7 +103,7 @@
       const origin = 'https://launch.ferzaneco.com', share = o.token ? `${origin}/api/share/${o.chain}/${o.token}` : '';
       const sym = String(o.symbol || '').replace(/[^A-Za-z0-9]/g, '').slice(0, 10);
       const tags = { solana: 'Solana', base: 'Base', bsc: 'BNBChain', ethereum: 'Ethereum' }[o.chain] || 'crypto';
-      const msg = `$${sym} just launched on Ferzan Factory 🚀 @ferzaneco`;
+      const msg = `$${sym} just launched on Ferzan Factory 🚀 @ferzanfactory`;
       const x = `https://twitter.com/intent/tweet?text=${encodeURIComponent(msg)}${share ? '&url=' + encodeURIComponent(share) : ''}&hashtags=memecoin,${tags}`;
       const t = share ? `https://t.me/share/url?url=${encodeURIComponent(share)}&text=${encodeURIComponent(msg)}` : '';
       const go = (u) => { if (tg?.openLink) tg.openLink(u); else window.open(u, '_blank'); };

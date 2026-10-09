@@ -22,7 +22,7 @@ NAME, SYMBOL = "Ferzan", "FERZAN"
 VAULT = "2vWqwX72ijo24vgvPQW6yBQh2qXE4jrEd18YDdEbWKLG"
 LOGO_URL = "https://ferzan-factory.com/brand/ferzan-token.jpg"
 LOGO_SHA = "200d514e10a37a27b79378b8a577b2e82b78256af7d5a8192692dd253837074c"
-LINKS = {"website": "https://ferzan-factory.com", "x": "https://x.com/ferzaneco", "telegram": "https://t.me/Ferzan_Chat"}
+LINKS = {"website": "https://ferzan-factory.com", "x": "https://x.com/ferzanfactory", "telegram": "https://t.me/Ferzan_Chat"}
 DESC = ("FERZAN powers the Ferzan ecosystem: the Ferzan Factory launchpad and the Ferzan Telegram bots for launching, "
         "trading and tracking coins on Solana, Base, BNB, Ethereum and Robinhood Chain. Every day, part of Ferzan's "
         "platform fees buys FERZAN on the open market and burns it.")

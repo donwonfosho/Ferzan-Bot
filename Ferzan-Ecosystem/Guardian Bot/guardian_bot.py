@@ -89,7 +89,7 @@ BUY = (os.getenv("FERZAN_BUY_BOT") or "Ferzan_Buy_Bot").lstrip("@")
 LIQ = (os.getenv("FERZAN_LIQ_BOT") or "FerzanLiqBot").lstrip("@")
 ME = (os.getenv("FERZAN_GUARDIAN_BOT") or "FerzanGuardianBot").lstrip("@")
 CHAT = os.getenv("FERZAN_CHAT_URL") or "https://t.me/Ferzan_Chat"
-X_URL = os.getenv("FERZAN_X_URL") or "https://x.com/ferzaneco"
+X_URL = os.getenv("FERZAN_X_URL") or "https://x.com/ferzanfactory"
 LOG_CHAT = os.getenv("GUARDIAN_LOG_CHAT", "").strip()
 # Whole words only ("Devon" / "Towner" are real names). "_" and digits count as separators in handles.
 FAKE = re.compile(r"(?<![a-z0-9])(admin|owner|support|moderator|official|helpdesk|dev ?team|developer)(?![a-z0-9])", re.I)
