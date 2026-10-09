@@ -49,6 +49,7 @@ from telegram import (
     InlineQueryResultArticle,
     InputTextMessageContent,
     Update,
+    WebAppInfo,
 )
 from telegram.constants import ChatMemberStatus
 from telegram.ext import (
@@ -1920,12 +1921,21 @@ def _start_text() -> str:
     )
 
 
-def _start_kb() -> InlineKeyboardMarkup:
+def _app_url() -> str:
+    """The Guardian Mini App page, only when the server has been set up to serve it (GUARDIAN_MINIAPP_URL)."""
+    u = (os.getenv("GUARDIAN_MINIAPP_URL") or "").strip()
+    return u if u.startswith("https://") else ""
+
+
+def _start_kb(private: bool = False) -> InlineKeyboardMarkup:
     add = f"https://t.me/{ME}?startgroup=true"
     rows = [
         [InlineKeyboardButton("🤖 ADD BOT TO GROUP", url=add)],
         [InlineKeyboardButton("🚀 Quick Start Guide", callback_data="gm:quickstart")],
     ]
+    # An app button only works in a private chat, and only once the page is being served.
+    if private and _app_url():
+        rows.insert(1, [InlineKeyboardButton("🛡 Open Guardian app", web_app=WebAppInfo(url=_app_url()))])
     # Guardian's own category buttons first, since this is the Guardian Bot card.
     rows.extend(_menu_kb("main").inline_keyboard)
     # Ecosystem cross-promo links below.
@@ -1961,7 +1971,8 @@ async def _send_banner_card(
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await _send_banner_card(update, context, _start_text(), _start_kb())
+    private = bool(update.effective_chat and update.effective_chat.type == "private")
+    await _send_banner_card(update, context, _start_text(), _start_kb(private))
 
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
