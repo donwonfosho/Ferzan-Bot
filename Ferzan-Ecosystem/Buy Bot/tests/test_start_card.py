@@ -34,5 +34,19 @@ class BuyStart(unittest.TestCase):
         self.assertLess(body.index('arg.startswith("trk_")'), body.index("START_TEXT"))
 
 
+    def test_app_button_private_only_and_only_when_served(self):
+        tree = ast.parse(SRC)
+        kb = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_start_kb")
+        self.assertEqual([a.arg for a in kb.args.args], ["private"])
+        self.assertIn("if private and _app_url()", ast.get_source_segment(SRC, kb))
+        self.assertIn("web_app=WebAppInfo", SRC)
+        self.assertIn("_start_kb(private)", SRC)
+
+    def test_tape_off_is_not_turned_back_on(self):
+        # `int(row[0] or 1)` read a stored 0 (OFF) as 1 (ON), so /tape off never stopped the posts.
+        self.assertNotIn("int(row[0] or 1)", SRC)
+        self.assertIn("1 if row[0] is None else int(row[0])", SRC)
+
+
 if __name__ == "__main__":
     unittest.main()

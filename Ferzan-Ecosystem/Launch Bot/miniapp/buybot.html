@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Ferzan Buy</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Sora:wght@500;600;700&family=Inter:wght@400;500;600&display=swap">
+<style>
+:root{
+  --bg:#f3f7f6;--surface:#ffffff;--surface2:#eaf1ef;--line:#d8e3e0;--text:#0e1c1a;--muted:#5b706c;
+  --accent:#0f9c8a;--accent-ink:#ffffff;--warn:#b7791f;--bad:#c2410c;--good:#0f9c8a;
+  --shadow:0 1px 2px rgba(10,30,26,.06);
+  --head:'Sora',system-ui,sans-serif;--body:'Inter',system-ui,sans-serif;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --bg:#0b1413;--surface:#121e1c;--surface2:#182826;--line:#233633;--text:#e6f2ef;--muted:#8fa8a3;
+  --accent:#4fd1bd;--accent-ink:#06201c;--warn:#e0a84a;--bad:#f08a5d;--good:#4fd1bd;--shadow:none;color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#0b1413;--surface:#121e1c;--surface2:#182826;--line:#233633;--text:#e6f2ef;--muted:#8fa8a3;
+  --accent:#4fd1bd;--accent-ink:#06201c;--warn:#e0a84a;--bad:#f08a5d;--good:#4fd1bd;--shadow:none;color-scheme:dark}
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--text);font:14px/1.45 var(--body);padding-inline:16px;padding-block:20px 40px}
+.wrap{max-width:440px;margin:0 auto;display:flex;flex-direction:column;gap:14px}
+.note{font-size:12px;color:var(--muted);border:1px dashed var(--line);border-radius:10px;padding:8px 10px}
+h1,h2,h3{font-family:var(--head);margin:0;text-wrap:balance}
+h1{font-size:20px}h2{font-size:15px}
+.top{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.who{font-size:12px;color:var(--muted)}
+.tabs{display:flex;gap:4px;background:var(--surface2);padding:4px;border-radius:12px}
+.tabs button{flex:1;border:0;background:none;color:var(--muted);font:600 12.5px var(--body);padding:8px 4px;border-radius:9px;cursor:pointer}
+.tabs button[aria-selected=true]{background:var(--surface);color:var(--text);box-shadow:var(--shadow)}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow)}
+.row{display:flex;align-items:center;gap:12px;padding:12px 14px;border-top:1px solid var(--line)}
+.row:first-child{border-top:0}
+.row .t{flex:1;min-width:0}
+.row .t b{display:block;font-weight:600}
+.row .t span{display:block;color:var(--muted);font-size:12.5px}
+.sw{width:42px;height:24px;border-radius:99px;background:var(--line);position:relative;border:0;cursor:pointer;flex:none}
+.sw::after{content:"";position:absolute;top:3px;left:3px;width:18px;height:18px;border-radius:50%;background:#fff;transition:transform .15s}
+.sw[aria-checked=true]{background:var(--accent)}
+.sw[aria-checked=true]::after{transform:translateX(18px)}
+.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.stat{padding:10px 12px}
+.stat b{display:block;font:700 20px var(--head);font-variant-numeric:tabular-nums}
+.stat span{font-size:12px;color:var(--muted)}
+.chip{font-size:11.5px;font-weight:600;padding:2px 8px;border-radius:99px;background:var(--surface2);color:var(--muted)}
+.chip.ok{color:var(--good)}.chip.warn{color:var(--warn)}.chip.bad{color:var(--bad)}
+.btn{border:1px solid var(--line);background:var(--surface);color:var(--text);font:600 12.5px var(--body);padding:7px 11px;border-radius:9px;cursor:pointer}
+.btn.pri{background:var(--accent);color:var(--accent-ink);border-color:transparent}
+.btn.dng{color:var(--bad)}
+.seg{display:flex;gap:6px;flex-wrap:wrap}
+.seg button{border:1px solid var(--line);background:var(--surface);color:var(--text);font:500 12.5px var(--body);padding:6px 11px;border-radius:99px;cursor:pointer}
+.seg button[aria-pressed=true]{background:var(--accent);color:var(--accent-ink);border-color:transparent}
+.pad{padding:12px 14px;display:flex;flex-direction:column;gap:10px}
+code{font:12px ui-monospace,Menlo,monospace;background:var(--surface2);padding:2px 6px;border-radius:6px;word-break:break-all}
+.ca{display:flex;align-items:center;gap:8px;justify-content:space-between}
+.sec{display:flex;flex-direction:column;gap:8px}
+.sec>h2{padding-inline:2px;color:var(--muted);font-size:12px;letter-spacing:.08em;text-transform:uppercase}
+.log .t span{font-variant-numeric:tabular-nums}
+[hidden]{display:none!important}
+
+.err{color:var(--bad);font-size:13px;padding:10px 12px}
+.toast{position:fixed;left:50%;bottom:calc(20px + env(safe-area-inset-bottom,0px));transform:translateX(-50%);background:var(--text);color:var(--bg);padding:9px 14px;border-radius:99px;font-size:13px;opacity:0;pointer-events:none;transition:opacity .2s}
+.toast.show{opacity:1}
+input.ca-in,input.amt{flex:1;min-width:0;background:var(--surface2);border:1px solid var(--line);color:var(--text);border-radius:9px;padding:8px 10px;font:13px ui-monospace,Menlo,monospace}
+</style>
+<style>input.amt{flex:1;min-width:0}.mini{display:flex;gap:8px}</style>
+</head><body>
+<div class="wrap">
+  <div class="top"><div><h1>🟢 Ferzan Buy</h1><div class="who" id="who">Loading…</div></div></div>
+  <div class="sec" id="gsec"><h2>Your groups</h2><div class="seg" id="groups"></div></div>
+  <div id="empty" class="card pad" hidden><b>No groups yet</b><span class="who">Add @Ferzan_Buy_Bot to a group, make yourself an admin and run /track there. It will show up here.</span></div>
+  <div id="main" hidden>
+  <div class="stats" id="stats"></div>
+  <div class="tabs" role="tablist" style="margin-top:14px">
+    <button role="tab" aria-selected="true" data-t="alerts">Alerts</button>
+    <button role="tab" aria-selected="false" data-t="tokens">Tokens</button>
+    <button role="tab" aria-selected="false" data-t="recent">Recent buys</button>
+  </div>
+  <section id="alerts" class="sec" style="margin-top:14px">
+    <div class="card pad"><h2>Minimum buy to post</h2>
+      <div class="seg" id="min"><button data-v="10">$10</button><button data-v="25">$25</button><button data-v="50">$50</button><button data-v="100">$100</button><button data-v="250">$250</button></div>
+      <div class="mini"><input class="ca-in amt" id="mincustom" inputmode="decimal" placeholder="Your own amount, e.g. 75" autocomplete="off"><button class="btn pri" id="minset">Set</button></div>
+      <span class="who" id="mincur"></span></div>
+    <div class="card pad"><h2>Whale alert from</h2>
+      <div class="seg" id="whale"><button data-v="500">$500</button><button data-v="1000">$1,000</button><button data-v="5000">$5,000</button><button data-v="10000">$10,000</button><button data-v="0">Default</button></div>
+      <div class="mini"><input class="ca-in amt" id="whalecustom" inputmode="decimal" placeholder="Your own amount, e.g. 2500" autocomplete="off"><button class="btn pri" id="whaleset">Set</button></div>
+      <span class="who" id="whalecur"></span></div>
+    <div class="card pad"><h2>Buy bar emoji</h2>
+      <div class="seg" id="emoji"><button data-v="🟢">🟢</button><button data-v="🚀">🚀</button><button data-v="🔥">🔥</button><button data-v="💎">💎</button><button data-v="🚕">🚕</button></div>
+      <div class="mini"><input class="ca-in amt" id="emojicustom" placeholder="Or type one emoji" autocomplete="off" maxlength="8"><button class="btn pri" id="emojiset">Set</button></div>
+      <div id="bar" style="font-size:20px;letter-spacing:2px"></div></div>
+    <div class="card" id="flags"></div>
+  </section>
+  <section id="tokens" class="sec" hidden style="margin-top:14px">
+    <div class="card" id="tlist"></div>
+    <div class="card pad"><h2>Add a token</h2><span class="who">Adding a token needs a live look-up of its pool, so do it in the group: send <code>/track</code> followed by the contract address.</span></div>
+    <div class="card pad"><h2>Links on the buy card</h2>
+      <div id="links" class="sec"></div>
+      <span class="who">Only https links to t.me, x.com and discord.gg are accepted. Leave a box empty and press Save to remove a link.</span></div>
+  </section>
+  <section id="recent" class="sec" hidden style="margin-top:14px"><div class="card" id="buys"></div>
+    <span class="who">Changes made in this app are recorded with your Telegram id.</span></section>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+<script>
+(function(){
+const tg=window.Telegram&&window.Telegram.WebApp;
+if(tg){try{tg.ready();tg.expand();}catch(e){}}
+const API=location.origin,$=s=>document.querySelector(s);
+const esc=s=>String(s==null?"":s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const usd=n=>"$"+Number(n).toLocaleString("en-US",{maximumFractionDigits:2});
+const FLAGS=[["tape","Live buy feed","Post each qualifying buy"],["sell","Sell alerts","Also post large sells"],["pin","Pin raid posts","Pin raids at the top"],["mute","Mute for 1 hour","Pause every post for now"]];
+const LINKS=[["link_tg","Telegram","https://t.me/…"],["link_x","X","https://x.com/…"],["link_discord","Discord","https://discord.gg/…"]];
+let toastT;const toast=m=>{const t=$("#toast");t.textContent=m;t.classList.add("show");clearTimeout(toastT);toastT=setTimeout(()=>t.classList.remove("show"),3500)};
+async function post(path,body){
+  const r=await fetch(API+path,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(Object.assign({initData:(tg&&tg.initData)||""},body||{}))});
+  const j=await r.json().catch(()=>({}));
+  if(!r.ok)throw new Error(typeof j.detail==="string"?j.detail:"Something went wrong");
+  return j;
+}
+let chat=null,S=null;
+const ago=(n,now)=>{const d=Math.max(0,(now||Date.now()/1000)-n);return d<90?"just now":d<5400?Math.round(d/60)+"m ago":d<129600?Math.round(d/3600)+"h ago":Math.round(d/86400)+"d ago"};
+function press(id,val){document.querySelectorAll("#"+id+" button").forEach(b=>b.setAttribute("aria-pressed",Number(b.dataset.v)===Number(val)||b.dataset.v===String(val)))}
+function drawCfg(){
+  press("min",S.min_usd);press("whale",S.whale_usd);press("emoji",S.emoji);
+  $("#mincur").textContent="Now: "+usd(S.min_usd);
+  $("#whalecur").textContent=S.whale_usd?"Now: "+usd(S.whale_usd):"Now: default ("+usd(Math.max(500,S.min_usd*10))+", ten times your minimum)";
+  $("#bar").textContent=String(S.emoji).repeat(8);
+  const on={tape:S.tape,sell:S.sell,pin:S.pin,mute:S.muted};
+  $("#flags").innerHTML=FLAGS.map(([k,t,d])=>`<div class="row"><div class="t"><b>${t}</b><span>${d}</span></div><button class="sw" role="switch" aria-checked="${!!on[k]}" aria-label="${t}" data-k="${k}"></button></div>`).join("");
+  $("#tlist").innerHTML=S.tokens.length?S.tokens.map((t,i)=>`<div class="row"><div class="t"><b><span class="chip">${esc(t.chain.toUpperCase())}</span> <code>${esc(t.short)}</code></b></div><button class="btn dng" data-rm="${i}">Stop</button></div>`).join(""):`<div class="row"><div class="t"><b>No tokens</b><span>Send /track in the group to add one.</span></div></div>`;
+  if(!document.activeElement||!document.activeElement.classList.contains("linkin"))$("#links").innerHTML=LINKS.map(([k,l,p])=>`<div class="ca"><span class="who" style="width:64px">${l}</span><input class="ca-in amt linkin" data-lk="${k}" value="${esc(S.links[k])}" placeholder="${p}" autocomplete="off" spellcheck="false"><button class="btn" data-ls="${k}">Save</button></div>`).join("");
+}
+function render(){
+  $("#stats").innerHTML=[["Buys today",S.buys_today],["Volume today",usd(S.volume_today)],["Tokens",S.tokens.length]].map(([l,v])=>`<div class="card stat"><b>${esc(v)}</b><span>${l}</span></div>`).join("");
+  drawCfg();
+  $("#buys").innerHTML=S.recent.length?S.recent.map(r=>`<div class="row"><div class="t"><b>${usd(r.usd)}${r.kind==="buy"?"":" ("+esc(r.kind)+")"}</b><span><code>${esc(r.ca)}</code></span></div><span class="who">${ago(r.ts,S.now)}</span></div>`).join(""):`<div class="row"><div class="t"><b>Nothing yet</b></div></div>`;
+}
+async function load(){try{S=await post("/api/buybot/group",{chat_id:chat});$("#main").hidden=false;render()}catch(e){$("#main").hidden=true;toast(e.message)}}
+async function setOpt(key,value){
+  try{const st=await post("/api/buybot/set",{chat_id:chat,key,value});Object.assign(S,st);drawCfg();toast("Saved");try{tg&&tg.HapticFeedback&&tg.HapticFeedback.impactOccurred("light")}catch(e){}}
+  catch(e){toast(e.message);drawCfg()}
+}
+document.addEventListener("click",async e=>{
+  const b=e.target.closest("button");if(!b)return;
+  if(b.dataset.g){chat=+b.dataset.g;document.querySelectorAll("#groups button").forEach(x=>x.setAttribute("aria-pressed",x===b));load()}
+  else if(b.dataset.t){document.querySelectorAll(".tabs button").forEach(x=>x.setAttribute("aria-selected",x===b));for(const s of["alerts","tokens","recent"])$("#"+s).hidden=s!==b.dataset.t}
+  else if(b.dataset.k){const k=b.dataset.k,cur=k==="mute"?S.muted:S[k];setOpt(k,!cur)}
+  else if(b.dataset.v!==undefined){const id=b.parentElement.id;setOpt(id,b.dataset.v)}
+  else if(b.id==="minset"){const v=$("#mincustom").value.trim();if(v){await setOpt("min",v);$("#mincustom").value=""}}
+  else if(b.id==="whaleset"){const v=$("#whalecustom").value.trim();if(v){await setOpt("whale",v);$("#whalecustom").value=""}}
+  else if(b.id==="emojiset"){const v=$("#emojicustom").value.trim();if(v){await setOpt("emoji",v);$("#emojicustom").value=""}}
+  else if(b.dataset.ls){const k=b.dataset.ls,inp=document.querySelector('[data-lk="'+k+'"]');await setOpt(k,inp.value);$("#links").innerHTML="";drawCfg()}
+  else if(b.dataset.rm!==undefined){
+    if(b.dataset.armed!=="1"){b.dataset.armed="1";b.textContent="Tap again to stop";setTimeout(()=>{b.dataset.armed="";b.textContent="Stop"},4000);return}
+    const t=S.tokens[+b.dataset.rm];
+    try{const r=await post("/api/buybot/untrack",{chat_id:chat,chain:t.chain,ca:t.ca});toast("Stopped");if(r.left){Object.assign(S,r);drawCfg()}else{location.reload()}}catch(er){toast(er.message)}}
+});
+(async function(){
+  try{const g=await post("/api/buybot/groups");
+    $("#who").textContent=(g.name?"Signed in as "+g.name+" · ":"")+"admin of "+g.groups.length+(g.groups.length===1?" group":" groups");
+    if(!g.groups.length){$("#gsec").hidden=true;$("#empty").hidden=false;return}
+    $("#groups").innerHTML=g.groups.map((x,i)=>`<button data-g="${x.chat_id}" aria-pressed="${i===0}">${esc(x.title)}</button>`).join("");
+    chat=g.groups[0].chat_id;load();
+  }catch(e){$("#who").textContent="";$("#gsec").hidden=true;$("#empty").hidden=false;$("#empty").innerHTML='<b>Open this from Telegram</b><span class="who">'+esc(e.message)+'</span>'}
+})();
+})();
+</script></body></html>

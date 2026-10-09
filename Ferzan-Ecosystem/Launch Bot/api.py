@@ -119,6 +119,8 @@ import launch_app as _launch_app  # noqa: E402
 app.include_router(_launch_app.router)
 import guardian_app as _guardian_app  # noqa: E402
 app.include_router(_guardian_app.router)
+import buy_app as _buy_app  # noqa: E402
+app.include_router(_buy_app.router)
 
 # Mini App runs in Telegram's in-app browser -- CORS needs to allow that
 # origin. Tighten this to your actual Mini App domain once deployed

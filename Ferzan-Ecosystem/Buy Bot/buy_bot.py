@@ -16,7 +16,7 @@ from pathlib import Path
 
 import requests
 from dotenv import load_dotenv
-from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update, WebAppInfo
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -1149,8 +1149,16 @@ START_TEXT = (
 )
 
 
-def _start_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
+def _app_url() -> str:
+    """The Buy Mini App page, only when the server has been set up to serve it (BUYBOT_MINIAPP_URL)."""
+    u = (os.getenv("BUYBOT_MINIAPP_URL") or "").strip()
+    return u if u.startswith("https://") else ""
+
+
+def _start_kb(private: bool = False) -> InlineKeyboardMarkup:
+    # An app button only works in a private chat, and only once the page is being served.
+    app_row = [[InlineKeyboardButton("🟢 Open Buy app", web_app=WebAppInfo(url=_app_url()))]] if private and _app_url() else []
+    return InlineKeyboardMarkup(app_row + [
         [InlineKeyboardButton("📖 All commands", callback_data="bb:cmds")],
         [InlineKeyboardButton("⚡ Ferzan Trade", url=f"https://t.me/{TRADE}"),
          InlineKeyboardButton("🚀 Launch a coin", url=f"https://t.me/{LAUNCH_BOT}")],
@@ -1175,7 +1183,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             context.args = [parts[1], parts[2]]
             await track(update, context)
             return
-    await update.effective_message.reply_text(START_TEXT, parse_mode="HTML", reply_markup=_start_kb(), disable_web_page_preview=True)
+    private = bool(update.effective_chat and update.effective_chat.type == "private")
+    await update.effective_message.reply_text(START_TEXT, parse_mode="HTML", reply_markup=_start_kb(private), disable_web_page_preview=True)
 
 
 async def setup_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1547,7 +1556,7 @@ def _flags(chat_id: int) -> tuple[int, int]:
     con.close()
     if not row:
         return 1, 0
-    return int(row[0] or 1), int(row[1] or 0)
+    return (1 if row[0] is None else int(row[0])), int(row[1] or 0)  # tape 0 means OFF: `or 1` used to turn it back on
 
 
 async def preview_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
