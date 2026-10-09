@@ -106,5 +106,58 @@ class SkipList(unittest.TestCase):
         self.assertEqual(len(fp.skipped(fp.LAUNCH_AT - 60)), 19)
 
 
+class CarefulX(unittest.TestCase):
+    def setUp(self):
+        import x_poster
+        self.xp = x_poster
+        for k in ("X_PAUSED", "X_UNLIMITED", "PROMO_X_PER_DAY"):
+            os.environ.pop(k, None)
+        self.orig_file = x_poster.PAUSE_FILE
+        x_poster.PAUSE_FILE = "/nonexistent/x-paused"
+
+    def tearDown(self):
+        self.xp.PAUSE_FILE = self.orig_file
+        for k in ("X_PAUSED", "X_UNLIMITED", "PROMO_X_PER_DAY"):
+            os.environ.pop(k, None)
+
+    def test_spacing_and_daily_cap(self):
+        now = 1_000_000.0
+        self.assertTrue(fp.x_allowed({"x_log": []}, "promo:1", now))
+        self.assertFalse(fp.x_allowed({"x_log": [now - 3600]}, "promo:2", now))        # 1h after the last one
+        self.assertTrue(fp.x_allowed({"x_log": [now - 5 * 3600]}, "promo:2", now))     # 5h after
+        three = [now - 20 * 3600, now - 15 * 3600, now - 9 * 3600]
+        self.assertFalse(fp.x_allowed({"x_log": three}, "promo:3", now))               # 3 already today
+        os.environ["PROMO_X_PER_DAY"] = "8"
+        self.assertFalse(fp.x_allowed({"x_log": three}, "promo:3", now))               # env cannot raise the ceiling
+        os.environ["X_UNLIMITED"] = "1"
+        self.assertTrue(fp.x_allowed({"x_log": three}, "promo:3", now))
+
+    def test_pause_and_minor_countdowns(self):
+        now = 1_000_000.0
+        os.environ["X_PAUSED"] = "1"
+        self.assertFalse(fp.x_allowed({"x_log": []}, "promo:1", now))
+        os.environ.pop("X_PAUSED")
+        self.assertTrue(fp.x_allowed({"x_log": []}, "countdown:604800", now))          # 7 days: yes
+        self.assertFalse(fp.x_allowed({"x_log": []}, "countdown:300", now))            # 5 minutes: Telegram only
+
+    def test_x_gets_the_fuller_copy_when_it_fits(self):
+        full = fp.x_text_for("Short and detailed enough.\nhttps://ferzan-factory.com", "tiny", "#a #b", "#c")
+        self.assertIn("detailed", full)
+        long_tg = "x" * 400
+        self.assertEqual(fp.x_text_for(long_tg, "tiny", "#a", "#c").split("\n")[0], "tiny")
+        for tg, x, tags in fp.PROMOS:
+            self.assertLessEqual(fp.x_len(fp.x_text_for(tg, x, tags, "#crypto")), 280)
+
+    def test_event_posts_capped_and_paused(self):
+        self.assertEqual(self.xp.event_cap(), 3)
+        os.environ["X_MAX_POSTS_PER_DAY"] = "10"
+        try:
+            self.assertEqual(self.xp.event_cap(), 4)
+        finally:
+            os.environ.pop("X_MAX_POSTS_PER_DAY")
+        os.environ["X_PAUSED"] = "1"
+        self.assertTrue(self.xp.paused())
+
+
 if __name__ == "__main__":
     unittest.main()

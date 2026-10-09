@@ -212,6 +212,31 @@ GENERAL_TAGS = ["#crypto", "#altcoins", "#Web3", "#cryptocurrency", "#DeFi"]
 
 # Older promos that a newer one says better (promo number = its image number). PROMO_SKIP overrides, "none" turns skipping off.
 DEFAULT_SKIP = "2,4,6,7,9,13,17,24,25,26,29,31,35,37,38,40,41,42,43"
+X_HARD_CAP = 3            # careful mode: promos per day on X, whatever PROMO_X_PER_DAY says (X_UNLIMITED=1 lifts it)
+X_MIN_GAP = 4 * 3600      # at least this long between X promo posts
+X_COUNTDOWN = {7 * 86400, 3 * 86400, 86400, 3600}  # only these countdown posts go to X; Telegram gets them all
+
+
+def x_allowed(s: dict, key: str, now: float) -> bool:
+    """Slow, spaced X posting. Paused, over the daily cap, too soon after the last one, or a minor countdown: no X post."""
+    import x_poster
+    if x_poster.paused():
+        return False
+    if key.startswith("countdown:") and int(key.split(":")[1]) not in X_COUNTDOWN:
+        return False
+    cap = int(os.environ.get("PROMO_X_PER_DAY") or X_HARD_CAP)
+    if os.environ.get("X_UNLIMITED") != "1":
+        cap = min(cap, X_HARD_CAP)
+    log = [t for t in s.get("x_log", []) if t > now - 86400]
+    return len(log) < cap and not (log and now - max(log) < X_MIN_GAP)
+
+
+def x_text_for(tg_text: str, x_body: str, tags: str, extra: str) -> str:
+    """The fuller Telegram copy goes to X when it fits in 280 characters with the hashtags; otherwise the short X version."""
+    full = with_tags(tg_text, tags, extra)
+    return full if x_len(full) <= 280 else with_tags(x_body, tags, extra)
+
+
 DATED_AFTER_LAUNCH = {49}  # graphic shows the launch date: skipped once FERZAN is live
 
 
@@ -308,10 +333,7 @@ def post(s: dict, key: str, text: str, x_text: str | None = None, groups: bool =
         for g in GROUPS:
             if not send(g, text):
                 admins(f"Could not post in {g}: add @Ferzan_Launch_Bot to it (admin in a channel, member in a group).")
-    cap = int(os.environ.get("PROMO_X_PER_DAY") or 6)
-    if ramp():
-        cap = max(cap, 10)
-    if x_text is not None and len(s["x_log"]) < cap:
+    if x_text is not None and x_allowed(s, key, time.time()):
         try:
             ok, info = fm.x_post_video(x_text[:280], vfile, pic) if vfile else fm.x_post(x_text[:280], pic)
             if ok:
@@ -364,7 +386,7 @@ def promo(s: dict, now: float) -> None:
     i = next_promo(int(s.get("promo_i") or 0))
     tg_text, x_body, tags = PROMOS[i]
     n = int(s.get("promo_n") or 0)  # rotating extra tag keeps repeat cycles from being identical (X rejects duplicates)
-    post(s, f"promo:{int(now // every)}", tg_text, with_tags(x_body, tags, GENERAL_TAGS[n % len(GENERAL_TAGS)]),
+    post(s, f"promo:{int(now // every)}", tg_text, x_text_for(tg_text, x_body, tags, GENERAL_TAGS[n % len(GENERAL_TAGS)]),
          groups=os.environ.get("PROMO_GROUP_PROMOS") != "0", image=f"promo_{i + 1:02d}.jpg",
          video=f"promo_{i + 1:02d}.mp4")
     s["promo_n"] = n + 1

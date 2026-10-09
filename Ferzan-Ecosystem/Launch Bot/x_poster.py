@@ -4,7 +4,8 @@ new King of the Hill and graduations. Called from the launch indexer's loop.
 
 Needs X API keys with write access (OAuth 1.0a user context) in Launch Bot/.env:
   X_API_KEY, X_API_SECRET, X_ACCESS_TOKEN, X_ACCESS_SECRET   (set with /opt/ferzan/ops/set_x.sh)
-Optional: X_POSTS=launch,p90,koth,grad   X_MAX_POSTS_PER_DAY=10
+Optional: X_POSTS=launch,p90,koth,grad   X_MAX_POSTS_PER_DAY=3 (careful mode never goes above 4 unless X_UNLIMITED=1)
+Pause: create the file /opt/ferzan/x-paused (or set X_PAUSED=1) and nothing is sent to X; delete the file to resume.
 Without keys it does nothing. It never posts old news: on its first run it only records what exists.
 """
 from __future__ import annotations
@@ -48,6 +49,19 @@ def oauth_header(method: str, url: str, keys: dict, params: dict | None = None,
     skey = f"{_q(keys['api_secret'])}&{_q(keys['access_secret'])}"
     oauth["oauth_signature"] = base64.b64encode(hmac.new(skey.encode(), base.encode(), hashlib.sha1).digest()).decode()
     return "OAuth " + ", ".join(f'{_q(k)}="{_q(v)}"' for k, v in sorted(oauth.items()))
+
+
+PAUSE_FILE = "/opt/ferzan/x-paused"
+HARD_CAP = 4  # careful mode: a fresh or recently flagged account stays well under what X treats as automated spam
+
+
+def paused() -> bool:
+    return os.environ.get("X_PAUSED") == "1" or os.path.exists(PAUSE_FILE)
+
+
+def event_cap() -> int:
+    cap = int(os.environ.get("X_MAX_POSTS_PER_DAY") or 3)
+    return cap if os.environ.get("X_UNLIMITED") == "1" else min(cap, HARD_CAP)
 
 
 def keys_from_env() -> dict | None:
@@ -106,10 +120,10 @@ def run(conn, now: int | None = None, post=None) -> list:
     """Scan the index DB for news and post what's new. Returns [(kind, key, ok, info)]."""
     now = int(now or time.time())
     conn.executescript(SCHEMA)
-    keys = keys_from_env()
+    keys = None if paused() else keys_from_env()  # paused: events are noted as skipped, never posted late
     post = post or (lambda text: tweet(keys, text))
     kinds = {k.strip() for k in (os.environ.get("X_POSTS") or "launch,p90,koth,grad").split(",") if k.strip()}
-    cap = int(os.environ.get("X_MAX_POSTS_PER_DAY") or 10)
+    cap = event_cap()
     base = (os.environ.get("MINI_APP_BASE_URL") or "https://launch.ferzaneco.com/miniapp").rstrip("/")
     done = {row[0] for row in conn.execute("SELECT key FROM x_posts")}
     first_run = not done and conn.execute("SELECT COUNT(*) FROM x_posts").fetchone()[0] == 0
