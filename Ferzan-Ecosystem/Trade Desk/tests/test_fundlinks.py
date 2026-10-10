@@ -29,7 +29,7 @@ class Funds(unittest.TestCase):
 
     def test_bridge_only_chains_buy_on_base_then_bridge(self):
         os.environ.pop("FERZAN_FUND_CODES", None)
-        for c in ("sonic", "ink", "pol"):
+        for c in ("sonic", "ink"):
             o = f.options(c, A)
             self.assertTrue(o["bridge_only"] and not o["buy"] and not o["sell"])
             self.assertIn("currencyCode=eth_base", o["via"]["buy"][0]["url"])
@@ -42,6 +42,21 @@ class Funds(unittest.TestCase):
             self.assertFalse(o["bridge_only"], chain)
             self.assertIn("currencyCode=" + code, o["buy"][0]["url"])
             self.assertEqual(o["sell"], [])  # sell support unconfirmed
+
+    def test_polygon_is_direct_with_listed_codes(self):
+        o = f.options("pol", A)
+        self.assertFalse(o["bridge_only"])
+        self.assertIn("currencyCode=pol_polygon", o["buy"][0]["url"])
+        self.assertIn("currencyCode=usdc_polygon", o["buy"][1]["url"])
+
+    def test_cash_out_only_for_confirmed_sellable_codes(self):
+        self.assertEqual(f.options("op", A)["sell"], [])  # eth_optimism: sell not supported
+        self.assertEqual(f.options("pol", A)["sell"], [])
+        self.assertTrue(f.options("base", A)["sell"])
+        for ch in f.CHAINS:
+            for it in f.options(ch, A)["sell"]:
+                code = it["url"].split("baseCurrencyCode=")[1].split("&")[0]
+                self.assertIn(code, f.SELL_OK)
 
     def test_bnb_uses_the_listed_code(self):
         self.assertIn("currencyCode=bnb_bsc", f.options("bsc", A)["buy"][0]["url"])

@@ -21,12 +21,13 @@ CHAINS: dict[str, tuple[str, str, list[tuple[str, str]]]] = {
     "bsc": ("BNB Chain", "evm", [("BNB", "bnb_bsc")]),
     "arb": ("Arbitrum", "evm", [("ETH", "eth_arbitrum"), ("USDC", "usdc_arbitrum")]),
     "op": ("Optimism", "evm", [("ETH", "eth_optimism")]),
+    "pol": ("Polygon", "evm", [("POL", "pol_polygon"), ("USDC", "usdc_polygon")]),
     "avax": ("Avalanche", "evm", [("AVAX", "avax_cchain")]),
     "ton": ("TON", "ton", [("TON", "ton")]),
     "trx": ("Tron", "trx", [("TRX", "trx")]),
 }
 # No fiat provider lists these: buy a coin on a direct chain, then use the Ferzan Bridge.
-BRIDGE_ONLY = {"pol": "Polygon", "arc": "Arc", "hood": "Robinhood Chain", "monad": "Monad", "sonic": "Sonic",
+BRIDGE_ONLY = {"arc": "Arc", "hood": "Robinhood Chain", "monad": "Monad", "sonic": "Sonic",
                "hype": "HyperEVM", "pulse": "PulseChain", "ink": "Ink", "linea": "Linea", "stable": "Stable"}
 NO_ROUTE = {"pulse", "stable"}  # neither a card provider nor the bridge reaches these yet
 # Verified against MoonPay's currency list on the droplet (Oct 10). Buy only: sell support was not shown.
@@ -40,6 +41,9 @@ DEFAULT_CODES: dict[str, list[tuple[str, str]]] = {
 }
 # Buy this on a direct chain, then bridge: (chain, coin label, MoonPay code, min arrival to react to)
 BRIDGE_SOURCE = ("base", "ETH", "eth_base", 0.0003)
+# Codes MoonPay confirmed sellable (Oct 10 check). Anything else gets no Cash out link.
+SELL_OK = {"sol", "usdc_sol", "eth", "usdc", "eth_base", "usdc_base", "bnb_bsc", "eth_arbitrum", "usdc_arbitrum",
+           "avax_cchain", "ton", "trx"}
 SETTLE_WARNING = ("Set the provider's receive address to your Ferzan address for that chain. "
                   "If it shows the provider's own wallet, change it or cancel.")
 
@@ -119,7 +123,8 @@ def options(chain: str, addresses: dict[str, str]) -> dict:
         for coin, code in coins:
             if addr:
                 buy.append({"provider": p["id"], "providerName": p["name"], "coin": coin, "url": p["buy"](code, addr)})
-            sell.append({"provider": p["id"], "providerName": p["name"], "coin": coin, "url": p["sell"](code)})
+            if code in SELL_OK:
+                sell.append({"provider": p["id"], "providerName": p["name"], "coin": coin, "url": p["sell"](code)})
     return {"chain": chain, "label": label, "address": addr, "bridge_only": False,
             "buy": buy, "sell": sell, "note": SETTLE_WARNING}
 
