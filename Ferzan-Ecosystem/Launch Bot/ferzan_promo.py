@@ -326,6 +326,9 @@ PROMOS = [
     (f"🧩 One factory. Everything connected. The site plus four bots (Launch Bot, Trade Desk, Buy Bot, Guardian), four community rooms (Eco Hub, Ferzan Chat, Trending, Raid) and eight chains.\n{SITE}",
      f"🧩 One factory. Everything connected: the site, 4 bots, 4 community rooms, 8 chains.\n{SITE}",
      "#Web3 #crypto"),
+    (f"🏭 Everything is ready on the Factory. FERZAN token launch: Fri Nov 13, 4:00 PM ET. The site, 8 chains, Launch Bot, Trade Bot, Buy Bot, Guardian and Eco Hub are all live. Creators get paid on every trade.\n{SITE}",
+     f"🏭 Everything is ready on the Factory. FERZAN launches Fri Nov 13, 4:00 PM ET. Creators get paid on every trade.\n{SITE}",
+     "#FERZAN #crypto"),
 ]
 GENERAL_TAGS = ["#crypto", "#altcoins", "#Web3", "#cryptocurrency", "#DeFi"]
 
@@ -357,7 +360,7 @@ def x_text_for(tg_text: str, x_body: str, tags: str, extra: str) -> str:
     return full if x_len(full) <= 280 else with_tags(x_body, tags, extra)
 
 
-DATED_AFTER_LAUNCH = {49}  # graphic shows the launch date: skipped once FERZAN is live
+DATED_AFTER_LAUNCH = {49, 90}  # graphic shows the launch date: skipped once FERZAN is live
 
 
 def skipped(now: float | None = None) -> set:

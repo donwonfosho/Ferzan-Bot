@@ -73,7 +73,7 @@ class SkipList(unittest.TestCase):
     def test_default_skips_older_duplicates_and_keeps_new_ones(self):
         sk = fp.skipped()
         self.assertEqual(sk, set(range(1, 51)))                 # the old 50 are retired
-        self.assertTrue(set(range(51, 90)).isdisjoint(sk))     # the new 17 portrait graphics are the rotation
+        self.assertTrue(set(range(51, 91)).isdisjoint(sk))     # the new 17 portrait graphics are the rotation
         seen, p = [], 0
         for _ in range(len(fp.PROMOS) - len(sk)):
             i = fp.next_promo(p); seen.append(i + 1); p = i + 1
@@ -91,8 +91,8 @@ class SkipList(unittest.TestCase):
         self.assertEqual(fp.next_promo(3), 3)  # never stuck
 
     def test_wrap_around_end(self):
-        os.environ["PROMO_SKIP"] = "89"
-        self.assertEqual(fp.next_promo(88) + 1, 1)
+        os.environ["PROMO_SKIP"] = "90"
+        self.assertEqual(fp.next_promo(89) + 1, 1)
 
     def test_old_launch_date_graphic_stays_out(self):
         self.assertIn(49, fp.skipped(0))
@@ -101,7 +101,7 @@ class SkipList(unittest.TestCase):
         self.assertEqual(fp.skipped(0), set())
 
     def test_rotation_size(self):
-        self.assertEqual(len(fp.PROMOS), 89)
+        self.assertEqual(len(fp.PROMOS), 90)
         self.assertEqual(len(fp.skipped(0)), 50)
 
 
