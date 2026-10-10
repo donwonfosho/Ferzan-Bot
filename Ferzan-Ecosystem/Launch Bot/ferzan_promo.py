@@ -317,6 +317,15 @@ PROMOS = [
     (f"🌍 Launch a coin on 8 chains. Free to launch, you only pay network gas (Tron is the one exception: 5 TRX). Pick a chain, name it, sign in with your wallet, and trading opens right away. Creators get paid on every trade.\n{SITE}/launch",
      f"🌍 Launch a coin on 8 chains. Free to launch, you only pay gas (Tron: 5 TRX). Trading opens right away.\n{SITE}/launch",
      "#memecoin #Web3"),
+    (f"💸 Creators get paid on every trade. Launch a coin on Ferzan and every buy and every sell pays you.\n{SITE}/launch",
+     f"💸 Creators get paid on every trade. Launch a coin and every buy and every sell pays you.\n{SITE}/launch",
+     "#memecoin #crypto"),
+    (f"👁 See it. 🦍 Ape it. 🚀 Send it. Spot it on the Floor, Pulse and Trending. Buy in a tap, on the site or in Telegram. Ride it to graduation and shout it in Raid.\n{SITE}",
+     f"👁 See it. 🦍 Ape it. 🚀 Send it. Spot it on the Floor, Pulse and Trending. Buy in a tap. Ride it to graduation.\n{SITE}",
+     "#memecoin #crypto"),
+    (f"🧩 One factory. Everything connected. The site plus four bots (Launch Bot, Trade Desk, Buy Bot, Guardian), four community rooms (Eco Hub, Ferzan Chat, Trending, Raid) and eight chains.\n{SITE}",
+     f"🧩 One factory. Everything connected: the site, 4 bots, 4 community rooms, 8 chains.\n{SITE}",
+     "#Web3 #crypto"),
 ]
 GENERAL_TAGS = ["#crypto", "#altcoins", "#Web3", "#cryptocurrency", "#DeFi"]
 
