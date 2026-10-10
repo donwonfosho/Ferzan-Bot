@@ -29,6 +29,9 @@ CHAINS: dict[str, tuple[str, str, list[tuple[str, str]]]] = {
 # No fiat provider lists these: buy a coin on a direct chain, then use the Ferzan Bridge.
 BRIDGE_ONLY = {"arc": "Arc", "hood": "Robinhood Chain", "monad": "Monad", "sonic": "Sonic",
                "hype": "HyperEVM", "pulse": "PulseChain", "ink": "Ink", "linea": "Linea", "stable": "Stable"}
+NO_ROUTE = {"pulse", "stable"}  # neither a card provider nor the bridge reaches these yet
+# Buy this on a direct chain, then bridge: (chain, coin label, MoonPay code, min arrival to react to)
+BRIDGE_SOURCE = ("base", "ETH", "eth_base", 0.0003)
 SETTLE_WARNING = ("Set the provider's receive address to your Ferzan address for that chain. "
                   "If it shows the provider's own wallet, change it or cancel.")
 
@@ -57,15 +60,49 @@ def moonpay_sell(code: str) -> str:
     return "https://sell.moonpay.com/?" + urlencode(params)
 
 
+def extra_codes() -> dict[str, list[tuple[str, str]]]:
+    """Direct-buy codes added without a release: FERZAN_FUND_CODES="arc:USDC=usdc_arc,hood:ETH=eth_robinhood".
+    A bridge-only chain with a code here becomes a direct buy (EVM address)."""
+    out: dict[str, list[tuple[str, str]]] = {}
+    for part in (os.getenv("FERZAN_FUND_CODES") or "").split(","):
+        try:
+            head, code = part.strip().split("=", 1)
+            chain, coin = head.split(":", 1)
+            chain, coin, code = chain.strip().lower(), coin.strip().upper(), code.strip()
+            if chain in BRIDGE_ONLY and coin and code.replace("_", "").isalnum():
+                out.setdefault(chain, []).append((coin, code))
+        except ValueError:
+            continue
+    return out
+
+
 PROVIDERS = [{"id": "moonpay", "name": "MoonPay", "buy": moonpay_buy, "sell": moonpay_sell}]
 
 
 def options(chain: str, addresses: dict[str, str]) -> dict:
     """Everything a surface needs for one chain. addresses: {"sol","evm","ton","trx"} -> address."""
     if chain in BRIDGE_ONLY:
-        return {"chain": chain, "label": BRIDGE_ONLY[chain], "address": addresses.get("evm", ""),
-                "bridge_only": True, "buy": [], "sell": [],
-                "note": "No card provider lists this chain yet. Add funds on Base, Ethereum or Solana, then bridge."}
+        extra = extra_codes().get(chain)
+        if extra:  # a provider code is configured: this chain is a direct buy
+            addr = addresses.get("evm", "")
+            buy = [{"provider": p["id"], "providerName": p["name"], "coin": coin, "url": p["buy"](code, addr)}
+                   for p in PROVIDERS for coin, code in extra if addr]
+            sell = [{"provider": p["id"], "providerName": p["name"], "coin": coin, "url": p["sell"](code)}
+                    for p in PROVIDERS for coin, code in extra]
+            return {"chain": chain, "label": BRIDGE_ONLY[chain], "address": addr, "bridge_only": False,
+                    "buy": buy, "sell": sell, "note": SETTLE_WARNING}
+        if chain in NO_ROUTE:
+            return {"chain": chain, "label": BRIDGE_ONLY[chain], "address": "", "bridge_only": True,
+                    "unsupported": True, "buy": [], "sell": [], "via": None,
+                    "note": "Funding this chain from outside isn't available yet."}
+        src, coin, code, _min = BRIDGE_SOURCE
+        a = addresses.get("evm", "")
+        via = {"chain": src, "coin": coin, "address": a,
+               "buy": [{"provider": p["id"], "providerName": p["name"], "coin": coin, "url": p["buy"](code, a)}
+                       for p in PROVIDERS if a]}
+        return {"chain": chain, "label": BRIDGE_ONLY[chain], "address": a, "bridge_only": True,
+                "buy": [], "sell": [], "via": via,
+                "note": f"Buy {coin} on {src.title()} to your Ferzan address, then bridge to {BRIDGE_ONLY[chain]}."}
     if chain not in CHAINS:
         raise KeyError(chain)
     label, kind, coins = CHAINS[chain]

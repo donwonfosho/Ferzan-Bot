@@ -844,7 +844,13 @@
       const sell = mode === "sell";
       const rows = fundData.chains.map((c) => {
         const items = c.bridge_only ? [] : (sell ? c.sell : c.buy);
-        if (c.bridge_only) return `<div class="w"><span>🌉 ${esc(c.label)}</span><span class="hint">via Bridge</span></div>`;
+        if (c.bridge_only && c.unsupported) return `<div class="w"><span>${esc(c.label)}</span><span class="hint">not yet</span></div>`;
+        if (c.bridge_only && sell) return `<div class="w"><span>🌉 ${esc(c.label)}</span><span class="hint">bridge out first</span></div>`;
+        if (c.bridge_only) {
+          const v = c.via || { buy: [] };
+          const vb = v.buy.map((i) => `<button class="btn" data-fund="${esc(i.url)}">Buy ${esc(i.coin)} on ${esc(v.chain)} · ${esc(i.providerName)}</button>`).join(" ");
+          return `<div class="w" style="display:block"><b>${esc(c.label)}</b><div class="hint">Buy on ${esc(v.chain)}, then bridge. In the bot: Add funds → ${esc(c.label)}.</div><div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">${vb}</div></div>`;
+        }
         if (!items.length) return `<div class="w"><span>${esc(c.label)}</span><span class="hint">open the bot</span></div>`;
         const btns = items.map((i) => `<button class="btn" data-fund="${esc(i.url)}">${esc(i.coin)} · ${esc(i.providerName)}</button>`).join(" ");
         const addr = !sell && c.address ? `<div class="hint" style="word-break:break-all;user-select:all">${esc(c.address)}</div>` : "";

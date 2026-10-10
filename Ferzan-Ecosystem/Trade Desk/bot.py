@@ -4643,6 +4643,45 @@ async def _fund_addresses(uid: int) -> dict:
     return out
 
 
+_FUND_WATCH: dict[int, "asyncio.Task"] = {}
+
+
+async def _fund_watch(bot, uid: int, cid: str, baseline: float, addr: str) -> None:
+    """Wait for the card purchase to land on Base, then offer the bridge quote. In-memory: a bot restart
+    just means the user taps Bridge themselves."""
+    import evm_signer
+    import fundlinks
+
+    src = fundlinks.BRIDGE_SOURCE
+    try:
+        for _ in range(135):  # ~45 minutes at 20s
+            await asyncio.sleep(20)
+            try:
+                bal, _sym = await asyncio.to_thread(evm_signer.native_balance, src[0], addr)
+            except Exception:
+                continue
+            if bal - baseline >= src[3]:
+                amt = max(0.0, (bal - baseline) * 0.95 - 0.0002)  # keep a little for gas, ignore pre-existing funds
+                if amt <= 0:
+                    return
+                amt_s = f"{amt:.6f}".rstrip("0").rstrip(".")
+                label = fundlinks.BRIDGE_ONLY.get(cid, cid)
+                await bot.send_message(
+                    uid,
+                    f"✅ <b>{bal - baseline:.5f} {src[1]} arrived on {src[0].title()}.</b>\n"
+                    f"Bridge {amt_s} {src[1]} to {html.escape(label)}? You'll see the quote first.",
+                    parse_mode="HTML",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton(f"📋 Get quote → {label}", callback_data=f"fd:q:{cid}:{amt_s}")],
+                        [InlineKeyboardButton("✖️ Not now", callback_data="go:home")],
+                    ]),
+                )
+                return
+        await bot.send_message(uid, "⌛ No deposit seen in 45 minutes. When the funds land, open /bridge to move them.")
+    finally:
+        _FUND_WATCH.pop(uid, None)
+
+
 def fund_chain_keyboard(mode: str) -> InlineKeyboardMarkup:
     import fundlinks
 
@@ -4680,12 +4719,40 @@ async def fund_chain_screen(uid: int, mode: str, cid: str) -> tuple[str, InlineK
 
     back = InlineKeyboardButton("↩️ Chains", callback_data="fd:s" if mode == "s" else "fd:b")
     if cid == "more":
-        names = ", ".join(fundlinks.BRIDGE_ONLY.values())
-        text = (f"🌉 <b>{names}</b>\n\nNo card provider lists these yet. Add funds on Base, Ethereum or Solana, "
-                "then move them with the Ferzan Bridge.")
-        return text, InlineKeyboardMarkup([[InlineKeyboardButton("🌉 Open Bridge", callback_data="go:bridge")], [back]])
+        rows, row = [], []
+        for c, name in fundlinks.BRIDGE_ONLY.items():
+            row.append(InlineKeyboardButton(name, callback_data=f"fd:{mode}:{c}"))
+            if len(row) == 2:
+                rows.append(row)
+                row = []
+        if row:
+            rows.append(row)
+        rows.append([back])
+        text = ("🌉 <b>More chains</b>\n\nPick one. If a card provider lists it you buy directly; otherwise "
+                "Ferzan buys on Base and walks you through the bridge.")
+        return text, InlineKeyboardMarkup(rows)
     addrs = await _fund_addresses(uid)
+    if cid not in fundlinks.CHAINS and cid not in fundlinks.BRIDGE_ONLY:
+        return "Unknown chain.", InlineKeyboardMarkup([[back]])
     o = fundlinks.options(cid, addrs)
+    if o.get("bridge_only") and mode != "s":
+        if o.get("unsupported"):
+            return (f"💵 <b>{html.escape(o['label'])}</b>\n\n{html.escape(o['note'])}"), InlineKeyboardMarkup([[back]])
+        via = o["via"]
+        rows = [[InlineKeyboardButton(f"1️⃣ Buy {b['coin']} on {via['chain'].title()} · {b['providerName']}", url=b["url"])]
+                for b in via["buy"]]
+        rows.append([InlineKeyboardButton(f"2️⃣ I paid · bridge to {o['label']} when it lands", callback_data=f"fd:w:{cid}")])
+        rows.append([InlineKeyboardButton("🌉 Bridge manually", callback_data="go:bridge"), back])
+        text = (f"💵 <b>Add funds · {html.escape(o['label'])}</b>\n\nNo card provider lists {html.escape(o['label'])} yet, "
+                f"so this is two steps:\n1️⃣ Buy {via['coin']} on {via['chain'].title()} to your Ferzan address "
+                f"(must match on the provider page):\n<code>{html.escape(via['address'])}</code>\n"
+                f"2️⃣ Tap <b>I paid</b>. Ferzan watches for the deposit, then shows a bridge quote to "
+                f"{html.escape(o['label'])} for one tap to confirm.\n\nYou pay the card fee plus the bridge fee. "
+                "The quote shows the bridge part before anything is sent.")
+        return text, InlineKeyboardMarkup(rows)
+    if o.get("bridge_only"):
+        return (f"🏦 <b>Cash out</b>\n\nBridge your {html.escape(o['label'])} funds to Base, Ethereum or Solana first, "
+                "then cash out there."), InlineKeyboardMarkup([[InlineKeyboardButton("🌉 Open Bridge", callback_data="go:bridge"), back]])
     rows = []
     items = o["sell"] if mode == "s" else o["buy"]
     for it in items:
@@ -7154,6 +7221,54 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             f"/quote {cid} <CA> 50\n"
             f"/launches {cid}",
         )
+        return
+    if data.startswith("fd:w:") or data.startswith("fd:q:"):
+        import fundlinks
+
+        parts = data.split(":")
+        cid = parts[2] if len(parts) > 2 else ""
+        if cid not in fundlinks.BRIDGE_ONLY or cid in fundlinks.NO_ROUTE:
+            await query.edit_message_text("That chain can't be funded this way yet.")
+            return
+        if parts[1] == "w":
+            if uid in _FUND_WATCH and not _FUND_WATCH[uid].done():
+                await query.edit_message_text("👀 Already watching for your deposit. I'll message you when it lands.")
+                return
+            addr = (await _fund_addresses(uid)).get("evm") or ""
+            try:
+                import evm_signer
+
+                base0, _s = await asyncio.to_thread(evm_signer.native_balance, fundlinks.BRIDGE_SOURCE[0], addr)
+            except Exception:
+                await query.edit_message_text("Couldn't read your balance just now. Try again in a minute.")
+                return
+            _FUND_WATCH[uid] = asyncio.create_task(_fund_watch(context.bot, uid, cid, base0, addr))
+            await query.edit_message_text(
+                f"👀 Watching your {fundlinks.BRIDGE_SOURCE[0].title()} address for ~45 minutes. "
+                f"When {fundlinks.BRIDGE_SOURCE[1]} arrives I'll message you with a bridge quote to "
+                f"{fundlinks.BRIDGE_ONLY[cid]}.")
+            return
+        try:  # fd:q:<chain>:<amount>
+            amt = float(parts[3])
+            if not (0 < amt < 10):
+                raise ValueError("amount")
+            amt_s = f"{amt:.6f}".rstrip("0").rstrip(".")
+            import bridge as ferzan_bridge
+
+            st = _bridge_state(context)
+            st.update({"from": fundlinks.BRIDGE_SOURCE[0], "to": cid, "amt": amt_s})
+            pack = await asyncio.to_thread(ferzan_bridge.quote, uid, st["from"], st["to"], amt_s)
+            context.user_data["bridge_pack"] = pack
+            await query.edit_message_text(
+                "🌉 <b>QUOTE</b>\n" + ferzan_bridge.summarize(pack) + "\n\nTap Send. Signed on this box.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("✅ Send from Ferzan wallet", callback_data="br:go")],
+                    [InlineKeyboardButton("↩️ Back", callback_data="go:bridge")],
+                ]),
+            )
+        except Exception as exc:
+            await query.edit_message_text(f"Quote failed.\n{str(exc)[:200]}\n\nOpen /bridge to try again.")
         return
     if data.startswith("fd:"):
         parts = data.split(":")
