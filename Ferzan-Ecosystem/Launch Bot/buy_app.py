@@ -41,8 +41,28 @@ _groups_cache: dict = {}
 _title_cache: dict = {}
 
 
+_file_tokens: dict = {}
+
+
 def _token() -> str:
-    return (os.environ.get("BUYBOT_TOKEN") or "").strip()
+    """The bot token: this service's environment first, else the shared server env file the bots themselves load
+    (the launch API's own env file does not carry the other bots' tokens). Read-only; never logged."""
+    v = (os.environ.get("BUYBOT_TOKEN") or "").strip()
+    if v:
+        return v
+    path = os.environ.get("FERZAN_ENV_FILE", "/opt/ferzan/.env")
+    try:
+        mt = os.stat(path).st_mtime
+        if _file_tokens.get("k") != (path, mt):
+            val = ""
+            with open(path, encoding="utf-8", errors="ignore") as fh:
+                for line in fh:
+                    if line.startswith("BUYBOT_TOKEN="):
+                        val = line.split("=", 1)[1].strip().strip("'\"")
+            _file_tokens.update(k=(path, mt), v=val)
+        return _file_tokens.get("v", "")
+    except OSError:
+        return ""
 
 
 def _db_path() -> Path:

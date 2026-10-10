@@ -173,3 +173,24 @@ class Setup(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TokenFallback(unittest.TestCase):
+    def test_token_comes_from_the_shared_env_file_when_the_service_has_none(self):
+        import buy_app, guardian_app
+        with tempfile.TemporaryDirectory() as d:
+            f = os.path.join(d, ".env")
+            open(f, "w").write("OTHER=1\nGUARDIAN_TOKEN=111:AAA\nBUYBOT_TOKEN='222:BBB'\n")
+            env = {k: v for k, v in os.environ.items() if k not in ("GUARDIAN_TOKEN", "BUYBOT_TOKEN")}
+            env["FERZAN_ENV_FILE"] = f
+            with mock.patch.dict(os.environ, env, clear=True):
+                guardian_app._file_tokens.clear(); buy_app._file_tokens.clear()
+                self.assertEqual(guardian_app._token(), "111:AAA")
+                self.assertEqual(buy_app._token(), "222:BBB")
+            env["GUARDIAN_TOKEN"] = "999:ENV"
+            with mock.patch.dict(os.environ, env, clear=True):
+                self.assertEqual(guardian_app._token(), "999:ENV")
+            env.pop("GUARDIAN_TOKEN"); env["FERZAN_ENV_FILE"] = os.path.join(d, "missing")
+            with mock.patch.dict(os.environ, env, clear=True):
+                guardian_app._file_tokens.clear()
+                self.assertEqual(guardian_app._token(), "")
