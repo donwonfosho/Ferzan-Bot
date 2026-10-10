@@ -2982,6 +2982,14 @@ async def live_stream(request: Request):
                       headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"})
 
 
+@app.get("/api/status")
+def public_status():
+    """Footer status for the website: normal / degraded / down. Names, hosts and errors never leave."""
+    import status_check
+    from fastapi.responses import JSONResponse
+    return JSONResponse(status_check.snapshot(RPC_URLS.get("solana", "")), headers={"Cache-Control": "public, max-age=15"})
+
+
 @app.get("/api/stream-status")
 def live_status():
     return {"clients": len(_LIVE["subs"]), "max": _LIVE_MAX, "running": bool(_LIVE["task"] and not _LIVE["task"].done()),
