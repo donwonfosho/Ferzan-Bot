@@ -18,18 +18,26 @@ CHAINS: dict[str, tuple[str, str, list[tuple[str, str]]]] = {
     "sol": ("Solana", "sol", [("SOL", "sol"), ("USDC", "usdc_sol")]),
     "eth": ("Ethereum", "evm", [("ETH", "eth"), ("USDC", "usdc")]),
     "base": ("Base", "evm", [("ETH", "eth_base"), ("USDC", "usdc_base")]),
-    "bsc": ("BNB Chain", "evm", [("BNB", "bnb")]),
+    "bsc": ("BNB Chain", "evm", [("BNB", "bnb_bsc")]),
     "arb": ("Arbitrum", "evm", [("ETH", "eth_arbitrum"), ("USDC", "usdc_arbitrum")]),
     "op": ("Optimism", "evm", [("ETH", "eth_optimism")]),
-    "pol": ("Polygon", "evm", [("POL", "matic_polygon")]),
     "avax": ("Avalanche", "evm", [("AVAX", "avax_cchain")]),
     "ton": ("TON", "ton", [("TON", "ton")]),
     "trx": ("Tron", "trx", [("TRX", "trx")]),
 }
 # No fiat provider lists these: buy a coin on a direct chain, then use the Ferzan Bridge.
-BRIDGE_ONLY = {"arc": "Arc", "hood": "Robinhood Chain", "monad": "Monad", "sonic": "Sonic",
+BRIDGE_ONLY = {"pol": "Polygon", "arc": "Arc", "hood": "Robinhood Chain", "monad": "Monad", "sonic": "Sonic",
                "hype": "HyperEVM", "pulse": "PulseChain", "ink": "Ink", "linea": "Linea", "stable": "Stable"}
 NO_ROUTE = {"pulse", "stable"}  # neither a card provider nor the bridge reaches these yet
+# Verified against MoonPay's currency list on the droplet (Oct 10). Buy only: sell support was not shown.
+# Sonic (suspended), Ink and Stable are not listed, so they stay bridge-only. Polygon waits for a verified code.
+DEFAULT_CODES: dict[str, list[tuple[str, str]]] = {
+    "arc": [("USDC", "usdc_arc")],
+    "hood": [("ETH", "eth_robinhood")],
+    "linea": [("ETH", "eth_linea")],
+    "monad": [("MON", "mon_mon")],
+    "hype": [("HYPE", "hype_hyperevm"), ("USDC", "usdc_hyperevm")],
+}
 # Buy this on a direct chain, then bridge: (chain, coin label, MoonPay code, min arrival to react to)
 BRIDGE_SOURCE = ("base", "ETH", "eth_base", 0.0003)
 SETTLE_WARNING = ("Set the provider's receive address to your Ferzan address for that chain. "
@@ -63,7 +71,7 @@ def moonpay_sell(code: str) -> str:
 def extra_codes() -> dict[str, list[tuple[str, str]]]:
     """Direct-buy codes added without a release: FERZAN_FUND_CODES="arc:USDC=usdc_arc,hood:ETH=eth_robinhood".
     A bridge-only chain with a code here becomes a direct buy (EVM address)."""
-    out: dict[str, list[tuple[str, str]]] = {}
+    out: dict[str, list[tuple[str, str]]] = {k: list(v) for k, v in DEFAULT_CODES.items()}
     for part in (os.getenv("FERZAN_FUND_CODES") or "").split(","):
         try:
             head, code = part.strip().split("=", 1)
@@ -87,8 +95,7 @@ def options(chain: str, addresses: dict[str, str]) -> dict:
             addr = addresses.get("evm", "")
             buy = [{"provider": p["id"], "providerName": p["name"], "coin": coin, "url": p["buy"](code, addr)}
                    for p in PROVIDERS for coin, code in extra if addr]
-            sell = [{"provider": p["id"], "providerName": p["name"], "coin": coin, "url": p["sell"](code)}
-                    for p in PROVIDERS for coin, code in extra]
+            sell = []  # sell support for these new listings isn't confirmed: bridge out to a direct chain to cash out
             return {"chain": chain, "label": BRIDGE_ONLY[chain], "address": addr, "bridge_only": False,
                     "buy": buy, "sell": sell, "note": SETTLE_WARNING}
         if chain in NO_ROUTE:

@@ -29,24 +29,34 @@ class Funds(unittest.TestCase):
 
     def test_bridge_only_chains_buy_on_base_then_bridge(self):
         os.environ.pop("FERZAN_FUND_CODES", None)
-        for c in ("arc", "hood", "monad"):
+        for c in ("sonic", "ink", "pol"):
             o = f.options(c, A)
             self.assertTrue(o["bridge_only"] and not o["buy"] and not o["sell"])
             self.assertIn("currencyCode=eth_base", o["via"]["buy"][0]["url"])
             self.assertIn("walletAddress=0xAbC", o["via"]["buy"][0]["url"])
+
+    def test_verified_direct_buys(self):
+        want = {"arc": "usdc_arc", "hood": "eth_robinhood", "linea": "eth_linea", "monad": "mon_mon", "hype": "hype_hyperevm"}
+        for chain, code in want.items():
+            o = f.options(chain, A)
+            self.assertFalse(o["bridge_only"], chain)
+            self.assertIn("currencyCode=" + code, o["buy"][0]["url"])
+            self.assertEqual(o["sell"], [])  # sell support unconfirmed
+
+    def test_bnb_uses_the_listed_code(self):
+        self.assertIn("currencyCode=bnb_bsc", f.options("bsc", A)["buy"][0]["url"])
 
     def test_unroutable_chains_are_marked_unsupported(self):
         for c in ("pulse", "stable"):
             self.assertTrue(f.options(c, A)["unsupported"])
 
     def test_env_code_makes_a_chain_direct(self):
-        os.environ["FERZAN_FUND_CODES"] = "arc:usdc=usdc_arc, hood:eth=eth_robinhood, bad, x:y=z"
+        os.environ["FERZAN_FUND_CODES"] = "ink:eth=eth_ink, bad, x:y=z"
         try:
-            o = f.options("arc", A)
+            o = f.options("ink", A)
             self.assertFalse(o["bridge_only"])
-            self.assertIn("currencyCode=usdc_arc", o["buy"][0]["url"])
-            self.assertFalse(f.options("hood", A)["bridge_only"])
-            self.assertTrue(f.options("monad", A)["bridge_only"])
+            self.assertIn("currencyCode=eth_ink", o["buy"][0]["url"])
+            self.assertTrue(f.options("sonic", A)["bridge_only"])
         finally:
             os.environ.pop("FERZAN_FUND_CODES")
 

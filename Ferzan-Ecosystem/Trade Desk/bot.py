@@ -4750,8 +4750,8 @@ async def fund_chain_screen(uid: int, mode: str, cid: str) -> tuple[str, InlineK
                 f"{html.escape(o['label'])} for one tap to confirm.\n\nYou pay the card fee plus the bridge fee. "
                 "The quote shows the bridge part before anything is sent.")
         return text, InlineKeyboardMarkup(rows)
-    if o.get("bridge_only"):
-        return (f"🏦 <b>Cash out</b>\n\nBridge your {html.escape(o['label'])} funds to Base, Ethereum or Solana first, "
+    if mode == "s" and not o["sell"]:
+        return (f"🏦 <b>Cash out</b>\n\nCard cash-out isn't offered for {html.escape(o['label'])} yet. Bridge your funds to Base, Ethereum or Solana first, "
                 "then cash out there."), InlineKeyboardMarkup([[InlineKeyboardButton("🌉 Open Bridge", callback_data="go:bridge"), back]])
     rows = []
     items = o["sell"] if mode == "s" else o["buy"]

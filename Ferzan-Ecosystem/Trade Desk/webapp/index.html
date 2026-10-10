@@ -851,7 +851,7 @@
           const vb = v.buy.map((i) => `<button class="btn" data-fund="${esc(i.url)}">Buy ${esc(i.coin)} on ${esc(v.chain)} · ${esc(i.providerName)}</button>`).join(" ");
           return `<div class="w" style="display:block"><b>${esc(c.label)}</b><div class="hint">Buy on ${esc(v.chain)}, then bridge. In the bot: Add funds → ${esc(c.label)}.</div><div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">${vb}</div></div>`;
         }
-        if (!items.length) return `<div class="w"><span>${esc(c.label)}</span><span class="hint">open the bot</span></div>`;
+        if (!items.length) return `<div class="w"><span>${esc(c.label)}</span><span class="hint">${sell ? "bridge out first" : "open the bot"}</span></div>`;
         const btns = items.map((i) => `<button class="btn" data-fund="${esc(i.url)}">${esc(i.coin)} · ${esc(i.providerName)}</button>`).join(" ");
         const addr = !sell && c.address ? `<div class="hint" style="word-break:break-all;user-select:all">${esc(c.address)}</div>` : "";
         return `<div class="w" style="display:block"><b>${esc(c.label)}</b>${addr}<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">${btns}</div></div>`;
