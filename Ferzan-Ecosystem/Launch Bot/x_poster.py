@@ -24,6 +24,7 @@ import urllib.request
 log = logging.getLogger("x_poster")
 TWEET_URL = "https://api.x.com/2/tweets"
 ME_URL = "https://api.x.com/2/users/me"
+SITE = (os.environ.get("FERZAN_SITE_URL") or "https://ferzan-factory.com").rstrip("/")
 CHAIN_NAME = {"base": "Base", "bsc": "BNB Chain", "eth": "Ethereum", "ethereum": "Ethereum", "robinhood": "Robinhood Chain",
               "solana": "Solana"}
 SCHEMA = """
@@ -105,7 +106,7 @@ def _fmt(kind: str, r, base: str, extra: str = "") -> str:
     chain = CHAIN_NAME.get(r["chain"], r["chain"])
     url = (f"https://ferzan-factory.com/coin/solana/{r['token']}" if r["chain"] == "solana"
            else f"https://t.me/{(os.environ.get('FERZAN_BOT_USERNAME') or 'Ferzan_Trade_Bot').lstrip('@')}?start=buy_{r['token']}"
-           if r["chain"] == "tron" else f"{base}/curve.html?chain={r['chain']}&curve={r['curve']}")
+           if r["chain"] == "tron" else f"{SITE}/coin/{r['chain']}/{str(r['curve']).lower() if str(r['curve']).startswith('0x') else r['curve']}")
     head = {
         "launch": f"🚀 New on Ferzan: {name} (${sym}) on {chain}",
         "p90": f"🚀 {name} (${sym}) is 90% of the way to graduation on {chain}{extra}",

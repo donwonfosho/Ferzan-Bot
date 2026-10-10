@@ -15,7 +15,7 @@ class NoJupiterLinks(unittest.TestCase):
 
     def test_other_chains_unchanged(self):
         r = dict(self.row, chain="base", token="0xabc", curve="0xdef")
-        self.assertIn("curve.html?chain=base&curve=0xdef", x_poster._fmt("launch", r, "https://b"))
+        self.assertIn("ferzan-factory.com/coin/base/0xdef", x_poster._fmt("launch", r, "https://b"))
 
     def test_no_jupiter_trade_links_left_in_user_facing_code(self):
         for f in ("x_poster.py", "curve_indexer.py", "api.py", "miniapp/solana.html"):

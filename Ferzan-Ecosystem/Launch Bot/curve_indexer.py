@@ -91,8 +91,8 @@ def _trade_url(r) -> str:
         return f"https://ferzan-factory.com/coin/solana/{r['token']}"
     if r["chain"] in ("tron", "ton"):  # Tron and TON curves trade in the Ferzan Trade Bot
         return f"https://t.me/{(os.environ.get('FERZAN_BOT_USERNAME') or 'Ferzan_Trade_Bot').lstrip('@')}?start=buy_{r['token']}"
-    base = (os.environ.get("MINI_APP_BASE_URL") or "https://launch.ferzaneco.com/miniapp").rstrip("/")
-    return f"{base}/curve.html?chain={r['chain']}&curve={r['curve']}"
+    site = (os.environ.get("FERZAN_SITE_URL") or "https://ferzan-factory.com").rstrip("/")
+    return f"{site}/coin/{r['chain']}/{str(r['curve']).lower() if str(r['curve']).startswith('0x') else r['curve']}"
 CONFIRMATIONS = 2
 REORG_OVERLAP = int(os.environ.get("CURVE_INDEX_OVERLAP") or "10")  # re-scan the last blocks each pass (node lag / RPC switch)
 # Free public nodes only keep recent history ("archive requests require a token"), so we follow

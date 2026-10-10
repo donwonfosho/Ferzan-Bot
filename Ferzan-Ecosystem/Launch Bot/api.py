@@ -60,6 +60,7 @@ logger = logging.getLogger(__name__)
 TELEGRAM_BOT_TOKEN = os.environ.get("LAUNCHBOT_TOKEN") or os.environ.get("TELEGRAM_BOT_TOKEN", "")
 MINI_APP_BASE = (os.environ.get("MINI_APP_BASE_URL") or "https://launch.ferzaneco.com/miniapp").rstrip("/")
 _PUBLIC_ORIGIN = (_re.match(r"(https?://[^/]+)", MINI_APP_BASE) or _re.match(r"(.*)", "https://launch.ferzaneco.com")).group(1)
+SITE_URL = (os.environ.get("FERZAN_SITE_URL") or "https://ferzan-factory.com").rstrip("/")  # where people trade: the website
 _MEDIA_DIR = _Path(__file__).resolve().with_name("media")
 
 # Deployed contract addresses, per chain -- fill these in after you
@@ -1025,7 +1026,7 @@ def _launch_card(req, token_addr: str, curve_addr: str, tx_hash: str) -> str:
     if token_addr and req.chain in _EXPLORER:
         lines.append(f"Explorer: {_EXPLORER[req.chain]}{esc(token_addr)}")
     if curve_addr and req.mode == "bonding_curve" and req.chain != "tron":
-        url = f"{MINI_APP_BASE}/curve.html?chain={req.chain}&curve={curve_addr}"
+        url = f"{SITE_URL}/coin/{req.chain}/{curve_addr.lower()}"
         lines.append(f"📈 Buy / sell on the curve: {esc(url)}")
     else:
         trade = (os.environ.get("FERZAN_BOT_USERNAME") or "Ferzan_Trade_Bot").lstrip("@")
@@ -1118,7 +1119,7 @@ def _growth_buttons(req, token_addr: str, curve_addr: str = "", trade_only: bool
     ok_ca = bool(token_addr) and bool(_re.fullmatch(r"[0-9A-Za-z]{32,44}", token_addr.replace("0x", "", 1)))
     if curve_addr and req.mode == "bonding_curve" and _re.fullmatch(r"0x[0-9a-fA-F]{40}", curve_addr):
         rows.append([{"text": "📈 Buy / Sell on the curve",
-                      "url": f"{MINI_APP_BASE}/curve.html?chain={req.chain}&curve={curve_addr}"}])
+                      "url": f"{SITE_URL}/coin/{req.chain}/{curve_addr.lower()}"}])
     if ok_ca:
         rows.append([{"text": "⚡ Buy in Ferzan Trade Bot", "url": f"https://t.me/{trade}?start=buy_{token_addr}"}])
     if trade_only:
@@ -1420,7 +1421,7 @@ def _trade_url(chain: str, curve: str, token: str) -> str:
         return f"https://ferzan-factory.com/coin/solana/{token}"
     if chain in {"tron", "ton"}:  # Tron and TON curves trade on the website and in the Ferzan Trade Bot
         return f"https://ferzan-factory.com/coin/{chain}/{curve}"
-    return f"{MINI_APP_BASE}/curve.html?chain={chain}&curve={curve}"
+    return f"{SITE_URL}/coin/{chain}/{curve.lower() if str(curve).startswith('0x') else curve}"
 
 
 def _curve_item(r, usd: float, extra: dict, vol24: float, stats: dict) -> dict:
