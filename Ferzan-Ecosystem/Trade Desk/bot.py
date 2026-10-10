@@ -1006,6 +1006,10 @@ def home_keyboard(private: bool = True, hot: list | None = None) -> InlineKeyboa
             InlineKeyboardButton("📤 Send", callback_data="go:withdraw"),
         ],
         [
+            InlineKeyboardButton("💵 Add funds", callback_data="go:buy"),
+            InlineKeyboardButton("🏦 Cash out", callback_data="go:cash"),
+        ],
+        [
             InlineKeyboardButton("👯 Copy", callback_data="go:copy"),
             InlineKeyboardButton("🔔 Alerts", callback_data="go:alerts"),
         ],
@@ -4610,99 +4614,109 @@ async def killswitch_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 def _onramp_url(code: str, address: str) -> str:
-    pk = (os.getenv("MOONPAY_PK") or os.getenv("MOONPAY_KEY") or "").strip()
-    sk = (os.getenv("MOONPAY_SK") or "").strip()
-    from urllib.parse import quote, urlencode
-    params = {
-        "currencyCode": code,
-        "walletAddress": address,
-        "baseCurrencyCode": "usd",
-        "enabledPaymentMethods": "apple_pay,google_pay,credit_debit_card",
-        "showWalletAddressForm": "true",
-    }
-    if pk:
-        params["apiKey"] = pk
-    q = urlencode(params)
-    url = "https://buy.moonpay.com/?" + q
-    if pk and sk:
-        import base64
-        import hashlib
-        import hmac
-        sig = base64.b64encode(
-            hmac.new(sk.encode(), ("?" + q).encode(), hashlib.sha256).digest()
-        ).decode()
-        url += "&signature=" + quote(sig)
-    return url
+    import fundlinks
+
+    return fundlinks.moonpay_buy(code, address)
 
 
 def _offramp_url(code: str) -> str:
-    pk = (os.getenv("MOONPAY_PK") or os.getenv("MOONPAY_KEY") or "").strip()
-    from urllib.parse import urlencode
-    params = {"baseCurrencyCode": code, "quoteCurrencyCode": "usd"}
-    if pk:
-        params["apiKey"] = pk
-    return "https://sell.moonpay.com/?" + urlencode(params)
+    import fundlinks
+
+    return fundlinks.moonpay_sell(code)
 
 
-def buy_fiat_keyboard(uid: int) -> InlineKeyboardMarkup:
+async def _fund_addresses(uid: int) -> dict:
+    """Per-kind deposit addresses for Add funds. A kind that cannot be derived is simply absent."""
     row = db.get_user_wallet(uid) or {}
-    sol = row.get("sol_pub") or ""
-    evm = row.get("evm_pub") or ""
-    buttons = []
-    if sol:
-        buttons.append(
-            [InlineKeyboardButton("🍎 Buy SOL · Apple Pay", url=_onramp_url("sol", sol))]
-        )
-    if evm:
-        buttons.append(
-            [InlineKeyboardButton("🍎 Buy ETH", url=_onramp_url("eth", evm))]
-        )
-        buttons.append(
-            [
-                InlineKeyboardButton("🟦 Buy ETH on Base", url=_onramp_url("eth_base", evm)),
-                InlineKeyboardButton("💵 USDC on Base", url=_onramp_url("usdc_base", evm)),
-            ]
-        )
-        buttons.append(
-            [InlineKeyboardButton("🟡 Buy BNB", url=_onramp_url("bnb", evm))]
-        )
-    buttons.append(
-        [
-            InlineKeyboardButton("🏦 Cash out SOL", url=_offramp_url("sol")),
-            InlineKeyboardButton("🏦 Cash out ETH", url=_offramp_url("eth")),
-        ]
-    )
-    buttons.append(
-        [InlineKeyboardButton("🏦 Cash out Base ETH", url=_offramp_url("eth_base"))]
-    )
-    buttons.append([InlineKeyboardButton("↩️ Wallets", callback_data="go:wallets")])
-    return InlineKeyboardMarkup(buttons)
+    out = {"sol": row.get("sol_pub") or "", "evm": row.get("evm_pub") or ""}
+    try:
+        out["ton"] = db.get_ton_addr(uid) or ""
+    except Exception:
+        out["ton"] = ""
+    try:
+        import tron_signer
+
+        _s, _e = await asyncio.to_thread(user_wallets.secrets, uid)
+        out["trx"] = (await asyncio.to_thread(tron_signer.evm_key_to_tron, _e.replace("0x", "")))[0]
+    except Exception:
+        out["trx"] = ""
+    return out
+
+
+def fund_chain_keyboard(mode: str) -> InlineKeyboardMarkup:
+    import fundlinks
+
+    rows, row = [], []
+    for cid, (label, _k, _c) in fundlinks.CHAINS.items():
+        row.append(InlineKeyboardButton(label, callback_data=f"fd:{mode}:{cid}"))
+        if len(row) == 3:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([InlineKeyboardButton("🌉 Other chains (via Bridge)", callback_data="fd:" + mode + ":more")])
+    rows.append([
+        InlineKeyboardButton("🏦 Cash out" if mode == "b" else "💵 Add funds", callback_data="fd:s" if mode == "b" else "fd:b"),
+        InlineKeyboardButton("↩️ Wallets", callback_data="go:wallets"),
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
+def fund_screen(mode: str) -> tuple[str, InlineKeyboardMarkup]:
+    if mode == "s":
+        text = ("🏦 <b>Cash out</b>\n\nPick the chain you hold funds on. The provider (MoonPay) runs the "
+                "KYC, the quote and the payout; it shows a deposit address and you send to it FROM Ferzan "
+                "on that same chain. Fees and checks are theirs.")
+    else:
+        text = ("💵 <b>Add funds</b>\n\nBuy crypto with Apple Pay, Google Pay or card straight into your "
+                "Ferzan wallet. Pick the chain.\n\n⚠️ On the provider page, the <b>receive address must be "
+                "your Ferzan address</b> (shown on the next screen). If it says “MoonPay wallet”, change it "
+                "or cancel.")
+    return text, fund_chain_keyboard("s" if mode == "s" else "b")
+
+
+async def fund_chain_screen(uid: int, mode: str, cid: str) -> tuple[str, InlineKeyboardMarkup]:
+    import fundlinks
+
+    back = InlineKeyboardButton("↩️ Chains", callback_data="fd:s" if mode == "s" else "fd:b")
+    if cid == "more":
+        names = ", ".join(fundlinks.BRIDGE_ONLY.values())
+        text = (f"🌉 <b>{names}</b>\n\nNo card provider lists these yet. Add funds on Base, Ethereum or Solana, "
+                "then move them with the Ferzan Bridge.")
+        return text, InlineKeyboardMarkup([[InlineKeyboardButton("🌉 Open Bridge", callback_data="go:bridge")], [back]])
+    addrs = await _fund_addresses(uid)
+    o = fundlinks.options(cid, addrs)
+    rows = []
+    items = o["sell"] if mode == "s" else o["buy"]
+    for it in items:
+        verb = "Cash out" if mode == "s" else "Buy"
+        rows.append([InlineKeyboardButton(f"{'🏦' if mode == 's' else '🍎'} {verb} {it['coin']} · {it['providerName']}", url=it["url"])])
+    rows.append([InlineKeyboardButton("🌉 Bridge", callback_data="go:bridge"), back])
+    if mode == "s":
+        text = f"🏦 <b>Cash out {html.escape(o['label'])}</b>\n\nSend FROM Ferzan to the address the provider shows."
+    elif o["address"]:
+        text = (f"💵 <b>Add funds · {html.escape(o['label'])}</b>\n\n⚠️ Receive address (must match on the provider page):\n"
+                f"<code>{html.escape(o['address'])}</code>")
+    else:
+        text = f"💵 <b>Add funds · {html.escape(o['label'])}</b>\n\nYour {html.escape(o['label'])} address isn't ready yet. Open /wallet first."
+    return text, InlineKeyboardMarkup(rows)
 
 
 async def fiat_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update):
         return
     uid = update.effective_user.id
-    row = db.get_user_wallet(uid)
-    if not row:
+    if not db.get_user_wallet(uid):
         await update.effective_message.reply_text("Generate a wallet first: /wallet")
         return
-    text = (
-        "🍎 <b>Buy gas / 🏦 Cash out</b>\n\n"
-        "⚠️ <b>READ THIS BEFORE YOU PAY</b>\n"
-        "MoonPay opens in the browser. Ferzan cannot lock their destination yet.\n"
-        "On the MoonPay screen, set <b>Receive / wallet</b> to the address below.\n"
-        "If it says “MoonPay wallet”, change it or cancel. Funds sent there are not in Ferzan.\n\n"
-        "🟣 SOL (Solana only)\n"
-        f"<code>{html.escape(row.get('sol_pub') or '')}</code>\n\n"
-        "🔷 EVM — same 0x on ETH, Base, and BNB. Pick the <b>network</b> to match the button.\n"
-        f"<code>{html.escape(row.get('evm_pub') or '')}</code>\n\n"
-        "Cash out: MoonPay shows a deposit address. Send FROM Ferzan on that same chain.\n"
-        "Fees and KYC are MoonPay’s. Apple Pay is on their page, not inside Telegram."
-    )
-    await update.effective_message.reply_text(
-        text, parse_mode="HTML", reply_markup=buy_fiat_keyboard(uid)
-    )
+    cmd = ""
+    try:
+        cmd = ((update.effective_message.text or "").split()[0].lstrip("/").split("@")[0]).lower()
+    except Exception:
+        pass
+    mode = "s" if cmd in {"cashout", "offramp"} or context.user_data.pop("fund_mode", "") == "s" else "b"
+    text, kb = fund_screen(mode)
+    await context.bot.send_message(update.effective_chat.id, text, parse_mode="HTML", reply_markup=kb)
 
 
 def wallet_menu_keyboard() -> InlineKeyboardMarkup:
@@ -4719,7 +4733,7 @@ def wallet_menu_keyboard() -> InlineKeyboardMarkup:
             ],
             [InlineKeyboardButton("🧲 Collect", callback_data="wi:col")],
             [InlineKeyboardButton("📤 Disperse", callback_data="wi:dis")],
-            [InlineKeyboardButton("🍎 Buy SOL / ETH / Base", callback_data="go:buy")],
+            [InlineKeyboardButton("💵 Add funds", callback_data="go:buy"), InlineKeyboardButton("🏦 Cash out", callback_data="go:cash")],
             [InlineKeyboardButton("🔗 Addresses by chain", callback_data="wi:chains")],
             [InlineKeyboardButton("🗝️ Export keys", callback_data="wi:exp")],
         ]
@@ -4745,7 +4759,7 @@ def chain_board_keyboard(user_id: int | None = None) -> InlineKeyboardMarkup:
             row = []
     if row:
         rows.append(row)
-    rows.append([InlineKeyboardButton("🍎 Buy gas", callback_data="go:buy")])
+    rows.append([InlineKeyboardButton("💵 Add funds", callback_data="go:buy")])
     if user_id:
         rows.append([InlineKeyboardButton(_degen_btn(user_id), callback_data="dgn:t")])
     if has:
@@ -7141,6 +7155,18 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             f"/launches {cid}",
         )
         return
+    if data.startswith("fd:"):
+        parts = data.split(":")
+        mode = "s" if len(parts) > 1 and parts[1] == "s" else "b"
+        try:
+            if len(parts) >= 3:
+                text, kb = await fund_chain_screen(uid, mode, parts[2])
+            else:
+                text, kb = fund_screen(mode)
+            await query.edit_message_text(text, parse_mode="HTML", reply_markup=kb)
+        except Exception:
+            logger.info("fund screen failed", exc_info=True)
+        return
     if data.startswith("go:"):
         kind = data[3:]
         if kind.startswith("signal:"):
@@ -7175,7 +7201,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await context.bot.send_message(
                 uid, _bridge_text(uid, st), parse_mode="HTML", reply_markup=_bridge_kb(st, uid)
             )
-        elif kind == "buy":
+        elif kind in {"buy", "cash"}:
+            context.user_data["fund_mode"] = "s" if kind == "cash" else "b"
             await fiat_cmd(update, context)
         elif kind == "bag":
             await bag_cmd(update, context)

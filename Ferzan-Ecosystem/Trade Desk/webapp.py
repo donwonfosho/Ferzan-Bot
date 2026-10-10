@@ -487,6 +487,27 @@ async def api_rules_save(request: Request) -> JSONResponse:
     return JSONResponse(await asyncio.to_thread(_rules_for, uid, mint))
 
 
+@app.post("/api/funds")
+async def api_funds(request: Request) -> JSONResponse:
+    """Add funds / Cash out links for every chain. Hosted-provider URLs only: no keys, no money movement.
+    Tron needs the wallet secret (this service never holds it), so its buy link is bot-only."""
+    body = await _json(request)
+    uid = _auth(body)
+    if not _rate_ok(uid, "funds", 20):
+        raise HTTPException(status_code=429, detail="Slow down a moment.")
+    import fundlinks
+
+    row = db.get_user_wallet(uid) or {}
+    if not row:
+        raise HTTPException(status_code=404, detail="Open the bot and send /wallet first.")
+    try:
+        ton = db.get_ton_addr(uid) or ""
+    except Exception:
+        ton = ""
+    addrs = {"sol": row.get("sol_pub") or "", "evm": row.get("evm_pub") or "", "ton": ton, "trx": ""}
+    return JSONResponse({"ok": True, "chains": fundlinks.all_options(addrs), "warning": fundlinks.SETTLE_WARNING})
+
+
 @app.post("/api/wallet")
 async def api_wallet(request: Request) -> JSONResponse:
     body = await _json(request)

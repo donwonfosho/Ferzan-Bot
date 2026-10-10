@@ -364,10 +364,22 @@
   <div id="wallets" class="list"></div>
 </div>
 
+<div class="wallets" id="sec-funds">
+  <h2>Add funds</h2>
+  <div class="list">
+    <button class="w" id="fundBuyBtn" style="border-top:0"><span>💵 Add funds <small>Apple Pay · card · crypto</small></span><span class="hint">›</span></button>
+    <button class="w" id="fundSellBtn"><span>🏦 Cash out</span><span class="hint">›</span></button>
+  </div>
+</div>
+
 <div class="list" style="margin-top:10px"><button class="w" id="degenBtn" style="border-top:0"><span id="degenTxt">😈 Degen mode</span><span class="hint" id="degenHint"></span></button></div>
 <div class="list" style="margin-top:10px"><button class="w" id="feedBtn" style="border-top:0"><span id="feedTxt">⚡ Feed auto-buy</span><span class="hint" id="feedHint"></span></button></div>
 <p class="foot" id="foot">Trades run through the bot — same safety checks as a button tap.</p>
 <p class="foot"><a href="#" id="toClassic">💬 Switch to classic chat mode</a></p>
+<div class="sheet" id="fundSheet" hidden role="dialog" aria-labelledby="fundTitle" style="max-height:80vh;overflow:auto">
+  <h3 id="fundTitle">Add funds</h3><div id="fundBody"></div>
+  <button class="btn full" id="fundClose" type="button">Close</button>
+</div>
 <div class="sheet-bg" id="sheetBg" hidden></div>
 <div class="sheet" id="sheet" hidden role="dialog" aria-labelledby="sheetTitle">
   <div class="top"><b id="sheetTitle">Rules</b><button class="x" id="sheetClose" aria-label="Close">✕</button></div>
@@ -823,6 +835,30 @@
     if (!(n > 0) || !isFinite(n)) { toast("Enter an amount greater than 0.", 2500); return; }
     buyNative(n);
   });
+
+  // ---- Add funds / Cash out: hosted provider links, receive address always shown ----
+  let fundData = null;
+  async function openFunds(mode) {
+    try {
+      if (!fundData) fundData = await api("/api/funds", {});
+      const sell = mode === "sell";
+      const rows = fundData.chains.map((c) => {
+        const items = c.bridge_only ? [] : (sell ? c.sell : c.buy);
+        if (c.bridge_only) return `<div class="w"><span>🌉 ${esc(c.label)}</span><span class="hint">via Bridge</span></div>`;
+        if (!items.length) return `<div class="w"><span>${esc(c.label)}</span><span class="hint">open the bot</span></div>`;
+        const btns = items.map((i) => `<button class="btn" data-fund="${esc(i.url)}">${esc(i.coin)} · ${esc(i.providerName)}</button>`).join(" ");
+        const addr = !sell && c.address ? `<div class="hint" style="word-break:break-all;user-select:all">${esc(c.address)}</div>` : "";
+        return `<div class="w" style="display:block"><b>${esc(c.label)}</b>${addr}<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">${btns}</div></div>`;
+      }).join("");
+      $("fundBody").innerHTML = `<p class="foot">${esc(fundData.warning)}</p>${rows}`;
+      $("fundTitle").textContent = sell ? "🏦 Cash out" : "💵 Add funds";
+      $("fundSheet").hidden = false;
+    } catch (err) { toast("🔴 " + err.message, 4000); }
+  }
+  $("fundBuyBtn").addEventListener("click", () => openFunds("buy"));
+  $("fundSellBtn").addEventListener("click", () => openFunds("sell"));
+  $("fundClose").addEventListener("click", () => { $("fundSheet").hidden = true; });
+  $("fundBody").addEventListener("click", (e) => { const b = e.target.closest("[data-fund]"); if (b) openLink(b.dataset.fund); });
 
   // ---- wallets: tap one to make it the active wallet --------------------
   $("wallets").addEventListener("click", async (e) => {
