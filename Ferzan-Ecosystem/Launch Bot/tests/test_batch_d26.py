@@ -16,6 +16,11 @@ class PromoSet(unittest.TestCase):
         self.assertIsNotNone(fm.img("promo_44.jpg"))
         self.assertGreaterEqual(len(fp.PROMOS), 44)
 
+    def test_new_video_promos_have_video_and_poster(self):
+        for n in (91, 92, 93):
+            self.assertIsNotNone(fm.vid(f"promo_{n}.mp4"), n)
+            self.assertIsNotNone(fm.img(f"promo_{n}.jpg"), n)
+
     def test_no_duplicate_copy_and_x_fits(self):
         tgs = [p[0] for p in fp.PROMOS]; xs = [p[1] for p in fp.PROMOS]
         self.assertEqual(len(set(tgs)), len(tgs)); self.assertEqual(len(set(xs)), len(xs))
@@ -73,7 +78,7 @@ class SkipList(unittest.TestCase):
     def test_default_skips_older_duplicates_and_keeps_new_ones(self):
         sk = fp.skipped()
         self.assertEqual(sk, set(range(1, 51)))                 # the old 50 are retired
-        self.assertTrue(set(range(51, 91)).isdisjoint(sk))     # the new 17 portrait graphics are the rotation
+        self.assertTrue(set(range(51, 94)).isdisjoint(sk))     # the new 17 portrait graphics are the rotation
         seen, p = [], 0
         for _ in range(len(fp.PROMOS) - len(sk)):
             i = fp.next_promo(p); seen.append(i + 1); p = i + 1
@@ -91,8 +96,8 @@ class SkipList(unittest.TestCase):
         self.assertEqual(fp.next_promo(3), 3)  # never stuck
 
     def test_wrap_around_end(self):
-        os.environ["PROMO_SKIP"] = "90"
-        self.assertEqual(fp.next_promo(89) + 1, 1)
+        os.environ["PROMO_SKIP"] = "93"
+        self.assertEqual(fp.next_promo(92) + 1, 1)
 
     def test_old_launch_date_graphic_stays_out(self):
         self.assertIn(49, fp.skipped(0))
@@ -101,7 +106,7 @@ class SkipList(unittest.TestCase):
         self.assertEqual(fp.skipped(0), set())
 
     def test_rotation_size(self):
-        self.assertEqual(len(fp.PROMOS), 90)
+        self.assertEqual(len(fp.PROMOS), 93)
         self.assertEqual(len(fp.skipped(0)), 50)
 
 

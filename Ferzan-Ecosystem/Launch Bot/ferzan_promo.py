@@ -329,6 +329,15 @@ PROMOS = [
     (f"🧰 Everything is ready on the Factory. FERZAN token launch: Fri Nov 13, 4:00 PM ET. The site, 8 chains, Launch Bot, Trade Bot, Buy Bot, Guardian and Eco Hub are all live. Creators get paid on every trade.\n{SITE}",
      f"🧰 Everything is ready on the Factory. FERZAN launches Fri Nov 13, 4:00 PM ET. Creators get paid on every trade.\n{SITE}",
      "#FERZAN #crypto"),
+    (f"🎥 Launch a coin on 8 chains. Free to launch, you only pay network gas (Tron: 5 TRX). Launch from the site or right from Telegram, with an anti-snipe wall until graduation and creators paid on every trade.\n{SITE}/launch",
+     f"🎥 Launch a coin on 8 chains. Free to launch (you pay gas; Tron 5 TRX), anti-snipe wall, creators paid on every trade.\n{SITE}/launch",
+     "#memecoin #Web3"),
+    (f"📽 See it. Ape it. Send it. The Trade Desk in Telegram, a live feed of every launch, Rug Guard on your bag and every buy posted in your group. Watch the tour.\n{SITE}",
+     f"📽 See it. Ape it. Send it. Trade Desk in Telegram, live launch feed, Rug Guard, buys posted in your group.\n{SITE}",
+     "#memecoin #DeFi"),
+    ("🎞 Your community. Protected. Guardian bans impersonators and deletes scams, every Ferzan bot plugs into one community, and refer-and-earn rewards your friends' trades. Watch the tour.\nhttps://t.me/Ferzan_Guardian_Bot",
+     "🎞 Your community. Protected. Guardian bans impersonators and deletes scams; every bot plugs into one community.\nhttps://t.me/Ferzan_Guardian_Bot",
+     "#Telegram #crypto"),
 ]
 GENERAL_TAGS = ["#crypto", "#altcoins", "#Web3", "#cryptocurrency", "#DeFi"]
 
